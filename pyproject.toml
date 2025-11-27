@@ -28,7 +28,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "llvmlite>=0.40.0",
+    "llvmlite>=0.40.0,<0.45.0",
 ]
 
 [project.optional-dependencies]
