@@ -6,3 +6,5 @@ docs
 backup
 .pytest_cache
 .vscode
+pythoc.egg-info
+dist/
