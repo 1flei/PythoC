@@ -1,0 +1,474 @@
+"""
+Loop statement visitor mixin (for, while)
+"""
+
+import ast
+from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
+from ..registry import VariableInfo
+from ..logger import logger
+
+
+class LoopsMixin:
+    """Mixin for loop statements: for, while"""
+    
+    def visit_While(self, node: ast.While):
+        """Handle while loops"""
+        # Don't process if current block is already terminated
+        if self.builder.block.is_terminated:
+            return
+        
+        # Create loop blocks
+        loop_header = self.current_function.append_basic_block(self.get_next_label("while_header"))
+        loop_body = self.current_function.append_basic_block(self.get_next_label("while_body"))
+        loop_exit = self.current_function.append_basic_block(self.get_next_label("while_exit"))
+        
+        # Push loop context for break/continue
+        self.loop_stack.append((loop_header, loop_exit))
+        
+        # Jump to loop header
+        self.builder.branch(loop_header)
+        
+        # Loop header: check condition
+        self.builder.position_at_end(loop_header)
+        condition = self._to_boolean(self.visit_expression(node.test))
+        self.builder.cbranch(condition, loop_body, loop_exit)
+        
+        # Loop body - increment scope depth for linear token restrictions
+        self.builder.position_at_end(loop_body)
+        
+        # Enter new scope for loop body and increment scope depth
+        self.ctx.var_registry.enter_scope()
+        self.scope_depth += 1
+        try:
+            # Execute loop body statements
+            for stmt in node.body:
+                if not self.builder.block.is_terminated:
+                    self.visit(stmt)
+            
+            # Check that all linear tokens created in loop are consumed
+            for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
+                    if var_info.linear_state != 'consumed':
+                        raise TypeError(
+                            f"Linear token '{var_info.name}' not consumed in loop "
+                            f"(declared at line {var_info.line_number})"
+                        )
+                    # Clean up consumed token
+                    var_info.linear_state = None
+        finally:
+            # Decrement scope depth and exit scope
+            self.scope_depth -= 1
+            self.ctx.var_registry.exit_scope()
+        
+        # Jump back to header (if not terminated by return/break)
+        if not self.builder.block.is_terminated:
+            self.builder.branch(loop_header)
+        
+        # Pop loop context
+        self.loop_stack.pop()
+        
+        # Continue after loop
+        self.builder.position_at_end(loop_exit)
+
+    def visit_For(self, node: ast.For):
+        """Handle for loops using iterator protocol
+        
+        Supports two protocols (in priority order):
+        1. Yield inlining: inline yield function body for zero overhead (REQUIRED for yield)
+        2. Compile-time constant unrolling: for loops over constant sequences
+        
+        Translates:
+            for i in iterable:
+                body
+            else:
+                else_body
+        
+        To (if inlined):
+            # Inlined yield function body with yields replaced by loop body
+            # else_body executes if no break occurred
+        
+        Note: Vtable iterator protocol has been removed. All yield functions
+        must be inlined at compile time.
+        """
+        # First evaluate the iterator expression
+        iter_val = self.visit_expression(node.iter)
+        logger.debug(f"Visiting for loop, iterable: {node.iter}, iter_val: {iter_val}")
+        
+        # Check for compile-time constant (Python value)
+        if iter_val.is_python_value() and hasattr(iter_val.get_python_value(), "__iter__"):
+            py_iterable = iter_val.get_python_value()
+            self._visit_for_with_constant_unroll(node, py_iterable)
+            return
+        
+        # Check for yield inlining (REQUIRED - no fallback to vtable)
+        if hasattr(iter_val, '_yield_inline_info') and iter_val._yield_inline_info:
+            self._visit_for_with_yield_inline(node, iter_val)
+            return
+        
+        # No vtable support - error if not handled above
+        raise TypeError(
+            f"Unsupported iterator type: {iter_val}. "
+            f"Only yield functions (via inlining) and compile-time constants are supported. "
+            f"Vtable iterator protocol has been removed."
+        )
+    
+    def _visit_for_with_yield_inline(self, node: ast.For, iter_val):
+        """Handle for loop with yield inline, including else clause"""
+        from ..inline.yield_adapter import YieldInlineAdapter
+        from llvmlite import ir
+        
+        adapter = YieldInlineAdapter(self)
+        inline_info = iter_val._yield_inline_info
+        
+        inlined_stmts = adapter.try_inline_for_loop(
+            node,
+            inline_info['original_ast'],
+            inline_info['call_node']
+        )
+        
+        if inlined_stmts is None:
+            # Inlining failed - this is now an error
+            raise TypeError(
+                f"Yield function inlining failed for '{ast.unparse(node.iter)}'. "
+                f"Yield functions must be inlinable (no complex control flow, recursion, etc.)"
+            )
+        
+        logger.debug(f"Successfully inlined yield function using universal kernel")
+        
+        # If there's an else clause, we need to track if break occurred
+        if node.orelse:
+            # Create blocks for else handling
+            else_block = self.current_function.append_basic_block(self.get_next_label("for_else"))
+            after_else = self.current_function.append_basic_block(self.get_next_label("after_for_else"))
+            
+            # Allocate a flag to track if break occurred
+            break_flag = self._create_alloca_in_entry(ir.IntType(1), "for_break_flag")
+            self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
+            
+            # Store break flag in loop context for break statement to set
+            old_break_flag = getattr(self, '_current_break_flag', None)
+            self._current_break_flag = break_flag
+            
+            try:
+                # Fix all missing locations in inlined statements
+                for stmt in inlined_stmts:
+                    ast.fix_missing_locations(stmt)
+                
+                # Visit each inlined statement
+                for stmt in inlined_stmts:
+                    if not self.builder.block.is_terminated:
+                        self.visit(stmt)
+                
+                # After loop completes, check break flag
+                if not self.builder.block.is_terminated:
+                    broke = self.builder.load(break_flag, "broke")
+                    self.builder.cbranch(broke, after_else, else_block)
+                
+                # Else block: execute if no break
+                self.builder.position_at_end(else_block)
+                for stmt in node.orelse:
+                    if not self.builder.block.is_terminated:
+                        self.visit(stmt)
+                
+                if not self.builder.block.is_terminated:
+                    self.builder.branch(after_else)
+                
+                # Continue after for-else
+                self.builder.position_at_end(after_else)
+            finally:
+                self._current_break_flag = old_break_flag
+        else:
+            # No else clause, process normally
+            # Fix all missing locations in inlined statements
+            for stmt in inlined_stmts:
+                ast.fix_missing_locations(stmt)
+            
+            # Visit each inlined statement
+            for stmt in inlined_stmts:
+                if not self.builder.block.is_terminated:
+                    self.visit(stmt)
+
+    def _visit_for_with_constant_unroll(self, node: ast.For, py_iterable):
+        """Unroll for loop at compile time for constant iterables
+        
+        Translates:
+            for i in [1, 2, 3]:
+                body
+            else:
+                else_body
+        
+        To (unrolled with blocks for break/continue support):
+            iter_0:
+                i = 1
+                body
+                br iter_1
+            iter_1:
+                i = 2
+                body
+                br iter_2
+            iter_2:
+                i = 3
+                body
+                br check_break
+            check_break:
+                if broke: br after_else
+                else: br for_else
+            for_else:
+                else_body
+                br after_else
+            after_else:
+        """
+        from ..builtin_entities.python_type import PythonType
+        from llvmlite import ir
+
+        py_iterable = list(py_iterable)
+        
+        # Handle empty iterator
+        if len(py_iterable) == 0:
+            # Empty iterator: execute else clause if present
+            if node.orelse:
+                for stmt in node.orelse:
+                    if not self.builder.block.is_terminated:
+                        self.visit(stmt)
+            return
+        
+        # Get loop variable name
+        if isinstance(node.target, ast.Name):
+            loop_var_name = node.target.id
+        else:
+            raise NotImplementedError("Complex loop targets not supported in constant unroll")
+        
+        # Create loop exit block
+        loop_exit = self.current_function.append_basic_block(
+            self.get_next_label("const_loop_exit")
+        )
+        
+        # If there's an else clause, need to track breaks
+        if node.orelse:
+            else_block = self.current_function.append_basic_block(
+                self.get_next_label("const_loop_else")
+            )
+            after_else = self.current_function.append_basic_block(
+                self.get_next_label("after_const_loop_else")
+            )
+            # Allocate break flag
+            break_flag = self._create_alloca_in_entry(ir.IntType(1), "const_for_break_flag")
+            self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
+            
+            old_break_flag = getattr(self, '_current_break_flag', None)
+            self._current_break_flag = break_flag
+        else:
+            break_flag = None
+            old_break_flag = None
+        
+        try:
+            # Unroll with basic blocks
+            for i, element in enumerate(py_iterable):
+                if self.builder.block.is_terminated:
+                    break
+                
+                # Enter new scope for this iteration
+                self.ctx.var_registry.enter_scope()
+                # Increment scope depth for this iteration
+                self.scope_depth += 1
+                
+                # Determine continue target
+                is_last = (i == len(py_iterable) - 1)
+                if is_last:
+                    continue_target = loop_exit
+                else:
+                    continue_target = self.current_function.append_basic_block(
+                        self.get_next_label(f"const_loop_iter_{i+1}")
+                    )
+                
+                # Push loop context for this iteration (for break/continue support)
+                # continue -> jump to continue_target (next iteration or loop_exit if last)
+                # break -> jump to loop_exit (exit the entire loop)
+                self.loop_stack.append((continue_target, loop_exit))
+                
+                # Set loop variable
+                elem_value_ref = wrap_value(
+                    element,
+                    kind="python", 
+                    type_hint=PythonType.wrap(element, is_constant=True)
+                )
+                
+                loop_var_info = VariableInfo(
+                    name=loop_var_name,
+                    value_ref=elem_value_ref,
+                    alloca=None,
+                    source="for_loop_unrolled"
+                )
+                self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
+                
+                try:
+                    # Execute loop body (break/continue will use loop_stack)
+                    for stmt in node.body:
+                        if not self.builder.block.is_terminated:
+                            self.visit(stmt)
+                        else:
+                            # Block is terminated, but we still need to process remaining statements
+                            # to generate their basic blocks (they might be reachable from other paths)
+                            # Create a new unreachable block to continue codegen
+                            unreachable_block = self.current_function.append_basic_block(
+                                self.get_next_label("unreachable_cont")
+                            )
+                            self.builder.position_at_end(unreachable_block)
+                            self.visit(stmt)
+                    
+                    # Check that all linear tokens created in this iteration are consumed
+                    for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                        if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
+                            if var_info.linear_state != 'consumed':
+                                raise TypeError(
+                                    f"Linear token '{var_info.name}' not consumed in loop iteration "
+                                    f"(declared at line {var_info.line_number})"
+                                )
+                finally:
+                    # Pop loop context
+                    self.loop_stack.pop()
+                    # Check linear tokens before exiting scope
+                    self._check_linear_tokens_consumed()
+                    # Decrement scope depth and exit scope
+                    self.scope_depth -= 1
+                    self.ctx.var_registry.exit_scope()
+                
+                # Branch to next iteration
+                if not self.builder.block.is_terminated:
+                    self.builder.branch(continue_target)
+                
+                # Position at next block for next iteration (if not last)
+                # Note: Even if current block is terminated, we still need to process
+                # remaining iterations, as the terminator might be in a conditional branch
+                if not is_last:
+                    self.builder.position_at_end(continue_target)
+            
+            # Position at exit
+            self.builder.position_at_end(loop_exit)
+            
+            # Handle else clause if present
+            if node.orelse:
+                # Check break flag
+                broke = self.builder.load(break_flag, "const_broke")
+                self.builder.cbranch(broke, after_else, else_block)
+                
+                # Else block
+                self.builder.position_at_end(else_block)
+                for stmt in node.orelse:
+                    if not self.builder.block.is_terminated:
+                        self.visit(stmt)
+                
+                if not self.builder.block.is_terminated:
+                    self.builder.branch(after_else)
+                
+                # Continue after else
+                self.builder.position_at_end(after_else)
+        finally:
+            if break_flag is not None:
+                self._current_break_flag = old_break_flag
+
+
+    def _visit_for_with_iterator_protocol(self, node: ast.For, iterable, type_hint):
+        """Handle for loop using iterator protocol methods"""
+        logger.warning("Handle_xxx iteration protocol is deprecated now")
+        # Get loop variable name
+        if isinstance(node.target, ast.Name):
+            loop_var_name = node.target.id
+        else:
+            raise NotImplementedError("Complex loop targets not supported")
+        
+        # Create loop blocks
+        loop_header = self.current_function.append_basic_block(self.get_next_label("for_header"))
+        loop_body = self.current_function.append_basic_block(self.get_next_label("for_body"))
+        loop_increment = self.current_function.append_basic_block(self.get_next_label("for_increment"))
+        loop_exit = self.current_function.append_basic_block(self.get_next_label("for_exit"))
+        
+        # Push loop context for break/continue
+        # continue jumps to increment block, break jumps to exit
+        self.loop_stack.append((loop_increment, loop_exit))
+        
+        # Store current block for PHI node
+        pre_loop_block = self.builder.block
+        
+        # it = iterable.begin()
+        # Call with args list and node for compatibility with @inline decorator
+        initial_iter = type_hint.handle_iter_begin(self, [iterable], node)
+        
+        # Jump to loop header
+        self.builder.branch(loop_header)
+        
+        # Loop header: maintain iterator and check condition
+        self.builder.position_at_end(loop_header)
+        
+        # Create PHI node for iterator (use actual iterator type)
+        iter_type = get_type(initial_iter)
+        iter_phi = self.builder.phi(iter_type)
+        
+        # Check condition: iterable.has_next(it)
+        iter_value_ref = wrap_value(iter_phi, kind="value", type_hint=initial_iter.type_hint)
+        has_next = type_hint.handle_iter_cond(self, [iterable, iter_value_ref], node)
+        
+        # Branch based on condition
+        self.builder.cbranch(ensure_ir(has_next), loop_body, loop_exit)
+        
+        # Loop body
+        self.builder.position_at_end(loop_body)
+        
+        # i = iterable.get(it)
+        current_value = type_hint.handle_iter_get(self, [iterable, wrap_value(iter_phi, kind="value", type_hint=initial_iter.type_hint)], node)
+        
+        # Check if loop variable has a type annotation and convert using PC type
+        loop_var_pc_type = None
+        if hasattr(node.target, 'annotation') and node.target.annotation:
+            # Parse the annotation properly using type_resolver
+            loop_var_pc_type = self.type_resolver.parse_annotation(node.target.annotation)
+        
+        # Convert current_value to loop variable PC type if needed
+        if loop_var_pc_type is not None:
+            current_value = self.type_converter.convert(current_value, loop_var_pc_type)
+        
+        # Store loop variable in registry
+        # Create alloca for loop variable
+        loop_var_alloca = self._create_alloca_in_entry(get_type(current_value), f"{loop_var_name}_addr")
+        self.builder.store(ensure_ir(current_value), loop_var_alloca)
+        
+        # Register loop variable
+        type_hint = get_type_hint(current_value)
+        loop_var_info = VariableInfo(
+            name=loop_var_name,
+            value_ref=ValueRef(
+                kind='address',
+                value=loop_var_alloca,
+                type_hint=type_hint,
+                address=loop_var_alloca
+            ),
+            alloca=loop_var_alloca,
+            source="for_loop"
+        )
+        self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
+        
+        # Execute loop body statements
+        for stmt in node.body:
+            if not self.builder.block.is_terminated:
+                self.visit(stmt)
+        
+        # Jump to increment block if not terminated
+        if not self.builder.block.is_terminated:
+            self.builder.branch(loop_increment)
+        
+        # Loop increment: it = iterable.next(it)
+        self.builder.position_at_end(loop_increment)
+        next_iter = type_hint.handle_iter_next(self, [iterable, wrap_value(iter_phi, kind="value", type_hint=initial_iter.type_hint)], node)
+        
+        # Jump back to header
+        self.builder.branch(loop_header)
+        
+        # Add PHI incoming edges
+        iter_phi.add_incoming(ensure_ir(initial_iter), pre_loop_block)
+        iter_phi.add_incoming(ensure_ir(next_iter), loop_increment)
+        
+        # Pop loop context
+        self.loop_stack.pop()
+        
+        # Continue after loop
+        self.builder.position_at_end(loop_exit)
