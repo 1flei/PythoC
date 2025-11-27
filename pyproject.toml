@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pythoc"
+version = "0.2.0"
+description = "PythoC: A Python DSL compiler that maps statically-typed Python subset to LLVM IR, providing C-equivalent capabilities with Python syntax"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "PythoC Compiler Team"}
+]
+keywords = ["compiler", "llvm", "python", "static-typing", "code-generation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Code Generators",
+]
+
+dependencies = [
+    "llvmlite>=0.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/1flei/PythoC"
+Repository = "https://github.com/1flei/PythoC"
+Documentation = "https://github.com/1flei/PythoC/blob/master/README.md"
+
+[tool.setuptools]
+packages = ["pythoc"]
+
+[tool.setuptools.package-data]
+pythoc = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
