@@ -4,8 +4,8 @@ Stack operations - using Node from node_ops
 
 from pythoc import compile, i32, ptr, nullptr, sizeof
 from pythoc.libc.stdlib import malloc, free
-from .type_defs import Node, Stack
-from .node_ops import create_node
+from type_defs import Node, Stack
+from node_ops import create_node
 
 
 @compile

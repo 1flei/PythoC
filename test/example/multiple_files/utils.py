@@ -3,9 +3,9 @@ Utility functions that use both node and stack operations
 """
 
 from pythoc import compile, i32, ptr, nullptr
-from .type_defs import Node, Stack
-from .node_ops import node_count, node_sum
-from .stack_ops import stack_push, stack_pop, stack_get_size
+from type_defs import Node, Stack
+from node_ops import node_count, node_sum
+from stack_ops import stack_push, stack_pop, stack_get_size
 
 
 @compile
@@ -38,7 +38,10 @@ def stack_sum(stack: ptr[Stack]) -> i32:
 @compile
 def reverse_stack(stack: ptr[Stack]) -> ptr[Stack]:
     """Create a new stack with reversed order"""
-    from .stack_ops import stack_init
+    try:
+        from .stack_ops import stack_init
+    except ImportError:
+        from stack_ops import stack_init
     
     new_stack: ptr[Stack] = stack_init()
     current: ptr[Node] = stack.top

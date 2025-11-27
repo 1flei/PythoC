@@ -4,7 +4,7 @@ Node operations - basic linked list node manipulation
 
 from pythoc import compile, i32, ptr, nullptr, sizeof
 from pythoc.libc.stdlib import malloc
-from .type_defs import Node
+from type_defs import Node
 
 
 @compile

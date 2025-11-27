@@ -5,13 +5,14 @@ Demonstrates multi-file compilation and cross-module references
 
 from pythoc import compile, i32, ptr, nullptr
 from pythoc.libc.stdio import printf
-from .type_defs import Node, Stack
-from .node_ops import create_node, node_append, node_count, node_sum
-from .stack_ops import (
+
+from type_defs import Node, Stack
+from node_ops import create_node, node_append, node_count, node_sum
+from stack_ops import (
     stack_init, stack_push, stack_pop, 
     stack_peek, stack_is_empty, stack_get_size
 )
-from .utils import list_to_stack, stack_sum
+from utils import list_to_stack, stack_sum
 
 
 @compile
