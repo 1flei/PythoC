@@ -212,14 +212,103 @@ class MultiSOExecutor:
         
         return dependencies
     
+    def _load_library_macos_lazy(self, so_file: str) -> ctypes.CDLL:
+        """
+        Load library on macOS using libc's dlopen with true RTLD_LAZY support.
+        
+        Python's ctypes.CDLL and _ctypes.dlopen on macOS force RTLD_NOW even when
+        RTLD_LAZY is specified (mode becomes 0xB instead of 0x9), breaking circular
+        dependencies. We bypass this by calling libc.dlopen directly.
+        
+        Args:
+            so_file: Path to shared library
+            
+        Returns:
+            ctypes.CDLL wrapper around the loaded library
+            
+        Raises:
+            OSError: If dlopen fails
+        """
+        # Get libc (load current process to access system dlopen)
+        libc = ctypes.CDLL(None)
+        
+        # Set up dlopen function signature
+        libc.dlopen.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        libc.dlopen.restype = ctypes.c_void_p
+        
+        # Set up dlerror for error reporting
+        libc.dlerror.argtypes = []
+        libc.dlerror.restype = ctypes.c_char_p
+        
+        # RTLD constants for macOS
+        RTLD_LAZY = 0x1     # Lazy symbol resolution
+        RTLD_GLOBAL = 0x8   # Make symbols globally available
+        
+        # Convert path to absolute to avoid search path issues
+        abs_path = os.path.abspath(so_file)
+        
+        # Call dlopen directly with true RTLD_LAZY
+        handle = libc.dlopen(abs_path.encode('utf-8'), RTLD_LAZY | RTLD_GLOBAL)
+        
+        if not handle:
+            # Get error message from dlerror
+            error = libc.dlerror()
+            error_msg = error.decode('utf-8') if error else 'unknown error'
+            raise OSError(f"dlopen failed: {error_msg}")
+        
+        # Wrap the handle in a CDLL-like object
+        # We create a custom wrapper since we can't use CDLL's handle parameter reliably
+        class LibraryHandle:
+            """Wrapper for dlopen handle that provides CDLL-like interface"""
+            def __init__(self, handle, path):
+                self._handle = handle
+                self._name = path
+                self._func_cache = {}
+                self._libc = libc
+            
+            def __getattr__(self, name):
+                # Avoid recursion for private attributes
+                if name.startswith('_'):
+                    raise AttributeError(name)
+                
+                # Check cache
+                if name in self._func_cache:
+                    return self._func_cache[name]
+                
+                # Look up symbol using dlsym
+                self._libc.dlsym.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+                self._libc.dlsym.restype = ctypes.c_void_p
+                
+                addr = self._libc.dlsym(self._handle, name.encode('utf-8'))
+                if not addr:
+                    error = self._libc.dlerror()
+                    error_msg = error.decode('utf-8') if error else f'symbol {name} not found'
+                    raise AttributeError(error_msg)
+                
+                # Create a ctypes function object from the address
+                # Start with a generic function pointer, caller will set argtypes/restype
+                func = ctypes.CFUNCTYPE(ctypes.c_int)(addr)
+                
+                # Store the raw address as an attribute for compatibility
+                func._address = addr
+                
+                # Cache and return
+                self._func_cache[name] = func
+                return func
+        
+        return LibraryHandle(handle, abs_path)
+    
     def _load_single_library(self, lib_key: str, so_file: str) -> ctypes.CDLL:
         """Load a single shared library"""
         if not os.path.exists(so_file):
             raise FileNotFoundError(f"Shared library not found: {so_file}")
         
         try:
-            # Use RTLD_LAZY | RTLD_GLOBAL for circular dependency support
-            if hasattr(os, 'RTLD_LAZY') and hasattr(os, 'RTLD_GLOBAL'):
+            # On macOS, ctypes.CDLL forces RTLD_NOW even when RTLD_LAZY is specified,
+            # breaking circular dependencies. Use libc.dlopen directly.
+            if sys.platform == 'darwin' and hasattr(os, 'RTLD_LAZY'):
+                lib = self._load_library_macos_lazy(so_file)
+            elif hasattr(os, 'RTLD_LAZY') and hasattr(os, 'RTLD_GLOBAL'):
                 lib = ctypes.CDLL(so_file, mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
             elif hasattr(ctypes, 'RTLD_GLOBAL'):
                 lib = ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
@@ -234,7 +323,7 @@ class MultiSOExecutor:
             # For circular dependencies, undefined symbols might be resolved later
             # when other libraries are loaded. Don't fail immediately.
             error_msg = str(e)
-            if "undefined symbol" in error_msg:
+            if "undefined symbol" in error_msg or "symbol not found" in error_msg:
                 # Don't add to loaded_libs yet - will try again later
                 return None
             raise RuntimeError(f"Failed to load library {so_file}: {e}")
