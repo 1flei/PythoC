@@ -9,7 +9,7 @@ from pythoc.libc.stdio import printf
 from pythoc.libc.stdlib import malloc, free
 
 # Import tokens
-from tool.c_header_parser.c_token import Token, TOK_INT, TOK_STAR, TOK_SEMICOLON
+from tool.c_header_parser.c_token import Token, TokenType
 from tool.c_header_parser.lexer import Lexer, lexer_create, lexer_destroy, lexer_next_token
 
 
@@ -30,18 +30,18 @@ def test_basic() -> i32:
     
     # Get first token - should be 'int'
     result1: i32 = lexer_next_token(lex, token)
-    printf("Token 1: type=%d (expected %d for TOK_INT), result=%d\n", token.type, TOK_INT, result1)
+    printf("Token 1: type=%d (expected %d for TokenType.INT), result=%d\n", token.type, TokenType.INT, result1)
     
-    if token.type != TOK_INT:
-        printf("FAIL: Expected TOK_INT\n")
+    if token.type != TokenType.INT:
+        printf("FAIL: Expected TokenType.INT\n")
         return 1
     
     # Get second token - should be '*'
     result2: i32 = lexer_next_token(lex, token)
-    printf("Token 2: type=%d (expected %d for TOK_STAR), result=%d\n", token.type, TOK_STAR, result2)
+    printf("Token 2: type=%d (expected %d for TokenType.STAR), result=%d\n", token.type, TokenType.STAR, result2)
     
-    if token.type != TOK_STAR:
-        printf("FAIL: Expected TOK_STAR\n")
+    if token.type != TokenType.STAR:
+        printf("FAIL: Expected TokenType.STAR\n")
         return 1
     
     printf("OK: Basic test passed!\n")
