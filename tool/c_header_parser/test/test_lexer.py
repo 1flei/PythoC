@@ -6,7 +6,7 @@ from pythoc import compile, i32, i8, ptr, array, nullptr, sizeof, void
 from pythoc.libc.stdio import printf
 from pythoc.libc.stdlib import malloc, free
 
-from .c_token import Token, TOK_INT, TOK_IDENTIFIER, TOK_STAR, TOK_SEMICOLON, TOK_LPAREN, TOK_RPAREN, TOK_COMMA, TOK_EOF, TOK_CHAR
+from .c_token import Token, TokenType
 from .lexer import Lexer, lexer_create, lexer_destroy, lexer_next_token, str_equal
 
 
@@ -20,43 +20,43 @@ def test_simple_tokens() -> i32:
     
     # Token 1: int
     lexer_next_token(lex, token)
-    if token.type != TOK_INT:
-        printf("FAIL: Expected TOK_INT, got %d\n", token.type)
+    if token.type != TokenType.INT:
+        printf("FAIL: Expected TokenType.INT, got %d\n", token.type)
         return 1
     
     # Token 2: *
     lexer_next_token(lex, token)
-    if token.type != TOK_STAR:
-        printf("FAIL: Expected TOK_STAR, got %d\n", token.type)
+    if token.type != TokenType.STAR:
+        printf("FAIL: Expected TokenType.STAR, got %d\n", token.type)
         return 1
     
     # Token 3: ;
     lexer_next_token(lex, token)
-    if token.type != TOK_SEMICOLON:
-        printf("FAIL: Expected TOK_SEMICOLON, got %d\n", token.type)
+    if token.type != TokenType.SEMICOLON:
+        printf("FAIL: Expected TokenType.SEMICOLON, got %d\n", token.type)
         return 1
     
     # Token 4: (
     lexer_next_token(lex, token)
-    if token.type != TOK_LPAREN:
-        printf("FAIL: Expected TOK_LPAREN, got %d\n", token.type)
+    if token.type != TokenType.LPAREN:
+        printf("FAIL: Expected TokenType.LPAREN, got %d\n", token.type)
         return 1
     
     # Token 5: )
     lexer_next_token(lex, token)
-    if token.type != TOK_RPAREN:
-        printf("FAIL: Expected TOK_RPAREN, got %d\n", token.type)
+    if token.type != TokenType.RPAREN:
+        printf("FAIL: Expected TokenType.RPAREN, got %d\n", token.type)
         return 1
     
     # Token 6: ,
     lexer_next_token(lex, token)
-    if token.type != TOK_COMMA:
-        printf("FAIL: Expected TOK_COMMA, got %d\n", token.type)
+    if token.type != TokenType.COMMA:
+        printf("FAIL: Expected TokenType.COMMA, got %d\n", token.type)
         return 1
     
     # Token 7: EOF
     result: i32 = lexer_next_token(lex, token)
-    if result != 0 or token.type != TOK_EOF:
+    if result != 0 or token.type != TokenType.EOF:
         printf("FAIL: Expected EOF\n")
         return 1
     
@@ -76,14 +76,14 @@ def test_identifiers_and_keywords() -> i32:
     
     # Token 1: int (keyword)
     lexer_next_token(lex, token)
-    if token.type != TOK_INT:
-        printf("FAIL: Expected TOK_INT\n")
+    if token.type != TokenType.INT:
+        printf("FAIL: Expected TokenType.INT\n")
         return 1
     
     # Token 2: foo (identifier)
     lexer_next_token(lex, token)
-    if token.type != TOK_IDENTIFIER:
-        printf("FAIL: Expected TOK_IDENTIFIER\n")
+    if token.type != TokenType.IDENTIFIER:
+        printf("FAIL: Expected TokenType.IDENTIFIER\n")
         return 1
     if str_equal(token.text, "foo") == 0:
         printf("FAIL: Expected 'foo', got '%s'\n", token.text)
@@ -91,14 +91,14 @@ def test_identifiers_and_keywords() -> i32:
     
     # Token 3: char (keyword)
     lexer_next_token(lex, token)
-    if token.type != TOK_CHAR:
-        printf("FAIL: Expected TOK_CHAR\n")
+    if token.type != TokenType.CHAR:
+        printf("FAIL: Expected TokenType.CHAR\n")
         return 1
     
     # Token 4: bar123 (identifier with numbers)
     lexer_next_token(lex, token)
-    if token.type != TOK_IDENTIFIER:
-        printf("FAIL: Expected TOK_IDENTIFIER\n")
+    if token.type != TokenType.IDENTIFIER:
+        printf("FAIL: Expected TokenType.IDENTIFIER\n")
         return 1
     if str_equal(token.text, "bar123") == 0:
         printf("FAIL: Expected 'bar123', got '%s'\n", token.text)
@@ -119,16 +119,16 @@ def test_simple_function() -> i32:
     token: ptr[Token] = ptr[Token](malloc(sizeof(Token)))
     
     expected_types: array[i32, 10]
-    expected_types[0] = TOK_INT
-    expected_types[1] = TOK_IDENTIFIER  # add
-    expected_types[2] = TOK_LPAREN
-    expected_types[3] = TOK_INT
-    expected_types[4] = TOK_IDENTIFIER  # a
-    expected_types[5] = TOK_COMMA
-    expected_types[6] = TOK_INT
-    expected_types[7] = TOK_IDENTIFIER  # b
-    expected_types[8] = TOK_RPAREN
-    expected_types[9] = TOK_SEMICOLON
+    expected_types[0] = TokenType.INT
+    expected_types[1] = TokenType.IDENTIFIER  # add
+    expected_types[2] = TokenType.LPAREN
+    expected_types[3] = TokenType.INT
+    expected_types[4] = TokenType.IDENTIFIER  # a
+    expected_types[5] = TokenType.COMMA
+    expected_types[6] = TokenType.INT
+    expected_types[7] = TokenType.IDENTIFIER  # b
+    expected_types[8] = TokenType.RPAREN
+    expected_types[9] = TokenType.SEMICOLON
     
     i: i32 = 0
     while i < 10:
@@ -154,17 +154,17 @@ def test_comments() -> i32:
     
     # Should get: int, x, ;
     lexer_next_token(lex, token)
-    if token.type != TOK_INT:
-        printf("FAIL: Expected TOK_INT after comment\n")
+    if token.type != TokenType.INT:
+        printf("FAIL: Expected TokenType.INT after comment\n")
         return 1
     
     lexer_next_token(lex, token)
-    if token.type != TOK_IDENTIFIER:
+    if token.type != TokenType.IDENTIFIER:
         printf("FAIL: Expected identifier 'x'\n")
         return 1
     
     lexer_next_token(lex, token)
-    if token.type != TOK_SEMICOLON:
+    if token.type != TokenType.SEMICOLON:
         printf("FAIL: Expected semicolon after line comment\n")
         return 1
     

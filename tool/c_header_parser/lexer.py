@@ -3,21 +3,12 @@ Lexer for C header files
 Converts source text into a stream of tokens
 """
 
-from pythoc import compile, i32, i8, ptr, array, nullptr, sizeof, void
+from pythoc import compile, i32, i8, ptr, array, nullptr, sizeof, void, char
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
 
-from .c_token import (
-    Token,
-    TOK_EOF, TOK_ERROR, TOK_IDENTIFIER, TOK_NUMBER,
-    TOK_INT, TOK_CHAR, TOK_SHORT, TOK_LONG, TOK_FLOAT, TOK_DOUBLE, TOK_VOID,
-    TOK_SIGNED, TOK_UNSIGNED, TOK_STRUCT, TOK_UNION, TOK_ENUM, TOK_TYPEDEF,
-    TOK_CONST, TOK_VOLATILE, TOK_STATIC, TOK_EXTERN,
-    TOK_STAR, TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET,
-    TOK_LBRACE, TOK_RBRACE, TOK_SEMICOLON, TOK_COMMA, TOK_COLON,
-    TOK_EQUALS, TOK_ELLIPSIS
-)
+from .c_token import Token, TokenType
 
 
 @compile
@@ -83,7 +74,7 @@ def lexer_advance(lex: ptr[Lexer]) -> void:
     c: i8 = lex.source[lex.pos]
     lex.pos = lex.pos + 1
     
-    if c == 10:  # '\n'
+    if c == char("\n"):
         lex.line = lex.line + 1
         lex.col = 1
     else:
@@ -102,19 +93,19 @@ def lexer_skip_whitespace(lex: ptr[Lexer]) -> void:
             continue
         
         # Skip // line comments
-        if c == 47 and lexer_peek(lex, 1) == 47:  # '//'
+        if c == char("/") and lexer_peek(lex, 1) == char("/"):
             lexer_advance(lex)
             lexer_advance(lex)
-            while lex.pos < lex.length and lexer_current(lex) != 10:  # '\n'
+            while lex.pos < lex.length and lexer_current(lex) != char("\n"):
                 lexer_advance(lex)
             continue
         
         # Skip /* block comments */
-        if c == 47 and lexer_peek(lex, 1) == 42:  # '/*'
+        if c == char("/") and lexer_peek(lex, 1) == char("*"):
             lexer_advance(lex)
             lexer_advance(lex)
             while lex.pos < lex.length:
-                if lexer_current(lex) == 42 and lexer_peek(lex, 1) == 47:  # '*/'
+                if lexer_current(lex) == char("*") and lexer_peek(lex, 1) == char("/"):
                     lexer_advance(lex)
                     lexer_advance(lex)
                     break
@@ -129,56 +120,56 @@ def lexer_skip_whitespace(lex: ptr[Lexer]) -> void:
 def is_keyword(word: ptr[i8]) -> i32:
     """Check if identifier is a C keyword, return token type or 0"""
     # int
-    if word[0] == 105 and word[1] == 110 and word[2] == 116 and word[3] == 0:  # 'int'
-        return TOK_INT
+    if word[0] == char("i") and word[1] == char("n") and word[2] == char("t") and word[3] == 0:
+        return TokenType.INT
     # char
-    if word[0] == 99 and word[1] == 104 and word[2] == 97 and word[3] == 114 and word[4] == 0:  # 'char'
-        return TOK_CHAR
+    if word[0] == char("c") and word[1] == char("h") and word[2] == char("a") and word[3] == char("r") and word[4] == 0:
+        return TokenType.CHAR
     # void
-    if word[0] == 118 and word[1] == 111 and word[2] == 105 and word[3] == 100 and word[4] == 0:  # 'void'
-        return TOK_VOID
+    if word[0] == char("v") and word[1] == char("o") and word[2] == char("i") and word[3] == char("d") and word[4] == 0:
+        return TokenType.VOID
     # short
-    if word[0] == 115 and word[1] == 104 and word[2] == 111 and word[3] == 114 and word[4] == 116 and word[5] == 0:  # 'short'
-        return TOK_SHORT
+    if word[0] == char("s") and word[1] == char("h") and word[2] == char("o") and word[3] == char("r") and word[4] == char("t") and word[5] == 0:
+        return TokenType.SHORT
     # long
-    if word[0] == 108 and word[1] == 111 and word[2] == 110 and word[3] == 103 and word[4] == 0:  # 'long'
-        return TOK_LONG
+    if word[0] == char("l") and word[1] == char("o") and word[2] == char("n") and word[3] == char("g") and word[4] == 0:
+        return TokenType.LONG
     # float
-    if word[0] == 102 and word[1] == 108 and word[2] == 111 and word[3] == 97 and word[4] == 116 and word[5] == 0:  # 'float'
-        return TOK_FLOAT
+    if word[0] == char("f") and word[1] == char("l") and word[2] == char("o") and word[3] == char("a") and word[4] == char("t") and word[5] == 0:
+        return TokenType.FLOAT
     # double
-    if word[0] == 100 and word[1] == 111 and word[2] == 117 and word[3] == 98 and word[4] == 108 and word[5] == 101 and word[6] == 0:  # 'double'
-        return TOK_DOUBLE
+    if word[0] == char("d") and word[1] == char("o") and word[2] == char("u") and word[3] == char("b") and word[4] == char("l") and word[5] == char("e") and word[6] == 0:
+        return TokenType.DOUBLE
     # signed
-    if word[0] == 115 and word[1] == 105 and word[2] == 103 and word[3] == 110 and word[4] == 101 and word[5] == 100 and word[6] == 0:  # 'signed'
-        return TOK_SIGNED
+    if word[0] == char("s") and word[1] == char("i") and word[2] == char("g") and word[3] == char("n") and word[4] == char("e") and word[5] == char("d") and word[6] == 0:
+        return TokenType.SIGNED
     # unsigned
-    if word[0] == 117 and word[1] == 110 and word[2] == 115 and word[3] == 105 and word[4] == 103 and word[5] == 110 and word[6] == 101 and word[7] == 100 and word[8] == 0:  # 'unsigned'
-        return TOK_UNSIGNED
+    if word[0] == char("u") and word[1] == char("n") and word[2] == char("s") and word[3] == char("i") and word[4] == char("g") and word[5] == char("n") and word[6] == char("e") and word[7] == char("d") and word[8] == 0:
+        return TokenType.UNSIGNED
     # struct
-    if word[0] == 115 and word[1] == 116 and word[2] == 114 and word[3] == 117 and word[4] == 99 and word[5] == 116 and word[6] == 0:  # 'struct'
-        return TOK_STRUCT
+    if word[0] == char("s") and word[1] == char("t") and word[2] == char("r") and word[3] == char("u") and word[4] == char("c") and word[5] == char("t") and word[6] == 0:
+        return TokenType.STRUCT
     # union
-    if word[0] == 117 and word[1] == 110 and word[2] == 105 and word[3] == 111 and word[4] == 110 and word[5] == 0:  # 'union'
-        return TOK_UNION
+    if word[0] == char("u") and word[1] == char("n") and word[2] == char("i") and word[3] == char("o") and word[4] == char("n") and word[5] == 0:
+        return TokenType.UNION
     # enum
-    if word[0] == 101 and word[1] == 110 and word[2] == 117 and word[3] == 109 and word[4] == 0:  # 'enum'
-        return TOK_ENUM
+    if word[0] == char("e") and word[1] == char("n") and word[2] == char("u") and word[3] == char("m") and word[4] == 0:
+        return TokenType.ENUM
     # typedef
-    if word[0] == 116 and word[1] == 121 and word[2] == 112 and word[3] == 101 and word[4] == 100 and word[5] == 101 and word[6] == 102 and word[7] == 0:  # 'typedef'
-        return TOK_TYPEDEF
+    if word[0] == char("t") and word[1] == char("y") and word[2] == char("p") and word[3] == char("e") and word[4] == char("d") and word[5] == char("e") and word[6] == char("f") and word[7] == 0:
+        return TokenType.TYPEDEF
     # const
-    if word[0] == 99 and word[1] == 111 and word[2] == 110 and word[3] == 115 and word[4] == 116 and word[5] == 0:  # 'const'
-        return TOK_CONST
+    if word[0] == char("c") and word[1] == char("o") and word[2] == char("n") and word[3] == char("s") and word[4] == char("t") and word[5] == 0:
+        return TokenType.CONST
     # volatile
-    if word[0] == 118 and word[1] == 111 and word[2] == 108 and word[3] == 97 and word[4] == 116 and word[5] == 105 and word[6] == 108 and word[7] == 101 and word[8] == 0:  # 'volatile'
-        return TOK_VOLATILE
+    if word[0] == char("v") and word[1] == char("o") and word[2] == char("l") and word[3] == char("a") and word[4] == char("t") and word[5] == char("i") and word[6] == char("l") and word[7] == char("e") and word[8] == 0:
+        return TokenType.VOLATILE
     # static
-    if word[0] == 115 and word[1] == 116 and word[2] == 97 and word[3] == 116 and word[4] == 105 and word[5] == 99 and word[6] == 0:  # 'static'
-        return TOK_STATIC
+    if word[0] == char("s") and word[1] == char("t") and word[2] == char("a") and word[3] == char("t") and word[4] == char("i") and word[5] == char("c") and word[6] == 0:
+        return TokenType.STATIC
     # extern
-    if word[0] == 101 and word[1] == 120 and word[2] == 116 and word[3] == 101 and word[4] == 114 and word[5] == 110 and word[6] == 0:  # 'extern'
-        return TOK_EXTERN
+    if word[0] == char("e") and word[1] == char("x") and word[2] == char("t") and word[3] == char("e") and word[4] == char("r") and word[5] == char("n") and word[6] == 0:
+        return TokenType.EXTERN
     
     return 0  # Not a keyword
 
@@ -190,7 +181,7 @@ def lexer_read_identifier(lex: ptr[Lexer], token: ptr[Token]) -> void:
     
     # First character must be alpha or underscore
     c: i8 = lexer_current(lex)
-    while lex.pos < lex.length and (isalnum(c) or c == 95):  # '_' = 95
+    while lex.pos < lex.length and (isalnum(c) or c == char("_")):
         if i < 255:
             token.text[i] = c
             i = i + 1
@@ -204,7 +195,7 @@ def lexer_read_identifier(lex: ptr[Lexer], token: ptr[Token]) -> void:
     if kw_type != 0:
         token.type = kw_type
     else:
-        token.type = TOK_IDENTIFIER
+        token.type = TokenType.IDENTIFIER
 
 
 @compile
@@ -214,7 +205,7 @@ def lexer_read_number(lex: ptr[Lexer], token: ptr[Token]) -> void:
     c: i8 = lexer_current(lex)
     
     # Check for hex prefix 0x or 0X
-    if c == 48 and (lexer_peek(lex, 1) == 120 or lexer_peek(lex, 1) == 88):  # '0x' or '0X'
+    if c == char("0") and (lexer_peek(lex, 1) == char("x") or lexer_peek(lex, 1) == char("X")):
         token.text[i] = c
         i = i + 1
         lexer_advance(lex)
@@ -228,12 +219,12 @@ def lexer_read_number(lex: ptr[Lexer], token: ptr[Token]) -> void:
     while lex.pos < lex.length:
         c = lexer_current(lex)
         # Check if valid number character
-        if isdigit(c) or c == 46 or c == 120 or c == 88:  # '.', 'x', 'X'
+        if isdigit(c) or c == char(".") or c == char("x") or c == char("X"):
             if i < 255:
                 token.text[i] = c
                 i = i + 1
             lexer_advance(lex)
-        elif (c >= 65 and c <= 70) or (c >= 97 and c <= 102):  # 'A-F' or 'a-f' for hex
+        elif (c >= char("A") and c <= char("F")) or (c >= char("a") and c <= char("f")):
             if i < 255:
                 token.text[i] = c
                 i = i + 1
@@ -242,7 +233,7 @@ def lexer_read_number(lex: ptr[Lexer], token: ptr[Token]) -> void:
             break
     
     token.text[i] = 0
-    token.type = TOK_NUMBER
+    token.type = TokenType.NUMBER
 
 
 @compile
@@ -255,7 +246,7 @@ def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
     
     # Check for EOF
     if lex.pos >= lex.length:
-        token.type = TOK_EOF
+        token.type = TokenType.EOF
         token.text[0] = 0
         token.line = lex.line
         token.col = lex.col
@@ -268,7 +259,7 @@ def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
     c: i8 = lexer_current(lex)
     
     # Identifier or keyword (starts with letter or underscore)
-    if isalpha(c) or c == 95:  # '_' = 95
+    if isalpha(c) or c == char("_"):
         lexer_read_identifier(lex, token)
         return 1
     
@@ -281,69 +272,69 @@ def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
     token.text[0] = c
     token.text[1] = 0
     
-    if c == 42:  # '*'
-        token.type = TOK_STAR
+    if c == char("*"):
+        token.type = TokenType.STAR
         lexer_advance(lex)
         return 1
     
-    if c == 40:  # '('
-        token.type = TOK_LPAREN
+    if c == char("("):
+        token.type = TokenType.LPAREN
         lexer_advance(lex)
         return 1
     
-    if c == 41:  # ')'
-        token.type = TOK_RPAREN
+    if c == char(")"):
+        token.type = TokenType.RPAREN
         lexer_advance(lex)
         return 1
     
-    if c == 91:  # '['
-        token.type = TOK_LBRACKET
+    if c == char("["):
+        token.type = TokenType.LBRACKET
         lexer_advance(lex)
         return 1
     
-    if c == 93:  # ']'
-        token.type = TOK_RBRACKET
+    if c == char("]"):
+        token.type = TokenType.RBRACKET
         lexer_advance(lex)
         return 1
     
-    if c == 123:  # '{'
-        token.type = TOK_LBRACE
+    if c == char("{"):
+        token.type = TokenType.LBRACE
         lexer_advance(lex)
         return 1
     
-    if c == 125:  # '}'
-        token.type = TOK_RBRACE
+    if c == char("}"):
+        token.type = TokenType.RBRACE
         lexer_advance(lex)
         return 1
     
-    if c == 59:  # ';'
-        token.type = TOK_SEMICOLON
+    if c == char(";"):
+        token.type = TokenType.SEMICOLON
         lexer_advance(lex)
         return 1
     
-    if c == 44:  # ','
-        token.type = TOK_COMMA
+    if c == char(","):
+        token.type = TokenType.COMMA
         lexer_advance(lex)
         return 1
     
-    if c == 58:  # ':'
-        token.type = TOK_COLON
+    if c == char(":"):
+        token.type = TokenType.COLON
         lexer_advance(lex)
         return 1
     
-    if c == 61:  # '='
-        token.type = TOK_EQUALS
+    if c == char("="):
+        token.type = TokenType.EQUALS
         lexer_advance(lex)
         return 1
     
     # Multi-character tokens
-    if c == 46:  # '.'
+    if c == char("."):
         # Check for ellipsis '...'
-        if lexer_peek(lex, 1) == 46 and lexer_peek(lex, 2) == 46:
-            token.type = TOK_ELLIPSIS
-            token.text[0] = 46
-            token.text[1] = 46
-            token.text[2] = 46
+        if lexer_peek(lex, 1) == char(".") and lexer_peek(lex, 2) == char("."):
+            token.type = TokenType.ELLIPSIS
+            token.text[0] = char(".")
+            token.text[1] = char(".")
+            token.text[2] = char(".")
             token.text[3] = 0
             lexer_advance(lex)
             lexer_advance(lex)
@@ -351,6 +342,6 @@ def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
             return 1
     
     # Unknown character - treat as error
-    token.type = TOK_ERROR
+    token.type = TokenType.ERROR
     lexer_advance(lex)
     return 1
