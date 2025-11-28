@@ -281,6 +281,75 @@ from .types import ptr, i8
 nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="value", type_hint=ptr[i8])
 
 
+class char(BuiltinFunction):
+    """char(value) - Convert string or int to i8 character
+    
+    Converts Python values to i8 type:
+    - char("abc") -> i8(ord('a')) - first character of string
+    - char("s") -> i8(ord('s')) - single character
+    - char("") -> i8(0) - empty string returns null terminator
+    - char(48) -> i8(48) - int directly converted to i8
+    
+    Only accepts int or str Python values.
+    Raises TypeError for other types.
+    """
+    
+    @classmethod
+    def get_name(cls) -> str:
+        return 'char'
+    
+    @classmethod
+    def can_be_called(cls) -> bool:
+        return True
+    
+    @classmethod
+    def handle_call(cls, visitor, args, node: ast.Call):
+        """Handle char(value) call
+        
+        Args:
+            visitor: AST visitor instance
+            args: Pre-evaluated argument ValueRefs
+            node: ast.Call node
+            
+        Returns:
+            ValueRef containing i8 value
+        """
+        from .python_type import PythonType
+        
+        if len(args) != 1:
+            raise TypeError(f"char() takes exactly 1 argument ({len(args)} given)")
+        
+        arg = args[0]
+        
+        # Only accept Python values (int or str)
+        if not arg.is_python_value():
+            raise TypeError(f"char() only accepts Python int or str values, got {arg.type_hint}")
+        
+        py_value = arg.get_python_value()
+        
+        # Handle str type
+        if isinstance(py_value, str):
+            if len(py_value) == 0:
+                # Empty string -> '\0' (null terminator)
+                char_value = 0
+            else:
+                # Non-empty string -> first character
+                char_value = ord(py_value[0])
+        # Handle int type
+        elif isinstance(py_value, int):
+            # Int directly converted to i8
+            char_value = py_value
+        else:
+            # Reject other types
+            raise TypeError(f"char() only accepts int or str, got {type(py_value).__name__}")
+        
+        # Create i8 constant
+        i8_ir = ir.Constant(ir.IntType(8), char_value)
+        
+        # Return as ValueRef with i8 type hint
+        return wrap_value(i8_ir, kind="value", type_hint=i8)
+
+
 class seq(BuiltinFunction):
     """seq(end) or seq(start, end) - Iterator for integer sequences
     
