@@ -14,7 +14,7 @@ from .builtin_entities import (
     ptr, array, struct, union, func, enum,
     const, static, volatile,
     TYPE_MAP,
-    sizeof, nullptr, typeof,
+    sizeof, nullptr, typeof, char,
     seq, linear, consume, void,
     refined, assume, refine,
     pyconst
@@ -60,6 +60,7 @@ __all__ = [
     'TYPE_MAP',
     'sizeof',
     'typeof',
+    'char',
     'pyconst',
     
     # Decorators
@@ -85,6 +86,7 @@ __all__ = [
     'nullptr',
     'sizeof',
     'typeof',
+    'char',
     'pyconst',
     'seq',
     'linear',
