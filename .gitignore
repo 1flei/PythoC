@@ -1,4 +1,5 @@
-/build
+build
+!/pythoc/build
 *.pyc
 __pycache__
 .codebuddy
