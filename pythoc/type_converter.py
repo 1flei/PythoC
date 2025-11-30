@@ -96,6 +96,17 @@ class TypeConverter:
         if isinstance(value, ValueRef) and value.is_python_value():
             value = self._promote_python_to_pc(value.get_python_value(), stripped_target)
             return value
+        
+        # Step 2: Handle enum to integer conversion (extract tag field)
+        if (hasattr(stripped_source, '_is_enum') and stripped_source._is_enum and
+            hasattr(stripped_target, 'is_signed')):
+            # Converting enum to integer - extract the tag field
+            # Enum is struct { tag, payload }, extract field 0 (tag)
+            enum_val = ensure_ir(value)
+            tag_val = self.builder.extract_value(enum_val, 0, name="enum_tag")
+            tag_ref = wrap_value(tag_val, kind="value", type_hint=stripped_source._tag_type)
+            # Convert tag to target integer type
+            return self.convert(tag_ref, target_type)
 
         # Validate target is a PC type (use stripped version)
         if not isinstance(stripped_target, type) or not hasattr(stripped_target, 'get_llvm_type'):

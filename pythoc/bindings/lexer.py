@@ -3,23 +3,12 @@ Lexer for C header files
 Converts source text into a stream of tokens
 """
 
-from pythoc import compile, i32, i8, ptr, array, nullptr, sizeof, void, char
+from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
 
-from .c_token import Token, TokenType
-
-
-@compile
-def str_equal(s1: ptr[i8], s2: ptr[i8]) -> i32:
-    """Compare two strings for equality, return 1 if equal, 0 if not"""
-    i: i32 = 0
-    while s1[i] != 0 and s2[i] != 0:
-        if s1[i] != s2[i]:
-            return 0
-        i = i + 1
-    return s1[i] == s2[i]
+from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string
 
 
 @compile
@@ -117,61 +106,17 @@ def lexer_skip_whitespace(lex: ptr[Lexer]) -> void:
 
 
 @compile
-def is_keyword(word: ptr[i8]) -> i32:
+def is_keyword(word: ptr[i8]) -> TokenType:
     """Check if identifier is a C keyword, return token type or 0"""
-    # int
-    if word[0] == char("i") and word[1] == char("n") and word[2] == char("t") and word[3] == 0:
-        return TokenType.INT
-    # char
-    if word[0] == char("c") and word[1] == char("h") and word[2] == char("a") and word[3] == char("r") and word[4] == 0:
-        return TokenType.CHAR
-    # void
-    if word[0] == char("v") and word[1] == char("o") and word[2] == char("i") and word[3] == char("d") and word[4] == 0:
-        return TokenType.VOID
-    # short
-    if word[0] == char("s") and word[1] == char("h") and word[2] == char("o") and word[3] == char("r") and word[4] == char("t") and word[5] == 0:
-        return TokenType.SHORT
-    # long
-    if word[0] == char("l") and word[1] == char("o") and word[2] == char("n") and word[3] == char("g") and word[4] == 0:
-        return TokenType.LONG
-    # float
-    if word[0] == char("f") and word[1] == char("l") and word[2] == char("o") and word[3] == char("a") and word[4] == char("t") and word[5] == 0:
-        return TokenType.FLOAT
-    # double
-    if word[0] == char("d") and word[1] == char("o") and word[2] == char("u") and word[3] == char("b") and word[4] == char("l") and word[5] == char("e") and word[6] == 0:
-        return TokenType.DOUBLE
-    # signed
-    if word[0] == char("s") and word[1] == char("i") and word[2] == char("g") and word[3] == char("n") and word[4] == char("e") and word[5] == char("d") and word[6] == 0:
-        return TokenType.SIGNED
-    # unsigned
-    if word[0] == char("u") and word[1] == char("n") and word[2] == char("s") and word[3] == char("i") and word[4] == char("g") and word[5] == char("n") and word[6] == char("e") and word[7] == char("d") and word[8] == 0:
-        return TokenType.UNSIGNED
-    # struct
-    if word[0] == char("s") and word[1] == char("t") and word[2] == char("r") and word[3] == char("u") and word[4] == char("c") and word[5] == char("t") and word[6] == 0:
-        return TokenType.STRUCT
-    # union
-    if word[0] == char("u") and word[1] == char("n") and word[2] == char("i") and word[3] == char("o") and word[4] == char("n") and word[5] == 0:
-        return TokenType.UNION
-    # enum
-    if word[0] == char("e") and word[1] == char("n") and word[2] == char("u") and word[3] == char("m") and word[4] == 0:
-        return TokenType.ENUM
-    # typedef
-    if word[0] == char("t") and word[1] == char("y") and word[2] == char("p") and word[3] == char("e") and word[4] == char("d") and word[5] == char("e") and word[6] == char("f") and word[7] == 0:
-        return TokenType.TYPEDEF
-    # const
-    if word[0] == char("c") and word[1] == char("o") and word[2] == char("n") and word[3] == char("s") and word[4] == char("t") and word[5] == 0:
-        return TokenType.CONST
-    # volatile
-    if word[0] == char("v") and word[1] == char("o") and word[2] == char("l") and word[3] == char("a") and word[4] == char("t") and word[5] == char("i") and word[6] == char("l") and word[7] == char("e") and word[8] == 0:
-        return TokenType.VOLATILE
-    # static
-    if word[0] == char("s") and word[1] == char("t") and word[2] == char("a") and word[3] == char("t") and word[4] == char("i") and word[5] == char("c") and word[6] == 0:
-        return TokenType.STATIC
-    # extern
-    if word[0] == char("e") and word[1] == char("x") and word[2] == char("t") and word[3] == char("e") and word[4] == char("r") and word[5] == char("n") and word[6] == 0:
-        return TokenType.EXTERN
-    
-    return 0  # Not a keyword
+    def word_equal_to(key) -> bool:
+        for i in range(len(key)):
+            if word[i] != char(key[i]):
+                return False
+        return True
+    for token_id, token_str in g_token_id_to_string.items():
+        if word_equal_to(token_str):
+            return token_id
+    return TokenType.ERROR  # Not a keyword
 
 
 @compile
@@ -236,6 +181,22 @@ def lexer_read_number(lex: ptr[Lexer], token: ptr[Token]) -> void:
     token.type = TokenType.NUMBER
 
 
+# Generate single-char token mapping using Python metaprogramming
+_single_char_tokens = [
+    ('*', TokenType.STAR),
+    ('(', TokenType.LPAREN),
+    (')', TokenType.RPAREN),
+    ('[', TokenType.LBRACKET),
+    (']', TokenType.RBRACKET),
+    ('{', TokenType.LBRACE),
+    ('}', TokenType.RBRACE),
+    (';', TokenType.SEMICOLON),
+    (',', TokenType.COMMA),
+    (':', TokenType.COLON),
+    ('=', TokenType.EQUALS),
+]
+
+
 @compile
 def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
     """
@@ -268,64 +229,15 @@ def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
         lexer_read_number(lex, token)
         return 1
     
-    # Single character tokens
+    # Single character tokens - generated by metaprogramming
     token.text[0] = c
     token.text[1] = 0
     
-    if c == char("*"):
-        token.type = TokenType.STAR
-        lexer_advance(lex)
-        return 1
-    
-    if c == char("("):
-        token.type = TokenType.LPAREN
-        lexer_advance(lex)
-        return 1
-    
-    if c == char(")"):
-        token.type = TokenType.RPAREN
-        lexer_advance(lex)
-        return 1
-    
-    if c == char("["):
-        token.type = TokenType.LBRACKET
-        lexer_advance(lex)
-        return 1
-    
-    if c == char("]"):
-        token.type = TokenType.RBRACKET
-        lexer_advance(lex)
-        return 1
-    
-    if c == char("{"):
-        token.type = TokenType.LBRACE
-        lexer_advance(lex)
-        return 1
-    
-    if c == char("}"):
-        token.type = TokenType.RBRACE
-        lexer_advance(lex)
-        return 1
-    
-    if c == char(";"):
-        token.type = TokenType.SEMICOLON
-        lexer_advance(lex)
-        return 1
-    
-    if c == char(","):
-        token.type = TokenType.COMMA
-        lexer_advance(lex)
-        return 1
-    
-    if c == char(":"):
-        token.type = TokenType.COLON
-        lexer_advance(lex)
-        return 1
-    
-    if c == char("="):
-        token.type = TokenType.EQUALS
-        lexer_advance(lex)
-        return 1
+    for ch, tok_type in _single_char_tokens:
+        if c == char(ch):
+            token.type = tok_type
+            lexer_advance(lex)
+            return 1
     
     # Multi-character tokens
     if c == char("."):

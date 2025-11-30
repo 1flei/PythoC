@@ -232,9 +232,19 @@ class LoopsMixin:
                         self.visit(stmt)
             return
         
-        # Get loop variable name
+        # Get loop variable name or names (for tuple unpacking)
         if isinstance(node.target, ast.Name):
-            loop_var_name = node.target.id
+            loop_var_names = [node.target.id]
+            is_tuple_unpack = False
+        elif isinstance(node.target, ast.Tuple):
+            # Support tuple unpacking: for i, j in [(1,2), (3,4)]
+            loop_var_names = []
+            for elt in node.target.elts:
+                if isinstance(elt, ast.Name):
+                    loop_var_names.append(elt.id)
+                else:
+                    raise NotImplementedError("Nested tuple unpacking not supported in constant unroll")
+            is_tuple_unpack = True
         else:
             raise NotImplementedError("Complex loop targets not supported in constant unroll")
         
@@ -286,20 +296,40 @@ class LoopsMixin:
                 # break -> jump to loop_exit (exit the entire loop)
                 self.loop_stack.append((continue_target, loop_exit))
                 
-                # Set loop variable
-                elem_value_ref = wrap_value(
-                    element,
-                    kind="python", 
-                    type_hint=PythonType.wrap(element, is_constant=True)
-                )
-                
-                loop_var_info = VariableInfo(
-                    name=loop_var_name,
-                    value_ref=elem_value_ref,
-                    alloca=None,
-                    source="for_loop_unrolled"
-                )
-                self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
+                # Set loop variable(s)
+                if is_tuple_unpack:
+                    # Unpack tuple element
+                    if not isinstance(element, (tuple, list)) or len(element) != len(loop_var_names):
+                        raise TypeError(
+                            f"Cannot unpack {element} into {len(loop_var_names)} variables"
+                        )
+                    for var_name, elem_val in zip(loop_var_names, element):
+                        elem_value_ref = wrap_value(
+                            elem_val,
+                            kind="python",
+                            type_hint=PythonType.wrap(elem_val, is_constant=True)
+                        )
+                        loop_var_info = VariableInfo(
+                            name=var_name,
+                            value_ref=elem_value_ref,
+                            alloca=None,
+                            source="for_loop_unrolled"
+                        )
+                        self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
+                else:
+                    # Single variable
+                    elem_value_ref = wrap_value(
+                        element,
+                        kind="python", 
+                        type_hint=PythonType.wrap(element, is_constant=True)
+                    )
+                    loop_var_info = VariableInfo(
+                        name=loop_var_names[0],
+                        value_ref=elem_value_ref,
+                        alloca=None,
+                        source="for_loop_unrolled"
+                    )
+                    self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
                 
                 try:
                     # Execute loop body (break/continue will use loop_stack)

@@ -81,13 +81,6 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
     
     source_file, source_code = get_function_file_and_source(func)
 
-    # Check if native executor has already loaded this source file
-    if executor.has_loaded_library(source_file):
-        raise RuntimeError(
-            f"Cannot compile new functions in '{source_file}' after native execution has started. "
-            f"All @compile decorators must be executed before calling any compiled functions."
-        )
-
     registry = _get_registry()
     # Use get_all_accessible_symbols to extract ALL accessible symbols
     # This includes: closure variables, enclosing scopes, caller frame locals, and globals

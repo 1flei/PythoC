@@ -342,12 +342,10 @@ class char(BuiltinFunction):
         else:
             # Reject other types
             raise TypeError(f"char() only accepts int or str, got {type(py_value).__name__}")
-        
-        # Create i8 constant
-        i8_ir = ir.Constant(ir.IntType(8), char_value)
-        
-        # Return as ValueRef with i8 type hint
-        return wrap_value(i8_ir, kind="value", type_hint=i8)
+
+        from .python_type import PythonType
+        python_type = PythonType.wrap(char_value, is_constant=True)
+        return wrap_value(char_value, kind="python", type_hint=python_type)
 
 
 class seq(BuiltinFunction):

@@ -487,7 +487,16 @@ class MultiSOExecutor:
     
     def has_loaded_library(self, source_file: str) -> bool:
         """Check if a library for the given source file is already loaded"""
-        return source_file in self.loaded_libs
+        # Check if any loaded library corresponds to this source file
+        # Build the expected .so path from source file
+        cwd = os.getcwd()
+        if source_file.startswith(cwd):
+            rel_path = os.path.relpath(source_file, cwd)
+        else:
+            rel_path = source_file
+        so_file = os.path.join('build', os.path.dirname(rel_path), 
+                              os.path.splitext(os.path.basename(source_file))[0] + '.so')
+        return so_file in self.loaded_libs
     
     def execute_function(self, wrapper) -> Callable:
         """
@@ -530,20 +539,39 @@ class MultiSOExecutor:
         
         # Check if we need to compile .so from .o
         need_compile = False
+        obj_file = so_file.replace('.so', '.o')
+        
         if not os.path.exists(so_file):
             need_compile = True
+        elif not os.path.exists(obj_file):
+            # If .so exists but .o doesn't, something is wrong
+            need_compile = False
         else:
+            # Check both .ll and .o timestamps
             ll_file = so_file.replace('.so', '.ll')
+            so_mtime = os.path.getmtime(so_file)
+            
+            # If .ll is newer than .so, need to recompile
             if os.path.exists(ll_file):
                 ll_mtime = os.path.getmtime(ll_file)
-                so_mtime = os.path.getmtime(so_file)
                 if ll_mtime > so_mtime:
                     need_compile = True
+            
+            # If .o is newer than .so, also need to recompile
+            obj_mtime = os.path.getmtime(obj_file)
+            if obj_mtime > so_mtime:
+                need_compile = True
         
         if need_compile:
-            obj_file = so_file.replace('.so', '.o')
             if not os.path.exists(obj_file):
                 raise RuntimeError(f"Object file {obj_file} not found for {func_name}")
+            # If recompiling, unload the old library first
+            if so_file in self.loaded_libs:
+                del self.loaded_libs[so_file]
+                # Also clear cached functions from this library
+                keys_to_remove = [k for k in self.function_cache.keys() if k.startswith(f"{source_file}:")]
+                for key in keys_to_remove:
+                    del self.function_cache[key]
             self.compile_source_to_so(obj_file, so_file)
         
         # Collect dependencies from compiler

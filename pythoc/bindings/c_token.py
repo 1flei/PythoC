@@ -8,8 +8,8 @@ from pythoc import compile, i32, i8, array, enum
 class TokenType:
     """Token type enumeration"""
     # Special tokens
-    EOF = 0
-    ERROR = 1
+    ERROR = 0
+    EOF = 1
     
     # Keywords
     INT = 10
@@ -66,3 +66,33 @@ class Token:
     text: array[i8, 256]         # Token text content
     line: i32                    # Source line number (1-based)
     col: i32                     # Source column number (1-based)
+
+
+# Map token type to C keyword string (lowercase)
+_token_to_keyword = {
+    TokenType.INT: "int",
+    TokenType.CHAR: "char",
+    TokenType.SHORT: "short",
+    TokenType.LONG: "long",
+    TokenType.FLOAT: "float",
+    TokenType.DOUBLE: "double",
+    TokenType.VOID: "void",
+    TokenType.SIGNED: "signed",
+    TokenType.UNSIGNED: "unsigned",
+    TokenType.STRUCT: "struct",
+    TokenType.UNION: "union",
+    TokenType.ENUM: "enum",
+    TokenType.TYPEDEF: "typedef",
+    TokenType.CONST: "const",
+    TokenType.VOLATILE: "volatile",
+    TokenType.STATIC: "static",
+    TokenType.EXTERN: "extern",
+}
+
+g_token_id_to_string = {}
+g_token_string_to_id = {}
+
+# Then, override with actual C keywords for keyword tokens
+for token_type, keyword in _token_to_keyword.items():
+    g_token_id_to_string[token_type] = keyword
+    g_token_string_to_id[keyword] = token_type
