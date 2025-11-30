@@ -43,7 +43,7 @@ def file_lock(lockfile_path: str, timeout: float = 60.0):
         # Try to acquire lock with exponential backoff
         while True:
             try:
-                lockfile = open(lockfile_path, 'w')
+                lockfile = open(lockfile_path, 'a')
                 fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break  # Lock acquired
             except (IOError, OSError):
@@ -66,11 +66,6 @@ def file_lock(lockfile_path: str, timeout: float = 60.0):
             try:
                 fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
                 lockfile.close()
-                # Clean up lock file
-                try:
-                    os.remove(lockfile_path)
-                except OSError:
-                    pass
             except Exception:
                 pass
 

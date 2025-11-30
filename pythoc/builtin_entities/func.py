@@ -131,9 +131,14 @@ class func(BuiltinType):
         converted_args = []
         for idx, (arg, expected_type) in enumerate(zip(args, param_llvm_types)):
             logger.debug("Function pointer call arg", func_ptr=func_ptr_ir, idx=idx, arg=arg, expected_type=expected_type)
-            if arg.is_python_value() or get_type(arg) != expected_type:
-                # Convert using PC param type directly
-                target_pc_type = cls.param_types[idx]
+            target_pc_type = cls.param_types[idx]
+            
+            # Check if PC types match (including refined types)
+            # Even if LLVM types match, PC types might be different (e.g., refined vs base)
+            pc_types_match = (hasattr(arg, 'type_hint') and arg.type_hint == target_pc_type)
+            
+            if arg.is_python_value() or get_type(arg) != expected_type or not pc_types_match:
+                # Convert using PC param type directly - this will enforce refined type checking
                 converted = visitor.type_converter.convert(arg, target_pc_type)
                 converted_args.append(ensure_ir(converted))
             else:

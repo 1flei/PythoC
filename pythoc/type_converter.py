@@ -15,23 +15,61 @@ from .logger import logger
 
 
 def strip_qualifiers(pc_type):
-    """Strip type qualifiers (const, volatile, static) from a PC type
+    """Strip type qualifiers (const, volatile, static) but NOT refined types
     
-    Returns the underlying qualified type if this is a qualifier type,
-    otherwise returns the type as-is.
+    Returns the underlying type by stripping qualifiers ONLY.
+    Refined types are NOT stripped because they have semantic meaning
+    (runtime constraints) and are not mere compile-time qualifiers.
     
     Example:
         const[i32] -> i32
         volatile[ptr[i32]] -> ptr[i32]
         static[const[i32]] -> i32 (strips nested qualifiers)
+        refined[is_positive] -> refined[is_positive] (NOT stripped!)
     """
     if pc_type is None:
         return None
+    
+    # Refined types are NOT qualifiers - they carry semantic constraints
+    # Do NOT strip them!
+    if hasattr(pc_type, '_is_refined') and pc_type._is_refined:
+        return pc_type
     
     # Check if this is a qualifier type
     if hasattr(pc_type, 'qualified_type') and pc_type.qualified_type is not None:
         # Recursively strip nested qualifiers
         return strip_qualifiers(pc_type.qualified_type)
+    
+    return pc_type
+
+
+def get_base_type(pc_type):
+    """Get the base type, stripping both qualifiers AND refined types
+    
+    This is used for operations that need to work with the underlying
+    value type (e.g., arithmetic operations, type category checks).
+    
+    Example:
+        const[i32] -> i32
+        refined[is_positive] -> i32
+        const[refined[is_positive]] -> i32
+    """
+    if pc_type is None:
+        return None
+    
+    # First strip qualifiers
+    pc_type = strip_qualifiers(pc_type)
+    
+    # Then strip refined types to get to the base type
+    if hasattr(pc_type, '_is_refined') and pc_type._is_refined:
+        if hasattr(pc_type, '_is_single_param') and pc_type._is_single_param:
+            # Single-parameter refined type: get underlying type
+            if pc_type._param_types and len(pc_type._param_types) > 0:
+                underlying_type = pc_type._param_types[0]
+                # Recursively process in case underlying type is also refined
+                return get_base_type(underlying_type)
+        # Multi-parameter refined type: keep as is (it's a struct)
+        return pc_type
     
     return pc_type
 
@@ -76,6 +114,21 @@ class TypeConverter:
         if isinstance(value, ir.Value):
             raise ValueError(f"Cannot convert raw LLVM value {value}")
         
+        # Check if target is a refined type but source is not
+        # This check MUST happen before stripping qualifiers, because refined types
+        # can only be constructed via assume() or refine(), not by direct conversion
+        target_is_refined = hasattr(target_type, '_is_refined') and target_type._is_refined
+        source_is_refined = value.type_hint and hasattr(value.type_hint, '_is_refined') and value.type_hint._is_refined
+        
+        if target_is_refined and not source_is_refined:
+            # Direct conversion from base type to refined type is not allowed
+            target_name = target_type.get_name() if hasattr(target_type, 'get_name') else str(target_type)
+            source_name = value.type_hint.get_name() if value.type_hint and hasattr(value.type_hint, 'get_name') else str(value.type_hint)
+            raise TypeError(
+                f"Cannot directly convert from {source_name} to refined type {target_name}. "
+                f"Refined types must be constructed using assume() or refine()."
+            )
+        
         # Strip qualifiers for comparison and conversion
         stripped_target = strip_qualifiers(target_type)
         stripped_source = strip_qualifiers(value.type_hint) if value.type_hint else None
@@ -97,26 +150,30 @@ class TypeConverter:
             value = self._promote_python_to_pc(value.get_python_value(), stripped_target)
             return value
         
+        # For actual conversion operations, use base types (strip refined types too)
+        base_target = get_base_type(target_type)
+        base_source = get_base_type(value.type_hint) if value.type_hint else None
+        
         # Step 2: Handle enum to integer conversion (extract tag field)
-        if (hasattr(stripped_source, '_is_enum') and stripped_source._is_enum and
-            hasattr(stripped_target, 'is_signed')):
+        if (hasattr(base_source, '_is_enum') and base_source._is_enum and
+            hasattr(base_target, 'is_signed')):
             # Converting enum to integer - extract the tag field
             # Enum is struct { tag, payload }, extract field 0 (tag)
             enum_val = ensure_ir(value)
             tag_val = self.builder.extract_value(enum_val, 0, name="enum_tag")
-            tag_ref = wrap_value(tag_val, kind="value", type_hint=stripped_source._tag_type)
+            tag_ref = wrap_value(tag_val, kind="value", type_hint=base_source._tag_type)
             # Convert tag to target integer type
             return self.convert(tag_ref, target_type)
 
-        # Validate target is a PC type (use stripped version)
-        if not isinstance(stripped_target, type) or not hasattr(stripped_target, 'get_llvm_type'):
+        # Validate target is a PC type (use base version)
+        if not isinstance(base_target, type) or not hasattr(base_target, 'get_llvm_type'):
             raise TypeError(f"Target type {target_type} is not a valid PC builtin type with get_llvm_type()")
 
-        # Extract LLVM type from pythoc type (use stripped version)
+        # Extract LLVM type from pythoc type (use base version)
         # All PC types now accept module_context parameter uniformly
         module = getattr(self._visitor, 'module', None)
         module_context = getattr(module, 'context', None)
-        target_llvm_type = stripped_target.get_llvm_type(module_context)
+        target_llvm_type = base_target.get_llvm_type(module_context)
         
         # Get source LLVM type
         source_ir = ensure_ir(value)
@@ -126,14 +183,14 @@ class TypeConverter:
         if source_type == target_llvm_type:
             return wrap_value(source_ir, kind="value", type_hint=target_type)
 
-        # Infer signedness from pythoc types (use stripped versions)
+        # Infer signedness from pythoc types (use base versions)
         source_is_unsigned = False
         target_is_unsigned = False
-        source_pc_type = stripped_source
+        source_pc_type = base_source
         if hasattr(source_pc_type, 'is_signed'):
             source_is_unsigned = not source_pc_type.is_signed()
-        if hasattr(stripped_target, 'is_signed'):
-            target_is_unsigned = not stripped_target.is_signed()
+        if hasattr(base_target, 'is_signed'):
+            target_is_unsigned = not base_target.is_signed()
 
         # Dispatch via registry (uses LLVM types for IR instruction selection)
         conversion_key = (type(source_type), type(target_llvm_type))
@@ -165,6 +222,16 @@ class TypeConverter:
             target_type: Optional target PC type (for context-aware promotion)
         """
         logger.debug("Promote python to PC", python_val=python_val, target_type=target_type)
+        
+        # Validate python_val is a supported primitive type
+        # Allow: int, float, bool, str, None, list, tuple (for array/struct initialization)
+        # Reject: type objects, classes, functions, modules, etc.
+        if not isinstance(python_val, (int, float, bool, str, type(None), list, tuple)):
+            raise TypeError(
+                f"Cannot promote Python value of type {type(python_val).__name__} to PC type. "
+                f"Only primitive types (int, float, bool, str, None) and collections (list, tuple) are supported. "
+                f"Got: {repr(python_val)}"
+            )
         
         # Handle enum initialization from tuple or int
         if hasattr(target_type, '_is_enum') and target_type._is_enum:
@@ -722,7 +789,8 @@ class TypeConverter:
             python_val = value.get_python_value()
             value = self._promote_python_to_pc(python_val, target_pc_type)
         
-        source_pc_type = strip_qualifiers(value.type_hint)
+        # Get base type for source (stripping both qualifiers and refined types)
+        source_pc_type = get_base_type(value.type_hint)
         if hasattr(source_pc_type, '_is_float') and source_pc_type._is_float:
             if source_pc_type == target_pc_type:
                 return value

@@ -3,7 +3,9 @@ Lexer for C header files
 Converts source text into a stream of tokens
 """
 
-from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char
+from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refined
+from pythoc.std.linear_wrapper import linear_wrap
+from pythoc.std.refine_wrapper import nonnull_wrap
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
@@ -22,7 +24,7 @@ class Lexer:
 
 
 @compile
-def lexer_create(source: ptr[i8]) -> ptr[Lexer]:
+def lexer_create_raw(source: ptr[i8]) -> ptr[Lexer]:
     """Create and initialize a new lexer"""
     lex: ptr[Lexer] = ptr[Lexer](malloc(sizeof(Lexer)))
     lex.source = source
@@ -34,13 +36,19 @@ def lexer_create(source: ptr[i8]) -> ptr[Lexer]:
 
 
 @compile
-def lexer_destroy(lex: ptr[Lexer]) -> void:
+def lexer_destroy_raw(lex: ptr[Lexer]) -> void:
     """Free lexer memory"""
     free(lex)
 
 
+lexer_create, lexer_destroy = linear_wrap(lexer_create_raw, lexer_destroy_raw)
+
+lexer_nonnull, LexerRef = nonnull_wrap(ptr[Lexer])
+token_nonnull, TokenRef = nonnull_wrap(ptr[Token])
+
+
 @compile
-def lexer_peek(lex: ptr[Lexer], offset: i32) -> i8:
+def lexer_peek(lex: LexerRef, offset: i32) -> i8:
     """Peek ahead at character without advancing"""
     pos: i32 = lex.pos + offset
     if pos >= lex.length:
@@ -49,13 +57,13 @@ def lexer_peek(lex: ptr[Lexer], offset: i32) -> i8:
 
 
 @compile
-def lexer_current(lex: ptr[Lexer]) -> i8:
+def lexer_current(lex: LexerRef) -> i8:
     """Get current character"""
     return lexer_peek(lex, 0)
 
 
 @compile
-def lexer_advance(lex: ptr[Lexer]) -> void:
+def lexer_advance(lex: LexerRef) -> void:
     """Advance to next character, tracking line and column"""
     if lex.pos >= lex.length:
         return
@@ -71,7 +79,7 @@ def lexer_advance(lex: ptr[Lexer]) -> void:
 
 
 @compile
-def lexer_skip_whitespace(lex: ptr[Lexer]) -> void:
+def lexer_skip_whitespace(lex: LexerRef) -> void:
     """Skip whitespace and comments"""
     while lex.pos < lex.length:
         c: i8 = lexer_current(lex)
@@ -120,7 +128,7 @@ def is_keyword(word: ptr[i8]) -> TokenType:
 
 
 @compile
-def lexer_read_identifier(lex: ptr[Lexer], token: ptr[Token]) -> void:
+def lexer_read_identifier(lex: LexerRef, token: TokenRef) -> void:
     """Read identifier or keyword"""
     i: i32 = 0
     
@@ -144,7 +152,7 @@ def lexer_read_identifier(lex: ptr[Lexer], token: ptr[Token]) -> void:
 
 
 @compile
-def lexer_read_number(lex: ptr[Lexer], token: ptr[Token]) -> void:
+def lexer_read_number(lex: LexerRef, token: TokenRef) -> void:
     """Read numeric literal (simplified, handles decimal and hex)"""
     i: i32 = 0
     c: i8 = lexer_current(lex)
@@ -198,7 +206,7 @@ _single_char_tokens = [
 
 
 @compile
-def lexer_next_token(lex: ptr[Lexer], token: ptr[Token]) -> i32:
+def lexer_next_token(lex: LexerRef, token: TokenRef) -> i32:
     """
     Get next token from source
     Returns 1 on success, 0 on EOF

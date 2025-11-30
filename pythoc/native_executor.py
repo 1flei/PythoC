@@ -303,32 +303,36 @@ class MultiSOExecutor:
         if not os.path.exists(so_file):
             raise FileNotFoundError(f"Shared library not found: {so_file}")
         
-        try:
-            # On macOS, ctypes.CDLL forces RTLD_NOW even when RTLD_LAZY is specified,
-            # breaking circular dependencies. Use libc.dlopen directly.
-            if sys.platform == 'darwin' and hasattr(os, 'RTLD_LAZY'):
-                lib = self._load_library_macos_lazy(so_file)
-            elif hasattr(os, 'RTLD_LAZY') and hasattr(os, 'RTLD_GLOBAL'):
-                lib = ctypes.CDLL(so_file, mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
-            elif hasattr(ctypes, 'RTLD_GLOBAL'):
-                lib = ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
-            else:
-                lib = ctypes.CDLL(so_file)
-            
-            self.loaded_libs[lib_key] = lib
-            self.lib_mtimes[lib_key] = os.path.getmtime(so_file)
-            return lib
-            
-        except OSError as e:
-            # For circular dependencies, undefined symbols might be resolved later
-            # when other libraries are loaded. Don't fail immediately.
-            error_msg = str(e)
-            if "undefined symbol" in error_msg or "symbol not found" in error_msg:
-                # Don't add to loaded_libs yet - will try again later
-                return None
-            raise RuntimeError(f"Failed to load library {so_file}: {e}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load library {so_file}: {e}")
+        from .utils.link_utils import file_lock
+        lockfile_path = so_file + '.lock'
+        
+        with file_lock(lockfile_path):
+            try:
+                # On macOS, ctypes.CDLL forces RTLD_NOW even when RTLD_LAZY is specified,
+                # breaking circular dependencies. Use libc.dlopen directly.
+                if sys.platform == 'darwin' and hasattr(os, 'RTLD_LAZY'):
+                    lib = self._load_library_macos_lazy(so_file)
+                elif hasattr(os, 'RTLD_LAZY') and hasattr(os, 'RTLD_GLOBAL'):
+                    lib = ctypes.CDLL(so_file, mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
+                elif hasattr(ctypes, 'RTLD_GLOBAL'):
+                    lib = ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
+                else:
+                    lib = ctypes.CDLL(so_file)
+                
+                self.loaded_libs[lib_key] = lib
+                self.lib_mtimes[lib_key] = os.path.getmtime(so_file)
+                return lib
+                
+            except OSError as e:
+                # For circular dependencies, undefined symbols might be resolved later
+                # when other libraries are loaded. Don't fail immediately.
+                error_msg = str(e)
+                if "undefined symbol" in error_msg or "symbol not found" in error_msg:
+                    # Don't add to loaded_libs yet - will try again later
+                    return None
+                raise RuntimeError(f"Failed to load library {so_file}: {e}")
+            except Exception as e:
+                raise RuntimeError(f"Failed to load library {so_file}: {e}")
     
     def get_function(self, func_name: str, compiler, so_file: str) -> Callable:
         """

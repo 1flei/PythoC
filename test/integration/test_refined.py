@@ -24,14 +24,14 @@ PositiveInt = refined[is_positive]
 def test_assume_positive() -> i32:
     """Test assume: create refined type without checking"""
     x = assume(5, is_positive)
-    return x[0]  # Access underlying value
+    return x  # Single-param: use directly
 
 
 @compile
 def test_refine_success() -> i32:
     """Test refine with valid value (for-else takes for branch)"""
     for x in refine(10, is_positive):
-        return x[0]
+        return x  # Single-param: use directly
     else:
         return -1
 
@@ -40,7 +40,7 @@ def test_refine_success() -> i32:
 def test_refine_failure() -> i32:
     """Test refine with invalid value (for-else takes else branch)"""
     for x in refine(-5, is_positive):
-        return x[0]
+        return x  # Single-param: use directly
     else:
         return -999  # Should return this
 
@@ -105,7 +105,7 @@ def is_nonzero(x: i32) -> bool:
 def safe_divide(dividend: i32, divisor: i32) -> i32:
     """Safely divide using refined type to ensure non-zero divisor"""
     for d in refine(divisor, is_nonzero):
-        result: i32 = dividend / d[0]
+        result: i32 = dividend / d  # Single-param: use directly
         return result
     else:
         return 0  # Return 0 if divisor is zero
@@ -142,7 +142,7 @@ PositiveEven = refined[is_positive_even]
 def test_positive_even() -> i32:
     """Test refined type with combined predicates"""
     for x in refine(8, is_positive_even):
-        return x[0]
+        return x  # Single-param: use directly
     else:
         return -1
 
@@ -151,7 +151,7 @@ def test_positive_even() -> i32:
 def test_positive_even_fail_negative() -> i32:
     """Test that negative even number fails positive_even"""
     for x in refine(-4, is_positive_even):
-        return x[0]
+        return x  # Single-param: use directly
     else:
         return -999
 
@@ -160,7 +160,7 @@ def test_positive_even_fail_negative() -> i32:
 def test_positive_even_fail_odd() -> i32:
     """Test that odd number fails positive_even"""
     for x in refine(7, is_positive_even):
-        return x[0]
+        return x  # Single-param: use directly
     else:
         return -999
 
@@ -170,7 +170,7 @@ def test_positive_even_fail_odd() -> i32:
 def test_constructor_syntax() -> i32:
     """Test using refined[Pred](...) as constructor"""
     x = PositiveInt(42)
-    return x[0]
+    return x  # Single-param: use directly
 
 
 @compile
