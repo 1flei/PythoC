@@ -130,3 +130,8 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
         return ResourceStruct, wrapped_acquire, wrapped_release
     else:
         return wrapped_acquire, wrapped_release
+
+from pythoc.libc.stdlib import malloc, free
+from pythoc.libc.stdio import fopen, fclose
+lmalloc, lfree = linear_wrap(malloc, free)
+lfopen, lfclose = linear_wrap(fopen, fclose)

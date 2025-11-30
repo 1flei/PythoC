@@ -21,22 +21,31 @@ from ..logger import logger
 class RefinedType(CompositeType):
     """Refinement type based on predicate function
     
-    A refined type is internally represented as a struct containing the
-    parameters of the predicate function. The predicate defines the
-    invariant that values of this type must satisfy.
+    For single-parameter predicates, the refined type directly uses the
+    underlying type (zero-overhead abstraction).
+    
+    For multi-parameter predicates, it's represented as a struct containing
+    the parameters of the predicate function.
     
     Example:
+        # Single parameter - direct type
         def is_positive(x: i32) -> bool:
             return x > 0
-        
         PositiveInt = refined[is_positive]
-        # Internally: struct[x: i32]
+        # Type: i32 (not struct)
+        
+        # Multiple parameters - struct
+        def is_valid_range(start: i32, end: i32) -> bool:
+            return start <= end
+        ValidRange = refined[is_valid_range]
+        # Type: struct[start: i32, end: i32]
     
     Attributes:
         _predicate_func: The predicate function object
         _param_types: List of parameter PC types from predicate
         _param_names: List of parameter names from predicate  
-        _struct_type: Underlying struct type (created from parameters)
+        _struct_type: Underlying struct type (None for single-param)
+        _is_single_param: True if single parameter refinement
     """
     
     _is_refined = True
@@ -44,6 +53,7 @@ class RefinedType(CompositeType):
     _param_types: Optional[List[Any]] = None
     _param_names: Optional[List[str]] = None
     _struct_type: Optional[type] = None
+    _is_single_param: bool = False
     
     @classmethod
     def get_name(cls) -> str:
@@ -54,14 +64,26 @@ class RefinedType(CompositeType):
     
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Returns underlying struct LLVM type
+        """Returns underlying LLVM type
         
-        The refined type has the same LLVM representation as its
-        underlying struct type.
+        For single-parameter refinements, returns the parameter's LLVM type.
+        For multi-parameter refinements, returns the struct LLVM type.
         """
-        if cls._struct_type is None:
-            raise TypeError(f"{cls.get_name()} has no underlying struct type")
-        return cls._struct_type.get_llvm_type(module_context)
+        if cls._is_single_param:
+            # Single parameter: use the parameter type directly
+            if cls._param_types and len(cls._param_types) > 0:
+                param_type = cls._param_types[0]
+                if hasattr(param_type, 'get_llvm_type'):
+                    return param_type.get_llvm_type(module_context)
+                else:
+                    raise TypeError(f"{cls.get_name()} parameter type has no get_llvm_type method")
+            else:
+                raise TypeError(f"{cls.get_name()} has no parameter type")
+        else:
+            # Multi-parameter: use struct type
+            if cls._struct_type is None:
+                raise TypeError(f"{cls.get_name()} has no underlying struct type")
+            return cls._struct_type.get_llvm_type(module_context)
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
@@ -69,7 +91,7 @@ class RefinedType(CompositeType):
         
         Two cases:
         1. Type subscript: refined[pred_func] -> create RefinedType
-        2. Value subscript: refined_value[i] -> delegate to struct
+        2. Value subscript: refined_value[i] -> delegate to struct (multi-param only)
         """
         from ..valueref import ValueRef
         
@@ -79,7 +101,13 @@ class RefinedType(CompositeType):
             return cls._create_refined_type_from_predicate(index, node, visitor)
         
         # Case 2: Value subscript (refined_value[i])
-        # Delegate to underlying struct
+        if cls._is_single_param:
+            raise TypeError(
+                f"{cls.get_name()} is a single-parameter refinement and does not support subscript access. "
+                f"Use the value directly or access by field name: .{cls._param_names[0]}"
+            )
+        
+        # Multi-parameter: delegate to underlying struct
         if cls._struct_type is None:
             raise TypeError(f"{cls.get_name()} has no underlying struct for subscript access")
         
@@ -160,12 +188,16 @@ class RefinedType(CompositeType):
         if len(param_types) == 0:
             raise TypeError(f"Predicate function '{pred_func.__name__}' must have at least one parameter")
         
-        # Create underlying struct type
-        # struct[param1: T1, param2: T2, ...]
-        struct_type = struct._create_struct_type_from_fields(
-            field_types=param_types,
-            field_names=param_names
-        )
+        # Check if single parameter
+        is_single_param = (len(param_types) == 1)
+        
+        # Create underlying struct type (only for multi-parameter)
+        struct_type = None
+        if not is_single_param:
+            struct_type = struct._create_struct_type_from_fields(
+                field_types=param_types,
+                field_names=param_names
+            )
         
         # Create new RefinedType subclass
         class_name = f"RefinedType_{pred_func.__name__}"
@@ -176,11 +208,12 @@ class RefinedType(CompositeType):
             '_struct_type': struct_type,
             '_field_types': param_types,  # For CompositeType compatibility
             '_field_names': param_names,   # For CompositeType compatibility
+            '_is_single_param': is_single_param,
         })
         
         logger.debug(
-            f"Created refined type: {class_name} with {len(param_names)} parameters: "
-            f"{list(zip(param_names, param_types))}"
+            f"Created refined type: {class_name} ({'single' if is_single_param else 'multi'}-param) "
+            f"with {len(param_names)} parameter(s): {list(zip(param_names, param_types))}"
         )
         
         # Return as Python type wrapped in ValueRef
@@ -195,6 +228,9 @@ class RefinedType(CompositeType):
         This is equivalent to assume(a, b, ..., Pred) - creates the refined
         type instance without checking the predicate.
         
+        For single-parameter refinements, returns the value directly.
+        For multi-parameter refinements, returns a struct.
+        
         Args:
             visitor: AST visitor instance
             args: Pre-evaluated argument ValueRefs
@@ -205,50 +241,92 @@ class RefinedType(CompositeType):
         """
         from ..valueref import wrap_value, ensure_ir
         
-        if cls._struct_type is None:
-            raise TypeError(f"{cls.get_name()} cannot be called (no struct type)")
-        
         # Verify argument count matches parameter count
         expected_count = len(cls._param_types) if cls._param_types else 0
         if len(args) != expected_count:
             raise TypeError(
-                f"{cls.get_name()} takes {expected_count} arguments ({len(args)} given)"
+                f"{cls.get_name()} takes {expected_count} argument(s) ({len(args)} given)"
             )
         
-        # Build struct value from arguments
-        # Get LLVM struct type
-        struct_llvm_type = cls._struct_type.get_llvm_type(visitor.module.context)
-        
-        # Create struct value by inserting each argument
-        # Start with undef
-        struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
-        
-        # Insert each field value
-        for i, arg in enumerate(args):
-            # Convert arg to expected field type
-            field_type = cls._param_types[i]
+        if cls._is_single_param:
+            # Single parameter: return the argument directly with refined type hint
+            arg = args[0]
+            field_type = cls._param_types[0]
             if field_type:
                 arg = visitor.type_converter.convert(arg, field_type)
-            arg_ir = ensure_ir(arg)
-            struct_value = visitor.builder.insert_value(struct_value, arg_ir, i)
-        
-        # Wrap as refined type (same LLVM value, different PC type)
-        return wrap_value(
-            struct_value,
-            kind='value',
-            type_hint=cls
-        )
+            
+            # Return the value directly, but mark it with the refined type
+            return wrap_value(
+                ensure_ir(arg),
+                kind='value',
+                type_hint=cls
+            )
+        else:
+            # Multi-parameter: build struct value
+            if cls._struct_type is None:
+                raise TypeError(f"{cls.get_name()} cannot be called (no struct type)")
+            
+            # Get LLVM struct type
+            struct_llvm_type = cls._struct_type.get_llvm_type(visitor.module.context)
+            
+            # Create struct value by inserting each argument
+            # Start with undef
+            struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
+            
+            # Insert each field value
+            for i, arg in enumerate(args):
+                # Convert arg to expected field type
+                field_type = cls._param_types[i]
+                if field_type:
+                    arg = visitor.type_converter.convert(arg, field_type)
+                arg_ir = ensure_ir(arg)
+                struct_value = visitor.builder.insert_value(struct_value, arg_ir, i)
+            
+            # Wrap as refined type (same LLVM value, different PC type)
+            return wrap_value(
+                struct_value,
+                kind='value',
+                type_hint=cls
+            )
     
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
         """Handle attribute access on refined type value: refined_val.field
         
-        Delegates to underlying struct for field access.
+        For single-parameter refinements, delegate to the underlying type.
+        For multi-parameter refinements, delegate to underlying struct.
         """
-        if cls._struct_type is None:
-            raise TypeError(f"{cls.get_name()} has no fields")
+        from ..valueref import wrap_value, ensure_ir
         
-        return cls._struct_type.handle_attribute(visitor, base, attr_name, node)
+        if cls._is_single_param:
+            # Single parameter: delegate to the underlying type
+            # First check if accessing by parameter name (return value itself)
+            if attr_name == cls._param_names[0]:
+                return base
+            
+            # Otherwise, delegate to the underlying type's handle_attribute
+            # Need to change type_hint from refined type to underlying type
+            underlying_type = cls._param_types[0]
+            if underlying_type and hasattr(underlying_type, 'handle_attribute'):
+                # Unwrap base and rewrap with underlying type hint
+                base_ir = ensure_ir(base)
+                base_with_underlying_type = wrap_value(
+                    base_ir,
+                    kind=base.kind,
+                    type_hint=underlying_type,
+                    address=base.address if hasattr(base, 'address') else None
+                )
+                return underlying_type.handle_attribute(visitor, base_with_underlying_type, attr_name, node)
+            else:
+                raise AttributeError(
+                    f"{cls.get_name()} (refined {underlying_type}) has no attribute '{attr_name}'"
+                )
+        else:
+            # Multi-parameter: delegate to struct
+            if cls._struct_type is None:
+                raise TypeError(f"{cls.get_name()} has no fields")
+            
+            return cls._struct_type.handle_attribute(visitor, base, attr_name, node)
 
 
 class refined(metaclass=type):
@@ -303,22 +381,26 @@ class refined(metaclass=type):
         if len(param_names) == 0:
             raise TypeError(f"Predicate function must have at least one parameter")
         
-        # Create underlying struct type
+        # Check if single parameter
+        is_single_param = (len(param_names) == 1)
+        
+        # Create underlying struct type (only for multi-parameter)
         # Actual struct will be created with resolved types
         from .struct import create_struct_type
         
-        # Try to create struct if all types are known and are PC types
         struct_type = None
-        if all(t is not None for t in param_types):
-            try:
-                struct_type = create_struct_type(
-                    field_types=param_types,
-                    field_names=param_names
-                )
-            except Exception as e:
-                # If creation fails (e.g., types not yet available), leave as None
-                # Will be created during compilation
-                pass
+        if not is_single_param:
+            # Try to create struct if all types are known and are PC types
+            if all(t is not None for t in param_types):
+                try:
+                    struct_type = create_struct_type(
+                        field_types=param_types,
+                        field_names=param_names
+                    )
+                except Exception as e:
+                    # If creation fails (e.g., types not yet available), leave as None
+                    # Will be created during compilation
+                    pass
         
         # Create new RefinedType subclass
         class_name = f"RefinedType_{predicate.__name__}"
@@ -329,6 +411,7 @@ class refined(metaclass=type):
             '_struct_type': struct_type,
             '_field_types': param_types,  # For CompositeType compatibility
             '_field_names': param_names,   # For CompositeType compatibility
+            '_is_single_param': is_single_param,
         })
         
         return new_refined_type
