@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Test cases for the lexer
 """
@@ -6,8 +7,21 @@ from pythoc import compile, i32, i8, ptr, array, nullptr, sizeof, void
 from pythoc.libc.stdio import printf
 from pythoc.libc.stdlib import malloc, free
 
-from .c_token import Token, TokenType
-from .lexer import Lexer, lexer_create, lexer_destroy, lexer_next_token, str_equal
+from pythoc.bindings.c_token import Token, TokenType
+from pythoc.bindings.lexer import Lexer, lexer_create, lexer_destroy, lexer_next_token
+
+
+@compile
+def str_equal(s1: ptr[i8], s2: ptr[i8]) -> i32:
+    """Compare two C strings for equality"""
+    i: i32 = 0
+    while s1[i] != 0 and s2[i] != 0:
+        if s1[i] != s2[i]:
+            return 0
+        i = i + 1
+    if s1[i] == s2[i]:
+        return 1
+    return 0
 
 
 @compile
@@ -200,3 +214,9 @@ def run_lexer_tests() -> i32:
         printf("%d lexer test(s) failed\n", failures)
     
     return failures
+
+
+if __name__ == "__main__":
+    result = run_lexer_tests()
+    exit(result)
+

@@ -486,6 +486,24 @@ class AssignmentsMixin:
         # Store the value
         logger.debug(f"visit_AnnAssign before store: var_name={var_name}, node={ast_module.unparse(node)}, rvalue={rvalue}, pc_type={pc_type}")
         self._store_to_new_lvalue(node, var_name, pc_type, rvalue)
+        
+        # Handle linear token registration for the new variable
+        if self._is_linear_type(pc_type):
+            # Check if rvalue is undefined
+            from llvmlite import ir as llvm_ir
+            is_undefined = (
+                rvalue.kind == 'value' and 
+                isinstance(rvalue.value, llvm_ir.Constant) and
+                rvalue.value.constant == llvm_ir.Undefined
+            )
+            
+            if hasattr(rvalue, 'var_name') and rvalue.var_name:
+                # Variable reference - transfer ownership
+                self._register_linear_token(var_name, pc_type, node, path=())
+                self._transfer_linear_ownership(rvalue, reason="assignment")
+            elif not is_undefined:
+                # Initialized value (function return, linear(), etc.)
+                self._register_linear_token(var_name, pc_type, node, path=())
     
 
     def visit_AugAssign(self, node: ast.AugAssign):

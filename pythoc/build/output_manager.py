@@ -76,6 +76,20 @@ class OutputManager:
         This should be called before native execution to ensure
         all .ll and .o files have been written.
         """
+        # Check if any group has already loaded its library
+        from ..native_executor import get_multi_so_executor
+        executor = get_multi_so_executor()
+        
+        for group_key, group in self._pending_groups.items():
+            source_file = group.get('source_file')
+            if source_file and executor.has_loaded_library(source_file):
+                # Check if this group has new wrappers that haven't been written yet
+                if not group.get('skip_codegen', False) and group.get('wrappers'):
+                    raise RuntimeError(
+                        f"Cannot compile new functions in '{source_file}' after native execution has started. "
+                        f"All @compile decorators must be executed before calling any compiled functions."
+                    )
+        
         for group_key, group in self._pending_groups.items():
             if group.get('skip_codegen', False):
                 # Already up-to-date
@@ -99,6 +113,9 @@ class OutputManager:
             # Write files
             compiler.save_ir_to_file(group['ir_file'])
             compiler.compile_to_object(group['obj_file'])
+            
+            # Clear wrappers after flushing to mark this group as up-to-date
+            group['wrappers'] = []
         
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
     

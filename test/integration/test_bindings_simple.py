@@ -1,16 +1,15 @@
+#!/usr/bin/env python3
 """
-Runner to test lexer from Python environment
+Simple standalone test for lexer basic functionality
+Tests without using string literals in PC code
 """
-import sys
-sys.path.insert(0, '/data/home/yifanlei/pythoc')
 
 from pythoc import compile, i32, i8, ptr, array, sizeof
 from pythoc.libc.stdio import printf
 from pythoc.libc.stdlib import malloc, free
 
-# Import tokens
-from tool.c_header_parser.c_token import Token, TokenType
-from tool.c_header_parser.lexer import Lexer, lexer_create, lexer_destroy, lexer_next_token
+from pythoc.bindings.c_token import Token, TokenType
+from pythoc.bindings.lexer import Lexer, lexer_create, lexer_destroy, lexer_next_token
 
 
 @compile
@@ -29,30 +28,30 @@ def test_basic() -> i32:
     token: ptr[Token] = ptr[Token](malloc(sizeof(Token)))
     
     # Get first token - should be 'int'
-    result1: i32 = lexer_next_token(lex, token)
-    printf("Token 1: type=%d (expected %d for TokenType.INT), result=%d\n", token.type, TokenType.INT, result1)
+    lexer_next_token(lex, token)
+    printf("Token 1 type: %d (expected %d for TokenType.INT)\n", token.type, TokenType.INT)
     
     if token.type != TokenType.INT:
         printf("FAIL: Expected TokenType.INT\n")
         return 1
     
     # Get second token - should be '*'
-    result2: i32 = lexer_next_token(lex, token)
-    printf("Token 2: type=%d (expected %d for TokenType.STAR), result=%d\n", token.type, TokenType.STAR, result2)
+    lexer_next_token(lex, token)
+    printf("Token 2 type: %d (expected %d for TokenType.STAR)\n", token.type, TokenType.STAR)
     
     if token.type != TokenType.STAR:
         printf("FAIL: Expected TokenType.STAR\n")
         return 1
     
-    printf("OK: Basic test passed!\n")
-    
     free(token)
     lexer_destroy(lex)
     free(source)
     
+    printf("OK: test_basic passed\n")
     return 0
 
 
 if __name__ == "__main__":
     result = test_basic()
-    print(f"\nTest result: {result}")
+    exit(result)
+

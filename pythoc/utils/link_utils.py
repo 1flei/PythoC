@@ -7,7 +7,72 @@ Provides unified linker functionality for both executables and shared libraries.
 import os
 import sys
 import subprocess
+import time
+import fcntl
 from typing import List, Optional
+from contextlib import contextmanager
+
+
+from contextlib import contextmanager
+
+
+@contextmanager
+def file_lock(lockfile_path: str, timeout: float = 60.0):
+    """
+    Context manager for file-based locking to prevent concurrent builds.
+    
+    Args:
+        lockfile_path: Path to the lock file
+        timeout: Maximum time to wait for lock (seconds)
+    
+    Yields:
+        None when lock is acquired
+    
+    Raises:
+        TimeoutError: If lock cannot be acquired within timeout
+    """
+    lockfile = None
+    start_time = time.time()
+    
+    try:
+        # Ensure lock directory exists
+        lock_dir = os.path.dirname(lockfile_path)
+        if lock_dir and not os.path.exists(lock_dir):
+            os.makedirs(lock_dir, exist_ok=True)
+        
+        # Try to acquire lock with exponential backoff
+        while True:
+            try:
+                lockfile = open(lockfile_path, 'w')
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break  # Lock acquired
+            except (IOError, OSError):
+                # Lock is held by another process
+                if lockfile:
+                    lockfile.close()
+                    lockfile = None
+                
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(f"Failed to acquire lock on {lockfile_path} within {timeout}s")
+                
+                # Exponential backoff: 10ms, 20ms, 40ms, ..., max 500ms
+                wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
+                time.sleep(wait_time)
+        
+        yield
+        
+    finally:
+        if lockfile:
+            try:
+                fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
+                lockfile.close()
+                # Clean up lock file
+                try:
+                    os.remove(lockfile_path)
+                except OSError:
+                    pass
+            except Exception:
+                pass
 
 
 def get_link_flags() -> List[str]:
@@ -134,11 +199,24 @@ def link_files(obj_files: List[str], output_file: str,
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     
-    link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
+    # Use file lock to prevent concurrent linking of the same output file
+    # This is critical when running parallel tests that import the same modules
+    lockfile_path = output_file + '.lock'
     
-    try:
-        subprocess.run(link_cmd, check=True, capture_output=True, text=True)
-        return output_file
-    except subprocess.CalledProcessError as e:
-        file_type = "shared library" if shared else "executable"
-        raise RuntimeError(f"Failed to link {file_type}: {e.stderr}")
+    with file_lock(lockfile_path):
+        # Check if output file already exists and is up-to-date
+        if os.path.exists(output_file):
+            output_mtime = os.path.getmtime(output_file)
+            obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
+            if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
+                # Output is up-to-date, skip linking
+                return output_file
+        
+        link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
+        
+        try:
+            subprocess.run(link_cmd, check=True, capture_output=True, text=True)
+            return output_file
+        except subprocess.CalledProcessError as e:
+            file_type = "shared library" if shared else "executable"
+            raise RuntimeError(f"Failed to link {file_type}: {e.stderr}")
