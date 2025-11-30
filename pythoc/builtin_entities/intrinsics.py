@@ -490,21 +490,23 @@ class consume(BuiltinFunction):
 
 
 class assume(BuiltinFunction):
-    """assume(a, b, ..., Pred) -> refined[Pred]
+    """assume(value, pred1, pred2, "tag1", "tag2", ...) -> refined[T, pred1, pred2, "tag1", "tag2"]
     
-    Create a refined type instance without checking the predicate.
-    This is equivalent to refined[Pred](a, b, ...) constructor.
+    Create a refined type instance without checking the predicates.
+    Supports multiple predicates and tags.
     
     Use when:
-    - You know the values satisfy the predicate
+    - You know the value satisfies the predicates
     - Performance is critical and validation is unnecessary
-    - The predicate has already been checked elsewhere
+    - The predicates have already been checked elsewhere
     
     Example:
         def is_positive(x: i32) -> bool:
             return x > 0
         
-        x = assume(5, is_positive)  # Creates refined type without checking
+        x = assume(5, is_positive)  # refined[i32, is_positive]
+        ptr = assume(p, "owned")    # refined[ptr[T], "owned"]
+        y = assume(10, is_positive, "validated")  # refined[i32, is_positive, "validated"]
     """
     
     @classmethod
@@ -513,7 +515,7 @@ class assume(BuiltinFunction):
     
     @classmethod
     def handle_call(cls, visitor, args, node: ast.Call):
-        """Handle assume(a, b, ..., predicate) call
+        """Handle assume(value, pred1, pred2, "tag1", ...) call
         
         Args:
             visitor: AST visitor instance
@@ -527,63 +529,245 @@ class assume(BuiltinFunction):
         from ..valueref import ValueRef
         
         if len(args) < 2:
-            raise TypeError("assume() requires at least 2 arguments (values and predicate)")
+            raise TypeError("assume() requires at least 2 arguments")
         if len(node.args) < 2:
-            raise TypeError("assume() requires at least 2 arguments (values and predicate)")
+            raise TypeError("assume() requires at least 2 arguments")
         
-        # Value arguments (all except last)
-        value_args = args[:-1]
+        # Parse predicates and tags from AST nodes
+        user_globals = {}
+        if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
+            user_globals = visitor.ctx.user_globals
+        elif hasattr(visitor, 'user_globals'):
+            user_globals = visitor.user_globals
         
-        # Get predicate function from AST node (not from evaluated args)
-        # This allows us to get the original Python function
-        predicate_node = node.args[-1]
-        predicate_func = None
+        # Check if last argument is a predicate (multi-param refined form)
+        # But only if there are no string tags mixed in
+        last_arg_node = node.args[-1]
+        is_multi_param_form = False
+        multi_param_predicate = None
         
-        if isinstance(predicate_node, ast.Name):
-            # Simple name - look up in user_globals
-            func_name = predicate_node.id
-            # Try visitor.ctx.user_globals first, then visitor.user_globals
-            user_globals = {}
-            if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
-                user_globals = visitor.ctx.user_globals
-            elif hasattr(visitor, 'user_globals'):
-                user_globals = visitor.user_globals
-            
+        # First check: no string constants in args (except potentially in multi-param case)
+        has_string_tag = any(
+            isinstance(node.args[i], ast.Constant) and isinstance(node.args[i].value, str)
+            for i in range(1, len(node.args))
+        )
+        
+        # Only consider multi-param form if:
+        # 1. Last arg is a callable predicate
+        # 2. No string tags are present
+        # 3. Predicate param count matches value count
+        if not has_string_tag and isinstance(last_arg_node, ast.Name):
+            func_name = last_arg_node.id
             if func_name in user_globals:
-                predicate_func = user_globals[func_name]
-                # Get original function if it's a compiled wrapper
-                if hasattr(predicate_func, '_original_func'):
-                    predicate_func = predicate_func._original_func
+                maybe_pred = user_globals[func_name]
+                if hasattr(maybe_pred, '_original_func'):
+                    maybe_pred = maybe_pred._original_func
+                if callable(maybe_pred):
+                    # Check if it's a multi-param predicate
+                    import inspect
+                    sig = inspect.signature(maybe_pred)
+                    params = list(sig.parameters.values())
+                    # Multi-param if: predicate has N>1 params AND we have N values
+                    if len(params) > 1 and len(args) == len(params) + 1:
+                        is_multi_param_form = True
+                        multi_param_predicate = maybe_pred
         
-        if predicate_func is None or not callable(predicate_func):
-            raise TypeError(f"assume() last argument must be a function (got {ast.unparse(predicate_node)})")
+        if is_multi_param_form:
+            # Form: assume(val1, val2, ..., pred)
+            # All args except last are values
+            value_args = args[:-1]
+            predicates = [multi_param_predicate]
+            tags = []
+            
+            # Get base types from predicate signature
+            import inspect
+            sig = inspect.signature(multi_param_predicate)
+            params = list(sig.parameters.values())
+            
+            from ..type_resolver import TypeResolver
+            type_resolver = TypeResolver(visitor.ctx)
+            param_types = []
+            for param in params:
+                pc_type = type_resolver.parse_annotation(param.annotation)
+                param_types.append(pc_type)
+            
+            # Promote Python values if needed
+            promoted_args = []
+            for i, (value_arg, target_type) in enumerate(zip(value_args, param_types)):
+                if isinstance(value_arg, ValueRef) and value_arg.is_python_value():
+                    value_arg = visitor.type_converter._promote_python_to_pc(
+                        value_arg.get_python_value(), target_type)
+                promoted_args.append(value_arg)
+            
+            # Create refined type from multi-param predicate
+            refined_type = cls._create_refined_type_from_predicate(
+                multi_param_predicate, param_types, visitor)
+            
+            # Call constructor with all values
+            return refined_type.handle_call(visitor, promoted_args, node)
         
-        # Create refined type from predicate
-        from .refined import refined
-        refined_factory = refined[predicate_func]
-        
-        if isinstance(refined_factory, type) and issubclass(refined_factory, RefinedType):
-            refined_type = refined_factory
         else:
-            raise TypeError(f"Failed to create refined type from predicate {predicate_func}")
+            # Form: assume(value, pred1, pred2, "tag1", "tag2", ...)
+            value_arg = args[0]
+            
+            predicates = []
+            tags = []
+            
+            for i in range(1, len(node.args)):
+                arg_node = node.args[i]
+                
+                # Check if it's a string literal (tag)
+                if isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str):
+                    tags.append(arg_node.value)
+                # Check if it's a name (predicate function)
+                elif isinstance(arg_node, ast.Name):
+                    func_name = arg_node.id
+                    
+                    if func_name in user_globals:
+                        predicate_func = user_globals[func_name]
+                        if hasattr(predicate_func, '_original_func'):
+                            predicate_func = predicate_func._original_func
+                        if callable(predicate_func):
+                            predicates.append(predicate_func)
+                        else:
+                            raise TypeError(f"assume() constraint must be a callable predicate, got {type(predicate_func)}")
+                    else:
+                        raise TypeError(f"assume() constraint '{func_name}' not found in globals")
+                else:
+                    raise TypeError(f"assume() constraint must be a predicate function or string tag, got {ast.dump(arg_node)}")
+            
+            if len(predicates) == 0 and len(tags) == 0:
+                raise TypeError("assume() requires at least one predicate or tag")
+            
+            # Get base type from value
+            if not isinstance(value_arg, ValueRef):
+                raise TypeError("assume() value must be a ValueRef")
+            
+            # If value is Python value, we need to infer its type
+            if value_arg.is_python_value():
+                py_value = value_arg.get_python_value()
+                
+                if len(predicates) > 0:
+                    # Get type from first predicate's first parameter
+                    import inspect
+                    sig = inspect.signature(predicates[0])
+                    params = list(sig.parameters.values())
+                    if len(params) > 0:
+                        from ..type_resolver import TypeResolver
+                        type_resolver = TypeResolver(visitor.ctx)
+                        base_type = type_resolver.parse_annotation(params[0].annotation)
+                    else:
+                        raise TypeError(f"Predicate {predicates[0].__name__} has no parameters")
+                else:
+                    # No predicates, only tags - use default type inference
+                    # int -> i32, float -> f64, bool -> i32
+                    if isinstance(py_value, bool):
+                        from .types import i32
+                        base_type = i32
+                    elif isinstance(py_value, int):
+                        from .types import i32
+                        base_type = i32
+                    elif isinstance(py_value, float):
+                        from .types import f64
+                        base_type = f64
+                    else:
+                        raise TypeError(f"assume() with Python value and only tags: cannot infer type for {type(py_value).__name__}")
+                
+                # Promote Python value to PC type
+                value_arg = visitor.type_converter._promote_python_to_pc(py_value, base_type)
+            else:
+                if value_arg.type_hint is None:
+                    raise TypeError("assume() value must have type information")
+                base_type = value_arg.type_hint
+            
+            # Create refined type: refined[base_type, pred1, pred2, "tag1", "tag2"]
+            from .refined import refined
+            
+            # Build the refined type
+            refined_type = cls._create_refined_type(base_type, predicates, tags, visitor)
+            
+            # Call constructor with value
+            return refined_type.handle_call(visitor, [value_arg], node)
+    
+    @classmethod
+    def _create_refined_type_from_predicate(cls, predicate, param_types, visitor):
+        """Create refined type from multi-param predicate"""
+        from .refined import RefinedType
+        from .struct import create_struct_type
+        import inspect
         
-        # Call the refined type constructor with the value arguments
-        return refined_type.handle_call(visitor, value_args, node)
+        sig = inspect.signature(predicate)
+        params = list(sig.parameters.values())
+        param_names = [p.name for p in params]
+        
+        # Create struct type for multi-param
+        struct_type = create_struct_type(param_types, param_names)
+        
+        # Create refined type class
+        class_name = f"RefinedType_{predicate.__name__}"
+        new_refined_type = type(class_name, (RefinedType,), {
+            '_base_type': None,  # Multi-param has no single base type
+            '_predicates': [predicate],
+            '_tags': [],
+            '_struct_type': struct_type,
+            '_field_types': param_types,
+            '_field_names': param_names,
+            '_param_types': param_types,
+            '_param_names': param_names,
+            '_is_refined': True,
+            '_is_single_param': False,
+        })
+        
+        return new_refined_type
+    
+    @classmethod
+    def _create_refined_type(cls, base_type, predicates, tags, visitor):
+        """Create refined type from base + predicates + tags"""
+        from .refined import RefinedType
+        
+        # Create name
+        base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
+        pred_names = [p.__name__ for p in predicates]
+        tag_names = [f'"{t}"' for t in tags]
+        all_names = [base_name] + pred_names + tag_names
+        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('"', '') for n in all_names)}"
+        
+        new_refined_type = type(class_name, (RefinedType,), {
+            '_base_type': base_type,
+            '_predicates': predicates,
+            '_tags': tags,
+            '_struct_type': None,
+            '_field_types': [base_type],
+            '_field_names': ['value'],
+            '_param_types': [base_type],
+            '_param_names': ['value'],
+            '_is_refined': True,
+            '_is_single_param': True,
+        })
+        
+        return new_refined_type
 
 
 class refine(BuiltinFunction):
-    """refine(a, b, ..., Pred) -> yield refined[Pred]
+    """refine(value, pred1, pred2, "tag1", "tag2", ...) -> yield refined[T, pred1, pred2, "tag1", "tag2"]
     
-    Check predicate and yield refined type if satisfied.
+    Check all predicates and yield refined type if all satisfied.
     Must be used in for-else loop.
     
     Example:
         for x in refine(5, is_positive):
-            # x is refined[is_positive] type
+            # x is refined[i32, is_positive] type
             use(x)
         else:
             # Predicate failed
             handle_error()
+        
+        for p in refine(ptr, "owned"):
+            # p is refined[ptr[T], "owned"] type
+            use(p)
+        else:
+            # never happens (tags are always true)
+            pass
     """
     
     @classmethod
@@ -592,11 +776,10 @@ class refine(BuiltinFunction):
     
     @classmethod
     def handle_call(cls, visitor, args, node: ast.Call):
-        """Handle refine(a, b, ..., predicate) call
+        """Handle refine(value, pred1, "tag1", ...) call
         
         This function is special - it's a yield function that should be
-        handled by the yield inlining system. We create a Python-level
-        generator function that will be inlined.
+        handled by the yield inlining system.
         
         Args:
             visitor: AST visitor instance
@@ -606,12 +789,6 @@ class refine(BuiltinFunction):
         Returns:
             ValueRef with yield inline info for for-loop processing
         """
-        # For refine, we need to create a yield function dynamically
-        # that checks the predicate and yields the refined value
-        
-        # Since refine must be inlined, we create a placeholder that
-        # triggers inline expansion in the for loop visitor
-        
         # Create the inline function AST
         func_ast = cls._create_refine_inline_ast(node, visitor)
         
@@ -641,13 +818,12 @@ class refine(BuiltinFunction):
     def _create_refine_inline_ast(cls, call_node: ast.Call, visitor) -> ast.FunctionDef:
         """Create AST for inline refine function
         
-        Translates:
-            refine(a, b, predicate)
+        Supports two forms:
+        1. Single-param: refine(value, pred1, pred2, "tag1", "tag2")
+           -> if pred1(value) and pred2(value): yield assume(value, pred1, pred2, "tag1", "tag2")
         
-        Into:
-            def __refine_inline__():
-                if predicate(a, b):
-                    yield assume(a, b, predicate)
+        2. Multi-param: refine(val1, val2, pred)
+           -> if pred(val1, val2): yield assume(val1, val2, pred)
         
         Args:
             call_node: The refine() call node
@@ -659,65 +835,187 @@ class refine(BuiltinFunction):
         import copy
         
         if len(call_node.args) < 2:
-            raise TypeError("refine() requires at least 2 arguments (values and predicate)")
+            raise TypeError("refine() requires at least 2 arguments")
         
-        # Extract arguments: values and predicate
-        value_args = call_node.args[:-1]
-        predicate_arg = call_node.args[-1]
+        # Check if last arg is a predicate (multi-param form detection)
+        user_globals = {}
+        if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
+            user_globals = visitor.ctx.user_globals
+        elif hasattr(visitor, 'user_globals'):
+            user_globals = visitor.user_globals
         
-        # Create the inline function:
-        # def __refine_inline__(<inferred return type>):
-        #     if predicate(values...):
-        #         yield assume(values..., predicate)
+        last_arg_node = call_node.args[-1]
+        is_multi_param_form = False
         
-        # Build predicate call: predicate(a, b, ...)
-        predicate_call = ast.Call(
-            func=copy.deepcopy(predicate_arg),
-            args=[copy.deepcopy(arg) for arg in value_args],
-            keywords=[]
+        # Check for string tags
+        has_string_tag = any(
+            isinstance(call_node.args[i], ast.Constant) and isinstance(call_node.args[i].value, str)
+            for i in range(1, len(call_node.args))
         )
         
-        # Build assume call: assume(a, b, ..., predicate)
-        assume_call = ast.Call(
-            func=ast.Name(id='assume', ctx=ast.Load()),
-            args=[copy.deepcopy(arg) for arg in call_node.args],  # All args including predicate
-            keywords=[]
-        )
+        # Only consider multi-param if no string tags and last arg is callable
+        if not has_string_tag and isinstance(last_arg_node, ast.Name):
+            func_name = last_arg_node.id
+            if func_name in user_globals:
+                maybe_pred = user_globals[func_name]
+                if hasattr(maybe_pred, '_original_func'):
+                    maybe_pred = maybe_pred._original_func
+                if callable(maybe_pred):
+                    import inspect
+                    sig = inspect.signature(maybe_pred)
+                    params = list(sig.parameters.values())
+                    # Multi-param if predicate has N>1 params and we have N+1 args
+                    if len(params) > 1 and len(call_node.args) == len(params) + 1:
+                        is_multi_param_form = True
         
-        # Build yield statement: yield assume(...)
-        yield_stmt = ast.Expr(value=ast.Yield(value=assume_call))
+        if is_multi_param_form:
+            # Multi-param form: refine(val1, val2, ..., pred)
+            # Generate: if pred(val1, val2, ...): yield assume(val1, val2, ..., pred)
+            value_args = call_node.args[:-1]
+            pred_node = call_node.args[-1]
+            
+            # Build predicate call: pred(val1, val2, ...)
+            pred_call = ast.Call(
+                func=copy.deepcopy(pred_node),
+                args=[copy.deepcopy(arg) for arg in value_args],
+                keywords=[]
+            )
+            
+            # Build assume call with all args
+            assume_call = ast.Call(
+                func=ast.Name(id='assume', ctx=ast.Load()),
+                args=[copy.deepcopy(arg) for arg in call_node.args],
+                keywords=[]
+            )
+            
+            yield_stmt = ast.Expr(value=ast.Yield(value=assume_call))
+            
+            # Build if statement
+            if_stmt = ast.If(
+                test=pred_call,
+                body=[yield_stmt],
+                orelse=[]
+            )
+            
+            func_def = ast.FunctionDef(
+                name='__refine_inline__',
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[],
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    defaults=[],
+                    vararg=None,
+                    kwarg=None
+                ),
+                body=[if_stmt],
+                decorator_list=[],
+                returns=None,
+                lineno=call_node.lineno,
+                col_offset=call_node.col_offset
+            )
         
-        # Build if statement: if predicate(...): yield assume(...)
-        if_stmt = ast.If(
-            test=predicate_call,
-            body=[yield_stmt],
-            orelse=[]
-        )
+        else:
+            # Single-param form: refine(value, pred1, pred2, "tag1", "tag2")
+            value_arg = call_node.args[0]
+            
+            # Rest are predicates/tags
+            predicate_nodes = []
+            all_constraint_nodes = []
+            
+            for i in range(1, len(call_node.args)):
+                arg_node = call_node.args[i]
+                all_constraint_nodes.append(arg_node)
+                
+                # Only add to predicate checks if it's NOT a string constant
+                if not (isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str)):
+                    predicate_nodes.append(arg_node)
+            
+            # Build predicate checks: pred1(value) and pred2(value) and ...
+            if len(predicate_nodes) == 0:
+                # No predicates, only tags - always true
+                # Just yield assume(value, "tag1", "tag2")
+                assume_call = ast.Call(
+                    func=ast.Name(id='assume', ctx=ast.Load()),
+                    args=[copy.deepcopy(arg) for arg in call_node.args],
+                    keywords=[]
+                )
+                
+                yield_stmt = ast.Expr(value=ast.Yield(value=assume_call))
+                
+                func_def = ast.FunctionDef(
+                    name='__refine_inline__',
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                        vararg=None,
+                        kwarg=None
+                    ),
+                    body=[yield_stmt],
+                    decorator_list=[],
+                    returns=None,
+                    lineno=call_node.lineno,
+                    col_offset=call_node.col_offset
+                )
+            else:
+                # Build predicate calls
+                predicate_calls = []
+                for pred_node in predicate_nodes:
+                    pred_call = ast.Call(
+                        func=copy.deepcopy(pred_node),
+                        args=[copy.deepcopy(value_arg)],
+                        keywords=[]
+                    )
+                    predicate_calls.append(pred_call)
+                
+                # Combine with 'and'
+                if len(predicate_calls) == 1:
+                    combined_test = predicate_calls[0]
+                else:
+                    combined_test = ast.BoolOp(
+                        op=ast.And(),
+                        values=predicate_calls
+                    )
+                
+                # Build assume call with ALL constraints (predicates + tags)
+                assume_call = ast.Call(
+                    func=ast.Name(id='assume', ctx=ast.Load()),
+                    args=[copy.deepcopy(arg) for arg in call_node.args],
+                    keywords=[]
+                )
+                
+                yield_stmt = ast.Expr(value=ast.Yield(value=assume_call))
+                
+                # Build if statement
+                if_stmt = ast.If(
+                    test=combined_test,
+                    body=[yield_stmt],
+                    orelse=[]
+                )
+                
+                func_def = ast.FunctionDef(
+                    name='__refine_inline__',
+                    args=ast.arguments(
+                        posonlyargs=[],
+                        args=[],
+                        kwonlyargs=[],
+                        kw_defaults=[],
+                        defaults=[],
+                        vararg=None,
+                        kwarg=None
+                    ),
+                    body=[if_stmt],
+                    decorator_list=[],
+                    returns=None,
+                    lineno=call_node.lineno,
+                    col_offset=call_node.col_offset
+                )
         
-        # Build function def
-        func_def = ast.FunctionDef(
-            name='__refine_inline__',
-            args=ast.arguments(
-                posonlyargs=[],
-                args=[],
-                kwonlyargs=[],
-                kw_defaults=[],
-                defaults=[],
-                vararg=None,
-                kwarg=None
-            ),
-            body=[if_stmt],
-            decorator_list=[],
-            returns=None,  # Will be inferred from yield type
-            lineno=call_node.lineno,
-            col_offset=call_node.col_offset
-        )
-        
-        # Fix missing locations
         ast.fix_missing_locations(func_def)
-        
         return func_def
-
 
 
 
