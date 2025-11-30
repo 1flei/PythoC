@@ -1,11 +1,15 @@
 """
 Refined Type Implementation
 
-Refinement types with predicate validation:
-- refined[Pred] creates a refined type with predicate constraint
-- Internal representation: struct containing predicate parameters
-- Runtime validation via refine() function (yield-based)
-- Unchecked construction via assume() function
+Refinement types with multiple forms:
+- refined[T, "tag"] - Type with string tag
+- refined[T, pred] - Type with predicate constraint  
+- refined[T, pred, "tag"] - Type with both predicate and tag
+- refined[T, "tag1", "tag2"] - Type with multiple tags
+- refined[pred] - Multi-param predicate (backward compat)
+
+Runtime validation via refine() function (yield-based)
+Unchecked construction via assume() function or explicit cast
 """
 
 import ast
@@ -19,93 +23,106 @@ from ..logger import logger
 
 
 class RefinedType(CompositeType):
-    """Refinement type based on predicate function
+    """Refinement type with predicates and/or tags
     
-    For single-parameter predicates, the refined type directly uses the
-    underlying type (zero-overhead abstraction).
+    Supports multiple forms:
+    - refined[T, "tag"] - Type with tag (no predicate)
+    - refined[T, pred] - Type with predicate constraint
+    - refined[T, pred, "tag"] - Type with both predicate and tag
+    - refined[T, "tag1", "tag2"] - Type with multiple tags
+    - refined[T, pred1, pred2, "tag"] - Multiple predicates and tags
     
-    For multi-parameter predicates, it's represented as a struct containing
-    the parameters of the predicate function.
+    For base type + constraints, uses the base type (zero-overhead).
+    For multi-parameter predicates, it's a struct.
     
-    Example:
-        # Single parameter - direct type
-        def is_positive(x: i32) -> bool:
-            return x > 0
-        PositiveInt = refined[is_positive]
-        # Type: i32 (not struct)
-        
-        # Multiple parameters - struct
-        def is_valid_range(start: i32, end: i32) -> bool:
-            return start <= end
-        ValidRange = refined[is_valid_range]
-        # Type: struct[start: i32, end: i32]
+    Conversion rules:
+    - Explicit cast (T2(t1) or assume(t, ...)): always allowed
+    - Implicit cast: refined with MORE terms -> refined with FEWER terms
+      Example: refined[T, pred, "tag"] -> refined[T, pred] (implicit OK)
+               refined[T, pred] -> refined[T, pred, "tag"] (explicit only)
+    - To base type: all refined types can implicitly cast to T
     
     Attributes:
-        _predicate_func: The predicate function object
-        _param_types: List of parameter PC types from predicate
-        _param_names: List of parameter names from predicate  
+        _base_type: The underlying base type (T in refined[T, ...])
+        _predicates: List of predicate functions
+        _tags: List of string tags
         _struct_type: Underlying struct type (None for single-param)
-        _is_single_param: True if single parameter refinement
+        _param_types: List of parameter types (for multi-param predicates)
+        _param_names: List of parameter names (for multi-param predicates)
     """
     
     _is_refined = True
-    _predicate_func: Optional[Any] = None
+    _base_type: Optional[Any] = None
+    _predicates: Optional[List[Any]] = None
+    _tags: Optional[List[str]] = None
+    _struct_type: Optional[type] = None
     _param_types: Optional[List[Any]] = None
     _param_names: Optional[List[str]] = None
-    _struct_type: Optional[type] = None
-    _is_single_param: bool = False
     
     @classmethod
     def get_name(cls) -> str:
         """Return refined type name"""
-        if cls._predicate_func and hasattr(cls._predicate_func, '__name__'):
-            return f"refined[{cls._predicate_func.__name__}]"
+        parts = []
+        if cls._base_type:
+            base_name = cls._base_type.get_name() if hasattr(cls._base_type, 'get_name') else str(cls._base_type)
+            parts.append(base_name)
+        if cls._predicates:
+            for pred in cls._predicates:
+                pred_name = pred.__name__ if hasattr(pred, '__name__') else str(pred)
+                parts.append(pred_name)
+        if cls._tags:
+            for tag in cls._tags:
+                parts.append(f'"{tag}"')
+        if parts:
+            return f"refined[{', '.join(parts)}]"
         return "refined"
     
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Returns underlying LLVM type
         
-        For single-parameter refinements, returns the parameter's LLVM type.
-        For multi-parameter refinements, returns the struct LLVM type.
+        For base type + tags/predicates, returns base type's LLVM type.
+        For multi-parameter predicates, returns the struct LLVM type.
         """
-        if cls._is_single_param:
-            # Single parameter: use the parameter type directly
-            if cls._param_types and len(cls._param_types) > 0:
-                param_type = cls._param_types[0]
-                if hasattr(param_type, 'get_llvm_type'):
-                    return param_type.get_llvm_type(module_context)
-                else:
-                    raise TypeError(f"{cls.get_name()} parameter type has no get_llvm_type method")
+        # If we have a base type, use it
+        if cls._base_type is not None:
+            if hasattr(cls._base_type, 'get_llvm_type'):
+                return cls._base_type.get_llvm_type(module_context)
             else:
-                raise TypeError(f"{cls.get_name()} has no parameter type")
-        else:
-            # Multi-parameter: use struct type
-            if cls._struct_type is None:
-                raise TypeError(f"{cls.get_name()} has no underlying struct type")
+                raise TypeError(f"{cls.get_name()} base type has no get_llvm_type method")
+        
+        # Multi-parameter predicate: use struct type
+        if cls._struct_type is not None:
             return cls._struct_type.get_llvm_type(module_context)
+        
+        # Fallback to param_types for backward compatibility
+        if cls._param_types and len(cls._param_types) > 0:
+            param_type = cls._param_types[0]
+            if hasattr(param_type, 'get_llvm_type'):
+                return param_type.get_llvm_type(module_context)
+        
+        raise TypeError(f"{cls.get_name()} has no type information")
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
         """Handle refined type subscript access
         
         Two cases:
-        1. Type subscript: refined[pred_func] -> create RefinedType
+        1. Type subscript: refined[T, pred, "tag", ...] -> create RefinedType
         2. Value subscript: refined_value[i] -> delegate to struct (multi-param only)
         """
         from ..valueref import ValueRef
         
-        # Case 1: Type subscript (refined[pred_func])
+        # Case 1: Type subscript (refined[...])
         if isinstance(base, type) and issubclass(base, RefinedType):
-            # This is refined[pred_func] - create new refined type
-            return cls._create_refined_type_from_predicate(index, node, visitor)
+            return cls._create_refined_type_from_args(index, node, visitor)
         
         # Case 2: Value subscript (refined_value[i])
-        if cls._is_single_param:
-            raise TypeError(
-                f"{cls.get_name()} is a single-parameter refinement and does not support subscript access. "
-                f"Use the value directly or access by field name: .{cls._param_names[0]}"
-            )
+        if cls._base_type is not None:
+            if cls._struct_type is None:
+                raise TypeError(
+                    f"{cls.get_name()} subscript depends on base type {cls._base_type}"
+                )
         
         # Multi-parameter: delegate to underlying struct
         if cls._struct_type is None:
@@ -114,201 +131,269 @@ class RefinedType(CompositeType):
         return cls._struct_type.handle_subscript(visitor, base, index, node)
     
     @classmethod
-    def _create_refined_type_from_predicate(cls, predicate, node, visitor):
-        """Create a new RefinedType from a predicate function
+    def _create_refined_type_from_args(cls, args, node, visitor):
+        """Create a new RefinedType from mixed arguments
+        
+        Supports:
+        - refined[ptr[T], "owned"] - base type + tag
+        - refined[i32, is_positive] - base type + predicate
+        - refined[i32, is_positive, "positive"] - base type + predicate + tag
+        - refined[i32, "tag1", "tag2"] - base type + multiple tags
+        - refined[is_valid_range] - multi-param predicate only (backward compat)
         
         Args:
-            predicate: The predicate function (can be ValueRef or Python function)
+            args: Single arg or tuple of args
             node: AST node for error reporting
             visitor: AST visitor instance
             
         Returns:
-            New RefinedType class with predicate information extracted
+            New RefinedType class wrapped in ValueRef
         """
-        from ..valueref import ValueRef
+        from ..valueref import ValueRef, wrap_value
         from ..type_resolver import TypeResolver
         
-        # Extract Python function from ValueRef if needed
-        if isinstance(predicate, ValueRef):
-            if predicate.kind == 'python' and callable(predicate.value):
-                pred_func = predicate.value
-            else:
-                raise TypeError(f"refined type subscript must be a function, got {predicate}")
-        elif callable(predicate):
-            pred_func = predicate
+        # Normalize args to list
+        if isinstance(args, tuple):
+            args_list = list(args)
         else:
-            raise TypeError(f"refined type subscript must be a function, got {type(predicate)}")
+            args_list = [args]
         
-        # Extract parameter information from predicate function
+        if len(args_list) == 0:
+            raise TypeError("refined requires at least one argument")
+        
+        # Parse arguments into: base_type, predicates, tags
+        base_type = None
+        predicates = []
+        tags = []
+        
+        for i, arg in enumerate(args_list):
+            # Unwrap ValueRef to get actual value
+            if isinstance(arg, ValueRef):
+                if arg.kind == 'python' and arg.value is not None:
+                    arg_value = arg.value
+                else:
+                    raise TypeError(f"refined argument must be a type, predicate, or string tag")
+            else:
+                arg_value = arg
+            
+            # Check if it's a string tag
+            if isinstance(arg_value, str):
+                tags.append(arg_value)
+            # Check if it's a callable (predicate)
+            elif callable(arg_value):
+                predicates.append(arg_value)
+            # Check if it's a type
+            elif isinstance(arg_value, type):
+                # First type becomes base_type
+                if base_type is None and i == 0:
+                    base_type = arg_value
+                else:
+                    raise TypeError(f"refined can only have one base type (position 0), got type at position {i}")
+            else:
+                raise TypeError(f"refined argument must be a type, callable predicate, or string tag, got {type(arg_value)}")
+        
+        # Validate combinations
+        if len(predicates) == 0 and len(tags) == 0:
+            raise TypeError("refined requires at least one predicate or tag")
+        
+        # Case 1: Only predicates, no base type (backward compat: refined[pred])
+        if base_type is None and len(predicates) == 1 and len(tags) == 0:
+            return cls._create_from_single_predicate(predicates[0], visitor)
+        
+        # Case 2: Base type with tags/predicates
+        if base_type is not None:
+            return cls._create_from_base_and_constraints(base_type, predicates, tags, visitor)
+        
+        # Case 3: Multiple predicates without base type
+        if base_type is None and len(predicates) > 0:
+            raise TypeError(
+                "refined with multiple predicates requires explicit base type: "
+                "refined[T, pred1, pred2, ...]"
+            )
+        
+        raise TypeError(f"Invalid refined type specification: {args_list}")
+    
+    @classmethod
+    def _create_from_single_predicate(cls, predicate, visitor):
+        """Create refined type from single predicate (backward compat)
+        
+        refined[is_positive] where is_positive(x: i32) -> bool
+        """
+        from ..valueref import ValueRef, wrap_value
+        from ..type_resolver import TypeResolver
+        
         try:
-            sig = inspect.signature(pred_func)
+            sig = inspect.signature(predicate)
         except (ValueError, TypeError) as e:
             raise TypeError(f"Cannot inspect predicate function signature: {e}")
         
         param_names = []
         param_types = []
         
-        # Get type resolver for annotation parsing
         type_resolver = TypeResolver(user_globals=visitor.user_globals if hasattr(visitor, 'user_globals') else {})
         
         for param_name, param in sig.parameters.items():
             param_names.append(param_name)
             
-            # Extract type annotation
             if param.annotation == inspect.Parameter.empty:
                 raise TypeError(
-                    f"Predicate function '{pred_func.__name__}' parameter '{param_name}' "
+                    f"Predicate function '{predicate.__name__}' parameter '{param_name}' "
                     f"must have type annotation"
                 )
             
-            # Parse annotation to PC type
             if isinstance(param.annotation, str):
-                # String annotation - parse it
                 pc_type = type_resolver.parse_annotation(param.annotation)
             elif isinstance(param.annotation, type):
-                # Already a type - check if it's PC type or convert
                 pc_type = param.annotation
             else:
-                # Try to parse as AST node
                 try:
                     pc_type = type_resolver.parse_annotation(param.annotation)
                 except Exception as e:
-                    raise TypeError(
-                        f"Cannot parse type annotation for parameter '{param_name}': {e}"
-                    )
+                    raise TypeError(f"Cannot parse type annotation for parameter '{param_name}': {e}")
             
             if pc_type is None:
                 raise TypeError(
-                    f"Predicate function '{pred_func.__name__}' parameter '{param_name}' "
+                    f"Predicate function '{predicate.__name__}' parameter '{param_name}' "
                     f"has invalid type annotation: {param.annotation}"
                 )
             
             param_types.append(pc_type)
         
         if len(param_types) == 0:
-            raise TypeError(f"Predicate function '{pred_func.__name__}' must have at least one parameter")
+            raise TypeError(f"Predicate function '{predicate.__name__}' must have at least one parameter")
         
-        # Check if single parameter
-        is_single_param = (len(param_types) == 1)
-        
-        # Create underlying struct type (only for multi-parameter)
-        struct_type = None
-        if not is_single_param:
+        # Single parameter: base_type = param_type
+        if len(param_types) == 1:
+            base_type = param_types[0]
+            struct_type = None
+        else:
+            # Multi-parameter: create struct
             struct_type = struct._create_struct_type_from_fields(
                 field_types=param_types,
                 field_names=param_names
             )
+            base_type = None
         
-        # Create new RefinedType subclass
-        class_name = f"RefinedType_{pred_func.__name__}"
+        class_name = f"RefinedType_{predicate.__name__}"
         new_refined_type = type(class_name, (RefinedType,), {
-            '_predicate_func': pred_func,
+            '_base_type': base_type,
+            '_predicates': [predicate],
+            '_tags': [],
+            '_struct_type': struct_type,
+            '_field_types': param_types,
+            '_field_names': param_names,
             '_param_types': param_types,
             '_param_names': param_names,
-            '_struct_type': struct_type,
-            '_field_types': param_types,  # For CompositeType compatibility
-            '_field_names': param_names,   # For CompositeType compatibility
-            '_is_single_param': is_single_param,
         })
         
-        logger.debug(
-            f"Created refined type: {class_name} ({'single' if is_single_param else 'multi'}-param) "
-            f"with {len(param_names)} parameter(s): {list(zip(param_names, param_types))}"
-        )
+        logger.debug(f"Created refined type from predicate: {class_name} with {len(param_names)} param(s)")
         
-        # Return as Python type wrapped in ValueRef
+        from ..valueref import wrap_value
+        from .python_type import PythonType
+        return wrap_value(new_refined_type, kind='python', type_hint=PythonType(new_refined_type))
+    
+    @classmethod
+    def _create_from_base_and_constraints(cls, base_type, predicates, tags, visitor):
+        """Create refined type from base type + predicates + tags
+        
+        refined[ptr[T], "owned"]
+        refined[i32, is_positive]
+        refined[i32, is_positive, "positive"]
+        """
+        from ..valueref import ValueRef, wrap_value
+        
+        # Validate predicates have single parameter matching base_type
+        for pred in predicates:
+            try:
+                sig = inspect.signature(pred)
+                params = list(sig.parameters.values())
+                if len(params) != 1:
+                    raise TypeError(
+                        f"Predicate '{pred.__name__}' for refined[{base_type}, ...] "
+                        f"must have exactly one parameter, got {len(params)}"
+                    )
+            except (ValueError, TypeError) as e:
+                raise TypeError(f"Cannot inspect predicate function signature: {e}")
+        
+        # Create name
+        base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
+        pred_names = [p.__name__ for p in predicates]
+        tag_names = [f'"{t}"' for t in tags]
+        all_names = [base_name] + pred_names + tag_names
+        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('\"', '') for n in all_names)}"
+        
+        new_refined_type = type(class_name, (RefinedType,), {
+            '_base_type': base_type,
+            '_predicates': predicates,
+            '_tags': tags,
+            '_struct_type': None,
+            '_field_types': [base_type],
+            '_field_names': ['value'],
+            '_param_types': [base_type],
+            '_param_names': ['value'],
+        })
+        
+        logger.debug(f"Created refined type: {class_name} base={base_type}, predicates={pred_names}, tags={tags}")
+        
         from ..valueref import wrap_value
         from .python_type import PythonType
         return wrap_value(new_refined_type, kind='python', type_hint=PythonType(new_refined_type))
     
     @classmethod
     def handle_call(cls, visitor, args, node):
-        """Handle refined type constructor call: refined[Pred](a, b, ...)
+        """Handle refined type constructor call: refined[...](value)
         
-        This is equivalent to assume(a, b, ..., Pred) - creates the refined
-        type instance without checking the predicate.
-        
-        For single-parameter refinements, returns the value directly.
-        For multi-parameter refinements, returns a struct.
-        
-        Args:
-            visitor: AST visitor instance
-            args: Pre-evaluated argument ValueRefs
-            node: ast.Call node
-            
-        Returns:
-            ValueRef containing the refined type value
+        Creates refined type instance without checking predicates.
+        Equivalent to assume(value, ...).
         """
-        from ..valueref import wrap_value, ensure_ir
+        from ..valueref import wrap_value, ensure_ir, ValueRef
         
-        # Verify argument count matches parameter count
+        # For base + constraints: expect 1 arg
+        if cls._base_type is not None:
+            if len(args) != 1:
+                raise TypeError(f"{cls.get_name()} takes 1 argument ({len(args)} given)")
+            
+            arg = args[0]
+            # If arg is Python value, promote it first
+            if isinstance(arg, ValueRef) and arg.is_python_value():
+                arg = visitor.type_converter._promote_python_to_pc(arg.get_python_value(), cls._base_type)
+            elif cls._base_type:
+                arg = visitor.type_converter.convert(arg, cls._base_type)
+            
+            return wrap_value(ensure_ir(arg), kind='value', type_hint=cls)
+        
+        # For multi-param predicates: expect N args
         expected_count = len(cls._param_types) if cls._param_types else 0
         if len(args) != expected_count:
-            raise TypeError(
-                f"{cls.get_name()} takes {expected_count} argument(s) ({len(args)} given)"
-            )
+            raise TypeError(f"{cls.get_name()} takes {expected_count} argument(s) ({len(args)} given)")
         
-        if cls._is_single_param:
-            # Single parameter: return the argument directly with refined type hint
-            arg = args[0]
-            field_type = cls._param_types[0]
+        if cls._struct_type is None:
+            raise TypeError(f"{cls.get_name()} cannot be called (no struct type)")
+        
+        struct_llvm_type = cls._struct_type.get_llvm_type(visitor.module.context)
+        struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
+        
+        for i, arg in enumerate(args):
+            field_type = cls._param_types[i]
             if field_type:
                 arg = visitor.type_converter.convert(arg, field_type)
-            
-            # Return the value directly, but mark it with the refined type
-            return wrap_value(
-                ensure_ir(arg),
-                kind='value',
-                type_hint=cls
-            )
-        else:
-            # Multi-parameter: build struct value
-            if cls._struct_type is None:
-                raise TypeError(f"{cls.get_name()} cannot be called (no struct type)")
-            
-            # Get LLVM struct type
-            struct_llvm_type = cls._struct_type.get_llvm_type(visitor.module.context)
-            
-            # Create struct value by inserting each argument
-            # Start with undef
-            struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
-            
-            # Insert each field value
-            for i, arg in enumerate(args):
-                # Convert arg to expected field type
-                field_type = cls._param_types[i]
-                if field_type:
-                    arg = visitor.type_converter.convert(arg, field_type)
-                arg_ir = ensure_ir(arg)
-                struct_value = visitor.builder.insert_value(struct_value, arg_ir, i)
-            
-            # Wrap as refined type (same LLVM value, different PC type)
-            return wrap_value(
-                struct_value,
-                kind='value',
-                type_hint=cls
-            )
+            arg_ir = ensure_ir(arg)
+            struct_value = visitor.builder.insert_value(struct_value, arg_ir, i)
+        
+        return wrap_value(struct_value, kind='value', type_hint=cls)
     
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
-        """Handle attribute access on refined type value: refined_val.field
-        
-        For single-parameter refinements, delegate to the underlying type.
-        For multi-parameter refinements, delegate to underlying struct.
-        """
+        """Handle attribute access on refined type value"""
         from ..valueref import wrap_value, ensure_ir
         
-        if cls._is_single_param:
-            # Single parameter: delegate to the underlying type
-            # First check if accessing by parameter name (return value itself)
-            if attr_name == cls._param_names[0]:
+        # For base + constraints: delegate to base type
+        if cls._base_type is not None:
+            if attr_name == 'value':
                 return base
             
-            # Otherwise, delegate to the underlying type's handle_attribute
-            # Need to change type_hint from refined type to underlying type
-            underlying_type = cls._param_types[0]
+            underlying_type = cls._base_type
             if underlying_type and hasattr(underlying_type, 'handle_attribute'):
-                # Unwrap base and rewrap with underlying type hint
                 base_ir = ensure_ir(base)
                 base_with_underlying_type = wrap_value(
                     base_ir,
@@ -318,103 +403,98 @@ class RefinedType(CompositeType):
                 )
                 return underlying_type.handle_attribute(visitor, base_with_underlying_type, attr_name, node)
             else:
-                raise AttributeError(
-                    f"{cls.get_name()} (refined {underlying_type}) has no attribute '{attr_name}'"
-                )
-        else:
-            # Multi-parameter: delegate to struct
-            if cls._struct_type is None:
-                raise TypeError(f"{cls.get_name()} has no fields")
-            
-            return cls._struct_type.handle_attribute(visitor, base, attr_name, node)
+                raise AttributeError(f"{cls.get_name()} (refined {underlying_type}) has no attribute '{attr_name}'")
+        
+        # For multi-param: delegate to struct
+        if cls._struct_type is None:
+            raise TypeError(f"{cls.get_name()} has no fields")
+        
+        return cls._struct_type.handle_attribute(visitor, base, attr_name, node)
 
 
 class refined(metaclass=type):
     """Factory class for creating refined types
     
     Usage:
-        refined[pred_func] -> RefinedType
+        refined[pred] -> RefinedType (backward compat)
+        refined[T, "tag"] -> RefinedType
+        refined[T, pred, "tag"] -> RefinedType
     
     Example:
         def is_positive(x: i32) -> bool:
             return x > 0
         
         PositiveInt = refined[is_positive]
-        x = PositiveInt(5)  # Create without checking
+        OwnedPtr = refined[ptr[T], "owned"]
     """
     
-    def __class_getitem__(cls, predicate):
-        """Create refined type from predicate: refined[pred]
+    def __class_getitem__(cls, args):
+        """Create refined type: refined[...]
         
-        This is a Python-level operation that creates a RefinedType class
-        with the predicate information extracted.
-        
-        Args:
-            predicate: Predicate function
-            
-        Returns:
-            RefinedType class
+        Python-level operation that creates a RefinedType class.
         """
-        if not callable(predicate):
-            raise TypeError(f"refined subscript must be a callable, got {type(predicate)}")
+        # Handle both single arg and tuple
+        if not isinstance(args, tuple):
+            args = (args,)
         
-        # Extract parameter information from predicate function
-        try:
-            sig = inspect.signature(predicate)
-        except (ValueError, TypeError) as e:
-            raise TypeError(f"Cannot inspect predicate function signature: {e}")
-        
-        param_names = []
-        param_types = []
-        
-        for param_name, param in sig.parameters.items():
-            param_names.append(param_name)
+        # Check for simple single predicate case (backward compat at Python level)
+        if len(args) == 1 and callable(args[0]):
+            predicate = args[0]
+            try:
+                sig = inspect.signature(predicate)
+            except (ValueError, TypeError) as e:
+                raise TypeError(f"Cannot inspect predicate function signature: {e}")
             
-            # Extract type annotation
-            if param.annotation == inspect.Parameter.empty:
-                # No annotation - will need to be resolved later during compilation
-                param_types.append(None)
-            else:
-                # Store annotation as-is, will be resolved during compilation
-                param_types.append(param.annotation)
+            param_names = []
+            param_types = []
+            
+            for param_name, param in sig.parameters.items():
+                param_names.append(param_name)
+                
+                if param.annotation == inspect.Parameter.empty:
+                    param_types.append(None)
+                else:
+                    param_types.append(param.annotation)
+            
+            if len(param_names) == 0:
+                raise TypeError(f"Predicate function must have at least one parameter")
+            
+            is_single_param = (len(param_names) == 1)
+            
+            struct_type = None
+            if not is_single_param:
+                from .struct import create_struct_type
+                if all(t is not None for t in param_types):
+                    try:
+                        struct_type = create_struct_type(
+                            field_types=param_types,
+                            field_names=param_names
+                        )
+                    except Exception:
+                        pass
+            
+            class_name = f"RefinedType_{predicate.__name__}"
+            new_refined_type = type(class_name, (RefinedType,), {
+                '_predicate_func': predicate,
+                '_param_types': param_types,
+                '_param_names': param_names,
+                '_struct_type': struct_type,
+                '_field_types': param_types,
+                '_field_names': param_names,
+                '_is_single_param': is_single_param,
+                '_base_type': param_types[0] if is_single_param and param_types[0] else None,
+                '_predicates': [predicate],
+                '_tags': [],
+            })
+            
+            return new_refined_type
         
-        if len(param_names) == 0:
-            raise TypeError(f"Predicate function must have at least one parameter")
-        
-        # Check if single parameter
-        is_single_param = (len(param_names) == 1)
-        
-        # Create underlying struct type (only for multi-parameter)
-        # Actual struct will be created with resolved types
-        from .struct import create_struct_type
-        
-        struct_type = None
-        if not is_single_param:
-            # Try to create struct if all types are known and are PC types
-            if all(t is not None for t in param_types):
-                try:
-                    struct_type = create_struct_type(
-                        field_types=param_types,
-                        field_names=param_names
-                    )
-                except Exception as e:
-                    # If creation fails (e.g., types not yet available), leave as None
-                    # Will be created during compilation
-                    pass
-        
-        # Create new RefinedType subclass
-        class_name = f"RefinedType_{predicate.__name__}"
-        new_refined_type = type(class_name, (RefinedType,), {
-            '_predicate_func': predicate,
-            '_param_types': param_types,
-            '_param_names': param_names,
-            '_struct_type': struct_type,
-            '_field_types': param_types,  # For CompositeType compatibility
-            '_field_names': param_names,   # For CompositeType compatibility
-            '_is_single_param': is_single_param,
-        })
-        
-        return new_refined_type
+        # For other cases (base + tags/predicates), return a placeholder
+        # that will be handled by _create_refined_type_from_args during compilation
+        raise TypeError(
+            f"refined[...] with multiple args or tags must be used in @compile context. "
+            f"At Python level, only refined[pred] is supported."
+        )
 
 
 __all__ = ['refined', 'RefinedType']
