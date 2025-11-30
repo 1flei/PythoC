@@ -58,76 +58,81 @@ def _extract_function_info(func):
 def linear_wrap(acquire_func, release_func, struct_name=None):
     """
     Wrap a pair of resource acquire/release functions with linear token enforcement.
-    
+
     Args:
         acquire_func: Function that acquires a resource (e.g., malloc, fopen)
         release_func: Function that releases a resource (e.g., free, fclose)
-        struct_name: Optional custom name for the resource struct type.
-                    If provided, returns (ResourceStruct, acquire, release) tuple.
-                    If None, returns (acquire, release) tuple.
+        struct_name: Optional custom name for the proof struct type.
+                    If provided, returns (ProofStruct, wrapped_acquire, wrapped_release).
+                    If None, returns (wrapped_acquire, wrapped_release) with raw linear.
     
     Returns:
-        (wrapped_acquire, wrapped_release) if struct_name is None
-        (ResourceStruct, wrapped_acquire, wrapped_release) if struct_name is provided
-        
-    Example:
-        from pythoc.libc.stdlib import malloc, free
-        lmalloc, lfree = linear_wrap(malloc, free)
-        
-        # With named struct
-        FileHandle, lfopen, lfclose = linear_wrap(fopen, fclose, 
-                                                   struct_name="FileHandle")
-        
-        # Generated signatures:
-        # lmalloc(size: i64) -> struct[ptr[i8], linear]
-        # lfree(ptr: ptr[i8], token: linear) -> void
+        If struct_name is None:
+            (wrapped_acquire, wrapped_release)
+            - acquire returns struct[resource, linear]
+            - release takes (resource_params..., linear)
+        If struct_name is provided:
+            (ProofStruct, wrapped_acquire, wrapped_release)
+            - ProofStruct is a named struct[linear] type
+            - acquire returns struct[resource, ProofStruct]
+            - release takes (resource_params..., ProofStruct)
     """
     
     # Extract function information
     acquire_name, acquire_param_types, acquire_return_type = _extract_function_info(acquire_func)
     release_name, release_param_types, _ = _extract_function_info(release_func)
     
-    # Create resource struct type
-    ResourceStruct = struct[acquire_return_type, linear]
+    # Create proof struct type
     if struct_name:
-        ResourceStruct.__name__ = struct_name
+        ProofStruct = struct[linear]
+        ProofStruct.__name__ = struct_name
+        proof_type = ProofStruct
+        
+        # Create a helper function to make proof struct
+        @compile(anonymous=True)
+        def make_proof() -> proof_type:
+            prf: proof_type
+            prf[0] = linear()
+            return prf
+
+        @compile(anonymous=True)
+        def release_proof(prf: proof_type):
+            consume(prf[0])
+    else:
+        proof_type = linear
+        @compile(anonymous=True)
+        def make_proof() -> proof_type:
+            return linear()
+        
+        @compile(anonymous=True)
+        def release_proof(prf: proof_type):
+            consume(prf)
+    
+    # Build return struct type
+    ReturnStruct = struct[proof_type, acquire_return_type]
     
     # Build acquire parameter struct
-    AcquireParamsStruct = struct[tuple(acquire_param_types)] if acquire_param_types else None
+    AcquireParamsStruct = struct[tuple(acquire_param_types)]
     
-    # Build wrapped acquire function - use anonymous compilation
-    if AcquireParamsStruct:
-        @compile(anonymous=True)
-        def wrapped_acquire(*args: AcquireParamsStruct) -> ResourceStruct:
-            resource = acquire_func(*args)
-            return resource, linear()
-    else:
-        @compile(anonymous=True)
-        def wrapped_acquire() -> ResourceStruct:
-            resource = acquire_func()
-            return resource, linear()
+    # Build wrapped acquire function
+    @compile(anonymous=True)
+    def wrapped_acquire(*args: AcquireParamsStruct) -> ReturnStruct:
+        ret: ReturnStruct
+        ret[0] = make_proof()
+        ret[1] = acquire_func(*args)
+        return ret
     
     # Build release function
-    ReleaseParams = struct[tuple(release_param_types)] if release_param_types else None
-    ReleaseParamsWithToken = struct[tuple(release_param_types + [linear])]
-    
-    # Build wrapped release function using struct unpacking
-    if ReleaseParams:
-        @compile(anonymous=True)
-        def wrapped_release(*args: ReleaseParamsWithToken):
-            release_params: ReleaseParams
-            for i in range(len(release_param_types)):
-                release_params[i] = args[i]
-            release_func(*release_params)
-            consume(args[len(release_param_types)])
-    else:
-        @compile(anonymous=True)
-        def wrapped_release(*args: ReleaseParamsWithToken):
-            release_func()
-            consume(args[0])
+    ReleaseParams = struct[tuple(release_param_types)]
+
+    # Raw linear: consume directly
+    @compile(anonymous=True)
+    def wrapped_release(prf: proof_type, *args: ReleaseParams):
+        release_func(*args)
+        release_proof(prf)
     
     if struct_name:
-        return ResourceStruct, wrapped_acquire, wrapped_release
+        return ProofStruct, wrapped_acquire, wrapped_release
     else:
         return wrapped_acquire, wrapped_release
 

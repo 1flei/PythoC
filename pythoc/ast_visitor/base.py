@@ -722,11 +722,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         """
         logger.debug(f"_transfer_linear_ownership: value_ref={value_ref}, reason={reason}")
         
-        # Skip if not a linear type
-        if not self._is_linear_type(value_ref.type_hint):
-            return
-        
         # Handle Python tuple containing ValueRefs (e.g., return statements)
+        # Check this BEFORE checking if it's a linear type, because the tuple itself
+        # is not linear but may contain linear elements
         if value_ref.is_python_value():
             py_val = value_ref.get_python_value()
             if isinstance(py_val, tuple):
@@ -735,6 +733,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     if isinstance(elem, ValueRef):
                         self._transfer_linear_ownership(elem, reason)
                 return
+        
+        # Skip if not a linear type
+        if not self._is_linear_type(value_ref.type_hint):
+            return
         
         # Check if ValueRef carries variable tracking info
         if not hasattr(value_ref, 'var_name') or not value_ref.var_name:

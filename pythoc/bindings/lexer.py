@@ -1,16 +1,22 @@
 """
 Lexer for C header files
 Converts source text into a stream of tokens
+
+Design: Uses linear types to ensure token lifetime is within lexer lifetime.
+- lexer_create() returns (lexer, lexer_prf)
+- lexer_next_token() consumes lexer_prf, returns (token, tk_prf)
+- token_release() consumes tk_prf, returns lexer_prf
+- lexer_destroy() consumes lexer_prf
 """
 
-from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refined
+from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refined, linear, struct, consume, assume
 from pythoc.std.linear_wrapper import linear_wrap
 from pythoc.std.refine_wrapper import nonnull_wrap
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
 
-from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string
+from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string, TokenRef, token_nonnull
 
 
 @compile
@@ -41,10 +47,40 @@ def lexer_destroy_raw(lex: ptr[Lexer]) -> void:
     free(lex)
 
 
-lexer_create, lexer_destroy = linear_wrap(lexer_create_raw, lexer_destroy_raw)
+# Define proof types using linear_wrap
+LexerProof, lexer_create, lexer_destroy = linear_wrap(
+    lexer_create_raw, lexer_destroy_raw, struct_name="LexerProof")
+
+@compile
+class TokenProof:
+    """Proof that a token holds lexer reference"""
+    inner: linear
 
 lexer_nonnull, LexerRef = nonnull_wrap(ptr[Lexer])
-token_nonnull, TokenRef = nonnull_wrap(ptr[Token])
+
+
+@compile
+def make_lexer_proof() -> LexerProof:
+    """Helper to create a new LexerProof"""
+    prf = LexerProof()
+    prf[0] = linear()
+    return prf
+
+@compile
+def token_release(token: Token, tk_prf: TokenProof) -> LexerProof:
+    """
+    Release a token, returning the lexer proof.
+    This allows getting the next token from the lexer.
+    
+    Args:
+        token: The token to release (can be dropped)
+        tk_prf: Token proof to consume
+    
+    Returns:
+        lexer_prf: LexerProof for lexer operations
+    """
+    consume(tk_prf.inner)
+    return make_lexer_proof()
 
 
 @compile
@@ -114,38 +150,41 @@ def lexer_skip_whitespace(lex: LexerRef) -> void:
 
 
 @compile
-def is_keyword(word: ptr[i8]) -> TokenType:
-    """Check if identifier is a C keyword, return token type or 0"""
-    def word_equal_to(key) -> bool:
-        for i in range(len(key)):
-            if word[i] != char(key[i]):
-                return False
-        return True
+def is_keyword(start: ptr[i8], length: i32) -> TokenType:
+    """Check if token text is a C keyword, return token type or ERROR"""
+    # Use Python metaprogramming to generate keyword checks at compile time
     for token_id, token_str in g_token_id_to_string.items():
-        if word_equal_to(token_str):
-            return token_id
-    return TokenType.ERROR  # Not a keyword
+        kw_len = len(token_str)
+        if length == kw_len:
+            # Check each character
+            matches: bool = True
+            for i in range(kw_len):
+                if start[i] != char(token_str[i]):
+                    matches = False
+                    break
+            if matches:
+                return token_id
+    return TokenType.ERROR
 
 
 @compile
 def lexer_read_identifier(lex: LexerRef, token: TokenRef) -> void:
-    """Read identifier or keyword"""
-    i: i32 = 0
+    """Read identifier or keyword (zero-copy)"""
+    token.start = lex.source + lex.pos
+    start_pos: i32 = lex.pos
     
-    # First character must be alpha or underscore
     c: i8 = lexer_current(lex)
-    while lex.pos < lex.length and (isalnum(c) or c == char("_")):
-        if i < 255:
-            token.text[i] = c
-            i = i + 1
-        lexer_advance(lex)
+    while lex.pos < lex.length:
         c = lexer_current(lex)
+        if not (isalnum(c) or c == char("_")):
+            break
+        lexer_advance(lex)
     
-    token.text[i] = 0  # Null terminator
+    token.length = lex.pos - start_pos
     
     # Check if it's a keyword
-    kw_type: i32 = is_keyword(token.text)
-    if kw_type != 0:
+    kw_type: i32 = is_keyword(token.start, token.length)
+    if kw_type != TokenType.ERROR:
         token.type = kw_type
     else:
         token.type = TokenType.IDENTIFIER
@@ -153,39 +192,29 @@ def lexer_read_identifier(lex: LexerRef, token: TokenRef) -> void:
 
 @compile
 def lexer_read_number(lex: LexerRef, token: TokenRef) -> void:
-    """Read numeric literal (simplified, handles decimal and hex)"""
-    i: i32 = 0
+    """Read numeric literal (zero-copy, handles decimal and hex)"""
+    token.start = lex.source + lex.pos
+    start_pos: i32 = lex.pos
+    
     c: i8 = lexer_current(lex)
     
     # Check for hex prefix 0x or 0X
     if c == char("0") and (lexer_peek(lex, 1) == char("x") or lexer_peek(lex, 1) == char("X")):
-        token.text[i] = c
-        i = i + 1
         lexer_advance(lex)
-        c = lexer_current(lex)
-        token.text[i] = c
-        i = i + 1
         lexer_advance(lex)
-        c = lexer_current(lex)
     
     # Read digits, dots, and hex letters
     while lex.pos < lex.length:
         c = lexer_current(lex)
         # Check if valid number character
         if isdigit(c) or c == char(".") or c == char("x") or c == char("X"):
-            if i < 255:
-                token.text[i] = c
-                i = i + 1
             lexer_advance(lex)
         elif (c >= char("A") and c <= char("F")) or (c >= char("a") and c <= char("f")):
-            if i < 255:
-                token.text[i] = c
-                i = i + 1
             lexer_advance(lex)
         else:
             break
     
-    token.text[i] = 0
+    token.length = lex.pos - start_pos
     token.type = TokenType.NUMBER
 
 
@@ -206,62 +235,79 @@ _single_char_tokens = [
 
 
 @compile
-def lexer_next_token(lex: LexerRef, token: TokenRef) -> i32:
+def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof]:
     """
-    Get next token from source
-    Returns 1 on success, 0 on EOF
+    Get next token from source, consuming lexer_prf and producing tk_prf.
+    
+    The returned tk_prf must be released via token_release() to get lexer_prf back,
+    ensuring token lifetime is within lexer lifetime.
+    
+    Args:
+        lex: Lexer reference
+        lexer_prf: LexerProof proof of lexer ownership
+    
+    Returns:
+        (token, tk_prf): Token and TokenProof bundle
     """
+    # Consume lexer_prf upfront to avoid linear type issues in branches
+    consume(lexer_prf[0])
+    
+    token: Token = Token()
     lexer_skip_whitespace(lex)
     
     # Check for EOF
     if lex.pos >= lex.length:
         token.type = TokenType.EOF
-        token.text[0] = 0
+        token.start = lex.source + lex.pos
+        token.length = 0
         token.line = lex.line
         token.col = lex.col
-        return 0
+    else:
+        # Record token position
+        token.line = lex.line
+        token.col = lex.col
+        
+        c: i8 = lexer_current(lex)
+        
+        # Identifier or keyword (starts with letter or underscore)
+        if isalpha(c) or c == char("_"):
+            token_ref = assume(ptr(token), token_nonnull)
+            lexer_read_identifier(lex, token_ref)
+        # Number (starts with digit)
+        elif isdigit(c):
+            token_ref = assume(ptr(token), token_nonnull)
+            lexer_read_number(lex, token_ref)
+        else:
+            # Single character tokens and multi-char tokens
+            token.start = lex.source + lex.pos
+            token.length = 1
+            token_found: bool = False
+            
+            for ch, tok_type in _single_char_tokens:
+                if c == char(ch):
+                    token.type = tok_type
+                    lexer_advance(lex)
+                    token_found = True
+                    break
+            
+            if not token_found:
+                # Multi-character tokens
+                if c == char("."):
+                    # Check for ellipsis '...'
+                    if lexer_peek(lex, 1) == char(".") and lexer_peek(lex, 2) == char("."):
+                        token.type = TokenType.ELLIPSIS
+                        token.length = 3
+                        lexer_advance(lex)
+                        lexer_advance(lex)
+                        lexer_advance(lex)
+                        token_found = True
+                
+                if not token_found:
+                    # Unknown character - treat as error
+                    token.type = TokenType.ERROR
+                    lexer_advance(lex)
     
-    # Record token position
-    token.line = lex.line
-    token.col = lex.col
-    
-    c: i8 = lexer_current(lex)
-    
-    # Identifier or keyword (starts with letter or underscore)
-    if isalpha(c) or c == char("_"):
-        lexer_read_identifier(lex, token)
-        return 1
-    
-    # Number (starts with digit)
-    if isdigit(c):
-        lexer_read_number(lex, token)
-        return 1
-    
-    # Single character tokens - generated by metaprogramming
-    token.text[0] = c
-    token.text[1] = 0
-    
-    for ch, tok_type in _single_char_tokens:
-        if c == char(ch):
-            token.type = tok_type
-            lexer_advance(lex)
-            return 1
-    
-    # Multi-character tokens
-    if c == char("."):
-        # Check for ellipsis '...'
-        if lexer_peek(lex, 1) == char(".") and lexer_peek(lex, 2) == char("."):
-            token.type = TokenType.ELLIPSIS
-            token.text[0] = char(".")
-            token.text[1] = char(".")
-            token.text[2] = char(".")
-            token.text[3] = 0
-            lexer_advance(lex)
-            lexer_advance(lex)
-            lexer_advance(lex)
-            return 1
-    
-    # Unknown character - treat as error
-    token.type = TokenType.ERROR
-    lexer_advance(lex)
-    return 1
+    # Create and return token proof
+    tk_prf = TokenProof()
+    tk_prf.inner = linear()
+    return token, tk_prf
