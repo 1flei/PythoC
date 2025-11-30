@@ -2,7 +2,8 @@
 Token definitions for C header parser
 """
 
-from pythoc import compile, i32, i8, array, enum
+from pythoc import compile, i32, i8, array, enum, ptr
+from pythoc.std.refine_wrapper import nonnull_wrap
 
 @enum
 class TokenType:
@@ -63,9 +64,13 @@ class TokenType:
 class Token:
     """Represents a single token from the lexer"""
     type: i32                    # Token type (one of TokenType enum values)
-    text: array[i8, 256]         # Token text content
+    start: ptr[i8]               # Pointer to token text in source (zero-copy)
+    length: i32                  # Length of token text
     line: i32                    # Source line number (1-based)
     col: i32                     # Source column number (1-based)
+
+
+token_nonnull, TokenRef = nonnull_wrap(ptr[Token])
 
 
 # Map token type to C keyword string (lowercase)

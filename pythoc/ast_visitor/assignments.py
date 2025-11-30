@@ -308,8 +308,7 @@ class AssignmentsMixin:
                         # This is a Python constant variable - update it
                         if rvalue.is_python_value():
                             # Update Python constant value_ref
-                            var_info.value_ref = rvalue
-                            continue
+                            raise RuntimeError("Cannot re-assign a Python Type Value in pc function")
                         else:
                             # Trying to assign PC value to Python constant variable
                             # Need to convert variable to PC type with alloca

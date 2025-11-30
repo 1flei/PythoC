@@ -25,46 +25,44 @@ FileHandle, lfopen_struct, lfclose_struct = linear_wrap(fopen, fclose, struct_na
 @compile
 def test_alloc():
     ptr_and_token = lmalloc(100)
-    ptr_val = ptr_and_token[0]
-    token = move(ptr_and_token[1])
-    lfree(ptr_val, token)
+    ptr_val = ptr_and_token[1]
+    token = move(ptr_and_token[0])
+    lfree(token, ptr_val)
 
 @compile
 def test_file():
     file_and_token = lfopen("/tmp/test_linear_wrapper.txt", "w")
-    file_ptr = file_and_token[0]
-    token = move(file_and_token[1])
-    lfclose(file_ptr, token)
+    file_ptr = file_and_token[1]
+    token = move(file_and_token[0])
+    lfclose(token, file_ptr)
 
 @compile
 def test_alloc_struct():
-    handle: MemoryHandle = lmalloc_struct(200)
-    ptr_val = handle[0]
-    token = move(handle[1])
-    lfree_struct(ptr_val, token)
+    handle = lmalloc_struct(200)
+    prf = handle[0]
+    ptr_val = handle[1]
+    lfree_struct(prf, ptr_val)
 
 @compile
 def test_file_struct():
-    handle: FileHandle = lfopen_struct("/tmp/test_linear_wrapper2.txt", "w")
-    file_ptr = handle[0]
-    token = move(handle[1])
-    lfclose_struct(file_ptr, token)
+    handle = lfopen_struct("/tmp/test_linear_wrapper2.txt", "w")
+    lfclose_struct(*handle)
 
 @compile
 def test_multi():
     # Allocate first block
     result1 = lmalloc(50)
-    ptr1 = result1[0]
-    token1 = move(result1[1])
+    ptr1 = result1[1]
+    token1 = move(result1[0])
     
     # Allocate second block
     result2 = lmalloc(100)
-    ptr2 = result2[0]
-    token2 = move(result2[1])
+    ptr2 = result2[1]
+    token2 = move(result2[0])
     
     # Free in reverse order
-    lfree(ptr2, token2)
-    lfree(ptr1, token1)
+    lfree(token2, ptr2)
+    lfree(token1, ptr1)
 
 
 def test_malloc_free_wrapper():
