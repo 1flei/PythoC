@@ -7,7 +7,7 @@ from pythoc import compile, i32, i8, ptr, array
 from pythoc.libc.stdio import printf
 
 from pythoc.bindings.c_token import Token, TokenType
-from pythoc.bindings.lexer import lex_tokens, lexer_create_raw, lexer_destroy_raw, lexer_nonnull
+from pythoc.bindings.lexer import tokens_from_source, lexer_create_raw, lexer_destroy_raw, lexer_nonnull
 
 
 # Real C code from nsieve.c
@@ -50,7 +50,7 @@ def test_full_c_file() -> i32:
     lshift_count: i32 = 0
     
     # Count tokens using for loop with yield generator
-    for token in lex_tokens(source):
+    for token in tokens_from_source(source):
         token_count = token_count + 1
         
         if token.type == TokenType.TYPEDEF:
@@ -105,7 +105,7 @@ def test_operators() -> i32:
     token_types: array[i32, 20]
     token_idx: i32 = 0
     
-    for token in lex_tokens(source):
+    for token in tokens_from_source(source):
         if token_idx < 20:
             token_types[token_idx] = token.type
             token_idx = token_idx + 1
@@ -163,7 +163,7 @@ def test_simple_code() -> i32:
     expected_types[4] = TokenType.SEMICOLON
     
     token_idx: i32 = 0
-    for token in lex_tokens(source):
+    for token in tokens_from_source(source):
         if token_idx < 5:
             if token.type != expected_types[token_idx]:
                 printf("FAIL: Token %d expected %d, got %d\n", 
