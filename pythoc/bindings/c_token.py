@@ -5,59 +5,108 @@ Token definitions for C header parser
 from pythoc import compile, i32, i8, array, enum, ptr
 from pythoc.std.refine_wrapper import nonnull_wrap
 
-@enum
+@enum(i32)
 class TokenType:
     """Token type enumeration"""
     # Special tokens
-    ERROR = 0
-    EOF = 1
+    ERROR: None
+    EOF: None
     
     # Keywords
-    INT = 10
-    CHAR = 11
-    SHORT = 12
-    LONG = 13
-    FLOAT = 14
-    DOUBLE = 15
-    VOID = 16
-    SIGNED = 17
-    UNSIGNED = 18
-    STRUCT = 19
-    UNION = 20
-    ENUM = 21
-    TYPEDEF = 22
-    CONST = 23
-    VOLATILE = 24
-    STATIC = 25
-    EXTERN = 26
+    INT: None
+    CHAR: None
+    SHORT: None
+    LONG: None
+    FLOAT: None
+    DOUBLE: None
+    VOID: None
+    SIGNED: None
+    UNSIGNED: None
+    STRUCT: None
+    UNION: None
+    ENUM: None
+    TYPEDEF: None
+    CONST: None
+    VOLATILE: None
+    STATIC: None
+    EXTERN: None
+    SIZEOF: None
+    RETURN: None
+    IF: None
+    ELSE: None
+    WHILE: None
+    FOR: None
+    DO: None
+    BREAK: None
+    CONTINUE: None
+    SWITCH: None
+    CASE: None
+    DEFAULT: None
+    GOTO: None
     
     # Identifiers and literals
-    IDENTIFIER = 30
-    NUMBER = 31
-    STRING = 32
-    CHAR_LITERAL = 33
+    IDENTIFIER: None
+    NUMBER: None
+    STRING: None
+    CHAR_LITERAL: None
     
-    # Operators and punctuation
-    STAR = 40        # *
-    LPAREN = 41      # (
-    RPAREN = 42      # )
-    LBRACKET = 43    # [
-    RBRACKET = 44    # ]
-    LBRACE = 45      # {
-    RBRACE = 46      # }
-    SEMICOLON = 47   # ;
-    COMMA = 48       # ,
-    COLON = 49       # :
-    EQUALS = 50      # =
-    ELLIPSIS = 51    # ...
+    # Single-character operators and punctuation
+    LPAREN: None      # (
+    RPAREN: None      # )
+    LBRACKET: None    # [
+    RBRACKET: None    # ]
+    LBRACE: None      # {
+    RBRACE: None      # }
+    SEMICOLON: None   # ;
+    COMMA: None       # ,
+    COLON: None       # :
+    DOT: None         # .
+    PLUS: None        # +
+    MINUS: None       # -
+    STAR: None        # *
+    SLASH: None       # /
+    PERCENT: None     # %
+    LT: None          # <
+    GT: None          # >
+    AMP: None         # &
+    PIPE: None        # |
+    CARET: None       # ^
+    TILDE: None       # ~
+    EXCLAIM: None     # !
+    QUESTION: None    # ?
+    ASSIGN: None      # =
+    
+    # Multi-character operators
+    ELLIPSIS: None    # ...
+    ARROW: None       # ->
+    INC: None         # ++
+    DEC: None         # --
+    LSHIFT: None      # <<
+    RSHIFT: None      # >>
+    LE: None          # <=
+    GE: None          # >=
+    EQ: None          # ==
+    NE: None          # !=
+    LAND: None        # &&
+    LOR: None         # ||
+    PLUS_ASSIGN: None   # +=
+    MINUS_ASSIGN: None  # -=
+    STAR_ASSIGN: None   # *=
+    SLASH_ASSIGN: None  # /=
+    PERCENT_ASSIGN: None # %=
+    LSHIFT_ASSIGN: None  # <<=
+    RSHIFT_ASSIGN: None  # >>=
+    AND_ASSIGN: None     # &=
+    OR_ASSIGN: None      # |=
+    XOR_ASSIGN: None     # ^=
     
     # Preprocessor
-    HASH = 60        # #
-    DEFINE = 61      # #define
-    INCLUDE = 62     # #include
-    IFDEF = 63       # #ifdef
-    IFNDEF = 64      # #ifndef
-    ENDIF = 65       # #endif
+    HASH: None        # #
+    DEFINE: None      # #define
+    INCLUDE: None     # #include
+    IFDEF: None       # #ifdef
+    IFNDEF: None      # #ifndef
+    ENDIF: None       # #endif
 
 
 @compile
@@ -92,7 +141,70 @@ _token_to_keyword = {
     TokenType.VOLATILE: "volatile",
     TokenType.STATIC: "static",
     TokenType.EXTERN: "extern",
+    TokenType.SIZEOF: "sizeof",
+    TokenType.RETURN: "return",
+    TokenType.IF: "if",
+    TokenType.ELSE: "else",
+    TokenType.WHILE: "while",
+    TokenType.FOR: "for",
+    TokenType.DO: "do",
+    TokenType.BREAK: "break",
+    TokenType.CONTINUE: "continue",
+    TokenType.SWITCH: "switch",
+    TokenType.CASE: "case",
+    TokenType.DEFAULT: "default",
+    TokenType.GOTO: "goto",
 }
+
+# Map operator string to token type (sorted by length descending for longest match first)
+_operator_to_token = [
+    ("...", TokenType.ELLIPSIS),
+    ("<<=", TokenType.LSHIFT_ASSIGN),
+    (">>=", TokenType.RSHIFT_ASSIGN),
+    ("->", TokenType.ARROW),
+    ("++", TokenType.INC),
+    ("--", TokenType.DEC),
+    ("<<", TokenType.LSHIFT),
+    (">>", TokenType.RSHIFT),
+    ("<=", TokenType.LE),
+    (">=", TokenType.GE),
+    ("==", TokenType.EQ),
+    ("!=", TokenType.NE),
+    ("&&", TokenType.LAND),
+    ("||", TokenType.LOR),
+    ("+=", TokenType.PLUS_ASSIGN),
+    ("-=", TokenType.MINUS_ASSIGN),
+    ("*=", TokenType.STAR_ASSIGN),
+    ("/=", TokenType.SLASH_ASSIGN),
+    ("%=", TokenType.PERCENT_ASSIGN),
+    ("&=", TokenType.AND_ASSIGN),
+    ("|=", TokenType.OR_ASSIGN),
+    ("^=", TokenType.XOR_ASSIGN),
+    (".", TokenType.DOT),
+    ("+", TokenType.PLUS),
+    ("-", TokenType.MINUS),
+    ("*", TokenType.STAR),
+    ("/", TokenType.SLASH),
+    ("%", TokenType.PERCENT),
+    ("<", TokenType.LT),
+    (">", TokenType.GT),
+    ("&", TokenType.AMP),
+    ("|", TokenType.PIPE),
+    ("^", TokenType.CARET),
+    ("!", TokenType.EXCLAIM),
+    ("=", TokenType.ASSIGN),
+    ("(", TokenType.LPAREN),
+    (")", TokenType.RPAREN),
+    ("[", TokenType.LBRACKET),
+    ("]", TokenType.RBRACKET),
+    ("{", TokenType.LBRACE),
+    ("}", TokenType.RBRACE),
+    (";", TokenType.SEMICOLON),
+    (",", TokenType.COMMA),
+    (":", TokenType.COLON),
+    ("~", TokenType.TILDE),
+    ("?", TokenType.QUESTION),
+]
 
 g_token_id_to_string = {}
 g_token_string_to_id = {}

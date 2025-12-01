@@ -156,8 +156,9 @@ class YieldExitRule(ExitPointRule):
         self.return_type_annotation = return_type_annotation
     
     def get_exit_node_types(self) -> Tuple[type, ...]:
-        # yield can appear as Expr(Yield(...)) or directly as Yield
-        return (ast.Yield, ast.Expr)
+        # Only Yield expressions, not all Expr nodes
+        # Expr nodes containing Yield are handled specially in visit_Expr
+        return (ast.Yield,)
     
     def transform_exit(
         self, 

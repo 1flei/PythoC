@@ -91,9 +91,8 @@ class InlineBodyTransformer(ast.NodeTransformer):
         elif ast.Expr in self.exit_types:
             return self.exit_rule.transform_exit(node, self.context)
         
-        # Otherwise, just rename variables
-        self.generic_visit(node)
-        return node
+        # Otherwise, just rename variables (use generic_visit's return value)
+        return self.generic_visit(node)
     
     def visit_While(self, node: ast.While) -> List[ast.stmt]:
         """Transform while loop (recursively transform body)
