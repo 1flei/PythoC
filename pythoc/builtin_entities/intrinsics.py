@@ -525,7 +525,7 @@ class assume(BuiltinFunction):
         Returns:
             ValueRef containing refined type value
         """
-        from .refined import RefinedType
+        from .refined import RefinedType, refined
         from ..valueref import ValueRef
         
         if len(args) < 2:
@@ -533,161 +533,192 @@ class assume(BuiltinFunction):
         if len(node.args) < 2:
             raise TypeError("assume() requires at least 2 arguments")
         
-        # Parse predicates and tags from AST nodes
-        user_globals = {}
-        if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
-            user_globals = visitor.ctx.user_globals
-        elif hasattr(visitor, 'user_globals'):
-            user_globals = visitor.user_globals
+        # Parse arguments: first N args are values, rest are predicates/tags
+        # Form 1: assume(val1, val2, ..., valN, predicate) - multi-param predicate
+        # Form 2: assume(value, pred1/tag1, pred2/tag2, ...) - single value with constraints
         
-        # Check if last argument is a predicate (multi-param refined form)
-        # But only if there are no string tags mixed in
-        last_arg_node = node.args[-1]
+        # assume(value, constraints...) is equivalent to refined[constraints...](value)
+        # BUT: assume(val1, val2, ..., predicate) is multi-param form
+        
+        # Strategy: Check if last arg is a multi-param predicate
+        # If yes: all args except last are values, last is predicate
+        # If no: first arg is value, rest are constraints
+        
+        if len(args) < 2:
+            raise TypeError(f"assume() requires at least 2 arguments (value + constraints), got {len(args)}")
+        
+        # Check if last argument is a callable (potential predicate)
+        last_arg = args[-1]
         is_multi_param_form = False
-        multi_param_predicate = None
         
-        # First check: no string constants in args (except potentially in multi-param case)
-        has_string_tag = any(
-            isinstance(node.args[i], ast.Constant) and isinstance(node.args[i].value, str)
-            for i in range(1, len(node.args))
-        )
-        
-        # Only consider multi-param form if:
-        # 1. Last arg is a callable predicate
-        # 2. No string tags are present
-        # 3. Predicate param count matches value count
-        if not has_string_tag and isinstance(last_arg_node, ast.Name):
-            func_name = last_arg_node.id
-            if func_name in user_globals:
-                maybe_pred = user_globals[func_name]
-                if hasattr(maybe_pred, '_original_func'):
-                    maybe_pred = maybe_pred._original_func
-                if callable(maybe_pred):
-                    # Check if it's a multi-param predicate
-                    import inspect
-                    sig = inspect.signature(maybe_pred)
+        if isinstance(last_arg, ValueRef):
+            # Try to unwrap it
+            if last_arg.kind == 'python' and last_arg.value is not None and callable(last_arg.value):
+                predicate = last_arg.value
+                import inspect
+                try:
+                    sig = inspect.signature(predicate)
                     params = list(sig.parameters.values())
-                    # Multi-param if: predicate has N>1 params AND we have N values
+                    # Multi-param if predicate has N>1 params and we have N+1 total args
                     if len(params) > 1 and len(args) == len(params) + 1:
                         is_multi_param_form = True
-                        multi_param_predicate = maybe_pred
+                except:
+                    pass
+            elif last_arg.kind == 'pointer':
+                # Function pointer - need to resolve it
+                arg_idx = len(args) - 1
+                if arg_idx < len(node.args):
+                    arg_node = node.args[arg_idx]
+                    if isinstance(arg_node, ast.Name):
+                        # Look up the function in globals
+                        user_globals = {}
+                        if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
+                            user_globals = visitor.ctx.user_globals
+                        elif hasattr(visitor, 'user_globals'):
+                            user_globals = visitor.user_globals
+                        
+                        if arg_node.id in user_globals:
+                            obj = user_globals[arg_node.id]
+                            if hasattr(obj, '_original_func'):
+                                predicate = obj._original_func
+                            elif callable(obj):
+                                predicate = obj
+                            else:
+                                predicate = None
+                            
+                            if predicate:
+                                import inspect
+                                try:
+                                    sig = inspect.signature(predicate)
+                                    params = list(sig.parameters.values())
+                                    if len(params) > 1 and len(args) == len(params) + 1:
+                                        is_multi_param_form = True
+                                except:
+                                    pass
         
         if is_multi_param_form:
-            # Form: assume(val1, val2, ..., pred)
-            # All args except last are values
+            # Multi-param form: assume(val1, val2, ..., predicate)
+            # Create refined[predicate] then call with multiple values
+            # refined[predicate] handles multi-param refinement types
             value_args = args[:-1]
-            predicates = [multi_param_predicate]
-            tags = []
+            predicate_arg = args[-1]
             
-            # Get base types from predicate signature
-            import inspect
-            sig = inspect.signature(multi_param_predicate)
-            params = list(sig.parameters.values())
-            
-            from ..type_resolver import TypeResolver
-            type_resolver = TypeResolver(visitor.ctx)
-            param_types = []
-            for param in params:
-                pc_type = type_resolver.parse_annotation(param.annotation)
-                param_types.append(pc_type)
-            
-            # Promote Python values if needed
-            promoted_args = []
-            for i, (value_arg, target_type) in enumerate(zip(value_args, param_types)):
-                if isinstance(value_arg, ValueRef) and value_arg.is_python_value():
-                    value_arg = visitor.type_converter._promote_python_to_pc(
-                        value_arg.get_python_value(), target_type)
-                promoted_args.append(value_arg)
-            
-            # Create refined type from multi-param predicate
-            refined_type = cls._create_refined_type_from_predicate(
-                multi_param_predicate, param_types, visitor)
-            
-            # Call constructor with all values
-            return refined_type.handle_call(visitor, promoted_args, node)
-        
-        else:
-            # Form: assume(value, pred1, pred2, "tag1", "tag2", ...)
-            value_arg = args[0]
-            
-            predicates = []
-            tags = []
-            
-            for i in range(1, len(node.args)):
-                arg_node = node.args[i]
-                
-                # Check if it's a string literal (tag)
-                if isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str):
-                    tags.append(arg_node.value)
-                # Check if it's a name (predicate function)
-                elif isinstance(arg_node, ast.Name):
-                    func_name = arg_node.id
-                    
-                    if func_name in user_globals:
-                        predicate_func = user_globals[func_name]
-                        if hasattr(predicate_func, '_original_func'):
-                            predicate_func = predicate_func._original_func
-                        if callable(predicate_func):
-                            predicates.append(predicate_func)
-                        else:
-                            raise TypeError(f"assume() constraint must be a callable predicate, got {type(predicate_func)}")
-                    else:
-                        raise TypeError(f"assume() constraint '{func_name}' not found in globals")
+            # Unwrap predicate
+            if isinstance(predicate_arg, ValueRef):
+                if predicate_arg.kind == 'python' and predicate_arg.value is not None:
+                    pred_callable = predicate_arg.value
+                elif predicate_arg.kind == 'pointer':
+                    # Already unwrapped above
+                    pred_callable = predicate
                 else:
-                    raise TypeError(f"assume() constraint must be a predicate function or string tag, got {ast.dump(arg_node)}")
-            
-            if len(predicates) == 0 and len(tags) == 0:
-                raise TypeError("assume() requires at least one predicate or tag")
-            
-            # Get base type from value
-            if not isinstance(value_arg, ValueRef):
-                raise TypeError("assume() value must be a ValueRef")
-            
-            # If value is Python value, we need to infer its type
-            if value_arg.is_python_value():
-                py_value = value_arg.get_python_value()
-                
-                if len(predicates) > 0:
-                    # Get type from first predicate's first parameter
-                    import inspect
-                    sig = inspect.signature(predicates[0])
-                    params = list(sig.parameters.values())
-                    if len(params) > 0:
-                        from ..type_resolver import TypeResolver
-                        type_resolver = TypeResolver(visitor.ctx)
-                        base_type = type_resolver.parse_annotation(params[0].annotation)
-                    else:
-                        raise TypeError(f"Predicate {predicates[0].__name__} has no parameters")
-                else:
-                    # No predicates, only tags - use default type inference
-                    # int -> i32, float -> f64, bool -> i32
-                    if isinstance(py_value, bool):
-                        from .types import i32
-                        base_type = i32
-                    elif isinstance(py_value, int):
-                        from .types import i32
-                        base_type = i32
-                    elif isinstance(py_value, float):
-                        from .types import f64
-                        base_type = f64
-                    else:
-                        raise TypeError(f"assume() with Python value and only tags: cannot infer type for {type(py_value).__name__}")
-                
-                # Promote Python value to PC type
-                value_arg = visitor.type_converter._promote_python_to_pc(py_value, base_type)
+                    raise TypeError("assume() last argument must be a predicate")
             else:
-                if value_arg.type_hint is None:
-                    raise TypeError("assume() value must have type information")
-                base_type = value_arg.type_hint
+                pred_callable = predicate_arg
             
-            # Create refined type: refined[base_type, pred1, pred2, "tag1", "tag2"]
-            from .refined import refined
+            # Create refined[predicate]
+            refined_type = refined[pred_callable]
             
-            # Build the refined type
-            refined_type = cls._create_refined_type(base_type, predicates, tags, visitor)
+            # Call with multiple values
+            return refined_type.handle_call(visitor, value_args, node)
+        
+        # Single-param form: assume(value, pred1, pred2, tag1, tag2, ...)
+        value_arg = args[0]
+        
+        # Remaining args are constraints (predicates/tags), passed to refined[...]
+        # Need to unwrap ValueRefs to get Python objects
+        constraint_args = []
+        for arg in args[1:]:
+            if isinstance(arg, ValueRef):
+                if arg.kind == 'python' and arg.value is not None:
+                    constraint_args.append(arg.value)
+                elif arg.kind == 'pointer':
+                    # Function pointer - look up from AST node name
+                    # Find corresponding AST node
+                    arg_idx = len(constraint_args) + 1
+                    if arg_idx < len(node.args):
+                        arg_node = node.args[arg_idx]
+                        if isinstance(arg_node, ast.Name):
+                            # Look up the function in globals
+                            user_globals = {}
+                            if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
+                                user_globals = visitor.ctx.user_globals
+                            elif hasattr(visitor, 'user_globals'):
+                                user_globals = visitor.user_globals
+                            
+                            if arg_node.id in user_globals:
+                                obj = user_globals[arg_node.id]
+                                if hasattr(obj, '_original_func'):
+                                    constraint_args.append(obj._original_func)
+                                elif callable(obj):
+                                    constraint_args.append(obj)
+                                else:
+                                    raise TypeError(f"assume() constraint must be callable or string, got {type(obj)}")
+                            else:
+                                raise TypeError(f"assume() constraint '{arg_node.id}' not found")
+                        else:
+                            raise TypeError(f"assume() constraint must be a name reference")
+                    else:
+                        raise TypeError(f"Cannot resolve constraint argument")
+                else:
+                    raise TypeError(f"assume() constraint must be Python value or function reference")
+            else:
+                constraint_args.append(arg)
+        
+        # Get base type from value
+        if not isinstance(value_arg, ValueRef):
+            raise TypeError("assume() first argument must be a value")
+        
+        base_type = value_arg.type_hint
+        
+        # If value doesn't have PC type hint (None or PythonType), infer from predicate or use default
+        from .python_type import PythonType
+        needs_type_inference = (base_type is None or isinstance(base_type, PythonType))
+        
+        if needs_type_inference:
+            # Try to infer from first predicate's parameter type
+            if len(constraint_args) > 0 and callable(constraint_args[0]):
+                import inspect
+                try:
+                    sig = inspect.signature(constraint_args[0])
+                    params = list(sig.parameters.values())
+                    if len(params) > 0 and params[0].annotation != inspect.Parameter.empty:
+                        # The annotation is already a type object (e.g., i32, i64, etc.)
+                        # Don't parse it - use it directly
+                        base_type = params[0].annotation
+                        needs_type_inference = False
+                except:
+                    pass
             
-            # Call constructor with value
-            return refined_type.handle_call(visitor, [value_arg], node)
+            # If still need inference and value is Python value, use default mapping
+            if needs_type_inference and value_arg.is_python_value():
+                py_value = value_arg.get_python_value()
+                if isinstance(py_value, bool):
+                    from .types import i32
+                    base_type = i32
+                elif isinstance(py_value, int):
+                    from .types import i32
+                    base_type = i32
+                elif isinstance(py_value, float):
+                    from .types import f64
+                    base_type = f64
+                else:
+                    raise TypeError(f"Cannot infer PC type for Python value of type {type(py_value)}")
+        
+        if base_type is None or isinstance(base_type, PythonType):
+            raise TypeError("assume() value must have PC type information or provide a predicate for type inference")
+        
+        # Build refined type args: [base_type, constraints...]
+        refined_args = [base_type] + constraint_args
+        
+        # Use refined's __class_getitem__ to create the type
+        if len(refined_args) == 1:
+            refined_type = refined[refined_args[0]]
+        else:
+            refined_type = refined[tuple(refined_args)]
+        
+        # Now call the refined type constructor with the value
+        # This delegates to RefinedType.handle_call which will handle it properly
+        return refined_type.handle_call(visitor, [value_arg], node)
     
     @classmethod
     def _create_refined_type_from_predicate(cls, predicate, param_types, visitor):

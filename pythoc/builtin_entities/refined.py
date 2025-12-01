@@ -348,19 +348,26 @@ class RefinedType(CompositeType):
         """
         from ..valueref import wrap_value, ensure_ir, ValueRef
         
-        # For base + constraints: expect 1 arg
+        # For base + constraints
         if cls._base_type is not None:
-            if len(args) != 1:
-                raise TypeError(f"{cls.get_name()} takes 1 argument ({len(args)} given)")
-            
-            arg = args[0]
-            # If arg is Python value, promote it first
-            if isinstance(arg, ValueRef) and arg.is_python_value():
-                arg = visitor.type_converter._promote_python_to_pc(arg.get_python_value(), cls._base_type)
-            elif cls._base_type:
-                arg = visitor.type_converter.convert(arg, cls._base_type)
-            
-            return wrap_value(ensure_ir(arg), kind='value', type_hint=cls)
+            # Refinement types cannot be constructed from nothing
+            # Must use assume(base_value, ...) instead
+            if len(args) == 0:
+                raise TypeError(
+                    f"{cls.get_name()} cannot be constructed without arguments. "
+                    f"Refinement types must be created from a base value using assume(base_value, ...)"
+                )
+            elif len(args) == 1:
+                arg = args[0]
+                # If arg is Python value, promote it first
+                if isinstance(arg, ValueRef) and arg.is_python_value():
+                    arg = visitor.type_converter._promote_python_to_pc(arg.get_python_value(), cls._base_type)
+                elif cls._base_type:
+                    arg = visitor.type_converter.convert(arg, cls._base_type)
+                
+                return wrap_value(ensure_ir(arg), kind='value', type_hint=cls)
+            else:
+                raise TypeError(f"{cls.get_name()} takes 0 or 1 argument ({len(args)} given)")
         
         # For multi-param predicates: expect N args
         expected_count = len(cls._param_types) if cls._param_types else 0
@@ -489,12 +496,58 @@ class refined(metaclass=type):
             
             return new_refined_type
         
-        # For other cases (base + tags/predicates), return a placeholder
-        # that will be handled by _create_refined_type_from_args during compilation
-        raise TypeError(
-            f"refined[...] with multiple args or tags must be used in @compile context. "
-            f"At Python level, only refined[pred] is supported."
-        )
+        # For other cases: base + tags/predicates
+        # Parse arguments: base_type, predicates, tags
+        base_type = None
+        predicates = []
+        tags = []
+        
+        for i, arg in enumerate(args):
+            if isinstance(arg, str):
+                tags.append(arg)
+            elif callable(arg) and not isinstance(arg, type):
+                predicates.append(arg)
+            elif isinstance(arg, type):
+                if base_type is None and i == 0:
+                    base_type = arg
+                else:
+                    raise TypeError(f"refined can only have one base type at position 0")
+            else:
+                raise TypeError(f"refined argument must be a type, callable predicate, or string tag")
+        
+        if base_type is None:
+            raise TypeError("refined[...] requires a base type as first argument")
+        
+        # Validate predicates
+        for pred in predicates:
+            try:
+                sig = inspect.signature(pred)
+                params = list(sig.parameters.values())
+                if len(params) != 1:
+                    raise TypeError(f"Predicate for refined[{base_type}, ...] must have exactly one parameter")
+            except (ValueError, TypeError) as e:
+                raise TypeError(f"Cannot inspect predicate function signature: {e}")
+        
+        # Create class name
+        base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
+        pred_names = [p.__name__ for p in predicates]
+        tag_names = [f'"{t}"' for t in tags]
+        all_names = [base_name] + pred_names + tag_names
+        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('\"', '') for n in all_names)}"
+        
+        new_refined_type = type(class_name, (RefinedType,), {
+            '_base_type': base_type,
+            '_predicates': predicates,
+            '_tags': tags,
+            '_struct_type': None,
+            '_field_types': [base_type],
+            '_field_names': ['value'],
+            '_param_types': [base_type],
+            '_param_names': ['value'],
+            '_is_single_param': True,
+        })
+        
+        return new_refined_type
 
 
 __all__ = ['refined', 'RefinedType']

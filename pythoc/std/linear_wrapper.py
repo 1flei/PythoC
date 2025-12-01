@@ -20,7 +20,7 @@ Usage:
 """
 
 from ..decorators import compile
-from ..builtin_entities import linear, struct, consume
+from ..builtin_entities import linear, struct, consume, refined, assume
 from ..registry import get_unified_registry
 
 
@@ -63,7 +63,7 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
         acquire_func: Function that acquires a resource (e.g., malloc, fopen)
         release_func: Function that releases a resource (e.g., free, fclose)
         struct_name: Optional custom name for the proof struct type.
-                    If provided, returns (ProofStruct, wrapped_acquire, wrapped_release).
+                    If provided, returns (ProofType, wrapped_acquire, wrapped_release).
                     If None, returns (wrapped_acquire, wrapped_release) with raw linear.
     
     Returns:
@@ -72,10 +72,10 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
             - acquire returns struct[resource, linear]
             - release takes (resource_params..., linear)
         If struct_name is provided:
-            (ProofStruct, wrapped_acquire, wrapped_release)
-            - ProofStruct is a named struct[linear] type
-            - acquire returns struct[resource, ProofStruct]
-            - release takes (resource_params..., ProofStruct)
+            (ProofType, wrapped_acquire, wrapped_release)
+            - ProofType is a named struct[linear] type
+            - acquire returns struct[resource, ProofType]
+            - release takes (resource_params..., ProofType)
     """
     
     # Extract function information
@@ -84,32 +84,25 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
     
     # Create proof struct type
     if struct_name:
-        ProofStruct = struct[linear]
-        ProofStruct.__name__ = struct_name
-        proof_type = ProofStruct
+        ProofType = refined[linear, struct_name]
         
         # Create a helper function to make proof struct
         @compile(anonymous=True)
-        def make_proof() -> proof_type:
-            prf: proof_type
-            prf[0] = linear()
+        def make_proof() -> ProofType:
+            prf = assume(linear(), struct_name)
             return prf
-
-        @compile(anonymous=True)
-        def release_proof(prf: proof_type):
-            consume(prf[0])
     else:
-        proof_type = linear
+        ProofType = linear
         @compile(anonymous=True)
-        def make_proof() -> proof_type:
+        def make_proof() -> ProofType:
             return linear()
         
-        @compile(anonymous=True)
-        def release_proof(prf: proof_type):
-            consume(prf)
+    @compile(anonymous=True)
+    def release_proof(prf: ProofType):
+        consume(prf)
     
     # Build return struct type
-    ReturnStruct = struct[proof_type, acquire_return_type]
+    ReturnStruct = struct[ProofType, acquire_return_type]
     
     # Build acquire parameter struct
     AcquireParamsStruct = struct[tuple(acquire_param_types)]
@@ -127,12 +120,12 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
 
     # Raw linear: consume directly
     @compile(anonymous=True)
-    def wrapped_release(prf: proof_type, *args: ReleaseParams):
+    def wrapped_release(prf: ProofType, *args: ReleaseParams):
         release_func(*args)
         release_proof(prf)
     
     if struct_name:
-        return ProofStruct, wrapped_acquire, wrapped_release
+        return ProofType, wrapped_acquire, wrapped_release
     else:
         return wrapped_acquire, wrapped_release
 

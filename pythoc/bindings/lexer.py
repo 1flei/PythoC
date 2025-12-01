@@ -51,20 +51,11 @@ def lexer_destroy_raw(lex: ptr[Lexer]) -> void:
 LexerProof, lexer_create, lexer_destroy = linear_wrap(
     lexer_create_raw, lexer_destroy_raw, struct_name="LexerProof")
 
-@compile
-class TokenProof:
-    """Proof that a token holds lexer reference"""
-    inner: linear
+# TokenProof is also a refined linear type with tag
+TokenProof = refined[linear, "TokenProof"]
 
 lexer_nonnull, LexerRef = nonnull_wrap(ptr[Lexer])
 
-
-@compile
-def make_lexer_proof() -> LexerProof:
-    """Helper to create a new LexerProof"""
-    prf = LexerProof()
-    prf[0] = linear()
-    return prf
 
 @compile
 def token_release(token: Token, tk_prf: TokenProof) -> LexerProof:
@@ -79,8 +70,8 @@ def token_release(token: Token, tk_prf: TokenProof) -> LexerProof:
     Returns:
         lexer_prf: LexerProof for lexer operations
     """
-    consume(tk_prf.inner)
-    return make_lexer_proof()
+    consume(tk_prf)
+    return LexerProof()
 
 
 @compile
@@ -235,7 +226,7 @@ _single_char_tokens = [
 
 
 @compile
-def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof]:
+def lexer_next_token(lex: LexerRef, lexer_prf):
     """
     Get next token from source, consuming lexer_prf and producing tk_prf.
     
@@ -244,13 +235,13 @@ def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, Toke
     
     Args:
         lex: Lexer reference
-        lexer_prf: LexerProof proof of lexer ownership
+        lexer_prf: LexerProof (refined[linear, "LexerProof"]) proof of lexer ownership
     
     Returns:
-        (token, tk_prf): Token and TokenProof bundle
+        (token, tk_prf): Token and TokenProof (refined[linear, "TokenProof"]) bundle
     """
     # Consume lexer_prf upfront to avoid linear type issues in branches
-    consume(lexer_prf[0])
+    consume(lexer_prf)
     
     token: Token = Token()
     lexer_skip_whitespace(lex)
@@ -307,7 +298,6 @@ def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, Toke
                     token.type = TokenType.ERROR
                     lexer_advance(lex)
     
-    # Create and return token proof
-    tk_prf = TokenProof()
-    tk_prf.inner = linear()
+    # Create and return token proof using refined type
+    tk_prf = make_token_proof()
     return token, tk_prf
