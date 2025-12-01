@@ -71,7 +71,7 @@ def token_release(token: Token, tk_prf: TokenProof) -> LexerProof:
         lexer_prf: LexerProof for lexer operations
     """
     consume(tk_prf)
-    return LexerProof()
+    return assume(linear(), "LexerProof")
 
 
 @compile
@@ -226,7 +226,7 @@ _single_char_tokens = [
 
 
 @compile
-def lexer_next_token(lex: LexerRef, lexer_prf):
+def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof]:
     """
     Get next token from source, consuming lexer_prf and producing tk_prf.
     
@@ -299,5 +299,5 @@ def lexer_next_token(lex: LexerRef, lexer_prf):
                     lexer_advance(lex)
     
     # Create and return token proof using refined type
-    tk_prf = make_token_proof()
+    tk_prf: TokenProof = assume(linear(), "TokenProof")
     return token, tk_prf
