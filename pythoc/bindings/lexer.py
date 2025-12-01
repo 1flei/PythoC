@@ -16,7 +16,7 @@ from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
 
-from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string, TokenRef, token_nonnull
+from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string, TokenRef, token_nonnull, _operator_to_token
 
 
 @compile
@@ -105,6 +105,15 @@ def lexer_advance(lex: LexerRef) -> void:
         lex.col = lex.col + 1
 
 
+@inline
+def next_token_is_keyword(lex: LexerRef, keyword) -> bool:
+    """Check if current position matches keyword string"""
+    for i, ch in enumerate(keyword):
+        if lexer_peek(lex, i) != char(ch):
+            return False
+    return True
+
+
 @compile
 def lexer_skip_whitespace(lex: LexerRef) -> void:
     """Skip whitespace and comments"""
@@ -117,7 +126,7 @@ def lexer_skip_whitespace(lex: LexerRef) -> void:
             continue
         
         # Skip // line comments
-        if c == char("/") and lexer_peek(lex, 1) == char("/"):
+        if next_token_is_keyword(lex, "//"):
             lexer_advance(lex)
             lexer_advance(lex)
             while lex.pos < lex.length and lexer_current(lex) != char("\n"):
@@ -125,11 +134,11 @@ def lexer_skip_whitespace(lex: LexerRef) -> void:
             continue
         
         # Skip /* block comments */
-        if c == char("/") and lexer_peek(lex, 1) == char("*"):
+        if next_token_is_keyword(lex, "/*"):
             lexer_advance(lex)
             lexer_advance(lex)
             while lex.pos < lex.length:
-                if lexer_current(lex) == char("*") and lexer_peek(lex, 1) == char("/"):
+                if next_token_is_keyword(lex, "*/"):
                     lexer_advance(lex)
                     lexer_advance(lex)
                     break
@@ -187,16 +196,14 @@ def lexer_read_number(lex: LexerRef, token: TokenRef) -> void:
     token.start = lex.source + lex.pos
     start_pos: i32 = lex.pos
     
-    c: i8 = lexer_current(lex)
-    
     # Check for hex prefix 0x or 0X
-    if c == char("0") and (lexer_peek(lex, 1) == char("x") or lexer_peek(lex, 1) == char("X")):
+    if next_token_is_keyword(lex, "0x") or next_token_is_keyword(lex, "0X"):
         lexer_advance(lex)
         lexer_advance(lex)
     
     # Read digits, dots, and hex letters
     while lex.pos < lex.length:
-        c = lexer_current(lex)
+        c: i8 = lexer_current(lex)
         # Check if valid number character
         if isdigit(c) or c == char(".") or c == char("x") or c == char("X"):
             lexer_advance(lex)
@@ -209,20 +216,37 @@ def lexer_read_number(lex: LexerRef, token: TokenRef) -> void:
     token.type = TokenType.NUMBER
 
 
-# Generate single-char token mapping using Python metaprogramming
-_single_char_tokens = [
-    ('*', TokenType.STAR),
-    ('(', TokenType.LPAREN),
-    (')', TokenType.RPAREN),
-    ('[', TokenType.LBRACKET),
-    (']', TokenType.RBRACKET),
-    ('{', TokenType.LBRACE),
-    ('}', TokenType.RBRACE),
-    (';', TokenType.SEMICOLON),
-    (',', TokenType.COMMA),
-    (':', TokenType.COLON),
-    ('=', TokenType.EQUALS),
-]
+@compile
+def try_match_operator(lex: LexerRef, token: TokenRef) -> bool:
+    """
+    Try to match an operator at current position.
+    Uses Python metaprogramming to generate checks for all operators (longest match first).
+    
+    Returns:
+        True if an operator was matched, False otherwise
+    """
+    token.start = lex.source + lex.pos
+    
+    # Use Python metaprogramming to generate operator checks at compile time
+    # Operators are already sorted by length (descending) in _operator_to_token
+    for op_str, op_type in _operator_to_token:
+        op_len = len(op_str)
+        # Check if operator matches at current position
+        matches: bool = True
+        for i in range(op_len):
+            if lexer_peek(lex, i) != char(op_str[i]):
+                matches = False
+                break
+        
+        if matches:
+            token.type = op_type
+            token.length = op_len
+            # Advance lexer position
+            for _ in range(op_len):
+                lexer_advance(lex)
+            return True
+    
+    return False
 
 
 @compile
@@ -269,35 +293,59 @@ def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, Toke
             token_ref = assume(ptr(token), token_nonnull)
             lexer_read_number(lex, token_ref)
         else:
-            # Single character tokens and multi-char tokens
-            token.start = lex.source + lex.pos
-            token.length = 1
-            token_found: bool = False
-            
-            for ch, tok_type in _single_char_tokens:
-                if c == char(ch):
-                    token.type = tok_type
-                    lexer_advance(lex)
-                    token_found = True
-                    break
-            
-            if not token_found:
-                # Multi-character tokens
-                if c == char("."):
-                    # Check for ellipsis '...'
-                    if lexer_peek(lex, 1) == char(".") and lexer_peek(lex, 2) == char("."):
-                        token.type = TokenType.ELLIPSIS
-                        token.length = 3
-                        lexer_advance(lex)
-                        lexer_advance(lex)
-                        lexer_advance(lex)
-                        token_found = True
-                
-                if not token_found:
-                    # Unknown character - treat as error
-                    token.type = TokenType.ERROR
-                    lexer_advance(lex)
+            # Operators and punctuation - use unified operator matching
+            token_ref = assume(ptr(token), token_nonnull)
+            if not try_match_operator(lex, token_ref):
+                # Unknown character - treat as error
+                token.type = TokenType.ERROR
+                token.start = lex.source + lex.pos
+                token.length = 1
+                lexer_advance(lex)
     
     # Create and return token proof using refined type
     tk_prf: TokenProof = assume(linear(), "TokenProof")
     return token, tk_prf
+
+
+@compile
+def lex_tokens(source: ptr[i8]) -> Token:
+    """
+    Yield-based iterator for lexing tokens from source.
+    Usage: for token in lex_tokens(source): ...
+    """
+    lex = lexer_create_raw(source)
+    lex_ref = assume(lex, lexer_nonnull)
+    
+    while lex.pos < lex.length:
+        token: Token = Token()
+        lexer_skip_whitespace(lex_ref)
+        
+        if lex.pos >= lex.length:
+            break
+        
+        token.line = lex.line
+        token.col = lex.col
+        
+        c: i8 = lexer_current(lex_ref)
+        
+        if isalpha(c) or c == char("_"):
+            token_ref = assume(ptr(token), token_nonnull)
+            lexer_read_identifier(lex_ref, token_ref)
+            yield token
+        elif isdigit(c):
+            token_ref = assume(ptr(token), token_nonnull)
+            lexer_read_number(lex_ref, token_ref)
+            yield token
+        else:
+            # Operators and punctuation - use unified operator matching
+            token_ref = assume(ptr(token), token_nonnull)
+            if try_match_operator(lex_ref, token_ref):
+                yield token
+            else:
+                # Unknown character - treat as error
+                token.type = TokenType.ERROR
+                token.start = lex.source + lex.pos
+                token.length = 1
+                lexer_advance(lex_ref)
+    
+    lexer_destroy_raw(lex)

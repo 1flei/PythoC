@@ -76,7 +76,8 @@ def create_yield_iterator_wrapper(func, func_ast, analyzer, user_globals, source
         # The actual value doesn't matter - only _yield_inline_info is used
         result = ValueRef('python', placeholder_wrapper, PythonType(placeholder_wrapper))
         result._yield_inline_info = {
-            'func_obj': placeholder_wrapper,
+            'func_obj': func,  # Use original function to access its __globals__
+            'placeholder': placeholder_wrapper,
             'original_ast': func_ast,
             'call_node': node,
             'call_args': args

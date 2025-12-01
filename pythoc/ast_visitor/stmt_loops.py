@@ -120,10 +120,14 @@ class LoopsMixin:
         adapter = YieldInlineAdapter(self)
         inline_info = iter_val._yield_inline_info
         
-        inlined_stmts = adapter.try_inline_for_loop(
+        # Extract func_obj to get its __globals__
+        func_obj = inline_info.get('func_obj', None)
+        
+        inlined_stmts, old_user_globals = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
-            inline_info['call_node']
+            inline_info['call_node'],
+            func_obj=func_obj
         )
         
         if inlined_stmts is None:
@@ -135,21 +139,51 @@ class LoopsMixin:
         
         logger.debug(f"Successfully inlined yield function using universal kernel")
         
-        # If there's an else clause, we need to track if break occurred
-        if node.orelse:
-            # Create blocks for else handling
-            else_block = self.current_function.append_basic_block(self.get_next_label("for_else"))
-            after_else = self.current_function.append_basic_block(self.get_next_label("after_for_else"))
-            
-            # Allocate a flag to track if break occurred
-            break_flag = self._create_alloca_in_entry(ir.IntType(1), "for_break_flag")
-            self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
-            
-            # Store break flag in loop context for break statement to set
-            old_break_flag = getattr(self, '_current_break_flag', None)
-            self._current_break_flag = break_flag
-            
-            try:
+        try:
+            # If there's an else clause, we need to track if break occurred
+            if node.orelse:
+                # Create blocks for else handling
+                else_block = self.current_function.append_basic_block(self.get_next_label("for_else"))
+                after_else = self.current_function.append_basic_block(self.get_next_label("after_for_else"))
+                
+                # Allocate a flag to track if break occurred
+                break_flag = self._create_alloca_in_entry(ir.IntType(1), "for_break_flag")
+                self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
+                
+                # Store break flag in loop context for break statement to set
+                old_break_flag = getattr(self, '_current_break_flag', None)
+                self._current_break_flag = break_flag
+                
+                try:
+                    # Fix all missing locations in inlined statements
+                    for stmt in inlined_stmts:
+                        ast.fix_missing_locations(stmt)
+                    
+                    # Visit each inlined statement
+                    for stmt in inlined_stmts:
+                        if not self.builder.block.is_terminated:
+                            self.visit(stmt)
+                    
+                    # After loop completes, check break flag
+                    if not self.builder.block.is_terminated:
+                        broke = self.builder.load(break_flag, "broke")
+                        self.builder.cbranch(broke, after_else, else_block)
+                    
+                    # Else block: execute if no break
+                    self.builder.position_at_end(else_block)
+                    for stmt in node.orelse:
+                        if not self.builder.block.is_terminated:
+                            self.visit(stmt)
+                    
+                    if not self.builder.block.is_terminated:
+                        self.builder.branch(after_else)
+                    
+                    # Continue after for-else
+                    self.builder.position_at_end(after_else)
+                finally:
+                    self._current_break_flag = old_break_flag
+            else:
+                # No else clause, process normally
                 # Fix all missing locations in inlined statements
                 for stmt in inlined_stmts:
                     ast.fix_missing_locations(stmt)
@@ -158,35 +192,10 @@ class LoopsMixin:
                 for stmt in inlined_stmts:
                     if not self.builder.block.is_terminated:
                         self.visit(stmt)
-                
-                # After loop completes, check break flag
-                if not self.builder.block.is_terminated:
-                    broke = self.builder.load(break_flag, "broke")
-                    self.builder.cbranch(broke, after_else, else_block)
-                
-                # Else block: execute if no break
-                self.builder.position_at_end(else_block)
-                for stmt in node.orelse:
-                    if not self.builder.block.is_terminated:
-                        self.visit(stmt)
-                
-                if not self.builder.block.is_terminated:
-                    self.builder.branch(after_else)
-                
-                # Continue after for-else
-                self.builder.position_at_end(after_else)
-            finally:
-                self._current_break_flag = old_break_flag
-        else:
-            # No else clause, process normally
-            # Fix all missing locations in inlined statements
-            for stmt in inlined_stmts:
-                ast.fix_missing_locations(stmt)
-            
-            # Visit each inlined statement
-            for stmt in inlined_stmts:
-                if not self.builder.block.is_terminated:
-                    self.visit(stmt)
+        finally:
+            # CRITICAL: Restore globals after visiting all inlined statements
+            if old_user_globals is not None:
+                self.ctx.user_globals = old_user_globals
 
     def _visit_for_with_constant_unroll(self, node: ast.For, py_iterable):
         """Unroll for loop at compile time for constant iterables

@@ -39,8 +39,9 @@ class YieldInlineAdapter:
         self,
         for_node: ast.For,
         func_ast: ast.FunctionDef,
-        call_node: ast.Call
-    ) -> Optional[List[ast.stmt]]:
+        call_node: ast.Call,
+        func_obj=None
+    ):
         """
         Try to inline a for loop over a yield function
         
@@ -48,18 +49,20 @@ class YieldInlineAdapter:
             for_node: The for loop AST node
             func_ast: The yield function's AST
             call_node: The original call AST node
+            func_obj: Original function object (to access __globals__)
             
         Returns:
-            List of inlined statements, or None if inlining not possible
+            (inlined_stmts, old_user_globals) tuple if successful, (None, None) if failed
+            Caller MUST restore user_globals after visiting the statements!
         """
         # Validate basic requirements
         if not self._is_inlinable(func_ast):
-            return None
+            return (None, None)
         
         # Get loop variable name
         loop_var = self._extract_loop_var(for_node)
         if not loop_var:
-            return None
+            return (None, None)
         
         # Extract call arguments from call node
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
@@ -79,44 +82,83 @@ class YieldInlineAdapter:
             return_type_annotation=return_type_annotation
         )
         
-        # Create inline operation
-        try:
-            op = self.kernel.create_inline_op(
-                callee_func=func_ast,
-                call_site=for_node.iter,  # The call expression
-                call_args=call_args,
-                caller_context=caller_context,
-                exit_rule=exit_rule
-            )
-        except Exception as e:
-            # If kernel rejects the operation, cannot inline
+        # CRITICAL: Merge callee's globals into visitor's user_globals
+        # This allows inlined code to access functions/builtins from the original module
+        # NOTE: Caller MUST restore globals after visiting returned statements!
+        if func_obj and hasattr(func_obj, '__globals__'):
             from ..logger import logger
-            logger.debug(f"Kernel rejected yield inline: {e}")
-            return None
+            logger.debug(f"Merging globals from func_obj: {func_obj}")
+            logger.debug(f"func_obj.__globals__ has {len(func_obj.__globals__)} keys")
+            old_user_globals = self.visitor.ctx.user_globals
+            # Create merged globals: callee's globals + current globals
+            # Current globals take precedence (to avoid overriding)
+            merged_globals = dict(func_obj.__globals__)
+            if old_user_globals:
+                merged_globals.update(old_user_globals)
+            self.visitor.ctx.user_globals = merged_globals
+            logger.debug(f"Merged user_globals now has {len(self.visitor.ctx.user_globals)} keys")
+            if 'assume' in self.visitor.ctx.user_globals:
+                logger.debug("'assume' IS in merged user_globals")
+            else:
+                logger.debug("'assume' NOT in merged user_globals")
+                logger.debug(f"Keys in merged globals: {list(self.visitor.ctx.user_globals.keys())}")
+        else:
+            from ..logger import logger
+            logger.debug(f"NOT merging globals: func_obj={func_obj}, has__globals__={hasattr(func_obj, '__globals__') if func_obj else 'N/A'}")
+            old_user_globals = None
         
-        # Execute inlining
         try:
-            inlined_stmts = self.kernel.execute_inline(op)
-            
-            # CRITICAL: Pre-declare loop variable before the inlined statements
-            # This is needed because yield points will only assign to it, not declare it
-            if return_type_annotation and inlined_stmts:
-                loop_var_decl = ast.AnnAssign(
-                    target=ast.Name(id=loop_var, ctx=ast.Store()),
-                    annotation=copy.deepcopy(return_type_annotation),
-                    value=None,  # No initial value, just declaration
-                    simple=1
+            # Create inline operation
+            try:
+                op = self.kernel.create_inline_op(
+                    callee_func=func_ast,
+                    call_site=for_node.iter,  # The call expression
+                    call_args=call_args,
+                    caller_context=caller_context,
+                    exit_rule=exit_rule
                 )
-                ast.copy_location(loop_var_decl, for_node)
-                inlined_stmts.insert(0, loop_var_decl)
+            except Exception as e:
+                # If kernel rejects the operation, cannot inline
+                from ..logger import logger
+                logger.debug(f"Kernel rejected yield inline: {e}")
+                return (None, None)
             
-            return inlined_stmts
+            # Execute inlining
+            try:
+                from ..logger import logger
+                logger.debug(f"Before execute_inline: user_globals has {len(self.visitor.ctx.user_globals)} keys, 'assume' in it: {'assume' in self.visitor.ctx.user_globals}")
+                inlined_stmts = self.kernel.execute_inline(op)
+                logger.debug(f"After execute_inline: user_globals has {len(self.visitor.ctx.user_globals)} keys, 'assume' in it: {'assume' in self.visitor.ctx.user_globals}")
+                
+                # CRITICAL: Pre-declare loop variable before the inlined statements
+                # This is needed because yield points will only assign to it, not declare it
+                if return_type_annotation and inlined_stmts:
+                    loop_var_decl = ast.AnnAssign(
+                        target=ast.Name(id=loop_var, ctx=ast.Store()),
+                        annotation=copy.deepcopy(return_type_annotation),
+                        value=None,  # No initial value, just declaration
+                        simple=1
+                    )
+                    ast.copy_location(loop_var_decl, for_node)
+                    inlined_stmts.insert(0, loop_var_decl)
+                
+                # Return the statements AND old_user_globals for caller to restore
+                # Caller MUST restore globals after visiting all statements!
+                return (inlined_stmts, old_user_globals)
+            except Exception as e:
+                from ..logger import logger
+                logger.warning(f"Yield inlining failed: {e}")
+                import traceback
+                logger.warning(traceback.format_exc())
+                # Restore globals before returning on error
+                if old_user_globals is not None:
+                    self.visitor.ctx.user_globals = old_user_globals
+                return (None, None)
         except Exception as e:
-            from ..logger import logger
-            logger.warning(f"Yield inlining failed: {e}")
-            import traceback
-            logger.warning(traceback.format_exc())
-            return None
+            # Restore globals on any outer exception
+            if old_user_globals is not None:
+                self.visitor.ctx.user_globals = old_user_globals
+            raise
     
     def _extract_loop_var(self, for_node: ast.For) -> Optional[str]:
         """Extract loop variable name from for node"""
