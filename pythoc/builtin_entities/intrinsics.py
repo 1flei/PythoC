@@ -490,23 +490,33 @@ class consume(BuiltinFunction):
 
 
 class assume(BuiltinFunction):
-    """assume(value, pred1, pred2, "tag1", "tag2", ...) -> refined[T, pred1, pred2, "tag1", "tag2"]
+    """assume(value, pred1, pred2, "tag1", "tag2", ...) -> refined type
     
     Create a refined type instance without checking the predicates.
     Supports multiple predicates and tags.
     
-    Use when:
-    - You know the value satisfies the predicates
-    - Performance is critical and validation is unnecessary
-    - The predicates have already been checked elsewhere
+    Forms:
+    1. Single value: assume(value, pred1, pred2, "tag1", ...)
+       - Multiple predicates/tags supported
+       
+    2. Multi-value (auto-detect): assume(val1, val2, predicate)
+       - Last arg is N-param predicate, first N args are values
+       - Only ONE predicate supported (auto-detected)
+       
+    3. Multi-value (explicit): assume((val1, val2), pred1, pred2, "tag1", ...)
+       - First arg is tuple of values
+       - Multiple predicates/tags supported
     
     Example:
-        def is_positive(x: i32) -> bool:
-            return x > 0
-        
+        # Single value
         x = assume(5, is_positive)  # refined[i32, is_positive]
-        ptr = assume(p, "owned")    # refined[ptr[T], "owned"]
         y = assume(10, is_positive, "validated")  # refined[i32, is_positive, "validated"]
+        
+        # Multi-value auto-detect
+        r = assume(10, 20, is_valid_range)  # refined[is_valid_range]
+        
+        # Multi-value explicit
+        r = assume((10, 20), pred1, pred2, "tag")  # refined[pred1, pred2, "tag"]
     """
     
     @classmethod
