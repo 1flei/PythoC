@@ -9,7 +9,7 @@ Design: Uses linear types to ensure token lifetime is within lexer lifetime.
 - lexer_destroy() consumes lexer_prf
 """
 
-from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refined, linear, struct, consume, assume
+from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refine, refined, linear, struct, consume, assume
 from pythoc.std.linear_wrapper import linear_wrap
 from pythoc.std.refine_wrapper import nonnull_wrap
 from pythoc.libc.stdlib import malloc, free
@@ -250,23 +250,14 @@ def try_match_operator(lex: LexerRef, token: TokenRef) -> bool:
 
 
 @compile
-def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof]:
+def lexer_next_token_impl(lex: LexerRef) -> Token:
     """
     Get next token from source, consuming lexer_prf and producing tk_prf.
     
     The returned tk_prf must be released via token_release() to get lexer_prf back,
     ensuring token lifetime is within lexer lifetime.
-    
-    Args:
-        lex: Lexer reference
-        lexer_prf: LexerProof (refined[linear, "LexerProof"]) proof of lexer ownership
-    
-    Returns:
-        (token, tk_prf): Token and TokenProof (refined[linear, "TokenProof"]) bundle
     """
     # Consume lexer_prf upfront to avoid linear type issues in branches
-    consume(lexer_prf)
-    
     token: Token = Token()
     lexer_skip_whitespace(lex)
     
@@ -301,51 +292,38 @@ def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, Toke
                 token.start = lex.source + lex.pos
                 token.length = 1
                 lexer_advance(lex)
+    return token
+
+
+@compile
+def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof]:
+    """Get next token with proof so it can not be used out of the lifetime of lexerproof"""
+    token: Token = lexer_next_token_impl(lex)
     
     # Create and return token proof using refined type
+    consume(lexer_prf)
     tk_prf: TokenProof = assume(linear(), "TokenProof")
     return token, tk_prf
 
 
 @compile
-def lex_tokens(source: ptr[i8]) -> Token:
+def lex_tokens(lex: LexerRef) -> Token:
     """
-    Yield-based iterator for lexing tokens from source.
-    Usage: for token in lex_tokens(source): ...
+    Yield-based iterator for lexing tokens from lex.
     """
-    lex = lexer_create_raw(source)
-    lex_ref = assume(lex, lexer_nonnull)
-    
     while lex.pos < lex.length:
-        token: Token = Token()
-        lexer_skip_whitespace(lex_ref)
-        
-        if lex.pos >= lex.length:
-            break
-        
-        token.line = lex.line
-        token.col = lex.col
-        
-        c: i8 = lexer_current(lex_ref)
-        
-        if isalpha(c) or c == char("_"):
-            token_ref = assume(ptr(token), token_nonnull)
-            lexer_read_identifier(lex_ref, token_ref)
+        token: Token = lexer_next_token_impl(lex)
+        yield token
+
+
+@compile
+def tokens_from_source(source: ptr[i8]) -> Token:
+    """
+    Yield-based iterator for lexing tokens from lex.
+    """
+    prf, lex_raw = lexer_create(source)
+    for lex in refine(lex_raw, lexer_nonnull):
+        while lex.pos < lex.length:
+            token: Token = lexer_next_token_impl(lex)
             yield token
-        elif isdigit(c):
-            token_ref = assume(ptr(token), token_nonnull)
-            lexer_read_number(lex_ref, token_ref)
-            yield token
-        else:
-            # Operators and punctuation - use unified operator matching
-            token_ref = assume(ptr(token), token_nonnull)
-            if try_match_operator(lex_ref, token_ref):
-                yield token
-            else:
-                # Unknown character - treat as error
-                token.type = TokenType.ERROR
-                token.start = lex.source + lex.pos
-                token.length = 1
-                lexer_advance(lex_ref)
-    
-    lexer_destroy_raw(lex)
+    lexer_destroy(prf, lex_raw)
