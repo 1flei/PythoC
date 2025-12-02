@@ -188,7 +188,8 @@ class LLVMCompiler:
             self.module = self.create_module()
             self.compiled_functions.clear()
         
-        # Check if function already exists in module
+        # Check if function already exists in module (e.g., from forward declaration)
+        existing_func = None
         try:
             existing_func = self.module.get_global(ast_node.name) if ast_node.name else None
         except KeyError:
@@ -277,9 +278,17 @@ class LLVMCompiler:
         if ast_node.args.vararg:
             logger.debug(f"Func_name={ast_node.name}, Vararg_kind={varargs_kind}, has_llvm_varargs={has_llvm_varargs}")
         
-        # Create function type and declaration
+        # Create function type and declaration (or reuse existing forward declaration)
         func_type = ir.FunctionType(return_type, param_types, var_arg=has_llvm_varargs)
-        llvm_function = ir.Function(self.module, func_type, ast_node.name)
+        
+        if existing_func is not None and isinstance(existing_func, ir.Function):
+            # Reuse existing forward declaration
+            llvm_function = existing_func
+            # Note: We trust that forward declaration has correct type
+            # since it was generated from the same FunctionInfo
+        else:
+            # Create new function
+            llvm_function = ir.Function(self.module, func_type, ast_node.name)
         
         # Set parameter names
         # For struct varargs, the expanded parameters are added to the end

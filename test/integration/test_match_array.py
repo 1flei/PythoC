@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i32, compile, array
-from pythoc.decorators import clear_registry
 import unittest
 
 
@@ -253,12 +252,6 @@ def test_array_larger_general() -> i32:
 
 class TestMatchArrayPatterns(unittest.TestCase):
     """Test array pattern feature"""
-    
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
     
     def test_array_literal_match(self):
         self.assertEqual(test_array_literal_123(), 123)

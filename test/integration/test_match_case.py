@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i32, compile
-from pythoc.decorators import clear_registry
 
 
 @compile
@@ -205,12 +204,6 @@ import unittest
 
 
 class TestMatchCase(unittest.TestCase):
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
-    
     def test_simple_match(self):
         self.assertEqual(match_simple(), 20)
     

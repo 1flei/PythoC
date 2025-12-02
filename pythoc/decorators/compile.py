@@ -327,33 +327,45 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
     compiler = group['compiler']
     skip_codegen = group['skip_codegen']
     
-    # Only compile if not skipping
+    # Queue compilation callback instead of compiling immediately
+    # This enables two-pass compilation for mutual recursion support
     if not skip_codegen:
-        # Determine reset_module based on group state
-        reset_module = len(group['wrappers']) == 0 and not is_dynamic
+        # Capture variables for the callback closure
+        _func_ast = func_ast
+        _func_source = func_source
+        _param_type_hints = param_type_hints
+        _return_type_hint = return_type_hint
+        _user_globals = user_globals
+        _is_dynamic = is_dynamic
+        _source_file = source_file
+        _registry = registry
         
-        # Compile the function into group's compiler
-        logger.debug(f"About to compile {func_ast.name}, user_globals={'None' if user_globals is None else f'dict with {len(user_globals)} keys'}, push_size={user_globals.get('push_size') if user_globals else 'N/A'}")
-        compiler.compile_function_from_ast(
-            func_ast,
-            func_source,
-            reset_module=reset_module,
-            param_type_hints=param_type_hints,
-            return_type_hint=return_type_hint,
-            user_globals=user_globals,
-        )
+        def compile_callback(comp):
+            """Deferred compilation callback"""
+            # Compile the function into group's compiler
+            logger.debug(f"Deferred compile {_func_ast.name}")
+            comp.compile_function_from_ast(
+                _func_ast,
+                _func_source,
+                reset_module=False,  # Never reset since forward declarations exist
+                param_type_hints=_param_type_hints,
+                return_type_hint=_return_type_hint,
+                user_globals=_user_globals,
+            )
+            
+            # After compilation, scan for declared functions and record dependencies
+            if not hasattr(comp, 'imported_user_functions'):
+                comp.imported_user_functions = {}
+            for name, value in comp.module.globals.items():
+                if hasattr(value, 'is_declaration') and value.is_declaration:
+                    dep_func_info = _registry.get_function_info(name)
+                    if not dep_func_info:
+                        dep_func_info = _registry.get_function_info_by_mangled(name)
+                    if dep_func_info and dep_func_info.source_file and dep_func_info.source_file != _source_file:
+                        comp.imported_user_functions[name] = dep_func_info.source_file
         
-        # After compilation, scan for declared functions and record dependencies
-        if not hasattr(compiler, 'imported_user_functions'):
-            compiler.imported_user_functions = {}
-        for name, value in compiler.module.globals.items():
-            if hasattr(value, 'is_declaration') and value.is_declaration:
-                func_info = registry.get_function_info(name)
-                if not func_info:
-                    # Try mangled name (for suffix-specialized functions)
-                    func_info = registry.get_function_info_by_mangled(name)
-                if func_info and func_info.source_file and func_info.source_file != source_file:
-                    compiler.imported_user_functions[name] = func_info.source_file
+        # Queue the compilation callback for deferred two-pass compilation
+        output_manager.queue_compilation(group_key, compile_callback, func_info)
     
     # Setup wrapper attributes
     wrapper._compiler = compiler

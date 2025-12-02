@@ -375,62 +375,83 @@ def test_extract_file():
 # Error cases
 # ============================================================================
 
+from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
+import os
+
 def test_error_dual_not_consumed():
     """Test error when not all tokens in dual are consumed"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_dual_not_consumed')
     try:
-        @compile(suffix="bad")
+        @compile(suffix="bad_dual_not_consumed")
         def bad_dual_not_consumed():
             dt = make_dual_token()
             consume(dt[0])
             # ERROR: dt[1] not consumed
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_dual_not_consumed failed - should have raised TypeError")
     except TypeError as e:
         if "not consumed" in str(e):
             print(f"OK test_error_dual_not_consumed passed: {e}")
         else:
             print(f"FAIL test_error_dual_not_consumed failed - wrong error: {e}")
+    finally:
+        # Clean up failed group
+        clear_failed_group(group_key)
 
 
 def test_error_nested_not_consumed():
     """Test error when nested resource not fully consumed"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_nested_not_consumed')
     try:
-        @compile(suffix="bad")
+        @compile(suffix="bad_nested_not_consumed")
         def bad_nested_not_consumed():
             nr = make_nested_resource()
             lfree(nr.mem[0], nr.mem[1])
             # ERROR: nr.file not consumed
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_nested_not_consumed failed - should have raised TypeError")
     except TypeError as e:
         if "not consumed" in str(e):
             print(f"OK test_error_nested_not_consumed passed: {e}")
         else:
             print(f"FAIL test_error_nested_not_consumed failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_double_consume_in_dual():
     """Test error when consuming same field twice in dual"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_double_consume')
     try:
-        @compile(suffix="bad")
+        @compile(suffix="bad_double_consume")
         def bad_double_consume():
             dt = make_dual_token()
             consume(dt[0])
             consume(dt[0])  # ERROR: already consumed
             consume(dt[1])
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_double_consume_in_dual failed - should have raised TypeError")
     except TypeError as e:
         if "already consumed" in str(e):
             print(f"OK test_error_double_consume_in_dual passed: {e}")
         else:
             print(f"FAIL test_error_double_consume_in_dual failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_inconsistent_if_composite():
     """Test error when if/else inconsistently consume composite"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_inconsistent_if')
     try:
-        @compile(suffix="bad")
+        @compile(suffix="bad_inconsistent_if")
         def bad_inconsistent_if(cond: i32):
             dt = make_dual_token()
             if cond:
@@ -440,18 +461,23 @@ def test_error_inconsistent_if_composite():
                 consume(dt[0])
                 # ERROR: dt[1] not consumed in this branch
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_inconsistent_if_composite failed - should have raised TypeError")
     except TypeError as e:
         if "consistently" in str(e).lower() or "not consumed" in str(e):
             print(f"OK test_error_inconsistent_if_composite passed: {e}")
         else:
             print(f"FAIL test_error_inconsistent_if_composite failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_loop_external_composite():
     """Test error when loop tries to consume external composite token"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_loop_external')
     try:
-        @compile(suffix="bad")
+        @compile(suffix="bad_loop_external")
         def bad_loop_external():
             dt = make_dual_token()
             i: i32 = 0
@@ -460,12 +486,15 @@ def test_error_loop_external_composite():
                 i = i + 1
             consume(dt[1])
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_loop_external_composite failed - should have raised TypeError")
     except TypeError as e:
         if "external" in str(e).lower() or "scope" in str(e).lower():
             print(f"OK test_error_loop_external_composite passed: {e}")
         else:
             print(f"FAIL test_error_loop_external_composite failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 # ============================================================================

@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i32, compile
-from pythoc.decorators import clear_registry
 import unittest
 
 
@@ -145,12 +144,6 @@ def test_range_mixed_with_literal(x: i32) -> i32:
 class TestMatchGuardClauses(unittest.TestCase):
     """Test guard clause feature"""
     
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
-    
     def test_guard_simple_positive(self):
         self.assertEqual(test_guard_simple(5), 1)
     
@@ -186,12 +179,6 @@ class TestMatchGuardClauses(unittest.TestCase):
 
 class TestMatchRanges(unittest.TestCase):
     """Test integer range feature"""
-    
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
     
     def test_range_basic_first(self):
         self.assertEqual(test_range_basic(5), 1)

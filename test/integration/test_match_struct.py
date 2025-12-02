@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i32, compile
-from pythoc.decorators import clear_registry
 import unittest
 
 
@@ -419,12 +418,6 @@ def test_struct_tuple_3d() -> i32:
 class TestMatchStructDestructuring(unittest.TestCase):
     """Test struct destructuring feature"""
     
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
-    
     def test_struct_literal_origin(self):
         self.assertEqual(test_struct_literal_origin(), 0)
     
@@ -488,12 +481,6 @@ class TestMatchStructDestructuring(unittest.TestCase):
 
 class TestMatchStructTupleSyntax(unittest.TestCase):
     """Test struct matching with tuple syntax"""
-    
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
     
     def test_tuple_literal(self):
         self.assertEqual(test_struct_tuple_literal(), 100)
