@@ -7,8 +7,10 @@ Each test should raise a specific error during compilation.
 """
 
 import sys
+import os
 from pythoc import compile, i32, bool
 from pythoc.builtin_entities import refined, assume, refine
+from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
 
 
 # Predicate definitions
@@ -54,17 +56,20 @@ def test_assume_without_constraints():
     EXPECTED FAILURE: assume() requires at least one predicate or tag
     """
     print("Test: assume() without constraints (should fail)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_assume_no_constraints')
     try:
-        @compile
+        @compile(suffix="bad_assume_no_constraints")
         def should_fail() -> i32:
             # This should fail: no constraints provided
             x = assume(10)  # ERROR: need at least one constraint
             return x
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("  FAIL: Should have raised TypeError but didn't")
         return False
     except TypeError as e:
-        if "at least" in str(e) or "constraint" in str(e):
+        if "at least" in str(e) or "constraint" in str(e) or "argument" in str(e):
             print(f"  PASS: Got expected error: {e}")
             return True
         else:
@@ -73,6 +78,8 @@ def test_assume_without_constraints():
     except Exception as e:
         print(f"  FAIL: Got unexpected exception: {type(e).__name__}: {e}")
         return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_refine_without_constraints():
@@ -80,8 +87,10 @@ def test_refine_without_constraints():
     EXPECTED FAILURE: refine() requires at least one predicate or tag
     """
     print("Test: refine() without constraints (should fail)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_refine_no_constraints')
     try:
-        @compile
+        @compile(suffix="bad_refine_no_constraints")
         def should_fail_refine_no_constraints() -> i32:
             # This should fail: no constraints provided
             for x in refine(10):  # ERROR: need at least one constraint
@@ -89,6 +98,7 @@ def test_refine_without_constraints():
             else:
                 return -1
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("  FAIL: Should have raised TypeError but didn't")
         return False
     except TypeError as e:
@@ -101,6 +111,8 @@ def test_refine_without_constraints():
     except Exception as e:
         print(f"  FAIL: Got unexpected exception: {type(e).__name__}: {e}")
         return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_assume_non_callable_constraint():
@@ -108,13 +120,16 @@ def test_assume_non_callable_constraint():
     EXPECTED FAILURE: assume() constraint must be callable or string
     """
     print("Test: assume() with non-callable constraint (should fail)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_assume_non_callable')
     try:
-        @compile
+        @compile(suffix="bad_assume_non_callable")
         def should_fail_non_callable() -> i32:
             # This should fail: 123 is not a predicate or tag
             x = assume(10, 123)  # ERROR: not callable
             return x
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("  FAIL: Should have raised TypeError but didn't")
         return False
     except (TypeError, AttributeError) as e:
@@ -123,6 +138,8 @@ def test_assume_non_callable_constraint():
     except Exception as e:
         print(f"  FAIL: Got unexpected exception: {type(e).__name__}: {e}")
         return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_refine_used_outside_for_loop():
@@ -133,13 +150,16 @@ def test_refine_used_outside_for_loop():
     or be caught by static analysis
     """
     print("Test: refine() used outside for loop (should fail or warn)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_refine_outside_for')
     try:
-        @compile
+        @compile(suffix="bad_refine_outside_for")
         def should_fail_refine_outside() -> i32:
             # This should fail or warn: refine() outside for loop
             x = refine(10, is_positive)  # ERROR: must be in for loop
             return 1
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         # If it compiled, try to run it
         try:
             result = should_fail_refine_outside()
@@ -151,6 +171,8 @@ def test_refine_used_outside_for_loop():
     except Exception as e:
         print(f"  PASS: Got expected error: {e}")
         return True
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_wrong_number_of_args_multiarg():
@@ -158,17 +180,20 @@ def test_wrong_number_of_args_multiarg():
     EXPECTED FAILURE: Multi-arg predicate expects specific number of values
     """
     print("Test: Wrong number of args for multi-arg predicate (should fail)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_wrong_args')
     try:
-        @compile
+        @compile(suffix="bad_wrong_args_helper")
         def is_valid_range_test(start: i32, end: i32) -> bool:
             return start <= end
         
-        @compile
+        @compile(suffix="bad_wrong_args")
         def should_fail_wrong_args() -> i32:
             # is_valid_range expects 2 args, but we provide 3
             r = assume(10, 20, 30, is_valid_range_test)  # ERROR: wrong arg count
             return r.start
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("  FAIL: Should have raised TypeError but didn't")
         return False
     except (TypeError, AttributeError) as e:
@@ -177,6 +202,9 @@ def test_wrong_number_of_args_multiarg():
     except Exception as e:
         print(f"  FAIL: Got unexpected exception: {type(e).__name__}: {e}")
         return False
+    finally:
+        clear_failed_group(group_key)
+        clear_failed_group((source_file, 'module', 'bad_wrong_args_helper'))
 
 
 def test_mixing_multiarg_with_tags():
@@ -186,17 +214,20 @@ def test_mixing_multiarg_with_tags():
     Note: This might be allowed in the future, but currently should fail
     """
     print("Test: Mixing multi-arg predicate with tags (should fail)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_mixed_forms')
     try:
-        @compile
+        @compile(suffix="bad_mixed_forms_helper")
         def is_valid_range_test2(start: i32, end: i32) -> bool:
             return start <= end
         
-        @compile
+        @compile(suffix="bad_mixed_forms")
         def should_fail_mixed_forms() -> i32:
             # Cannot mix multi-arg form with tags
             r = assume(10, 20, is_valid_range_test2, "validated")  # ERROR: mixed forms
             return r.start
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("  FAIL: Should have raised error but didn't")
         return False
     except (TypeError, AttributeError, SyntaxError) as e:
@@ -206,6 +237,9 @@ def test_mixing_multiarg_with_tags():
         # Might succeed if implementation allows it
         print(f"  WARNING: Compiled successfully, implementation may support mixed forms")
         return True
+    finally:
+        clear_failed_group(group_key)
+        clear_failed_group((source_file, 'module', 'bad_mixed_forms_helper'))
 
 
 def test_predicate_not_found():
@@ -213,13 +247,16 @@ def test_predicate_not_found():
     EXPECTED FAILURE: Predicate function not found in globals
     """
     print("Test: Predicate not found (should fail)...")
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_not_found')
     try:
-        @compile
+        @compile(suffix="bad_not_found")
         def should_fail_not_found() -> i32:
             # nonexistent_pred is not defined
             x = assume(10, nonexistent_pred)  # ERROR: not found
             return x
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("  FAIL: Should have raised NameError or TypeError but didn't")
         return False
     except (NameError, TypeError) as e:
@@ -228,6 +265,8 @@ def test_predicate_not_found():
     except Exception as e:
         print(f"  FAIL: Got unexpected exception: {type(e).__name__}: {e}")
         return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def main():

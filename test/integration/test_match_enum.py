@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i8, i32, compile, ptr, enum
-from pythoc.decorators import clear_registry
 import unittest
 
 
@@ -407,12 +406,6 @@ def test_enum_multiple_conditions() -> i32:
 class TestMatchEnumPatterns(unittest.TestCase):
     """Test enum pattern matching (legacy tag-based)"""
     
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
-    
     def test_enum_tag_match(self):
         self.assertEqual(test_enum_tag_match(), 1)
     
@@ -428,12 +421,6 @@ class TestMatchEnumPatterns(unittest.TestCase):
 
 class TestMatchEnumTupleSyntax(unittest.TestCase):
     """Test enum matching with tuple syntax"""
-    
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
     
     def test_tuple_literal_ok(self):
         self.assertEqual(test_enum_tuple_literal_ok(), 1)
@@ -466,12 +453,6 @@ class TestMatchEnumTupleSyntax(unittest.TestCase):
 class TestMatchEnumConstructorSyntax(unittest.TestCase):
     """Test enum matching with constructor syntax"""
     
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
-    
     def test_constructor_literal(self):
         self.assertEqual(test_enum_constructor_literal(), 1)
     
@@ -493,12 +474,6 @@ class TestMatchEnumConstructorSyntax(unittest.TestCase):
 
 class TestMatchEnumComplexPatterns(unittest.TestCase):
     """Test complex enum matching patterns"""
-    
-    def setUp(self):
-        clear_registry()
-    
-    def tearDown(self):
-        clear_registry()
     
     def test_result_handler(self):
         self.assertEqual(test_enum_result_handler(), 42)
