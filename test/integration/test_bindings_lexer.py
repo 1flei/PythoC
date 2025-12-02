@@ -22,53 +22,53 @@ def test_simple_tokens() -> i32:
     lex_ref = assume(lex, lexer_nonnull)
     
     # Token 1: int
-    token1, tk_prf1 = lexer_next_token(lex_ref, prf)
+    token1, tk_prf1, prf = lexer_next_token(lex_ref, prf)
     if token1.type != TokenType.INT:
         printf("FAIL: Expected TokenType.INT, got %d\n", token1.type)
         return 1
-    prf = token_release(token1, tk_prf1)
+    prf = token_release(token1, tk_prf1, prf)
     
     # Token 2: *
-    token2, tk_prf2 = lexer_next_token(lex_ref, prf)
+    token2, tk_prf2, prf = lexer_next_token(lex_ref, prf)
     if token2.type != TokenType.STAR:
         printf("FAIL: Expected TokenType.STAR, got %d\n", token2.type)
         return 1
-    prf = token_release(token2, tk_prf2)
+    prf = token_release(token2, tk_prf2, prf)
     
     # Token 3: ;
-    token3, tk_prf3 = lexer_next_token(lex_ref, prf)
+    token3, tk_prf3, prf = lexer_next_token(lex_ref, prf)
     if token3.type != TokenType.SEMICOLON:
         printf("FAIL: Expected TokenType.SEMICOLON, got %d\n", token3.type)
         return 1
-    prf = token_release(token3, tk_prf3)
+    prf = token_release(token3, tk_prf3, prf)
     
     # Token 4: (
-    token4, tk_prf4 = lexer_next_token(lex_ref, prf)
+    token4, tk_prf4, prf = lexer_next_token(lex_ref, prf)
     if token4.type != TokenType.LPAREN:
         printf("FAIL: Expected TokenType.LPAREN, got %d\n", token4.type)
         return 1
-    prf = token_release(token4, tk_prf4)
+    prf = token_release(token4, tk_prf4, prf)
     
     # Token 5: )
-    token5, tk_prf5 = lexer_next_token(lex_ref, prf)
+    token5, tk_prf5, prf = lexer_next_token(lex_ref, prf)
     if token5.type != TokenType.RPAREN:
         printf("FAIL: Expected TokenType.RPAREN, got %d\n", token5.type)
         return 1
-    prf = token_release(token5, tk_prf5)
+    prf = token_release(token5, tk_prf5, prf)
     
     # Token 6: ,
-    token6, tk_prf6 = lexer_next_token(lex_ref, prf)
+    token6, tk_prf6, prf = lexer_next_token(lex_ref, prf)
     if token6.type != TokenType.COMMA:
         printf("FAIL: Expected TokenType.COMMA, got %d\n", token6.type)
         return 1
-    prf = token_release(token6, tk_prf6)
+    prf = token_release(token6, tk_prf6, prf)
     
     # Token 7: EOF
-    token7, tk_prf7 = lexer_next_token(lex_ref, prf)
+    token7, tk_prf7, prf = lexer_next_token(lex_ref, prf)
     if token7.type != TokenType.EOF:
         printf("FAIL: Expected EOF\n")
         return 1
-    prf = token_release(token7, tk_prf7)
+    prf = token_release(token7, tk_prf7, prf)
     
     lexer_destroy(prf, lex)
     printf("OK: test_simple_tokens passed\n")
@@ -84,32 +84,32 @@ def test_identifiers_and_keywords() -> i32:
     lex_ref = assume(lex, lexer_nonnull)
     
     # Token 1: int (keyword)
-    token1, tk_prf1 = lexer_next_token(lex_ref, prf)
+    token1, tk_prf1, prf = lexer_next_token(lex_ref, prf)
     if token1.type != TokenType.INT:
         printf("FAIL: Expected TokenType.INT\n")
         return 1
-    prf = token_release(token1, tk_prf1)
+    prf = token_release(token1, tk_prf1, prf)
     
     # Token 2: foo (identifier)
-    token2, tk_prf2 = lexer_next_token(lex_ref, prf)
+    token2, tk_prf2, prf = lexer_next_token(lex_ref, prf)
     if token2.type != TokenType.IDENTIFIER:
         printf("FAIL: Expected TokenType.IDENTIFIER\n")
         return 1
-    prf = token_release(token2, tk_prf2)
+    prf = token_release(token2, tk_prf2, prf)
     
     # Token 3: char (keyword)
-    token3, tk_prf3 = lexer_next_token(lex_ref, prf)
+    token3, tk_prf3, prf = lexer_next_token(lex_ref, prf)
     if token3.type != TokenType.CHAR:
         printf("FAIL: Expected TokenType.CHAR\n")
         return 1
-    prf = token_release(token3, tk_prf3)
+    prf = token_release(token3, tk_prf3, prf)
     
     # Token 4: bar123 (identifier with numbers)
-    token4, tk_prf4 = lexer_next_token(lex_ref, prf)
+    token4, tk_prf4, prf = lexer_next_token(lex_ref, prf)
     if token4.type != TokenType.IDENTIFIER:
         printf("FAIL: Expected TokenType.IDENTIFIER\n")
         return 1
-    prf = token_release(token4, tk_prf4)
+    prf = token_release(token4, tk_prf4, prf)
     
     lexer_destroy(prf, lex)
     printf("OK: test_identifiers_and_keywords passed\n")
@@ -125,18 +125,18 @@ def test_comments() -> i32:
     lex_ref = assume(lex, lexer_nonnull)
     
     # Token 1: int
-    token1, tk_prf1 = lexer_next_token(lex_ref, prf)
+    token1, tk_prf1, prf = lexer_next_token(lex_ref, prf)
     if token1.type != TokenType.INT:
         printf("FAIL: Expected TokenType.INT\n")
         return 1
-    prf = token_release(token1, tk_prf1)
+    prf = token_release(token1, tk_prf1, prf)
     
     # Token 2: x (comment should be skipped)
-    token2, tk_prf2 = lexer_next_token(lex_ref, prf)
+    token2, tk_prf2, prf = lexer_next_token(lex_ref, prf)
     if token2.type != TokenType.IDENTIFIER:
         printf("FAIL: Expected TokenType.IDENTIFIER\n")
         return 1
-    prf = token_release(token2, tk_prf2)
+    prf = token_release(token2, tk_prf2, prf)
     
     lexer_destroy(prf, lex)
     printf("OK: test_comments passed\n")

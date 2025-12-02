@@ -3,10 +3,10 @@ Lexer for C header files
 Converts source text into a stream of tokens
 
 Design: Uses linear types to ensure token lifetime is within lexer lifetime.
-- lexer_create() returns (lexer, lexer_prf)
-- lexer_next_token() consumes lexer_prf, returns (token, tk_prf)
-- token_release() consumes tk_prf, returns lexer_prf
-- lexer_destroy() consumes lexer_prf
+- lexer_create() returns (lexer_prf, lexer)
+- lexer_next_token(lex, lex_prf) -> (token, tk_prf, lex_prf) - lexer can produce multiple tokens
+- token_release(token, tk_prf, lex_prf) -> lex_prf - token lifetime must be within lexer lifetime
+- lexer_destroy(lex_prf, lex) - consumes lexer_prf
 """
 
 from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refine, refined, linear, struct, consume, assume
@@ -58,20 +58,25 @@ lexer_nonnull, LexerRef = nonnull_wrap(ptr[Lexer])
 
 
 @compile
-def token_release(token: Token, tk_prf: TokenProof) -> LexerProof:
+def token_release(token: Token, tk_prf: TokenProof, lex_prf: LexerProof) -> LexerProof:
     """
-    Release a token, returning the lexer proof.
-    This allows getting the next token from the lexer.
+    Release a token, verifying its lifetime is within lexer lifetime.
+    
+    The lex_prf parameter ensures that token cannot outlive the lexer:
+    - To release a token, you must have the lexer proof
+    - This proves the lexer is still alive when the token is released
     
     Args:
-        token: The token to release (can be dropped)
+        token: The token to release (value is dropped)
         tk_prf: Token proof to consume
+        lex_prf: Lexer proof (passed through to verify lifetime)
     
     Returns:
-        lexer_prf: LexerProof for lexer operations
+        lex_prf: LexerProof passed through unchanged
     """
     consume(tk_prf)
-    return assume(linear(), "LexerProof")
+    # Pass through lex_prf - this enforces that lexer outlives token
+    return lex_prf
 
 
 @compile
@@ -296,14 +301,30 @@ def lexer_next_token_impl(lex: LexerRef) -> Token:
 
 
 @compile
-def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof]:
-    """Get next token with proof so it can not be used out of the lifetime of lexerproof"""
+def lexer_next_token(lex: LexerRef, lexer_prf: LexerProof) -> struct[Token, TokenProof, LexerProof]:
+    """
+    Get next token with proof, preserving lexer proof.
+    
+    This design allows:
+    - Multiple tokens to exist simultaneously (each with its own tk_prf)
+    - Lexer to continue producing tokens (lex_prf is returned)
+    - Token lifetime to be bounded by lexer lifetime (enforced at token_release)
+    
+    Args:
+        lex: Lexer reference
+        lexer_prf: Lexer proof (passed through)
+    
+    Returns:
+        token: The parsed token
+        tk_prf: Token proof (must be released via token_release)
+        lex_prf: Lexer proof (passed through for continued use)
+    """
     token: Token = lexer_next_token_impl(lex)
     
-    # Create and return token proof using refined type
-    consume(lexer_prf)
+    # Create token proof - represents a live token
     tk_prf: TokenProof = assume(linear(), "TokenProof")
-    return token, tk_prf
+    # Pass through lexer proof - lexer is still valid
+    return token, tk_prf, lexer_prf
 
 
 @compile
@@ -323,7 +344,6 @@ def tokens_from_source(source: ptr[i8]) -> Token:
     """
     prf, lex_raw = lexer_create(source)
     for lex in refine(lex_raw, lexer_nonnull):
-        while lex.pos < lex.length:
-            token: Token = lexer_next_token_impl(lex)
-            yield token
+        for tk in lex_tokens(lex):
+            yield tk
     lexer_destroy(prf, lex_raw)
