@@ -2,7 +2,7 @@ import inspect
 import ast
 import textwrap
 from functools import wraps
-from ..logger import logger
+from ..logger import logger, set_source_context
 
 
 # Registry to track inline methods that need to be attached to classes
@@ -46,6 +46,13 @@ def inline(func=None, *, cls_method=False, method=False):
         try:
             source = inspect.getsource(f)
             source = textwrap.dedent(source)
+            # Get function start line for accurate error messages
+            try:
+                _, start_line = inspect.getsourcelines(f)
+                source_file = inspect.getfile(f)
+                set_source_context(source_file, start_line - 1)
+            except (OSError, TypeError):
+                pass
             tree = ast.parse(source)
             func_ast = tree.body[0]
             if not isinstance(func_ast, ast.FunctionDef):

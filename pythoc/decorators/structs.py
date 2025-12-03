@@ -4,6 +4,7 @@ import textwrap
 import ast
 from ..registry import register_struct_from_class
 from ..builtin_entities.struct import create_struct_type
+from ..logger import set_source_context
 
 
 def add_struct_handle_call(cls):
@@ -167,6 +168,13 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None):
     try:
         cls_source = inspect.getsource(cls)
         cls_source = textwrap.dedent(cls_source)
+        # Get class start line for accurate error messages
+        try:
+            _, start_line = inspect.getsourcelines(cls)
+            source_file = inspect.getfile(cls)
+            set_source_context(source_file, start_line - 1)
+        except (OSError, TypeError):
+            pass
         tree = ast.parse(cls_source)
         if tree.body and isinstance(tree.body[0], ast.ClassDef):
             cls_ast = tree.body[0]

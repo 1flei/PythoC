@@ -24,13 +24,14 @@ from ..utils import (
     normalize_suffix,
     get_anonymous_suffix,
     get_function_file_and_source,
+    get_function_start_line,
 )
 from ..build import (
     BuildCache,
     get_output_manager,
     flush_all_pending_outputs,
 )
-from ..logger import logger
+from ..logger import logger, set_source_context
 
 
 def _get_registry():
@@ -80,6 +81,11 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
         return wrapper._native_func(*args)
     
     source_file, source_code = get_function_file_and_source(func)
+    
+    # Get function start line for accurate error messages
+    start_line = get_function_start_line(func)
+    # Set logger context: line_offset = start_line - 1 because AST lineno starts from 1
+    set_source_context(source_file, start_line - 1)
 
     registry = _get_registry()
     # Use get_all_accessible_symbols to extract ALL accessible symbols
@@ -339,9 +345,12 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
         _is_dynamic = is_dynamic
         _source_file = source_file
         _registry = registry
+        _start_line = start_line
         
         def compile_callback(comp):
             """Deferred compilation callback"""
+            # Set source context for accurate error messages during compilation
+            set_source_context(_source_file, _start_line - 1)
             # Compile the function into group's compiler
             logger.debug(f"Deferred compile {_func_ast.name}")
             comp.compile_function_from_ast(

@@ -45,6 +45,7 @@ class Logger:
         self.level = self._get_level_from_env(level)
         self.enabled = True
         self.current_source_file = None  # Track current source file being compiled
+        self.current_line_offset = 0  # Line offset for AST nodes (function start line - 1)
     
     def _get_level_from_env(self, default_level: LogLevel) -> LogLevel:
         """Get log level from environment variable PC_LOG_LEVEL or use default"""
@@ -67,6 +68,29 @@ class Logger:
         """Set the current source file being compiled"""
         self.current_source_file = filename
     
+    def set_line_offset(self, offset: int):
+        """Set line offset for AST nodes.
+        
+        When parsing function source with ast.parse(), line numbers start from 1.
+        To get the actual line number in the source file, we need to add the
+        function's starting line number minus 1.
+        
+        Args:
+            offset: The starting line number of the function minus 1
+                   (e.g., if function starts at line 10, offset should be 9)
+        """
+        self.current_line_offset = offset
+    
+    def set_source_context(self, filename: Optional[str], line_offset: int = 0):
+        """Set both source file and line offset at once.
+        
+        Args:
+            filename: Source file path
+            line_offset: Starting line number of the function minus 1
+        """
+        self.current_source_file = filename
+        self.current_line_offset = line_offset
+    
     def _get_source_location(self, node: Optional[Union[ast.AST, Any]] = None) -> str:
         """Get source code location from AST node or caller info"""
         # Priority 1: If node is provided and has location info, use it
@@ -78,7 +102,9 @@ class Logger:
                     filename = filename.split('/pc/')[-1]
                 elif '/' in filename:
                     filename = filename.split('/')[-1]
-                return f"{filename}:{node.lineno}:{node.col_offset}"
+                # Add line offset to get actual line number in source file
+                actual_lineno = node.lineno + self.current_line_offset
+                return f"{filename}:{actual_lineno}:{node.col_offset}"
         
         # Priority 2: Fall back to Python caller location
         try:
@@ -159,6 +185,7 @@ class Logger:
             **kwargs: Additional key-value pairs to log
         """
         self._log(LogLevel.ERROR, "ERROR", msg, node=node, **kwargs)
+        raise RuntimeError("Compilation failed")
 
 
 # Global logger instance
@@ -173,6 +200,16 @@ def set_log_level(level: LogLevel):
 def set_source_file(filename: Optional[str]):
     """Set the current source file being compiled (for better error messages)"""
     logger.set_source_file(filename)
+
+
+def set_line_offset(offset: int):
+    """Set line offset for AST nodes (function start line - 1)"""
+    logger.set_line_offset(offset)
+
+
+def set_source_context(filename: Optional[str], line_offset: int = 0):
+    """Set both source file and line offset at once"""
+    logger.set_source_context(filename, line_offset)
 
 
 def enable_logging():
