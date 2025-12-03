@@ -455,16 +455,8 @@ class AssignmentsMixin:
         if pc_type is None:
             import ast as ast_module
             annotation_str = ast_module.unparse(node.annotation) if hasattr(ast_module, 'unparse') else str(node.annotation)
-            raise RuntimeError(
-                f"AnnAssign requires valid PC type annotation. "
-                f"Line: {node.lineno}, annotation: {annotation_str}"
-            )
-        # Check if this is a static-qualified type
-        # if pc_type and hasattr(pc_type, 'is_static') and pc_type.is_static():
-        #     is_static_var = True
-        #     # Get the underlying type
-        #     if hasattr(pc_type, 'get_qualified_type'):
-        #         pc_type = pc_type.get_qualified_type()
+            logger.error(
+                f"AnnAssign requires valid PC type annotation. annotation: {annotation_str}", node)
 
         # Now parse the RHS
         logger.debug("AnnAssign processing", has_value=(node.value is not None))

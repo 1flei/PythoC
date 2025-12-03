@@ -147,7 +147,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             allow_redeclare: Allow redeclaration in same scope
             value_ref: Optional ValueRef to store directly
         """
-        from ..valueref import ValueRef
+        from ..valueref import wrap_value
 
         pc_type = type_hint
         # Create ValueRef if not provided
@@ -156,7 +156,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             from ..builtin_entities.func import func
             if isinstance(pc_type, type) and issubclass(pc_type, func):
                 # Store alloca directly, func.handle_call will load it when needed
-                value_ref = ValueRef(
+                value_ref = wrap_value(
                     kind='address',
                     value=alloca,
                     type_hint=pc_type,
@@ -164,7 +164,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 )
             else:
                 # For regular PC variables with alloca, create an address ValueRef
-                value_ref = ValueRef(
+                value_ref = wrap_value(
                     kind='address',
                     value=alloca,  # Store alloca as value for now
                     type_hint=pc_type,
@@ -211,7 +211,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if self.ctx.user_globals and name in self.ctx.user_globals:
             python_obj = self.ctx.user_globals[name]
             if hasattr(python_obj, 'handle_call') and callable(python_obj.handle_call):
-                from ..valueref import ValueRef
+                from ..valueref import wrap_value
                 
                 # For @compile functions, get type hints from function annotations
                 type_hint = python_obj  # Default to the wrapper itself
@@ -241,11 +241,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 
                 return VariableInfo(
                     name=name,
-                    value_ref=ValueRef(
-                        kind='python',
-                        value=python_obj,
-                        type_hint=type_hint,
-                    ),
+                    value_ref = wrap_value(value=python_obj, kind='python', type_hint=type_hint),
                     alloca=None,
                     source="python_global",
                     is_global=True,
@@ -297,10 +293,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 wrapper = LLVMFunctionWrapper(name, func_type_hints)
                 
                 # Create a pseudo VariableInfo for the function
-                from ..valueref import ValueRef
+                from ..valueref import wrap_value
                 return VariableInfo(
                     name=name,
-                    value_ref=ValueRef(
+                    value_ref=wrap_value(
                         kind='python',
                         value=wrapper,
                         type_hint=func_type_hints,
@@ -326,10 +322,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
                         # Return them directly as type_hint (not wrapped in PythonType)
                         if issubclass(python_obj, (BuiltinType, BuiltinFunction)):
                             # Create a ValueRef to hold the type_hint
-                            from ..valueref import ValueRef
+                            from ..valueref import wrap_value
                             return VariableInfo(
                                 name=name,
-                                value_ref=ValueRef(
+                                value_ref=wrap_value(
                                     kind='python',
                                     value=python_obj,
                                     type_hint=python_obj,  # The class itself as type_hint
@@ -350,7 +346,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     return None
             
             # Wrap Python object
-            from ..valueref import ValueRef
+            from ..valueref import ValueRef, wrap_value
             
             # If python_obj is already a ValueRef (like nullptr), return it directly
             if isinstance(python_obj, ValueRef):
@@ -369,7 +365,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             # Create pseudo VariableInfo for Python object
             return VariableInfo(
                 name=name,
-                value_ref=ValueRef(
+                value_ref=wrap_value(
                     kind='python',
                     value=python_obj,
                     type_hint=python_type,
