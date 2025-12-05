@@ -93,6 +93,16 @@ class BuiltinEntity(ABC, metaclass=BuiltinEntityMeta):
         return True
     
     @classmethod
+    def is_struct_type(cls) -> bool:
+        """Is this a struct type? Override in struct to return True."""
+        return False
+    
+    @classmethod
+    def is_enum_type(cls) -> bool:
+        """Is this an enum type? Override in enum to return True."""
+        return False
+    
+    @classmethod
     def handle_as_type(cls, visitor, node: ast.AST):
         """Handle type annotation resolution (unified call protocol)
         

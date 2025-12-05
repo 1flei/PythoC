@@ -113,10 +113,10 @@ class AssignmentsMixin:
             )
             
             # Return lvalue for the new variable
-            from ..valueref import ValueRef
-            return ValueRef(
+            from ..valueref import wrap_value
+            return wrap_value(
+                alloca,
                 kind='address',
-                value=alloca,
                 type_hint=pc_type,
                 address=alloca
             )
@@ -318,11 +318,11 @@ class AssignmentsMixin:
                             
                             # Update variable info with alloca and new value_ref
                             inferred_pc_type = self.infer_pc_type_from_value(rvalue)
-                            from ..valueref import ValueRef
+                            from ..valueref import wrap_value
                             var_info.alloca = alloca
-                            var_info.value_ref = ValueRef(
+                            var_info.value_ref = wrap_value(
+                                alloca,
                                 kind='address',
-                                value=alloca,
                                 type_hint=inferred_pc_type,
                                 address=alloca
                             )
@@ -382,9 +382,9 @@ class AssignmentsMixin:
             
             for py_val, elt in zip(tuple_value, target.elts):
                 # Convert Python value to ValueRef
-                from ..valueref import ValueRef
+                from ..valueref import wrap_value
                 from ..builtin_entities.python_type import PythonType
-                val_ref = ValueRef(kind='python', value=py_val, 
+                val_ref = wrap_value(py_val, kind='python',
                                  type_hint=PythonType.wrap(py_val, is_constant=True))
                 
                 # Get or create lvalue (may return None for Python constants)
@@ -405,8 +405,8 @@ class AssignmentsMixin:
                 # Extract field value from struct
                 field_value = self.builder.extract_value(ensure_ir(rvalue), i)
                 field_pc_type = field_types[i]
-                from ..valueref import ValueRef
-                field_val_ref = ValueRef(kind='value', value=field_value, type_hint=field_pc_type)
+                from ..valueref import wrap_value
+                field_val_ref = wrap_value(field_value, kind='value', type_hint=field_pc_type)
                 
                 # Get or create lvalue (with explicit pc_type to force PC value)
                 lvalue = self.visit_lvalue_or_define(elt, value_ref=field_val_ref, pc_type=field_pc_type)

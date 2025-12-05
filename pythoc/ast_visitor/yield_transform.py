@@ -70,11 +70,11 @@ def create_yield_iterator_wrapper(func, func_ast, analyzer, user_globals, source
     
     # Add handle_call that triggers yield inlining
     def handle_call(visitor, args, node):
-        from ..valueref import ValueRef
+        from ..valueref import wrap_value
         from ..builtin_entities.python_type import PythonType
         # Create a dummy result that will trigger inlining in for loop
         # The actual value doesn't matter - only _yield_inline_info is used
-        result = ValueRef('python', placeholder_wrapper, PythonType(placeholder_wrapper))
+        result = wrap_value(placeholder_wrapper, kind='python', type_hint=PythonType(placeholder_wrapper))
         result._yield_inline_info = {
             'func_obj': func,  # Use original function to access its __globals__
             'placeholder': placeholder_wrapper,

@@ -113,6 +113,11 @@ class EnumType(CompositeType):
     _union_payload = None
     
     @classmethod
+    def is_enum_type(cls) -> bool:
+        """Override base class to return True for enum types."""
+        return True
+    
+    @classmethod
     def get_name(cls) -> str:
         if hasattr(cls, '__name__'):
             return cls.__name__

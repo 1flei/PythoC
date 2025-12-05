@@ -55,7 +55,7 @@ class refine(BuiltinFunction):
         refine_placeholder.__name__ = 'refine'
         refine_placeholder._original_ast = func_ast
         
-        result = ValueRef('python', refine_placeholder, PythonType(refine_placeholder))
+        result = wrap_value(refine_placeholder, kind='python', type_hint=PythonType(refine_placeholder))
         result._yield_inline_info = {
             'func_obj': refine_placeholder,
             'original_ast': func_ast,

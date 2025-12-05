@@ -54,6 +54,11 @@ class StructType(CompositeType):
         return 'struct'
     
     @classmethod
+    def is_struct_type(cls) -> bool:
+        """Struct types return True."""
+        return True
+    
+    @classmethod
     def _is_compile_class(cls) -> bool:
         """Check if this struct is from @compile decorated class"""
         return cls._python_class is not None
@@ -543,6 +548,36 @@ class StructType(CompositeType):
         loaded_value = visitor.builder.load(field_ptr)
         return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr,
                         var_name=result_var_name, linear_path=result_linear_path)
+
+    @classmethod
+    def get_all_fields(cls, visitor, base, node) -> list:
+        """Get all fields of a struct as a list of ValueRefs.
+        
+        This is useful for unpacking struct values, e.g., for multi-dimensional
+        subscript access where a tuple (i, j, k) becomes struct and needs to be
+        unpacked into individual indices.
+        
+        Args:
+            visitor: AST visitor
+            base: Pre-evaluated struct ValueRef
+            node: AST node for error reporting
+        
+        Returns:
+            List of ValueRef for each field
+        """
+        from .python_type import pyconst
+        from ..valueref import wrap_value
+        
+        cls._ensure_field_types_resolved()
+        field_count = len(cls._field_types) if cls._field_types else 0
+        
+        fields = []
+        for i in range(field_count):
+            field_vref = cls.handle_subscript(visitor, base, 
+                wrap_value(i, kind='python', type_hint=pyconst[i]), node)
+            fields.append(field_vref)
+        
+        return fields
 
 
 def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] = None, 

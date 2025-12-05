@@ -399,18 +399,13 @@ class ptr(BuiltinType):
             return wrap_value(SpecializedPtr, kind="python", type_hint=SpecializedPtr)
         
         # Value subscript: p[index] or p[i, j, k] - pointer arithmetic
-        # Check if index is a tuple (multi-dimensional access)
-        if index.kind == 'python' and isinstance(index.value, tuple):
-            # Multi-dimensional pointer access: p[i, j, k]
-            # Convert each tuple element to ValueRef
-            from .python_type import PythonType
-            indices = [wrap_value(v, kind='python', type_hint=PythonType.wrap(v)) 
-                      for v in index.value]
+        # Check if index is a struct (multi-dimensional access from tuple expression)
+        if index.is_struct_value():
+            # Multi-dimensional pointer access: p[i, j, k] where (i, j, k) is a struct
+            indices = index.get_pc_type().get_all_fields(visitor, index, node)
             return cls._handle_multidim_subscript(visitor, base, indices, node)
         
         # Single index: p[i] - convert to *(ptr + index)
-        if index.is_python_value() and index.value == 0:
-            return cls.handle_deref(visitor, base, node)
         base = cls.handle_add(visitor, base, index, node)
         return cls.handle_deref(visitor, base, node)
 

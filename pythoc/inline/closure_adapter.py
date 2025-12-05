@@ -145,7 +145,7 @@ class ClosureAdapter:
             # Wrap non-ValueRef as python ValueRef
             if not isinstance(param_value, ValueRef):
                 from ..builtin_entities.python_type import PythonType
-                param_value = ValueRef(kind="python", value=param_value,
+                param_value = wrap_value(param_value, kind="python",
                                      type_hint=PythonType.wrap(param_value, is_constant=True))
             
             # Register temp variable WITHOUT alloca

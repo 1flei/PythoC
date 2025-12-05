@@ -11,6 +11,7 @@ enabling zero-overhead conditional struct layouts.
 
 from .base import BuiltinEntity
 from typing import Any, Optional
+from ..valueref import wrap_value
 import ast
 
 
@@ -126,15 +127,14 @@ class PythonType(_PythonTypeBase):
         return self._constant_value
     
     def get_llvm_type(self, module_context=None):
-        """pyconst types have no LLVM representation (zero-sized).
+        """pyconst types are zero-sized, represented as empty struct {}.
         
-        Returns an empty struct type for compatibility with struct layout,
-        but this should be filtered out during struct layout generation.
+        Returns an empty struct type {} for compatibility with struct layout.
+        This allows struct[pyconst[1], pyconst[2]] to become {{}, {}}.
         """
-        if self._is_constant:
-            # Return None to indicate zero-sized (will be filtered in struct layout)
-            return None
-        return None
+        from llvmlite import ir
+        # Return empty struct {} for zero-sized representation
+        return ir.LiteralStructType([])
     
     def handle_field_access(self, visitor, base, field_index, field_name, node):
         """Handle field access for pyconst fields in structs.
@@ -156,7 +156,7 @@ class PythonType(_PythonTypeBase):
         
         # Create a ValueRef that acts as both constant value and assignable lvalue
         # Strategy: Return as Python value but with special attributes
-        from ..valueref import wrap_value, ValueRef
+        from ..valueref import wrap_value
         from llvmlite import ir
         
         # Create null pointer as dummy address
@@ -165,9 +165,9 @@ class PythonType(_PythonTypeBase):
         # Return ValueRef with:
         # - kind="pyconst_field" for lvalue protocol
         # - But also with the actual constant value for expression use
-        result = ValueRef(
+        result = wrap_value(
+            self._constant_value,  # The actual constant value
             kind="pyconst_field",
-            value=self._constant_value,  # The actual constant value
             type_hint=self,
             address=null_ptr  # Dummy address for lvalue protocol
         )

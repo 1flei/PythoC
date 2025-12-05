@@ -615,22 +615,45 @@ class ExpressionsMixin:
     
 
     def visit_Tuple(self, node: ast.Tuple):
-        """Handle tuple expressions
+        """Handle tuple expressions - returns struct[element_types...]
         
-        If all elements are Python values, return as Python tuple
-        Otherwise, return as tuple of ValueRefs
+        Creates an anonymous struct type from the tuple elements.
+        For Python values, uses pyconst[value] as the field type.
+        This allows tuples to be used as lightweight structs in PC code.
         """
-        from ..builtin_entities.python_type import PythonType
+        from ..builtin_entities.struct import struct
         
-        # Evaluate all elements (they may be Python values or PC values)
+        # Evaluate all elements
         elements = [self.visit_expression(elt) for elt in node.elts]
         
-        if all(elem.is_python_value() for elem in elements):
-            python_tuple = tuple(elem.get_python_value() for elem in elements)
-        else:
-            python_tuple = tuple(elements)
-        python_type_inst = PythonType.wrap(python_tuple, is_constant=True)
-        return wrap_value(python_tuple, kind="python", type_hint=python_type_inst)
+        # Build struct type from element types
+        # Format: ((None, type1), (None, type2), ...) for unnamed fields
+        # For Python values, use pyconst[value] as the type
+        field_specs = [(None, elem.get_pc_type()) for elem in elements]
+        # Create anonymous struct type: struct[type1, type2, ...]
+        struct_type = struct.handle_type_subscript(tuple(field_specs))
+        
+        # Allocate struct and store elements (only non-zero-sized fields)
+        llvm_struct_type = struct_type.get_llvm_type()
+        struct_alloca = self.builder.alloca(llvm_struct_type, name="tuple_struct")
+        
+        # Store each non-pyconst element into the struct
+        # pyconst fields are zero-sized and don't need storage
+        llvm_field_idx = 0
+        for i, elem in enumerate(elements):
+            field_ptr = self.builder.gep(
+                struct_alloca,
+                [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), llvm_field_idx)],
+                name=f"tuple_field_{i}"
+            )
+            self.builder.store(ensure_ir(elem), field_ptr)
+            llvm_field_idx += 1
+        
+        # Load the struct value
+        struct_val = self.builder.load(struct_alloca, name="tuple_val")
+        # logger.error(f"struct_type: {struct_type}, llvm_struct_type: {llvm_struct_type}, struct_alloca: {struct_alloca}, struct_val: {struct_val}", node)
+        
+        return wrap_value(struct_val, kind="address", type_hint=struct_type, address=struct_alloca)
     
 
     def visit_JoinedStr(self, node: ast.JoinedStr):

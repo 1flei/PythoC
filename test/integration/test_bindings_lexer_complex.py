@@ -180,8 +180,6 @@ def test_simple_code() -> i32:
 
 
 def main():
-    print("Compiling complex lexer tests with yield interface...")
-    
     # Compile all test functions
     test_full_c_file()
     test_operators()
