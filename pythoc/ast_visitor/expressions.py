@@ -633,8 +633,8 @@ class ExpressionsMixin:
         # Create anonymous struct type: struct[type1, type2, ...]
         struct_type = struct.handle_type_subscript(tuple(field_specs))
         
-        # Allocate struct and store elements (only non-zero-sized fields)
-        llvm_struct_type = struct_type.get_llvm_type()
+        # Allocate struct and store elements
+        llvm_struct_type = struct_type.get_llvm_type(self.module.context)
         struct_alloca = self.builder.alloca(llvm_struct_type, name="tuple_struct")
         
         # Store each non-pyconst element into the struct
@@ -648,6 +648,9 @@ class ExpressionsMixin:
             )
             self.builder.store(ensure_ir(elem), field_ptr)
             llvm_field_idx += 1
+            
+            # Transfer ownership of linear elements (they're being moved into the tuple)
+            self._transfer_linear_ownership(elem, reason="tuple construction")
         
         # Load the struct value
         struct_val = self.builder.load(struct_alloca, name="tuple_val")
