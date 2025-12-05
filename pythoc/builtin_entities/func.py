@@ -139,7 +139,7 @@ class func(BuiltinType):
             
             if arg.is_python_value() or get_type(arg) != expected_type or not pc_types_match:
                 # Convert using PC param type directly - this will enforce refined type checking
-                converted = visitor.type_converter.convert(arg, target_pc_type)
+                converted = visitor.type_converter.convert(arg, target_pc_type, node)
                 converted_args.append(ensure_ir(converted))
             else:
                 converted_args.append(ensure_ir(arg))

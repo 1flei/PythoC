@@ -38,9 +38,7 @@ def test_file():
 
 @compile
 def test_alloc_struct():
-    handle = lmalloc_struct(200)
-    prf = handle[0]
-    ptr_val = handle[1]
+    prf, ptr_val = lmalloc_struct(200)
     lfree_struct(prf, ptr_val)
 
 @compile

@@ -13,6 +13,7 @@ from llvmlite import ir
 from .valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from .type_check import is_struct_type, is_enum_type
 from .logger import logger
+import ast
 
 
 def strip_qualifiers(pc_type):
@@ -100,7 +101,8 @@ class TypeConverter:
     def convert(
         self,
         value: Union[ir.Value, ValueRef],
-        target_type: type
+        target_type: type,
+        node: Optional[ast.AST] =None
     ) -> ValueRef:
         """
         Convert value to target PC type using appropriate LLVM instruction.
@@ -125,10 +127,12 @@ class TypeConverter:
             # Direct conversion from base type to refined type is not allowed
             target_name = target_type.get_name() if hasattr(target_type, 'get_name') else str(target_type)
             source_name = value.type_hint.get_name() if value.type_hint and hasattr(value.type_hint, 'get_name') else str(value.type_hint)
-            raise TypeError(
-                f"Cannot directly convert from {source_name} to refined type {target_name}. "
-                f"Refined types must be constructed using assume() or refine()."
-            )
+            logger.error(f"Cannot directly convert from {source_name} to refined type {target_name}. "
+                f"Refined types must be constructed using assume() or refine().", node)
+            # raise TypeError(
+            #     f"Cannot directly convert from {source_name} to refined type {target_name}. "
+            #     f"Refined types must be constructed using assume() or refine()."
+            # )
         
         # Strip qualifiers for comparison and conversion
         stripped_target = strip_qualifiers(target_type)
