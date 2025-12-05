@@ -17,7 +17,7 @@ from .statements import StatementsMixin
 from .assignments import AssignmentsMixin
 from .functions import FunctionsMixin
 from .helpers import HelpersMixin
-from ..valueref import ValueRef, ensure_ir
+from ..valueref import ValueRef, ensure_ir, wrap_value
 from ..context import VariableInfo
 from ..logger import logger
 
@@ -135,11 +135,11 @@ class InlineVisitor(
                 # Create LLVM constant
                 llvm_type = self.get_llvm_type(type_hint)
                 llvm_const = ir.Constant(llvm_type, attr_value)
-                return ValueRef(kind="value", value=llvm_const, type_hint=type_hint)
+                return wrap_value(llvm_const, kind="value", type_hint=type_hint)
             else:
                 # Keep as Python value
                 from ..builtin_entities.python_type import PythonType
-                return ValueRef(kind="python", value=attr_value, 
+                return wrap_value(attr_value, kind="python",
                               type_hint=PythonType.wrap(attr_value, is_constant=True))
         
         # Fall back to parent implementation for normal attribute access
@@ -196,7 +196,7 @@ class InlineVisitor(
                     from ..builtin_entities.python_type import PythonType
                     param_info = VariableInfo(
                         name=param_name,
-                        value_ref=ValueRef(kind="python", value=param_value, 
+                        value_ref=wrap_value(param_value, kind="python",
                                          type_hint=PythonType.wrap(param_value, is_constant=True)),
                         alloca=None,
                         source="inline_param_python_obj",
@@ -233,16 +233,16 @@ class InlineVisitor(
                     # Check if this is a function pointer parameter
                     if param_type and isinstance(param_type, type) and issubclass(param_type, func):
                         # Store alloca directly, func.handle_call will load it when needed
-                        value_ref = ValueRef(
+                        value_ref = wrap_value(
+                            param_alloca,
                             kind='address',
-                            value=param_alloca,
                             type_hint=param_type,
                             address=param_alloca
                         )
                     else:
-                        value_ref = ValueRef(
+                        value_ref = wrap_value(
+                            param_alloca,
                             kind='address',
-                            value=param_alloca,
                             type_hint=param_type,
                             address=param_alloca
                         )
@@ -337,7 +337,7 @@ class InlineVisitor(
                             phi.add_incoming(val_ir, block)
                             logger.debug("Added IR value to phi", block=block.name)
                 
-                return ValueRef(kind="value", value=phi, type_hint=target_pc_type)
+                return wrap_value(phi, kind="value", type_hint=target_pc_type)
             
             return None
     

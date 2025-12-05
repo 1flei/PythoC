@@ -23,6 +23,22 @@ def iter_range_comb(shape):
         yield comb
 
 
+
+def tuple_to_struct_code(comb):
+    """Generate code string to create struct from tuple at compile time."""
+    from pythoc import struct, pyconst
+    from pythoc.builtin_entities.python_type import PythonType
+    
+    # Create struct type with pyconst fields
+    field_specs = []
+    for elem in comb:
+        elem_type = PythonType.wrap(elem, is_constant=True)
+        field_specs.append((None, elem_type))
+    
+    struct_type = struct.handle_type_subscript(tuple(field_specs))
+    return struct_type
+
+
 def generate_multidim_array_initializer(shape):
     # for comb in iter_range_comb(shape):
     #     print(comb)
@@ -32,6 +48,7 @@ def generate_multidim_array_initializer(shape):
         DecayPtrType = ptr[i32]
     else:
         DecayPtrType = ptr[array[i32, *shape_tuple[1:]]]
+    
     @compile(suffix=shape_tuple)
     def init_multidim_array() -> DecayPtrType:
         is_init: static[bool] = False
@@ -39,8 +56,12 @@ def generate_multidim_array_initializer(shape):
         if is_init:
             return xs
 
+        # Generate assignment statements for each combination
         for comb in iter_range_comb(shape):
-            xs[comb] = i32(sum(comb))
+            # Create struct type from tuple
+            idx_type = tuple_to_struct_code(comb)
+            # Create struct instance (zero-sized for pyconst fields)
+            xs[idx_type()] = i32(sum(comb))
         is_init = True
         return xs
     return init_multidim_array

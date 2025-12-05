@@ -475,9 +475,9 @@ class LoopsMixin:
         type_hint = get_type_hint(current_value)
         loop_var_info = VariableInfo(
             name=loop_var_name,
-            value_ref=ValueRef(
+            value_ref=wrap_value(
+                loop_var_alloca,
                 kind='address',
-                value=loop_var_alloca,
                 type_hint=type_hint,
                 address=loop_var_alloca
             ),

@@ -390,22 +390,22 @@ class LLVMCompiler:
             
             # Create ValueRef with proper wrapper for function pointers
             from .context import VariableInfo
-            from .valueref import ValueRef
+            from .valueref import wrap_value
             from .builtin_entities.func import func
             
             # Check if this is a function pointer parameter
             if type_hint and isinstance(type_hint, type) and issubclass(type_hint, func):
                 # Store alloca directly, func.handle_call will load it when needed
-                value_ref = ValueRef(
+                value_ref = wrap_value(
+                    alloca,
                     kind='address',
-                    value=alloca,
                     type_hint=type_hint,
                     address=alloca
                 )
             else:
-                value_ref = ValueRef(
+                value_ref = wrap_value(
+                    alloca,
                     kind='address',
-                    value=alloca,
                     type_hint=type_hint,
                     address=alloca
                 )
@@ -470,11 +470,11 @@ class LLVMCompiler:
             
             # Register the varargs struct as a variable
             from .context import VariableInfo
-            from .valueref import ValueRef
+            from .valueref import wrap_value
             
-            varargs_value_ref = ValueRef(
+            varargs_value_ref = wrap_value(
+                varargs_alloca,
                 kind='address',
-                value=varargs_alloca,
                 type_hint=varargs_type_hint,
                 address=varargs_alloca
             )
@@ -494,7 +494,7 @@ class LLVMCompiler:
         # The actual va_list will be initialized on first access in subscripts.py
         if varargs_kind in ('union', 'enum'):
             from .context import VariableInfo
-            from .valueref import ValueRef
+            from .valueref import wrap_value
             
             # Parse the varargs type annotation to get the enum/union type
             varargs_type_hint = None
@@ -503,11 +503,10 @@ class LLVMCompiler:
             
             # Create a placeholder ValueRef - the actual va_list is initialized lazily
             # We use kind='varargs' to indicate this is a special varargs placeholder
-            varargs_placeholder = ValueRef(
+            varargs_placeholder = wrap_value(
+                None,  # Will be initialized on first access
                 kind='varargs',  # Special kind to indicate varargs placeholder
-                value=None,  # Will be initialized on first access
                 type_hint=varargs_type_hint,  # The enum/union type
-                address=None
             )
             
             varargs_var_info = VariableInfo(

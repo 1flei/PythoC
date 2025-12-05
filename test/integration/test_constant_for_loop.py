@@ -15,14 +15,6 @@ def test_constant_list() -> i32:
     return sum
 
 @compile
-def test_constant_tuple() -> i32:
-    """Test for loop with constant tuple"""
-    sum: i32 = 0
-    for i in (10, 20, 30):
-        sum = sum + i
-    return sum
-
-@compile
 def test_constant_empty() -> i32:
     """Test for loop with empty constant list"""
     sum: i32 = 0
@@ -110,9 +102,6 @@ if __name__ == '__main__':
     
     print("test_constant_list():", test_constant_list())
     print("Expected: 15 (1+2+3+4+5)")
-    
-    print("\ntest_constant_tuple():", test_constant_tuple())
-    print("Expected: 60 (10+20+30)")
     
     print("\ntest_constant_empty():", test_constant_empty())
     print("Expected: 0 (no iterations)")

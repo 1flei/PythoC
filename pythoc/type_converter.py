@@ -11,6 +11,7 @@ from typing import Optional, Union, Any, Tuple
 from llvmlite import ir
 
 from .valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
+from .type_check import is_struct_type, is_enum_type
 from .logger import logger
 
 
@@ -135,9 +136,9 @@ class TypeConverter:
         
         if stripped_source == stripped_target:
             # Types match after stripping qualifiers, just update type_hint
-            return ValueRef(
+            return wrap_value(
+                value.ir_value,
                 kind=value.kind,
-                value=value.ir_value,
                 type_hint=target_type,  # Keep original qualifiers
                 address=value.address,
                 var_name=value.var_name,
@@ -155,8 +156,7 @@ class TypeConverter:
         base_source = get_base_type(value.type_hint) if value.type_hint else None
         
         # Step 2: Handle enum to integer conversion (extract tag field)
-        if (hasattr(base_source, '_is_enum') and base_source._is_enum and
-            hasattr(base_target, 'is_signed')):
+        if is_enum_type(base_source) and hasattr(base_target, 'is_signed'):
             # Converting enum to integer - extract the tag field
             # Enum is struct { tag, payload }, extract field 0 (tag)
             enum_val = ensure_ir(value)
@@ -164,6 +164,15 @@ class TypeConverter:
             tag_ref = wrap_value(tag_val, kind="value", type_hint=base_source._tag_type)
             # Convert tag to target integer type
             return self.convert(tag_ref, target_type)
+
+        # Step 3: Handle struct to enum conversion
+        # struct[pyconst[Tag], payload] -> EnumType
+        if is_struct_type(base_source) and is_enum_type(base_target):
+            return self._convert_struct_to_enum(value, base_source, base_target, target_type)
+
+        # Step 4: Handle struct to struct conversion (field-by-field)
+        if is_struct_type(base_source) and is_struct_type(base_target):
+            return self._convert_struct_to_struct(value, base_source, base_target, target_type)
 
         # Validate target is a PC type (use base version)
         if not isinstance(base_target, type) or not hasattr(base_target, 'get_llvm_type'):
@@ -509,6 +518,151 @@ class TypeConverter:
             struct_value = self._visitor.builder.insert_value(struct_value, field_val, i)
         return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
 
+    def _convert_struct_to_struct(self, value, source_struct_type, target_struct_type, original_target_type):
+        """Convert struct to struct by field-by-field conversion.
+        
+        This enables implicit conversion like:
+            struct[pyconst[42], pyconst[3.14], pyconst[1]] -> struct[i32, f64, i32]
+        
+        Each field is converted individually using the standard convert() method.
+        
+        Args:
+            value: Source ValueRef with struct type
+            source_struct_type: Source struct type (base type, qualifiers stripped)
+            target_struct_type: Target struct type (base type, qualifiers stripped)
+            original_target_type: Original target type (may have qualifiers)
+        
+        Returns:
+            ValueRef with converted struct value
+        """
+        # Get field types
+        source_fields = source_struct_type._field_types if source_struct_type._field_types else []
+        target_fields = target_struct_type._field_types if target_struct_type._field_types else []
+        
+        # Check field count matches
+        if len(source_fields) != len(target_fields):
+            raise TypeError(
+                f"Cannot convert struct with {len(source_fields)} fields to struct with {len(target_fields)} fields"
+            )
+        
+        # Get all source field values using get_all_fields
+        source_field_values = source_struct_type.get_all_fields(self._visitor, value, None)
+        
+        # Convert each field
+        converted_fields = []
+        for i, (src_field_vref, target_field_type) in enumerate(zip(source_field_values, target_fields)):
+            # Convert field to target type
+            converted_field = self.convert(src_field_vref, target_field_type)
+            converted_fields.append(ensure_ir(converted_field))
+        
+        # Build target struct value
+        target_llvm_type = target_struct_type.get_llvm_type(self._visitor.module.context)
+        struct_value = ir.Constant(target_llvm_type, ir.Undefined)
+        for i, field_val in enumerate(converted_fields):
+            struct_value = self._visitor.builder.insert_value(struct_value, field_val, i)
+        
+        return wrap_value(struct_value, kind="value", type_hint=original_target_type)
+
+    def _convert_struct_to_enum(self, value, source_struct_type, target_enum_type, original_target_type):
+        """Convert struct to enum when first field is pyconst tag.
+        
+        This enables implicit conversion like:
+            struct[pyconst[Result.Ok], pyconst[42]] -> Result
+        
+        The first field must be a pyconst containing the enum tag value.
+        The payload type is inferred from the tag's corresponding variant.
+        
+        Args:
+            value: Source ValueRef with struct type
+            source_struct_type: Source struct type (base type, qualifiers stripped)
+            target_enum_type: Target enum type
+            original_target_type: Original target type (may have qualifiers)
+        
+        Returns:
+            ValueRef with enum value
+        """
+        from .builtin_entities.python_type import PythonType
+        
+        # Get source struct fields
+        source_fields = source_struct_type._field_types if source_struct_type._field_types else []
+        
+        # Need at least 1 field (tag), optionally 2 (tag + payload)
+        if len(source_fields) < 1 or len(source_fields) > 2:
+            raise TypeError(
+                f"Cannot convert struct with {len(source_fields)} fields to enum. "
+                f"Expected struct[pyconst[tag]] or struct[pyconst[tag], payload]"
+            )
+        
+        # First field must be pyconst (compile-time constant tag)
+        tag_field_type = source_fields[0]
+        if not isinstance(tag_field_type, PythonType) or not tag_field_type.is_constant():
+            raise TypeError(
+                f"Cannot convert struct to enum: first field must be pyconst[tag], "
+                f"got {tag_field_type}"
+            )
+        
+        # Extract tag value from pyconst
+        tag_value = tag_field_type.get_constant_value()
+        
+        # Find which variant this tag corresponds to
+        variant_idx = None
+        variant_payload_type = None
+        variant_names = target_enum_type._variant_names or []
+        variant_types = target_enum_type._variant_types or []
+        tag_values = target_enum_type._tag_values
+        
+        if isinstance(tag_values, dict):
+            # @enum decorator format: Dict[str, int]
+            for idx, (var_name, var_type) in enumerate(zip(variant_names, variant_types)):
+                if var_name in tag_values and tag_values[var_name] == tag_value:
+                    variant_idx = idx
+                    variant_payload_type = var_type
+                    break
+        elif tag_values:
+            # enum[...] subscript format: may be list of tags
+            for idx, (var_name, var_type) in enumerate(zip(variant_names, variant_types)):
+                if hasattr(target_enum_type, var_name) and getattr(target_enum_type, var_name) == tag_value:
+                    variant_idx = idx
+                    variant_payload_type = var_type
+                    break
+        
+        if variant_idx is None:
+            raise TypeError(
+                f"Tag value {tag_value} does not match any variant of enum {target_enum_type.get_name()}"
+            )
+        
+        # Get source field values
+        source_field_values = source_struct_type.get_all_fields(self._visitor, value, None)
+        tag_vref = source_field_values[0]
+        
+        # Build enum using handle_call
+        from .builtin_entities.types import void
+        
+        if len(source_fields) == 1:
+            # No payload - just tag
+            if variant_payload_type is not None and variant_payload_type != void:
+                raise TypeError(
+                    f"Variant {variant_names[variant_idx]} requires payload of type {variant_payload_type}, "
+                    f"but struct has no payload field"
+                )
+            return target_enum_type.handle_call(self._visitor, [tag_vref], None)
+        else:
+            # Has payload
+            payload_vref = source_field_values[1]
+            
+            # Check if payload is void variant
+            if variant_payload_type is None or variant_payload_type == void:
+                raise TypeError(
+                    f"Variant {variant_names[variant_idx]} has no payload, "
+                    f"but struct has payload field"
+                )
+            
+            # Convert payload to variant's payload type if needed
+            payload_type = payload_vref.type_hint
+            if payload_type != variant_payload_type:
+                payload_vref = self.convert(payload_vref, variant_payload_type)
+            
+            return target_enum_type.handle_call(self._visitor, [tag_vref, payload_vref], None)
 
     def _build_conversion_registry(self):
         """Build dispatch table for conversions using LLVM types."""

@@ -84,16 +84,16 @@ class FunctionsMixin:
             # Check if this is a function pointer parameter
             if type_hint and isinstance(type_hint, type) and issubclass(type_hint, func):
                 # Store alloca directly, func.handle_call will load it when needed
-                value_ref = ValueRef(
+                value_ref = wrap_value(
+                    alloca,
                     kind='address',
-                    value=alloca,
                     type_hint=type_hint,
                     address=alloca
                 )
             else:
-                value_ref = ValueRef(
+                value_ref = wrap_value(
+                    alloca,
                     kind='address',
-                    value=alloca,
                     type_hint=type_hint,
                     address=alloca
                 )
@@ -195,9 +195,9 @@ class FunctionsMixin:
         # Register as a variable in current scope
         var_info = VariableInfo(
             name=func_name,
-            value_ref=ValueRef(
+            value_ref=wrap_value(
+                wrapper,
                 kind='python',
-                value=wrapper,
                 type_hint=wrapper,
             ),
             alloca=None,

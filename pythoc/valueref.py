@@ -4,6 +4,7 @@ from typing import Optional, Sequence, TYPE_CHECKING, Union, Any as AnyType
 from llvmlite import ir
 import ast
 from .logger import logger
+from .type_check import is_struct_type, is_enum_type
 
 if TYPE_CHECKING:
     from typing import Any
@@ -295,6 +296,38 @@ class ValueRef:
         addr_str = ", +addr" if self.address is not None else ""
         return f"ValueRef(kind={self.kind}{type_str}{value_str}{addr_str})"
 
+    def is_struct_value(self):
+        return is_struct_type(self.type_hint)
+
+    def get_pc_type(self):
+        from .builtin_entities.python_type import pyconst
+        # Consider different kind
+        if self.kind == 'python':
+            return pyconst[self.value]
+        return self.type_hint
+
+    def get_ir_value(self) -> ir.Value:
+        if self.is_python_value():
+            # Return empty struct {} for pyconst (zero-sized type)
+            return ir.Constant(ir.LiteralStructType([]), [])
+        return self.value
+
+    # def __getattribute__(self, name):
+    #     # List of fields to track
+    #     # if name in ('kind', 'value', 'type_hint', 'address', 'source_node', 
+    #     #             'var_name', 'linear_path', 'vref_id', 'ir_value'):
+    #     if name in ('value', ):
+    #         import traceback
+    #         import sys
+    #         # Print stack trace showing where the access happened
+    #         stack = traceback.extract_stack()[:-1]  # Exclude this frame
+    #         caller = stack[-1]
+    #         if not caller.filename.endswith('valueref.py'):
+    #             print(f"[VALUEREF ACCESS] .{name} at {caller.filename}:{caller.lineno} in {caller.name}", 
+    #                 file=sys.stderr)
+    #     return object.__getattribute__(self, name)
+
+
 
 def ensure_ir(value: Union[ir.Value, ValueRef], visitor=None) -> ir.Value:
     """Return underlying ir.Value for either ValueRef or ir.Value.
@@ -308,27 +341,7 @@ def ensure_ir(value: Union[ir.Value, ValueRef], visitor=None) -> ir.Value:
         visitor: Optional visitor for context (needed for string constants)
     """
     if isinstance(value, ValueRef):
-        # Special case: pyconst_field contains Python value that needs promotion
-        if value.kind == 'pyconst_field':
-            # The value field contains the Python constant
-            # We need to promote it to appropriate PC type
-            # For now, use default promotion (int -> i32, float -> f64, etc.)
-            py_val = value.value
-            if isinstance(py_val, bool):
-                return ir.Constant(ir.IntType(32), int(py_val))
-            elif isinstance(py_val, int):
-                if -2**31 <= py_val < 2**31:
-                    return ir.Constant(ir.IntType(32), py_val)
-                else:
-                    return ir.Constant(ir.IntType(64), py_val)
-            elif isinstance(py_val, float):
-                return ir.Constant(ir.DoubleType(), py_val)
-            else:
-                raise TypeError(f"Cannot convert pyconst value {py_val} to LLVM IR")
-        
-        if value.is_python_value():
-            raise TypeError("Cannot get IR value from Python value")
-        return value.value
+        return value.get_ir_value()
     if isinstance(value, ir.Value):
         return value
     raise TypeError(f"Cannot get IR value from {type(value)}")
@@ -386,16 +399,20 @@ def wrap_value(value: Union[ir.Value, AnyType], kind: str,
         raise TypeError(
             f"BUG: Attempting to wrap a ValueRef in another ValueRef. "
             f"value.kind={value.kind}, value.type_hint={value.type_hint}, "
-            f"requested kind={kind}, requested type_hint={type_hint or pc_type}"
+            f"requested kind={kind}, requested type_hint={type_hint}"
         )
 
-    if kind not in {'address', 'value', 'python'}:
-        raise ValueError(f"Invalid kind: {kind}")
+    # Valid kinds: address, value, python, pointer, pyconst_field, varargs
+    valid_kinds = {'address', 'value', 'python', 'pointer', 'pyconst_field', 'varargs'}
+    if kind not in valid_kinds:
+        raise ValueError(f"Invalid kind: {kind}, must be one of {valid_kinds}")
     
-    # Auto-detect kind for Python types
+    # Auto-detect kind for Python types (but allow pyconst_field for pyconst struct fields)
     if hasattr(type_hint, 'is_python_type') and type_hint.is_python_type():
-        assert(kind == "python")
+        if kind not in ('python', 'pyconst_field'):
+            raise ValueError(f"Python type requires kind='python' or 'pyconst_field', got '{kind}'")
     
+    # address kind requires address field (except for special cases)
     if kind == "address" and address is None:
         raise ValueError("Address kind requires address")
 

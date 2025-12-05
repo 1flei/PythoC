@@ -560,6 +560,7 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
         
         # Build func type hint
         from ..builtin_entities import func as func_type
+        from ..valueref import wrap_value
         param_types = [func_info.param_type_hints[p] for p in func_info.param_names]
         if param_types:
             func_type_hint = func_type[param_types, func_info.return_type_hint]
@@ -567,9 +568,9 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
             func_type_hint = func_type[[], func_info.return_type_hint]
         
         # Return ValueRef with actual IR function pointer
-        return ValueRef(
+        return wrap_value(
+            ir_func,
             kind='pointer',
-            value=ir_func,
             type_hint=func_type_hint,
         )
     
