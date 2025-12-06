@@ -354,23 +354,39 @@ class PythonType(_PythonTypeBase):
         return self._wrap_constant_result(visitor, result)
     
     def handle_subscript(self, visitor, base, index, node: ast.Subscript):
-        """Handle subscripting a Python object.
+        """Handle subscripting a Python object (always type subscript for PC types).
         
-        Strategy:
-        1. If constant sequence: try compile-time indexing
-        2. Otherwise: raise error
+        Design principle:
+        - If _python_object is a PC type class (ptr, struct, etc.): type subscript
+        - If _python_object is a Python sequence (list, dict): compile-time indexing
+        
+        For type subscripts:
+        - ptr[i32]: index is pyconst[i32]
+        - struct[x: i32]: index is refined[struct[...], "slice"]
+        - struct[x: i32, y: f64]: index is refined[struct[...], "tuple"] of slices
         
         Args:
             visitor: AST visitor
             base: Pre-evaluated base object (ValueRef)
-            index: Pre-evaluated index (ValueRef)
+            index: Pre-evaluated index (ValueRef) - always provided now
             node: ast.Subscript node
         """
+        from ..valueref import wrap_value
+        
         # Check if the Python object has its own handle_subscript method
+        # This handles PC type classes (ptr, struct, array, etc.)
         if hasattr(self._python_object, "handle_subscript") and callable(self._python_object.handle_subscript):
-            # Delegate to the object's handle_subscript
-            return self._python_object.handle_subscript(visitor, base, index, node)
+            # For PC type classes, extract type items from index and call handle_type_subscript
+            if isinstance(self._python_object, type) and hasattr(self._python_object, 'handle_type_subscript'):
+                # Extract type items from index ValueRef
+                items = self._extract_type_items(index)
+                # Normalize and delegate to handle_type_subscript
+                normalized = self._python_object.normalize_subscript_items(items)
+                result_type = self._python_object.handle_type_subscript(normalized)
+                # Wrap result as python value
+                return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
 
+        # Python sequence subscript (list, dict, etc.)
         # Extract the index value
         if index.is_python_value():
             index_val = index.value
@@ -384,47 +400,163 @@ class PythonType(_PythonTypeBase):
         
         result = self._python_object[index_val]
         return self._wrap_constant_result(visitor, result)
-        # If it's a constant, perform compile-time subscript
-        # if self._is_constant:
-        #     # Extract Python value from index
-        #     if index.is_python_value():
-        #         index_val = index.value
-        #     else:
-        #         # Try to extract constant from LLVM IR
-        #         from llvmlite import ir
-        #         if isinstance(index.value, ir.Constant) and isinstance(index.value.type, ir.IntType):
-        #             index_val = index.value.constant
-        #         else:
-        #             raise TypeError("List subscript requires constant index at compile time")
-            
-        #     # Perform subscript on Python object
-        #     try:
-        #         result = self._python_object[index_val]
-        #         return self._wrap_constant_result(visitor, result)
-        #     except (IndexError, KeyError, TypeError) as e:
-        #         raise ValueError(f"Compile-time subscript failed: {e}")
-        
-        raise NotImplementedError(
-            f"Cannot subscript non-constant Python object '{self._python_type.__name__}' in compiled code"
-        )
     
-    def _handle_constant_subscript(self, visitor, node: ast.Subscript):
-        """Try to evaluate constant subscript at compile time."""
-        # Evaluate the index
-        index_node = node.slice
+    def _extract_type_items(self, index):
+        """Extract type items from index ValueRef for type subscript.
         
-        # For now, only support constant integer indices
-        if isinstance(index_node, ast.Constant) and isinstance(index_node.value, int):
-            try:
-                result = self._python_object[index_node.value]
-                # Wrap result as a new PythonType or convert to PC type
-                return self._wrap_constant_result(visitor, result)
-            except (IndexError, KeyError, TypeError) as e:
-                raise ValueError(f"Compile-time subscript failed: {e}")
+        Handles:
+        - pyconst[type]: single type -> type
+        - refined[struct[...], "slice"]: named field -> ("name", type)
+        - refined[struct[...], "tuple"]: multiple items -> tuple of items
+        - struct[...] (runtime tuple): extract from _field_types
         
-        raise NotImplementedError(
-            f"Only constant integer indices supported for compile-time subscripting"
-        )
+        Args:
+            index: ValueRef from visit_expression(node.slice)
+        
+        Returns:
+            Single item or tuple of items suitable for normalize_subscript_items
+        """
+        from .refined import RefinedType
+        
+        if index.is_python_value():
+            index_val = index.value
+            
+            # Check if it's a refined type (from visit_Slice or visit_Tuple)
+            if isinstance(index_val, type) and issubclass(index_val, RefinedType):
+                tags = getattr(index_val, '_tags', [])
+                
+                if "slice" in tags:
+                    # refined[struct[pyconst["name"], pyconst[type]], "slice"]
+                    # Extract ("name", type) tuple
+                    return self._extract_slice_item(index_val)
+                
+                if "tuple" in tags:
+                    # refined[struct[...], "tuple"] - multiple items
+                    # Extract all items recursively
+                    return self._extract_tuple_items(index_val)
+            
+            # Plain python value (type or constant)
+            return index_val
+        
+        # Non-python value: check if it's a struct type (from visit_Tuple without all-python special case)
+        # The struct's _field_types contain the type information
+        type_hint = index.type_hint
+        if type_hint is not None and hasattr(type_hint, '_field_types'):
+            # It's a struct type - extract items from _field_types
+            return self._extract_struct_type_items(type_hint)
+        
+        raise TypeError(f"Type subscript index must be a python value, got {index}")
+    
+    def _extract_slice_item(self, refined_type):
+        """Extract (name, type) from refined[struct[pyconst["name"], pyconst[type]], "slice"]"""
+        base_type = getattr(refined_type, '_base_type', None)
+        if base_type is None:
+            raise TypeError(f"Invalid slice type: {refined_type}")
+        
+        # base_type is struct[pyconst["name"], pyconst[type]]
+        field_types = getattr(base_type, '_field_types', [])
+        if len(field_types) != 2:
+            raise TypeError(f"Slice must have exactly 2 fields (name, type), got {len(field_types)}")
+        
+        # Extract name from pyconst["name"]
+        name_type = field_types[0]
+        if hasattr(name_type, '_python_object'):
+            name = name_type._python_object
+        elif hasattr(name_type, 'get_python_object'):
+            name = name_type.get_python_object()
+        else:
+            raise TypeError(f"Cannot extract name from {name_type}")
+        
+        # Extract type from pyconst[type]
+        type_type = field_types[1]
+        if hasattr(type_type, '_python_object'):
+            field_type = type_type._python_object
+        elif hasattr(type_type, 'get_python_object'):
+            field_type = type_type.get_python_object()
+        else:
+            raise TypeError(f"Cannot extract type from {type_type}")
+        
+        return (name, field_type)
+    
+    def _extract_tuple_items(self, refined_type):
+        """Extract items from refined[struct[...], "tuple"]"""
+        from .refined import RefinedType
+        
+        base_type = getattr(refined_type, '_base_type', None)
+        if base_type is None:
+            raise TypeError(f"Invalid tuple type: {refined_type}")
+        
+        # base_type is struct[item1, item2, ...]
+        field_types = getattr(base_type, '_field_types', [])
+        
+        items = []
+        for field_type in field_types:
+            # Each field_type could be:
+            # - pyconst[type]: unnamed field (PythonType wrapping a type)
+            # - pyconst[refined[struct[...], "slice"]]: named field (PythonType wrapping refined type)
+            
+            # First, extract the actual value from pyconst/PythonType
+            actual_value = field_type
+            if hasattr(field_type, '_python_object'):
+                actual_value = field_type._python_object
+            elif hasattr(field_type, 'get_python_object'):
+                actual_value = field_type.get_python_object()
+            
+            # Check if it's a refined type with "slice" tag
+            if isinstance(actual_value, type) and issubclass(actual_value, RefinedType):
+                tags = getattr(actual_value, '_tags', [])
+                if "slice" in tags:
+                    items.append(self._extract_slice_item(actual_value))
+                    continue
+            
+            # Plain value (type or constant)
+            items.append(actual_value)
+        
+        return tuple(items)
+    
+    def _extract_struct_type_items(self, struct_type):
+        """Extract items from a struct type (from visit_Tuple without all-python special case).
+        
+        This handles the case where visit_Tuple creates a runtime struct instead of
+        a refined[struct[...], "tuple"]. The struct's _field_types contain pyconst
+        or refined types that we need to extract.
+        
+        Args:
+            struct_type: A struct type with _field_types attribute
+        
+        Returns:
+            Tuple of items suitable for normalize_subscript_items
+        """
+        from .refined import RefinedType
+        
+        field_types = getattr(struct_type, '_field_types', [])
+        if not field_types:
+            raise TypeError(f"Struct type has no field types: {struct_type}")
+        
+        items = []
+        for field_type in field_types:
+            # Each field_type could be:
+            # - pyconst[type]: PythonType wrapping a type
+            # - refined[struct[...], "slice"]: named field from visit_Slice
+            
+            # First, extract the actual value from pyconst/PythonType
+            actual_value = field_type
+            if hasattr(field_type, '_python_object'):
+                actual_value = field_type._python_object
+            elif hasattr(field_type, 'get_python_object'):
+                actual_value = field_type.get_python_object()
+            
+            # Check if it's a refined type with "slice" tag
+            if isinstance(actual_value, type) and issubclass(actual_value, RefinedType):
+                tags = getattr(actual_value, '_tags', [])
+                if "slice" in tags:
+                    items.append(self._extract_slice_item(actual_value))
+                    continue
+            
+            # Plain value (type or constant)
+            items.append(actual_value)
+        
+        return tuple(items)
     
     def _wrap_constant_result(self, visitor, result):
         """Wrap a compile-time evaluation result.

@@ -28,19 +28,18 @@ class SubscriptsMixin:
     def visit_Subscript(self, node: ast.Subscript):
         """Handle subscript operations with unified duck typing protocol
         
-        Design principle (unified protocol, similar to visit_Call):
+        Design principle (unified protocol):
         1. Get subscriptable object from node.value
-        2. For type subscripts (struct[...], union[...]), pass node directly
-        3. For value subscripts (arr[0]), pre-evaluate base and index
-        4. Delegate to handle_subscript(visitor, base, index, node)
+        2. ALWAYS visit index (no special case for type subscripts)
+        3. Delegate to type_hint.handle_subscript(visitor, base, index, node)
         
-        All subscriptable types implement: handle_subscript(visitor, base, index, node) -> ValueRef
-        where base and index are pre-evaluated ValueRef objects (or None for type subscripts).
+        Key insight: The dispatch is determined by base.type_hint:
+        - base.type_hint is PythonType -> type subscript (ptr[i32], struct[x: i32])
+        - base.type_hint is PC type instance -> value subscript (arr[0], p[i])
         
         Protocol implementers:
-            - Builtin types (ptr, array, struct, union): type class with handle_subscript
-            - Value types (array, ptr values): type_hint with handle_subscript (for value subscript)
-            - Python types: PythonType instance with handle_subscript
+            - PythonType.handle_subscript: always type subscript
+            - PCType.handle_subscript (array, ptr, struct): always value subscript
         """
         # Special case: union/enum varargs access (args[i])
         # Struct varargs are now handled as normal struct, no special case needed
@@ -52,33 +51,17 @@ class SubscriptsMixin:
                     if self.current_varargs_info['kind'] in ('union', 'enum'):
                         return self._handle_varargs_subscript(node)
         
-        # Normal subscript handling
         # Get the subscriptable object (evaluates node.value)
         result = self.visit_expression(node.value)
         
-        # Extract the object that implements handle_subscript
-        subscriptable = None
-        if hasattr(result.value, 'handle_subscript'):
-            subscriptable = result.value
-        elif result.type_hint and hasattr(result.type_hint, 'handle_subscript'):
-            subscriptable = result.type_hint
-        else:
-            raise TypeError(f"Object does not support subscripting: valueref: {result}")
+        # ALWAYS visit index - unified handling
+        index = self.visit_expression(node.slice)
         
-        # Determine if this is a type subscript or value subscript
-        # Type subscript: result.kind == 'python' and result.value is a type
-        # For type subscripts, don't pre-evaluate index (pass None)
-        # For value subscripts, pre-evaluate index normally
-        # Note: For tuple indices like matrix[i, j], we don't pre-evaluate here
-        # Let handle_subscript decide based on node.slice
-        is_type_sub = (result.kind == 'python' and isinstance(result.value, type))
+        # Delegate to type_hint's handle_subscript
+        if result.type_hint and hasattr(result.type_hint, 'handle_subscript'):
+            return result.type_hint.handle_subscript(self, result, index, node)
         
-        if is_type_sub:
-            index = None
-        else:
-            index = self.visit_expression(node.slice)
-        
-        return subscriptable.handle_subscript(self, result, index, node)
+        raise TypeError(f"Object does not support subscripting: valueref: {result}")
     
     def visit_Attribute(self, node: ast.Attribute):
         """Handle attribute access with unified duck typing protocol

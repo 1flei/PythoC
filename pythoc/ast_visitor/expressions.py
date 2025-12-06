@@ -614,14 +614,76 @@ class ExpressionsMixin:
         return elements
     
 
-    def visit_Tuple(self, node: ast.Tuple):
-        """Handle tuple expressions - returns struct[element_types...]
+    def visit_Slice(self, node: ast.Slice):
+        """Handle slice syntax (x: Type) as refined[struct[...], "slice"].
         
-        Creates an anonymous struct type from the tuple elements.
+        ast.Slice structure:
+        - lower: field name (ast.Name 'x' -> string "x")
+        - upper: field type (type expression like i32)
+        - step: None (not used)
+        
+        Equivalence:
+            x: i32      <=>  refined[struct[pyconst["x"], pyconst[i32]], "slice"]
+            "name": f64 <=>  refined[struct[pyconst["name"], pyconst[f64]], "slice"]
+        
+        Returns: ValueRef representing refined[struct[...], "slice"]
+        """
+        from ..builtin_entities.python_type import PythonType, pyconst
+        from ..builtin_entities.struct import struct
+        from ..builtin_entities.refined import refined
+        
+        # Extract field name as STRING (not variable lookup!)
+        if node.lower is None:
+            raise TypeError("Slice must have lower bound (field name)")
+        
+        if isinstance(node.lower, ast.Name):
+            # x: i32 -> "x" (Name.id as string literal)
+            field_name = node.lower.id
+        elif isinstance(node.lower, ast.Constant) and isinstance(node.lower.value, str):
+            # "x": i32 -> "x" (already a string)
+            field_name = node.lower.value
+        else:
+            raise TypeError(f"Invalid field name in slice, expected name or string: {ast.dump(node.lower)}")
+        
+        # Visit field type (upper bound)
+        if node.upper is None:
+            raise TypeError("Slice must have upper bound (field type)")
+        
+        field_type_ref = self.visit_expression(node.upper)
+        
+        # Extract the actual type from field_type_ref
+        # field_type_ref is pyconst[i32], we need to get i32
+        if field_type_ref.is_python_value():
+            field_type = field_type_ref.value
+        else:
+            field_type = field_type_ref.type_hint
+        
+        # Create 2-element struct: struct[pyconst["x"], pyconst[field_type]]
+        # Field 0: the name (as pyconst[str])
+        # Field 1: the type (as pyconst[type])
+        inner_struct_type = struct.handle_type_subscript((
+            (None, pyconst[field_name]),
+            (None, pyconst[field_type]),
+        ))
+        
+        # Wrap as refined[struct[...], "slice"]
+        refined_type = refined[inner_struct_type, "slice"]
+        
+        # Return as python value (this is a type, not a runtime value)
+        return wrap_value(refined_type, kind="python", type_hint=PythonType.wrap(refined_type))
+
+    def visit_Tuple(self, node: ast.Tuple):
+        """Handle tuple expressions - returns refined[struct[...], "tuple"]
+        
+        Creates an anonymous struct type from the tuple elements, wrapped in refined with "tuple" tag.
         For Python values, uses pyconst[value] as the field type.
         This allows tuples to be used as lightweight structs in PC code.
+        
+        Design: tuple is refined[struct[...], "tuple"] to distinguish from raw struct.
         """
         from ..builtin_entities.struct import struct
+        from ..builtin_entities.refined import refined
+        from ..builtin_entities.python_type import PythonType
         
         # Evaluate all elements
         elements = [self.visit_expression(elt) for elt in node.elts]

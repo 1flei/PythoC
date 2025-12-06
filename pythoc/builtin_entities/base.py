@@ -101,43 +101,6 @@ class BuiltinEntity(ABC, metaclass=BuiltinEntityMeta):
     def is_enum_type(cls) -> bool:
         """Is this an enum type? Override in enum to return True."""
         return False
-    
-    @classmethod
-    def handle_as_type(cls, visitor, node: ast.AST):
-        """Handle type annotation resolution (unified call protocol)
-        
-        This method is called when an entity is used as a type annotation.
-        It allows entities to customize how they are resolved to PC types.
-        
-        Unified protocol:
-            visitor: AST visitor instance, provides compilation context (includes type_resolver)
-            node: AST node, provides complete syntax information
-                - ast.Name: simple type name (i32, f64, etc.)
-                - ast.Subscript: generic type (ptr[T], array[T, N], etc.)
-                - ast.Constant: string type name
-                - other node types
-        
-        Returns:
-            PC type (BuiltinEntity subclass, ir.Type, or None)
-            - BuiltinEntity subclass: builtin type class
-            - ir.Type: LLVM type (for struct, etc.)
-            - None: cannot resolve to a type
-        
-        Examples:
-            i32.handle_as_type(visitor, ast.Name('i32')) -> i32
-            ptr.handle_as_type(visitor, ast.Subscript('ptr', 'i32')) -> ptr[i32]
-        """
-        # Default implementation: 
-        # - For simple Name nodes, return self if can_be_type()
-        # - For Subscript nodes, return None to let fallback logic handle it
-        #   (unless subclass overrides this method)
-        if node and isinstance(node, ast.Subscript):
-            # Let fallback logic handle subscript types (struct[...], union[...], etc.)
-            return None
-        
-        if cls.can_be_type():
-            return cls
-        return None
 
 
 class BuiltinType(BuiltinEntity):
