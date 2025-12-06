@@ -1,5 +1,6 @@
 import os
 import atexit
+from ..utils.link_utils import file_lock
 
 
 class OutputManager:
@@ -224,18 +225,27 @@ class OutputManager:
             
             compiler = group['compiler']
             
-            # Verify module
-            if not compiler.verify_module():
-                source_file, scope, suffix = group_key
-                raise RuntimeError(f"Module verification failed for group {group_key}")
+            # Use file lock to prevent concurrent compilation of the same module
+            # This protects against parallel test runs compiling the same .o file
+            # Note: We don't skip compilation even if .o exists, because each process
+            # may generate different anonymous symbol names. The lock ensures only
+            # one process writes at a time.
+            obj_file = group['obj_file']
+            lockfile_path = obj_file + '.lock'
             
-            # Optimize
-            opt_level = int(os.environ.get('PC_OPT_LEVEL', '2'))
-            compiler.optimize_module(optimization_level=opt_level)
-            
-            # Write files
-            compiler.save_ir_to_file(group['ir_file'])
-            compiler.compile_to_object(group['obj_file'])
+            with file_lock(lockfile_path):
+                # Verify module
+                if not compiler.verify_module():
+                    source_file, scope, suffix = group_key
+                    raise RuntimeError(f"Module verification failed for group {group_key}")
+                
+                # Optimize
+                opt_level = int(os.environ.get('PC_OPT_LEVEL', '2'))
+                compiler.optimize_module(optimization_level=opt_level)
+                
+                # Write files
+                compiler.save_ir_to_file(group['ir_file'])
+                compiler.compile_to_object(group['obj_file'])
             
             # Mark this group as flushed
             self._flushed_groups.add(group_key)

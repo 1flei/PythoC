@@ -673,16 +673,16 @@ class ExpressionsMixin:
         return wrap_value(refined_type, kind="python", type_hint=PythonType.wrap(refined_type))
 
     def visit_Tuple(self, node: ast.Tuple):
-        """Handle tuple expressions - returns refined[struct[...], "tuple"]
+        """Handle tuple expressions - returns struct type
         
-        Creates an anonymous struct type from the tuple elements, wrapped in refined with "tuple" tag.
+        Creates an anonymous struct type from the tuple elements.
         For Python values, uses pyconst[value] as the field type.
         This allows tuples to be used as lightweight structs in PC code.
         
-        Design: tuple is refined[struct[...], "tuple"] to distinguish from raw struct.
+        If all fields are zero-sized (pyconst), no IR is generated and a python
+        value is returned. This enables using visit_expression for type resolution.
         """
         from ..builtin_entities.struct import struct
-        from ..builtin_entities.refined import refined
         from ..builtin_entities.python_type import PythonType
         
         # Evaluate all elements
@@ -695,28 +695,32 @@ class ExpressionsMixin:
         # Create anonymous struct type: struct[type1, type2, ...]
         struct_type = struct.handle_type_subscript(tuple(field_specs))
         
-        # Allocate struct and store elements
+        # Get LLVM struct type to check if it has any runtime fields
         llvm_struct_type = struct_type.get_llvm_type(self.module.context)
+        
+        # If struct has no runtime fields (all pyconst), return as python value
+        # This enables compile-time evaluation without IR generation
+        if len(llvm_struct_type.elements) == 0:
+            return wrap_value(struct_type, kind="python", type_hint=PythonType.wrap(struct_type))
+        
+        # Allocate struct and store elements
         struct_alloca = self.builder.alloca(llvm_struct_type, name="tuple_struct")
         
-        # Store each non-pyconst element into the struct
-        # pyconst fields are zero-sized and don't need storage
-        llvm_field_idx = 0
+        # Store each element into the struct
+        # Zero-sized fields (like pyconst) exist as {} in LLVM IR
         for i, elem in enumerate(elements):
             field_ptr = self.builder.gep(
                 struct_alloca,
-                [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), llvm_field_idx)],
+                [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
                 name=f"tuple_field_{i}"
             )
             self.builder.store(ensure_ir(elem), field_ptr)
-            llvm_field_idx += 1
             
             # Transfer ownership of linear elements (they're being moved into the tuple)
             self._transfer_linear_ownership(elem, reason="tuple construction")
         
         # Load the struct value
         struct_val = self.builder.load(struct_alloca, name="tuple_val")
-        # logger.error(f"struct_type: {struct_type}, llvm_struct_type: {llvm_struct_type}, struct_alloca: {struct_alloca}, struct_val: {struct_val}", node)
         
         return wrap_value(struct_val, kind="address", type_hint=struct_type, address=struct_alloca)
     

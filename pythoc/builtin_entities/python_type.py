@@ -373,18 +373,16 @@ class PythonType(_PythonTypeBase):
         """
         from ..valueref import wrap_value
         
-        # Check if the Python object has its own handle_subscript method
-        # This handles PC type classes (ptr, struct, array, etc.)
-        if hasattr(self._python_object, "handle_subscript") and callable(self._python_object.handle_subscript):
-            # For PC type classes, extract type items from index and call handle_type_subscript
-            if isinstance(self._python_object, type) and hasattr(self._python_object, 'handle_type_subscript'):
-                # Extract type items from index ValueRef
-                items = self._extract_type_items(index)
-                # Normalize and delegate to handle_type_subscript
-                normalized = self._python_object.normalize_subscript_items(items)
-                result_type = self._python_object.handle_type_subscript(normalized)
-                # Wrap result as python value
-                return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
+        # Check if the Python object is a PC type class with handle_type_subscript
+        # This handles PC type classes (ptr, struct, array, func, etc.)
+        if isinstance(self._python_object, type) and hasattr(self._python_object, 'handle_type_subscript'):
+            # Extract type items from index ValueRef
+            items = self._extract_type_items(index)
+            # Normalize and delegate to handle_type_subscript
+            normalized = self._python_object.normalize_subscript_items(items)
+            result_type = self._python_object.handle_type_subscript(normalized)
+            # Wrap result as python value
+            return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
 
         # Python sequence subscript (list, dict, etc.)
         # Extract the index value

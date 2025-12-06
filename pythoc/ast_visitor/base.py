@@ -449,14 +449,23 @@ class LLVMIRVisitor(ast.NodeVisitor):
         A type is linear if:
         1. It's the linear token type itself
         2. It has _is_linear attribute set to True
-        3. It's a struct containing linear fields (recursively)
+        3. It's a RefinedType wrapping a linear type
+        4. It's a struct containing linear fields (recursively)
         """
         from ..builtin_entities import linear
+        from ..builtin_entities.refined import RefinedType
+        
         if type_hint is linear:
             return True
         # Check if it's a class with _is_linear attribute
         if isinstance(type_hint, type) and hasattr(type_hint, '_is_linear'):
             return type_hint._is_linear
+        
+        # Check if it's a RefinedType - delegate to base type
+        if isinstance(type_hint, type) and issubclass(type_hint, RefinedType):
+            base_type = getattr(type_hint, '_base_type', None)
+            if base_type is not None:
+                return self._is_linear_type(base_type)
         
         # Check if it's a struct with linear fields
         if isinstance(type_hint, type) and hasattr(type_hint, '_field_types'):
@@ -476,16 +485,26 @@ class LLVMIRVisitor(ast.NodeVisitor):
         
         Examples:
             linear -> [()]
+            refined[linear, "tag"] -> [()] (refined wrapping linear is linear itself)
             struct[ptr, linear] -> [(1,)]
             struct[struct[ptr, linear], linear] -> [(0, 1), (1,)]
         """
         from ..builtin_entities import linear
+        from ..builtin_entities.refined import RefinedType
         
         if type_hint is linear:
             return [prefix]
         
         if isinstance(type_hint, type) and hasattr(type_hint, '_is_linear') and type_hint._is_linear:
             return [prefix]
+        
+        # Check if it's a RefinedType - delegate to base type
+        # A refined[linear, "tag"] is linear at the current path, not nested
+        if isinstance(type_hint, type) and issubclass(type_hint, RefinedType):
+            base_type = getattr(type_hint, '_base_type', None)
+            if base_type is not None:
+                # Delegate to base type at the same prefix (not nested)
+                return self._get_linear_paths(base_type, prefix)
         
         # Check if it's a struct with linear fields
         if isinstance(type_hint, type) and hasattr(type_hint, '_field_types'):
