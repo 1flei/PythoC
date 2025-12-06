@@ -688,6 +688,11 @@ class ExpressionsMixin:
         # Evaluate all elements
         elements = [self.visit_expression(elt) for elt in node.elts]
         
+        # In constexpr mode, return Python tuple directly
+        if self.is_constexpr():
+            values = [elem.value if isinstance(elem, ValueRef) else elem for elem in elements]
+            return wrap_value(tuple(values), kind="python", type_hint=tuple)
+        
         # Build struct type from element types
         # Format: ((None, type1), (None, type2), ...) for unnamed fields
         # For Python values, use pyconst[value] as the type

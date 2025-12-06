@@ -4,7 +4,7 @@ Base visitor class with initialization and core helper methods
 
 import ast
 import builtins
-from typing import Optional, Any, List, Tuple
+from typing import Optional, Any, List, Tuple, TYPE_CHECKING
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..type_converter import TypeConverter
@@ -35,26 +35,43 @@ from ..registry import get_unified_registry, infer_struct_from_access
 from ..type_resolver import TypeResolver
 from ..logger import logger
 
+if TYPE_CHECKING:
+    from ..backend import AbstractBackend
+
 
 class LLVMIRVisitor(ast.NodeVisitor):
     """Enhanced AST visitor that generates LLVM IR using llvmlite
     
     Now includes context management for better type tracking and scope handling.
+    Supports both legacy (module/builder) and new (backend) initialization.
     """
     
-    def __init__(self, module: ir.Module, builder: ir.IRBuilder, func_type_hints: dict, struct_types: dict = None, source_globals: dict = None, compiler=None, user_globals: dict = None):
-        self.module = module
-        self.builder = builder
-        self.func_type_hints = func_type_hints
+    def __init__(self, module: ir.Module = None, builder: ir.IRBuilder = None,
+                 func_type_hints: dict = None, struct_types: dict = None,
+                 source_globals: dict = None, compiler=None, user_globals: dict = None,
+                 backend: "AbstractBackend" = None):
+        # Support both legacy (module/builder) and new (backend) initialization
+        if backend is not None:
+            self._backend = backend
+            self.module = backend.get_module()
+            self.builder = backend.get_llvm_builder() if hasattr(backend, 'get_llvm_builder') else None
+            # Create context with backend
+            self.ctx = CompilationContext(backend=backend, user_globals=user_globals)
+        else:
+            self._backend = None
+            self.module = module
+            self.builder = builder
+            # Legacy context initialization
+            self.ctx = CompilationContext(module, builder, user_globals=user_globals)
         
-        # New context management system
-        self.ctx = CompilationContext(module, builder, user_globals=user_globals)
+        self.func_type_hints = func_type_hints or {}
         self.ctx.struct_types = struct_types or {}
         self.ctx.source_globals = source_globals or {}
         
         # Type resolver for unified type annotation parsing
         # Pass visitor=self to allow type resolver to access local Python type variables
-        self.type_resolver = TypeResolver(module.context, user_globals=user_globals, visitor=self)
+        module_context = self.module.context if self.module else None
+        self.type_resolver = TypeResolver(module_context, user_globals=user_globals, visitor=self)
         
         # Type converter for centralized type conversion
         self.type_converter = TypeConverter(self)
@@ -69,6 +86,17 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.source_globals = self.ctx.source_globals
         self.compiler = compiler
         self.loop_stack = self.ctx.loop_stack
+    
+    @property
+    def backend(self) -> Optional["AbstractBackend"]:
+        """Get the backend (if initialized with one)"""
+        return self._backend
+    
+    def is_constexpr(self) -> bool:
+        """Check if this visitor is for constexpr evaluation"""
+        if self._backend is not None:
+            return self._backend.is_constexpr()
+        return self.module is None
         
     def get_next_label(self, prefix="label"):
         """Generate unique label names"""
@@ -205,19 +233,18 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if var_info:
             return var_info
         
-        # 2. Check user globals for objects with handle_call (like ExternFunctionWrapper)
-        # This must come BEFORE checking global functions, because extern functions
-        # may be declared as LLVM functions but should still use their wrapper's handle_call
+        # 2. Check user globals
         if self.ctx.user_globals and name in self.ctx.user_globals:
             python_obj = self.ctx.user_globals[name]
+            from ..valueref import ValueRef, wrap_value
+            
+            # 2a. Objects with handle_call (ExternFunctionWrapper, @compile wrapper, etc.)
             if hasattr(python_obj, 'handle_call') and callable(python_obj.handle_call):
-                from ..valueref import wrap_value
                 from ..builtin_entities.python_type import PythonType
                 
                 # For @compile functions, get type hints from function annotations
-                type_hint = PythonType.wrap(python_obj, is_constant=True)  # Wrap with PythonType for unified subscript handling
+                type_hint = PythonType.wrap(python_obj, is_constant=True)
                 if hasattr(python_obj, '_is_compiled') and python_obj._is_compiled:
-                    # Get type hints from function annotations
                     if hasattr(python_obj, '__annotations__'):
                         annotations = python_obj.__annotations__
                         param_type_hints = {}
@@ -229,127 +256,46 @@ class LLVMIRVisitor(ast.NodeVisitor):
                             else:
                                 param_type_hints[key] = value
                         
-                        # Create func type if we have return type
-                        # Otherwise keep the wrapper as type_hint (it has handle_call)
                         if return_type_hint is not None:
                             from ..builtin_entities import func
-                            # Build param types list in order
                             param_types = list(param_type_hints.values())
-                            if param_types:
-                                type_hint = func[param_types, return_type_hint]
-                            else:
-                                type_hint = func[[], return_type_hint]
+                            type_hint = func[param_types, return_type_hint] if param_types else func[[], return_type_hint]
                 
                 return VariableInfo(
                     name=name,
-                    value_ref = wrap_value(value=python_obj, kind='python', type_hint=type_hint),
+                    value_ref=wrap_value(value=python_obj, kind='python', type_hint=type_hint),
                     alloca=None,
                     source="python_global",
                     is_global=True,
                     is_mutable=False,
                 )
-        
-        # 3. Then check if it's a global function
-        try:
-            func = self.module.get_global(name)
-            if isinstance(func, ir.Function):
-                # Get function type hints from unified registry
-                from ..registry import get_unified_registry
-                func_type_hints = get_unified_registry().get_function_type_hints(name)
-                
-                # Create a wrapper object with handle_call for unified call handling
-                class LLVMFunctionWrapper:
-                    def __init__(self, func_name, func_type_hints):
-                        self.func_name = func_name
-                        self.func_type_hints = func_type_hints
-                    
-                    def handle_call(self, visitor, args, node):
-                        """Handle calls to LLVM functions"""
-                        # Get the function from the module
-                        try:
-                            ir_func = visitor.module.get_global(self.func_name)
-                        except KeyError:
-                            raise NameError(f"Function '{self.func_name}' not found in module")
-                        
-                        # Extract parameter types
-                        if not self.func_type_hints or 'params' not in self.func_type_hints:
-                            raise TypeError(f"No parameter type hints found for function '{self.func_name}'")
-                        
-                        param_llvm_types = []
-                        for param_name, pc_param_type in self.func_type_hints['params'].items():
-                            if hasattr(pc_param_type, 'get_llvm_type'):
-                                # Try with module_context first (for struct types), fallback to no-arg
-                                try:
-                                    param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
-                                except TypeError:
-                                    param_llvm_types.append(pc_param_type.get_llvm_type())
-                            else:
-                                raise TypeError(f"Invalid parameter type hint for '{param_name}' in function '{self.func_name}'")
-                        
-                        return_type_hint = self.func_type_hints.get('return', None)
-                        
-                        # Use visitor's _perform_call with pre-evaluated args
-                        return visitor._perform_call(node, ir_func, param_llvm_types, return_type_hint, evaluated_args=args)
-                
-                wrapper = LLVMFunctionWrapper(name, func_type_hints)
-                
-                # Create a pseudo VariableInfo for the function
-                from ..valueref import wrap_value
-                return VariableInfo(
-                    name=name,
-                    value_ref=wrap_value(
-                        kind='python',
-                        value=wrapper,
-                        type_hint=func_type_hints,
-                    ),
-                    alloca=func,  # Store function as "alloca" for backward compat
-                    source="function",
-                    is_global=True,
-                    is_mutable=False,
-                )
-        except KeyError:
-            pass
-        
-        # 3. Check user globals for Python objects
-        if self.ctx.user_globals and name in self.ctx.user_globals:
-            python_obj = self.ctx.user_globals[name]
             
-            # Skip PC builtin entities and struct classes - they should be handled by type system, not as Python objects
+            # 2b. BuiltinEntity types (i32, ptr, etc.)
             from ..builtin_entities import BuiltinEntity, BuiltinType, BuiltinFunction
             if isinstance(python_obj, type):
                 try:
                     if issubclass(python_obj, BuiltinEntity):
-                        # BuiltinType and BuiltinFunction have their own handle_call/handle_subscript
-                        # Return them directly as type_hint (not wrapped in PythonType)
                         if issubclass(python_obj, (BuiltinType, BuiltinFunction)):
-                            # Create a ValueRef to hold the type_hint
-                            from ..valueref import wrap_value
                             return VariableInfo(
                                 name=name,
                                 value_ref=wrap_value(
                                     kind='python',
                                     value=python_obj,
-                                    type_hint=python_obj,  # The class itself as type_hint
+                                    type_hint=python_obj,
                                 ),
                                 alloca=None,
                                 source="builtin_entity",
                                 is_global=True,
                                 is_mutable=False,
                             )
-                        # Other BuiltinEntity subclasses can be wrapped
                 except TypeError:
-                    # Not a class, continue
                     pass
                 
-                # Check if it's a struct class (marked by @compile decorator)
+                # 2c. Struct class - return None to let type system handle it
                 if hasattr(python_obj, '_is_struct') and python_obj._is_struct:
-                    # This is a PC struct type - don't wrap it as Python object
                     return None
             
-            # Wrap Python object
-            from ..valueref import ValueRef, wrap_value
-            
-            # If python_obj is already a ValueRef (like nullptr), return it directly
+            # 2d. Already a ValueRef (like nullptr)
             if isinstance(python_obj, ValueRef):
                 return VariableInfo(
                     name=name,
@@ -360,10 +306,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     is_mutable=False,
                 )
             
+            # 2e. Generic Python object
             from ..builtin_entities.python_type import PythonType
             python_type = PythonType.wrap(python_obj)
-            
-            # Create pseudo VariableInfo for Python object
             return VariableInfo(
                 name=name,
                 value_ref=wrap_value(
@@ -371,8 +316,75 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     value=python_obj,
                     type_hint=python_type,
                 ),
-                alloca=None,  # No LLVM alloca for Python objects
+                alloca=None,
                 source="python_global",
+                is_global=True,
+                is_mutable=False,
+            )
+        
+        # 4. Check unified registry for @compile functions (supports mutual recursion)
+        # This handles the case where function B calls function A, but A's wrapper
+        # is not yet in user_globals when B's decorator runs (deferred compilation)
+        from ..registry import get_unified_registry
+        registry = get_unified_registry()
+        func_info = registry.get_function_info(name)
+        if func_info:
+            # Create a callable wrapper that uses registry info
+            class RegistryFunctionWrapper:
+                def __init__(self, func_name, func_info):
+                    self.func_name = func_name
+                    self.func_info = func_info
+                
+                def handle_call(self, visitor, args, node):
+                    """Handle calls to functions registered in unified registry"""
+                    from llvmlite import ir as llvm_ir
+                    
+                    actual_func_name = self.func_info.mangled_name or self.func_name
+                    
+                    # Get or declare the function in the module
+                    try:
+                        ir_func = visitor.module.get_global(actual_func_name)
+                    except KeyError:
+                        # Declare the function
+                        param_llvm_types = []
+                        for param_name in self.func_info.param_names:
+                            pc_param_type = self.func_info.param_type_hints.get(param_name)
+                            if pc_param_type and hasattr(pc_param_type, 'get_llvm_type'):
+                                param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
+                            else:
+                                raise TypeError(f"Invalid parameter type hint for '{param_name}' in function '{actual_func_name}'")
+                        
+                        if self.func_info.return_type_hint and hasattr(self.func_info.return_type_hint, 'get_llvm_type'):
+                            return_llvm_type = self.func_info.return_type_hint.get_llvm_type(visitor.module.context)
+                        else:
+                            return_llvm_type = llvm_ir.VoidType()
+                        
+                        func_type = llvm_ir.FunctionType(return_llvm_type, param_llvm_types)
+                        ir_func = llvm_ir.Function(visitor.module, func_type, actual_func_name)
+                    
+                    # Build parameter LLVM types
+                    param_llvm_types = []
+                    for p in self.func_info.param_names:
+                        param_type = self.func_info.param_type_hints[p]
+                        param_llvm_types.append(param_type.get_llvm_type(visitor.module.context))
+                    
+                    return visitor._perform_call(
+                        node, ir_func, param_llvm_types,
+                        self.func_info.return_type_hint,
+                        evaluated_args=args
+                    )
+            
+            wrapper = RegistryFunctionWrapper(name, func_info)
+            from ..valueref import wrap_value
+            return VariableInfo(
+                name=name,
+                value_ref=wrap_value(
+                    kind='python',
+                    value=wrapper,
+                    type_hint=func_info,
+                ),
+                alloca=None,
+                source="registry_function",
                 is_global=True,
                 is_mutable=False,
             )
