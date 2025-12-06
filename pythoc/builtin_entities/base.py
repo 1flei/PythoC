@@ -129,6 +129,8 @@ class BuiltinType(BuiltinEntity):
                 - Tuple with slices: (slice("x", i32), slice("y", f64))
                 - Tuple with named tuples: (("x", i32), ("y", f64))
                 - Mixed: (i32, slice("y", f64), ("z", i32))
+                - refined[struct[...], "slice"]: from visit_Slice (AST parsing)
+                - refined[struct[...], "tuple"]: from visit_Tuple (AST parsing)
         
         Returns:
             Tuple[Tuple[Optional[str], type], ...] where:
@@ -143,32 +145,149 @@ class BuiltinType(BuiltinEntity):
             (("x", i32), i32) -> (("x", i32), (None, i32))
         """
         import builtins
+        from .refined import RefinedType
         
-        # Normalize to tuple
+        # First, unwrap refined[..., "tuple"] if present (from visit_Tuple in AST parsing)
+        # This handles the case where AST parsing produces a single refined type
+        # containing multiple elements
         if not isinstance(items, builtins.tuple):
-            items = (items,)
+            if isinstance(items, type) and issubclass(items, RefinedType):
+                tags = getattr(items, '_tags', [])
+                if "tuple" in tags:
+                    # Recursively extract items from refined tuple
+                    items = cls._extract_tuple_from_refined(items)
+            if not isinstance(items, builtins.tuple):
+                items = (items,)
         
         normalized = []
         for item in items:
-            if isinstance(item, builtins.slice):
-                # Named field from Python runtime: slice("name", type, None)
-                # Convert to ("name", type) tuple
-                if item.start is None or item.stop is None:
-                    raise TypeError("Named field requires both name and type")
-                
-                field_name = item.start
-                if not isinstance(field_name, str):
-                    raise TypeError(f"Field name must be a string, got {type(field_name)}")
-                
-                normalized.append((field_name, item.stop))
-            elif isinstance(item, builtins.tuple) and len(item) == 2 and isinstance(item[0], str):
-                # Already in ("name", type) format from TypeResolver
-                normalized.append(item)
-            else:
-                # Unnamed item - wrap as (None, type)
-                normalized.append((None, item))
+            normalized.append(cls._normalize_single_item(item))
         
         return tuple(normalized)
+    
+    @classmethod
+    def _normalize_single_item(cls, item):
+        """Normalize a single subscript item to (Optional[str], type) format.
+        
+        Handles:
+        - slice("name", type, None): Python runtime named field
+        - ("name", type): already normalized tuple
+        - refined[struct[...], "slice"]: from visit_Slice (AST parsing)
+        - refined[struct[...], "tuple"]: recursively extract items
+        - other: unnamed field -> (None, item)
+        """
+        import builtins
+        from .refined import RefinedType
+        
+        # Case 1: Python runtime slice object
+        if isinstance(item, builtins.slice):
+            if item.start is None or item.stop is None:
+                raise TypeError("Named field requires both name and type")
+            field_name = item.start
+            if not isinstance(field_name, str):
+                raise TypeError(f"Field name must be a string, got {type(field_name)}")
+            return (field_name, item.stop)
+        
+        # Case 2: Already normalized ("name", type) tuple
+        if isinstance(item, builtins.tuple) and len(item) == 2 and isinstance(item[0], str):
+            return item
+        
+        # Case 3: refined[struct[...], "slice"] from visit_Slice
+        if isinstance(item, type) and issubclass(item, RefinedType):
+            tags = getattr(item, '_tags', [])
+            
+            if "slice" in tags:
+                # Extract ("name", type) from refined[struct[pyconst["name"], pyconst[type]], "slice"]
+                return cls._extract_slice_from_refined(item)
+            
+            # "tuple" tag should be handled at normalize_subscript_items level, not here
+            # If we get here with "tuple" tag, something is wrong
+            if "tuple" in tags:
+                raise TypeError("refined[..., 'tuple'] should be unwrapped at normalize_subscript_items level")
+        
+        # Case 4: Unnamed item
+        return (None, item)
+    
+    @classmethod
+    def _extract_slice_from_refined(cls, refined_type):
+        """Extract (name, type) from refined[struct[pyconst["name"], pyconst[type]], "slice"]
+        
+        This handles the output of visit_Slice when parsing AST type annotations.
+        """
+        base_type = getattr(refined_type, '_base_type', None)
+        if base_type is None:
+            raise TypeError(f"Invalid slice type: {refined_type}")
+        
+        # base_type is struct[pyconst["name"], pyconst[type]]
+        field_types = getattr(base_type, '_field_types', [])
+        if len(field_types) != 2:
+            raise TypeError(f"Slice must have exactly 2 fields (name, type), got {len(field_types)}")
+        
+        # Extract name from pyconst["name"]
+        name_type = field_types[0]
+        if hasattr(name_type, '_python_object'):
+            name = name_type._python_object
+        elif hasattr(name_type, 'get_python_object'):
+            name = name_type.get_python_object()
+        else:
+            raise TypeError(f"Cannot extract name from {name_type}")
+        
+        # Extract type from pyconst[type]
+        type_type = field_types[1]
+        if hasattr(type_type, '_python_object'):
+            field_type = type_type._python_object
+        elif hasattr(type_type, 'get_python_object'):
+            field_type = type_type.get_python_object()
+        else:
+            raise TypeError(f"Cannot extract type from {type_type}")
+        
+        return (name, field_type)
+    
+    @classmethod
+    def _extract_tuple_from_refined(cls, refined_type):
+        """Extract items from refined[struct[...], "tuple"]
+        
+        This handles the output of visit_Tuple when parsing AST type annotations.
+        The refined type wraps a struct where each field is a pyconst containing
+        either a type or another refined type (for slices).
+        
+        Returns:
+            Tuple of items (types or (name, type) tuples)
+        """
+        from .refined import RefinedType
+        
+        base_type = getattr(refined_type, '_base_type', None)
+        if base_type is None:
+            raise TypeError(f"Invalid tuple type: {refined_type}")
+        
+        field_types = getattr(base_type, '_field_types', [])
+        items = []
+        
+        for field_type in field_types:
+            # Extract actual value from pyconst wrapper
+            if hasattr(field_type, '_python_object'):
+                actual_value = field_type._python_object
+            elif hasattr(field_type, 'get_python_object'):
+                actual_value = field_type.get_python_object()
+            else:
+                actual_value = field_type
+            
+            # Check if it's a nested refined type (slice or tuple)
+            if isinstance(actual_value, type) and issubclass(actual_value, RefinedType):
+                tags = getattr(actual_value, '_tags', [])
+                if "slice" in tags:
+                    items.append(cls._extract_slice_from_refined(actual_value))
+                    continue
+                if "tuple" in tags:
+                    # Nested tuple - recursively extract and flatten
+                    nested = cls._extract_tuple_from_refined(actual_value)
+                    items.extend(nested)
+                    continue
+            
+            # Plain value
+            items.append(actual_value)
+        
+        return tuple(items)
     
     @classmethod
     def handle_type_subscript(cls, items):

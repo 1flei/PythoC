@@ -17,6 +17,7 @@ import ast
 
 if TYPE_CHECKING:
     from .builtin_entities import BuiltinType
+    from .backend import AbstractBackend
 
 # Backward compatibility: import type registry from builtin_entities
 from .builtin_entities import TYPE_REGISTRY as PC_TYPE_MAP
@@ -42,13 +43,25 @@ class CompilationContext:
     This holds all context information for a compilation unit:
     - Variable registry
     - Type information
-    - Module and builder references
+    - Backend (module and builder access)
     - Compilation options
+    
+    Supports two initialization modes:
+    1. Legacy: module + builder (backward compatible)
+    2. New: backend (preferred)
     """
     
-    def __init__(self, module: ir.Module, builder: ir.IRBuilder, user_globals: Dict[str, Any] = None):
-        self.module = module
-        self.builder = builder
+    def __init__(self, module: ir.Module = None, builder: ir.IRBuilder = None,
+                 user_globals: Dict[str, Any] = None, backend: "AbstractBackend" = None):
+        # Support both legacy (module/builder) and new (backend) initialization
+        if backend is not None:
+            self._backend = backend
+            self._module = backend.get_module()
+            self._builder = backend.get_llvm_builder() if hasattr(backend, 'get_llvm_builder') else None
+        else:
+            self._backend = None
+            self._module = module
+            self._builder = builder
         
         # Variable management
         self.var_registry = VariableRegistry()
@@ -75,6 +88,27 @@ class CompilationContext:
         # Label counter for unique names
         self.label_counter = 0
     
+    @property
+    def module(self) -> Optional[ir.Module]:
+        """Get LLVM module (backward compatible property)"""
+        return self._module
+    
+    @property
+    def builder(self) -> Optional[ir.IRBuilder]:
+        """Get LLVM builder (backward compatible property)"""
+        return self._builder
+    
+    @property
+    def backend(self) -> Optional["AbstractBackend"]:
+        """Get the backend (if initialized with one)"""
+        return self._backend
+    
+    def is_constexpr(self) -> bool:
+        """Check if this context is for constexpr evaluation"""
+        if self._backend is not None:
+            return self._backend.is_constexpr()
+        return self._module is None
+    
     def get_next_label(self, prefix: str = "label") -> str:
         """Generate unique label name"""
         label = f"{prefix}{self.label_counter}"
@@ -92,4 +126,8 @@ class CompilationContext:
         self.current_function = None
     
     def __repr__(self) -> str:
-        return f"CompilationContext(module={self.module.name})"
+        if self._module is not None:
+            return f"CompilationContext(module={self._module.name})"
+        elif self._backend is not None:
+            return f"CompilationContext(backend={type(self._backend).__name__})"
+        return "CompilationContext(constexpr)"

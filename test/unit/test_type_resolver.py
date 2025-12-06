@@ -155,9 +155,9 @@ class TestTypeResolver(unittest.TestCase):
         self.assertEqual(result.count, 10)
     
     def test_parse_invalid_type(self):
-        """Test parsing invalid type returns None"""
-        result = self.resolver.parse_annotation("invalid_type")
-        self.assertIsNone(result)
+        """Test parsing invalid type raises NameError"""
+        with self.assertRaises(NameError):
+            self.resolver.parse_annotation("invalid_type")
     
     def test_parse_none_annotation(self):
         """Test parsing None annotation"""
