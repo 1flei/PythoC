@@ -3,7 +3,7 @@
 """
 Test unified call protocol for type resolution (duck type dispatch)
 
-Verify correctness of handle_as_type method
+Verify correctness of handle_type_subscript method via TypeResolver.parse_annotation
 """
 
 import ast
@@ -37,7 +37,7 @@ def test_simple_type_resolution():
 
 
 def test_ptr_type_resolution():
-    """Test pointer type resolution (using handle_as_type)"""
+    """Test pointer type resolution (using handle_type_subscript)"""
     print("Testing pointer type resolution...")
     
     resolver = TypeResolver()
@@ -87,24 +87,24 @@ def test_duck_type_dispatch():
     print("Testing duck type dispatch mechanism...")
     
     # Use ptr type to verify duck type dispatch
-    # ptr class has implemented handle_as_type method
+    # ptr class has implemented handle_type_subscript method
     resolver = TypeResolver()
     
-    # Test ptr[i32] - should dispatch through handle_as_type
+    # Test ptr[i32] - should dispatch through handle_type_subscript
     subscript_node = ast.Subscript(
         value=ast.Name(id='ptr'),
         slice=ast.Name(id='i32')
     )
     result = resolver.parse_annotation(subscript_node)
     
-    # Verify result is created through handle_as_type
+    # Verify result is created through handle_type_subscript
     assert isinstance(result, type), f"Expected type, got {type(result)}"
     assert issubclass(result, ptr), f"Expected ptr subclass, got {result}"
     assert hasattr(result, 'pointee_type'), "Expected pointee_type attribute"
     assert result.pointee_type == i32, f"Expected pointee_type=i32, got {result.pointee_type}"
-    print(f"  OK Duck type dispatch created {result.get_name()} via ptr.handle_as_type")
+    print(f"  OK Duck type dispatch created {result.get_name()} via ptr.handle_type_subscript")
     
-    # Verify simple types also call handle_as_type (though returning itself)
+    # Verify simple types also work correctly
     node = ast.Name(id='i32')
     result = resolver.parse_annotation(node)
     assert result == i32, f"Expected i32, got {result}"
@@ -114,13 +114,13 @@ def test_duck_type_dispatch():
 
 
 def test_array_type_resolution():
-    """Test array type resolution (using handle_as_type)"""
+    """Test array type resolution (using handle_type_subscript)"""
     print("Testing array type resolution...")
     
     from pythoc.builtin_entities import array
     resolver = TypeResolver()
     
-    # Test array[i32, 5] - should use handle_as_type
+    # Test array[i32, 5] - should use handle_type_subscript
     subscript_node = ast.Subscript(
         value=ast.Name(id='array'),
         slice=ast.Tuple(elts=[
@@ -138,7 +138,7 @@ def test_array_type_resolution():
     assert result.element_type == i32, f"Expected element_type=i32, got {result.element_type}"
     assert hasattr(result, 'dimensions'), "Expected dimensions attribute"
     assert result.dimensions == (5,), f"Expected dimensions=(5,), got {result.dimensions}"
-    print(f"  OK array[i32, 5] -> {result.get_name()} (via handle_as_type)")
+    print(f"  OK array[i32, 5] -> {result.get_name()} (via handle_type_subscript)")
     
     # Test multi-dimensional array array[f32, 3, 4]
     multi_dim_node = ast.Subscript(
@@ -154,7 +154,7 @@ def test_array_type_resolution():
     assert issubclass(result, array), f"Expected array subclass, got {result}"
     assert result.element_type == f32, f"Expected element_type=f32, got {result.element_type}"
     assert result.dimensions == (3, 4), f"Expected dimensions=(3, 4), got {result.dimensions}"
-    print(f"  OK array[f32, 3, 4] -> {result.get_name()} (via handle_as_type)")
+    print(f"  OK array[f32, 3, 4] -> {result.get_name()} (via handle_type_subscript)")
     
     print("OK Array type resolution tests passed\n")
 

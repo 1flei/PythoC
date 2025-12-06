@@ -199,19 +199,33 @@ def link_files(obj_files: List[str], output_file: str,
     lockfile_path = output_file + '.lock'
     
     with file_lock(lockfile_path):
-        # Check if output file already exists and is up-to-date
-        if os.path.exists(output_file):
-            output_mtime = os.path.getmtime(output_file)
-            obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
-            if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
-                # Output is up-to-date, skip linking
-                return output_file
-        
-        link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
-        
+        # Also acquire locks for all input .o files to ensure they are fully written
+        # This prevents "file truncated" errors when another process is still writing
+        obj_locks = []
         try:
-            subprocess.run(link_cmd, check=True, capture_output=True, text=True)
-            return output_file
-        except subprocess.CalledProcessError as e:
-            file_type = "shared library" if shared else "executable"
-            raise RuntimeError(f"Failed to link {file_type}: {e.stderr}")
+            for obj_file in obj_files:
+                obj_lockfile = obj_file + '.lock'
+                lock = file_lock(obj_lockfile)
+                lock.__enter__()
+                obj_locks.append(lock)
+            
+            # Check if output file already exists and is up-to-date
+            if os.path.exists(output_file):
+                output_mtime = os.path.getmtime(output_file)
+                obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
+                if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
+                    # Output is up-to-date, skip linking
+                    return output_file
+            
+            link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
+            
+            try:
+                subprocess.run(link_cmd, check=True, capture_output=True, text=True)
+                return output_file
+            except subprocess.CalledProcessError as e:
+                file_type = "shared library" if shared else "executable"
+                raise RuntimeError(f"Failed to link {file_type}: {e.stderr}")
+        finally:
+            # Release all .o file locks in reverse order
+            for lock in reversed(obj_locks):
+                lock.__exit__(None, None, None)

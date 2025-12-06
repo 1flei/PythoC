@@ -82,22 +82,30 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
     acquire_name, acquire_param_types, acquire_return_type = _extract_function_info(acquire_func)
     release_name, release_param_types, _ = _extract_function_info(release_func)
     
+    # Generate deterministic suffix based on function names and struct_name
+    # This ensures the same source code generates the same symbol names across processes
+    # Format: lw_<acquire>_<release>[_<struct_name>] (lw = linear_wrap)
+    if struct_name:
+        deterministic_suffix = f"lw_{acquire_name}_{release_name}_{struct_name}"
+    else:
+        deterministic_suffix = f"lw_{acquire_name}_{release_name}"
+    
     # Create proof struct type
     if struct_name:
         ProofType = refined[linear, struct_name]
         
         # Create a helper function to make proof struct
-        @compile(anonymous=True)
+        @compile(suffix=deterministic_suffix)
         def make_proof() -> ProofType:
             prf = assume(linear(), struct_name)
             return prf
     else:
         ProofType = linear
-        @compile(anonymous=True)
+        @compile(suffix=deterministic_suffix)
         def make_proof() -> ProofType:
             return linear()
         
-    @compile(anonymous=True)
+    @compile(suffix=deterministic_suffix)
     def release_proof(prf: ProofType):
         consume(prf)
     
@@ -108,7 +116,7 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
     AcquireParamsStruct = struct[tuple(acquire_param_types)]
     
     # Build wrapped acquire function
-    @compile(anonymous=True)
+    @compile(suffix=deterministic_suffix)
     def wrapped_acquire(*args: AcquireParamsStruct) -> ReturnStruct:
         ret: ReturnStruct
         ret[0] = make_proof()
@@ -119,7 +127,7 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
     ReleaseParams = struct[tuple(release_param_types)]
 
     # Raw linear: consume directly
-    @compile(anonymous=True)
+    @compile(suffix=deterministic_suffix)
     def wrapped_release(prf: ProofType, *args: ReleaseParams):
         release_func(*args)
         release_proof(prf)
