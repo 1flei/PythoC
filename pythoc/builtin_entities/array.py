@@ -139,61 +139,6 @@ class array(BuiltinType):
 
         zero_array = converter.create_zero_constant(array_type)
         return wrap_value(zero_array, kind="value", type_hint=cls)
-    
-    @classmethod
-    def handle_as_type(cls, visitor, node: ast.AST):
-        """Handle array type annotation resolution (unified call protocol)
-        
-        Args:
-            visitor: AST visitor instance
-            node: AST node
-                - ast.Name('array'): returns array base class
-                - ast.Subscript('array', (T, N)): returns array[T, N] specialized type
-                - ast.Subscript('array', (T, N, M)): returns array[T, N, M] specialized type
-        
-        Returns:
-            array class or array[T, N, ...] specialized type
-        """
-        # Handle None node (direct class reference)
-        if node is None:
-            return cls
-        
- # array ,
-        if isinstance(node, ast.Name):
-            return cls
-        
- # array[T, N, ...] ,
-        if isinstance(node, ast.Subscript):
- # slice
-            slice_node = node.slice
-            
- # slice_node Tuple: (T, N) (T, N, M, ...)
-            if isinstance(slice_node, ast.Tuple):
-                elts = slice_node.elts
-                if len(elts) < 2:
-                    raise TypeError("array requires at least element type and one dimension")
-                
- # 
-                elem_type_node = elts[0]
-                elem_type = visitor.type_resolver.parse_annotation(elem_type_node)
-                
-                if elem_type is None:
-                    raise TypeError(f"Unknown element type in array annotation")
-                
-                # Remaining elements are dimensions
-                # Get user_globals from type_resolver
-                user_globals = getattr(visitor.type_resolver, 'user_globals', None)
-                dimensions = cls._parse_dimensions(elts[1:], user_globals=user_globals)
-                
-                # Delegate via normalization -> handle_type_subscript
-                raw_items = (elem_type, *dimensions)
-                normalized = cls.normalize_subscript_items(raw_items)
-                return cls.handle_type_subscript(normalized)
-            else:
-                raise TypeError("array requires element type and dimensions: array[T, N]")
-        
-        # Other cases return base class
-        return cls
 
     @classmethod
     def get_decay_pointer_type(cls):
@@ -228,32 +173,24 @@ class array(BuiltinType):
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node: ast.Subscript):
-        """Handle array subscript operations (unified duck typing protocol)
+        """Handle array value subscript: arr[index] or arr[i, j, k]
         
-        Supports three modes:
-        1. Type subscript (index=None): array[i32, 10] - creates specialized array type
-        2. Value subscript (single index): arr[0] - accesses array element
-        3. Value subscript (tuple index): matrix[1, 2] - accesses multi-dimensional array element
+        Note: Type subscripts (array[T, N]) are now handled by PythonType.handle_subscript
+        which extracts items and calls array.handle_type_subscript directly.
+        This method only handles value subscripts.
         
         Args:
             visitor: AST visitor instance
             base: Pre-evaluated base object (ValueRef)
-            index: Pre-evaluated index (ValueRef or None for type subscript)
+            index: Pre-evaluated index (ValueRef)
             node: Original ast.Subscript node
             
         Returns:
-            For type subscript: specialized array type (ValueRef kind='python')
-            For value subscript: ValueRef with element value
+            ValueRef with element value
         """
         from llvmlite import ir
         from ..valueref import ensure_ir
         from ..ir_helpers import propagate_qualifiers, strip_qualifiers
-        
-        # Check if this is a type subscript or value subscript
-        # Use index=None as the marker (unified protocol!)
-        if index is None:
-            # Type subscript: array[T, N, M, ...]
-            return cls.handle_as_type(visitor, node)
         
         # Value subscript: arr[index] or arr[i, j, k]
         # Always decay to ptr for both single dimensional and multi-dimensional indices

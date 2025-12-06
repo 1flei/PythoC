@@ -10,6 +10,7 @@ Each function checks if a type has the corresponding method and calls it.
 TYPE_CHECK_METHODS = [
     "is_struct_type",
     "is_enum_type",
+    "is_pc_type",
 ]
 
 

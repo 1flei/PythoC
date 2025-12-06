@@ -185,40 +185,26 @@ class TypeResolver:
             value = self._lookup_name(node.id)
             return wrap_value(value, kind="python", type_hint=type(value))
 
-        # Subscript: KEY REUSE - handle_subscript(index=None) for type subscripts!
+        # Subscript: Use normalize_subscript_items + handle_type_subscript
         if isinstance(node, ast.Subscript):
             # Step 1: Evaluate base to ValueRef
             base = self._evaluate_type_expression(node.value)
 
-            # Step 2: Check if base supports handle_subscript (type syntax)
-            subscriptable = None
+            # Step 2: Get the base value (type class like ptr, struct, etc.)
             base_value = self._unwrap_value(base)
 
-            if hasattr(base_value, "handle_subscript"):
-                subscriptable = base_value
-            elif (
-                isinstance(base, ValueRef)
-                and base.type_hint
-                and hasattr(base.type_hint, "handle_subscript")
-            ):
-                subscriptable = base.type_hint
-
-            if subscriptable:
-                # Step 3: Call handle_subscript with index=None (type subscript marker)
-                # This reuses the SAME mechanism as visit_Subscript!
-                # ptr.handle_subscript(visitor, base, index=None, node) -> ptr[i32]
-                # struct.handle_subscript(visitor, base, index=None, node) -> struct[...]
-                # IMPORTANT: Pass the whole node, handle_subscript will parse node.slice itself
-                # This allows it to handle ast.Slice nodes (named fields: struct[a: i32])
-                result = subscriptable.handle_subscript(
-                    self._get_visitor_context(),
-                    base,
-                    index=None,  # Type subscript marker (same as visit_Subscript!)
-                    node=node,
+            # Step 3: Check if base supports type subscript
+            if hasattr(base_value, "handle_type_subscript"):
+                # Parse subscript items from AST
+                items = self._parse_subscript_items(node.slice)
+                # Normalize and call handle_type_subscript
+                normalized = base_value.normalize_subscript_items(items)
+                result_value = base_value.handle_type_subscript(normalized)
+                return wrap_value(
+                    result_value, kind="python", type_hint=type(result_value)
                 )
-                return result
             elif hasattr(base_value, "__class_getitem__"):
-                # Step 4: Fallback to __class_getitem__ for types that don't have handle_subscript
+                # Fallback to __class_getitem__ for types that don't have handle_type_subscript
                 # (e.g., func type which uses __class_getitem__ directly)
                 # We need to convert ast.Slice nodes to Python slice objects
                 slice_arg = self._convert_slice_to_runtime(node.slice)
@@ -227,7 +213,7 @@ class TypeResolver:
                     result_value, kind="python", type_hint=type(result_value)
                 )
             else:
-                # Step 5: Not a type syntax - runtime dict subscript (dict[key])
+                # Not a type syntax - runtime dict subscript (dict[key])
                 # e.g., type_map = {i32: Struct_i32}, type_map[T]
                 # For dict subscript, we DO need to evaluate the key
                 key = self._evaluate_type_expression(node.slice)
@@ -401,6 +387,58 @@ class TypeResolver:
             return builtins.list(elements)
 
         # Other nodes: evaluate and unwrap
+        value_ref = self._evaluate_type_expression(slice_node)
+        return self._unwrap_value(value_ref)
+
+    def _parse_subscript_items(self, slice_node):
+        """Parse subscript items from AST for type subscript.
+        
+        Converts AST slice node to items suitable for normalize_subscript_items.
+        
+        Handles:
+        - ast.Slice (a: i32) -> ("a", i32)
+        - ast.Tuple -> tuple of items
+        - ast.Name/ast.Subscript -> type expression
+        
+        Args:
+            slice_node: AST node from Subscript.slice
+            
+        Returns:
+            Single item or tuple of items
+        """
+        import builtins
+        
+        # Handle ast.Slice: named field (a: i32)
+        if isinstance(slice_node, ast.Slice):
+            # Extract field name
+            if slice_node.lower is None:
+                raise TypeError("Slice must have lower bound (field name)")
+            
+            if isinstance(slice_node.lower, ast.Name):
+                field_name = slice_node.lower.id
+            elif isinstance(slice_node.lower, ast.Constant) and isinstance(slice_node.lower.value, str):
+                field_name = slice_node.lower.value
+            else:
+                raise TypeError(f"Invalid field name in slice: {ast.dump(slice_node.lower)}")
+            
+            # Extract field type
+            if slice_node.upper is None:
+                raise TypeError("Slice must have upper bound (field type)")
+            
+            field_type_ref = self._evaluate_type_expression(slice_node.upper)
+            field_type = self._unwrap_value(field_type_ref)
+            
+            return (field_name, field_type)
+        
+        # Handle ast.Tuple: multiple items
+        if isinstance(slice_node, ast.Tuple):
+            items = []
+            for elt in slice_node.elts:
+                item = self._parse_subscript_items(elt)
+                items.append(item)
+            return builtins.tuple(items)
+        
+        # Other nodes: evaluate as type expression
         value_ref = self._evaluate_type_expression(slice_node)
         return self._unwrap_value(value_ref)
 

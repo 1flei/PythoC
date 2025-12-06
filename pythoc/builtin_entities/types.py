@@ -321,86 +321,58 @@ class ptr(BuiltinType):
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node: ast.Subscript):
-        """Handle pointer subscript operations (unified duck typing protocol)
+        """Handle pointer value subscript: p[index] - pointer arithmetic
         
-        Supports two modes:
-        1. Type subscript (index=None): ptr[int_type] or ptr[int_type, dims...] - creates specialized pointer type
-           - ptr[i32, 5] = ptr[i32] (first dim ignored)
-           - ptr[i32, 3, 5] = ptr[array[i32, 5]] (first dim ignored)
-           - ptr[i32, 3, 5, 7] = ptr[array[i32, 5, 7]] (first dim ignored)
-        2. Value subscript (index=ValueRef): p[index] - pointer arithmetic (equivalent to *(p + index))
+        Note: Type subscripts (ptr[T]) are now handled by PythonType.handle_subscript
+        which extracts items and calls ptr.handle_type_subscript directly.
+        This method only handles value subscripts.
+        
+        Supports:
+        - p[i]: single index -> *(p + i)
+        - p[i, j, k]: multi-dimensional -> p[i][j][k]
         
         Args:
             visitor: AST visitor instance
             base: Pre-evaluated base object (ValueRef)
-            index: Pre-evaluated index (ValueRef) or None for type subscript
+            index: Pre-evaluated index (ValueRef)
             node: Original ast.Subscript node
             
         Returns:
-            For type subscript: specialized ptr type (ValueRef kind='python')
-            For value subscript: ValueRef with dereferenced value
+            ValueRef with dereferenced value
         """
-
         from ..valueref import wrap_value, ensure_ir
-        
-        # Check if this is a type subscript or value subscript
-        # Use index=None as the marker (unified protocol with struct/union/enum!)
-        if index is None:
-            # Type subscript: ptr[T] or ptr[T, dims...]
-            # Handle tuple index for multi-dimensional array decay
-            # ptr[i32, 5] -> ptr[i32]
-            # ptr[i32, 3, 5] -> ptr[array[i32, 5]]
-            # ptr[i32, 3, 5, 7] -> ptr[array[i32, 5, 7]]
-            
-            if isinstance(node.slice, ast.Tuple):
-                # Multi-dimensional: ptr[T, dim1, dim2, ...]
-                # First element is the base type, rest are dimensions
-                # First dimension is ignored (for array decay)
-                elts = node.slice.elts
-                if len(elts) < 2:
-                    raise TypeError(f"ptr tuple subscript requires at least 2 elements")
-                
-                # Parse the base type (first element)
-                base_type = visitor.type_resolver.parse_annotation(elts[0])
-                if not base_type:
-                    raise TypeError(f"Cannot parse base type from: {ast.dump(elts[0])}")
-                
-                # Ignore first dimension (elts[1]), use remaining dimensions
-                remaining_dims = elts[2:]
-                
-                if len(remaining_dims) == 0:
-                    # ptr[i32, 5] -> ptr[i32] (first dim ignored, no remaining dims)
-                    inner_type = base_type
-                else:
-                    # ptr[i32, 3, 5] -> ptr[array[i32, 5]]
-                    # ptr[i32, 3, 5, 7] -> ptr[array[i32, 5, 7]]
-                    # Parse remaining dimensions
-                    dims = []
-                    for dim_node in remaining_dims:
-                        if isinstance(dim_node, ast.Constant):
-                            dims.append(dim_node.value)
-                        else:
-                            raise TypeError(f"Array dimension must be constant, got: {ast.dump(dim_node)}")
-                    
-                    # Create array type with remaining dimensions
-                    from .array import array
-                    inner_type = array[base_type, *dims]
-            else:
-                # Single type: ptr[T]
-                inner_type = visitor.type_resolver.parse_annotation(node.slice)
-                if not inner_type:
-                    raise TypeError(f"Cannot parse type from subscript: {ast.dump(node.slice)}")
-            
-            # Create a specialized ptr[T] type
-            class SpecializedPtr(ptr):
-                pointee_type = inner_type
-            
-            # Wrap the type in a ValueRef so it can be used in expressions
-            return wrap_value(SpecializedPtr, kind="python", type_hint=SpecializedPtr)
+        from .refined import RefinedType
         
         # Value subscript: p[index] or p[i, j, k] - pointer arithmetic
         # Check if index is a struct (multi-dimensional access from tuple expression)
-        if index.is_struct_value():
+        # Also check for refined[struct[...], "tuple"] which is the new tuple representation
+        is_multidim = index.is_struct_value()
+        if not is_multidim and index.type_hint:
+            # Check if it's a refined type with "tuple" tag (from visit_Tuple)
+            type_hint = index.type_hint
+            # For python values, type_hint might be PythonType wrapping a refined type
+            if hasattr(type_hint, '_python_object'):
+                type_hint = type_hint._python_object
+            if isinstance(type_hint, type) and issubclass(type_hint, RefinedType):
+                tags = getattr(type_hint, '_tags', [])
+                if "tuple" in tags:
+                    # Extract indices from the refined tuple type
+                    base_struct = type_hint._base_type
+                    if hasattr(base_struct, '_field_types'):
+                        # Extract values from the struct fields (pyconst values)
+                        indices = []
+                        for field_type in base_struct._field_types:
+                            if hasattr(field_type, '_python_object'):
+                                indices.append(wrap_value(field_type._python_object, kind="python", 
+                                             type_hint=field_type))
+                            elif hasattr(field_type, 'get_python_object'):
+                                indices.append(wrap_value(field_type.get_python_object(), kind="python",
+                                             type_hint=field_type))
+                            else:
+                                indices.append(wrap_value(field_type, kind="python", type_hint=field_type))
+                        return cls._handle_multidim_subscript(visitor, base, indices, node)
+        
+        if is_multidim:
             # Multi-dimensional pointer access: p[i, j, k] where (i, j, k) is a struct
             indices = index.get_pc_type().get_all_fields(visitor, index, node)
             return cls._handle_multidim_subscript(visitor, base, indices, node)
@@ -408,6 +380,52 @@ class ptr(BuiltinType):
         # Single index: p[i] - convert to *(ptr + index)
         base = cls.handle_add(visitor, base, index, node)
         return cls.handle_deref(visitor, base, node)
+    
+    @classmethod
+    def handle_type_subscript(cls, items):
+        """Handle type subscript: ptr[T] or ptr[T, dims...]
+        
+        Called by PythonType.handle_subscript after normalization.
+        
+        Args:
+            items: Normalized tuple from normalize_subscript_items
+                   - ((None, i32),) for ptr[i32]
+                   - ((None, i32), (None, 5)) for ptr[i32, 5]
+        
+        Returns:
+            Specialized ptr type class
+        """
+        import builtins
+        from .array import array
+        
+        if not isinstance(items, builtins.tuple) or len(items) == 0:
+            raise TypeError("ptr requires at least one type argument")
+        
+        # Extract types from normalized format
+        types_and_dims = [item[1] for item in items]
+        
+        if len(types_and_dims) == 1:
+            # ptr[T] - simple pointer
+            inner_type = types_and_dims[0]
+        else:
+            # ptr[T, dim1, dim2, ...] - pointer to array
+            # First dimension is ignored (for array decay)
+            # ptr[i32, 5] -> ptr[i32]
+            # ptr[i32, 3, 5] -> ptr[array[i32, 5]]
+            base_type = types_and_dims[0]
+            remaining_dims = types_and_dims[2:]  # Skip first dim
+            
+            if len(remaining_dims) == 0:
+                inner_type = base_type
+            else:
+                # Create array type with remaining dimensions
+                inner_type = array[base_type, *remaining_dims]
+        
+        # Create a specialized ptr[T] type
+        class SpecializedPtr(ptr):
+            pointee_type = inner_type
+        
+        return SpecializedPtr
 
     @classmethod
     def _handle_multidim_subscript(cls, visitor, base, indices, node: ast.Subscript):
@@ -509,94 +527,6 @@ class ptr(BuiltinType):
         
         # # Delegate to struct - let it handle GEP and load
         # return struct_type.handle_attribute(visitor, ptr_base, attr_name, node)
-    
-    @classmethod
-    def handle_type_subscript(cls, items):
-        """Handle type subscript with normalized items for ptr
-        
-        Args:
-            items: Normalized tuple with exactly one item: (None or name, type)
-        
-        Returns:
-            ptr subclass with pointee_type set
-        """
-        import builtins
-        if not isinstance(items, builtins.tuple):
-            items = (items,)
-        if len(items) != 1:
-            raise TypeError("ptr requires exactly one type parameter: ptr[T]")
-        name, item = items[0]
-        if item is None:
-            raise TypeError("ptr requires a pointee type: ptr[T]")
-        inner_name = getattr(item, 'get_name', lambda: str(item))()
-        return type(
-            f'ptr[{inner_name}]',
-            (ptr,),
-            {'pointee_type': item}
-        )
-    
-    @classmethod
-    def handle_as_type(cls, visitor, node: ast.AST):
-        """Handle ptr type annotation resolution (unified call protocol)
-        
-        Args:
-            visitor: AST visitor instance
-            node: AST node
-                - ast.Name('ptr'): returns ptr base class
-                - ast.Subscript('ptr', T): returns ptr[T] specialized type
-        
-        Returns:
-            ptr class or ptr[T] specialized type
-        """
- # ptr ,
-        if isinstance(node, ast.Name):
-            return cls
-        
- # ptr[T] ptr[T, dims...] ,
-        if isinstance(node, ast.Subscript):
-            # Handle tuple subscript: ptr[i32, 3, 4] -> ptr[array[i32, 4]]
-            if isinstance(node.slice, ast.Tuple):
-                elts = node.slice.elts
-                if len(elts) < 2:
-                    raise TypeError(f"ptr tuple subscript requires at least 2 elements")
-                
-                # Parse the base type (first element)
-                base_type = visitor.type_resolver.parse_annotation(elts[0])
-                if not base_type:
-                    raise TypeError(f"Cannot parse base type from: {ast.dump(elts[0])}")
-                
-                # Ignore first dimension (elts[1]), use remaining dimensions
-                remaining_dims = elts[2:]
-                
-                if len(remaining_dims) == 0:
-                    # ptr[i32, 5] -> ptr[i32] (first dim ignored, no remaining dims)
-                    inner_type = base_type
-                else:
-                    # ptr[i32, 3, 5] -> ptr[array[i32, 5]]
-                    # ptr[i32, 3, 5, 7] -> ptr[array[i32, 5, 7]]
-                    # Parse remaining dimensions
-                    dims = []
-                    for dim_node in remaining_dims:
-                        if isinstance(dim_node, ast.Constant):
-                            dims.append(dim_node.value)
-                        else:
-                            raise TypeError(f"Array dimension must be constant, got: {ast.dump(dim_node)}")
-                    
-                    # Create array type with remaining dimensions
-                    from .array import array
-                    inner_type = array[base_type, *dims]
-            else:
-                # Single type: ptr[T]
-                inner_type = visitor.type_resolver.parse_annotation(node.slice)
-                if inner_type is None:
-                    raise TypeError(f"Cannot parse pointee type from: {ast.dump(node.slice)}")
-            
-            # Delegate via normalization -> handle_type_subscript
-            normalized = cls.normalize_subscript_items(inner_type)
-            return cls.handle_type_subscript(normalized)
-        
-        # Other cases return base class
-        return cls
     
     @classmethod
     def _handle_typed_ptr_call(cls, visitor, args, node: ast.Call) -> ir.Value:

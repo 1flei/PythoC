@@ -312,20 +312,21 @@ class ValueRef:
             return ir.Constant(ir.LiteralStructType([]), [])
         return self.value
 
-    # def __getattribute__(self, name):
-    #     # List of fields to track
-    #     # if name in ('kind', 'value', 'type_hint', 'address', 'source_node', 
-    #     #             'var_name', 'linear_path', 'vref_id', 'ir_value'):
-    #     if name in ('value', ):
-    #         import traceback
-    #         import sys
-    #         # Print stack trace showing where the access happened
-    #         stack = traceback.extract_stack()[:-1]  # Exclude this frame
-    #         caller = stack[-1]
-    #         if not caller.filename.endswith('valueref.py'):
-    #             print(f"[VALUEREF ACCESS] .{name} at {caller.filename}:{caller.lineno} in {caller.name}", 
-    #                 file=sys.stderr)
-    #     return object.__getattribute__(self, name)
+    def __getattribute__(self, name):
+        # List of fields to track
+        # if name in ('kind', 'value', 'type_hint', 'address', 'source_node', 
+        #             'var_name', 'linear_path', 'vref_id', 'ir_value'):
+        if name in ('kind', ):
+            import traceback
+            import sys
+            # Print stack trace showing where the access happened
+            stack = traceback.extract_stack()[:-1]  # Exclude this frame
+            caller = stack[-1]
+            if not caller.filename.endswith('valueref.py'):
+                # print(f"[VALUEREF ACCESS] .{name} at {caller.filename}:{caller.lineno} in {caller.name}", 
+                #     file=sys.stderr)
+                pass
+        return object.__getattribute__(self, name)
 
 
 

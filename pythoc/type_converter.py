@@ -236,6 +236,25 @@ class TypeConverter:
         """
         logger.debug("Promote python to PC", python_val=python_val, target_type=target_type)
         
+        # Handle refined tuple types - extract the actual tuple values
+        # This happens when visit_Tuple returns refined[struct[...], "tuple"]
+        from .builtin_entities.refined import RefinedType
+        if isinstance(python_val, type) and issubclass(python_val, RefinedType):
+            tags = getattr(python_val, '_tags', [])
+            if "tuple" in tags:
+                # Extract tuple values from refined type
+                base_struct = python_val._base_type
+                if hasattr(base_struct, '_field_types'):
+                    tuple_values = []
+                    for field_type in base_struct._field_types:
+                        if hasattr(field_type, '_python_object'):
+                            tuple_values.append(field_type._python_object)
+                        elif hasattr(field_type, 'get_python_object'):
+                            tuple_values.append(field_type.get_python_object())
+                        else:
+                            tuple_values.append(field_type)
+                    python_val = tuple(tuple_values)
+        
         # Validate python_val is a supported primitive type
         # Allow: int, float, bool, str, None, list, tuple (for array/struct initialization)
         # Reject: type objects, classes, functions, modules, etc.

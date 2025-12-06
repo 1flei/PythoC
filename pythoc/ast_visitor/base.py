@@ -212,9 +212,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
             python_obj = self.ctx.user_globals[name]
             if hasattr(python_obj, 'handle_call') and callable(python_obj.handle_call):
                 from ..valueref import wrap_value
+                from ..builtin_entities.python_type import PythonType
                 
                 # For @compile functions, get type hints from function annotations
-                type_hint = python_obj  # Default to the wrapper itself
+                type_hint = PythonType.wrap(python_obj, is_constant=True)  # Wrap with PythonType for unified subscript handling
                 if hasattr(python_obj, '_is_compiled') and python_obj._is_compiled:
                     # Get type hints from function annotations
                     if hasattr(python_obj, '__annotations__'):

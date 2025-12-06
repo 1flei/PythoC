@@ -98,25 +98,14 @@ class UnionType(CompositeType):
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
-        """Handle subscript access on union instances or union type definition
+        """Handle value subscript access on union instances: u[0]
         
-        Supports two modes:
-        1. Type subscript: union[i32, f64] - creates union type
-        2. Value subscript: u[0] - field access by index
+        Note: Type subscripts (union[i32, f64]) are now handled by PythonType.handle_subscript
+        which extracts items and calls union.handle_type_subscript directly.
+        This method only handles value subscripts.
         """
         import ast
         from ..valueref import wrap_value, ensure_ir, get_type
-        
-        if index is None:
-            # TYPE SUBSCRIPT: union[i32, f64]
-            from ..builtin_entities.type_subscript_parser import parse_type_subscript
-            field_types, field_names = parse_type_subscript(node, visitor.type_resolver)
-            
-            # Create union type
-            union_type = create_union_type(field_types, field_names)
-            
-            # Return as ValueRef for callable protocol
-            return wrap_value(union_type, kind="python", type_hint=union_type)
         
         # VALUE SUBSCRIPT: u[0] - field access by index
         # Extract constant index from pre-evaluated index ValueRef

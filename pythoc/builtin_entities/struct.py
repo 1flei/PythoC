@@ -456,34 +456,22 @@ class StructType(CompositeType):
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
-        """Handle subscript access on struct instances: unnamed[0] or struct[i32, f64]
+        """Handle value subscript access on struct instances: s[0]
         
-        Supports two modes:
-        1. Type subscript: struct[i32, i32] or struct[x: i32, y: f64] - creates anonymous struct type
-        2. Value subscript: s[0] - indexed field access
+        Note: Type subscripts (struct[i32, f64]) are now handled by PythonType.handle_subscript
+        which extracts items and calls struct.handle_type_subscript directly.
+        This method only handles value subscripts.
         
         Args:
             visitor: AST visitor
-            base: Pre-evaluated base object (ValueRef for value subscript, type for type subscript)
-            index: Pre-evaluated index (ValueRef for value subscript, None for type subscript)
+            base: Pre-evaluated base object (ValueRef)
+            index: Pre-evaluated index (ValueRef)
             node: Original ast.Subscript node
         """
         import ast
         from ..valueref import wrap_value, ensure_ir, get_type
 
         logger.debug(f"handle_subscript: base={base}, index={index}, node={node}")
-        
-        # Distinguish type subscript vs value subscript
-        # Type subscript: index is None (set by visit_Subscript when detecting type subscript)
-        # Value subscript: index is a ValueRef
-        
-        if index is None:
-            # TYPE SUBSCRIPT: struct[i32, f64] or struct[x: i32, y: f64]
-            from ..builtin_entities.type_subscript_parser import parse_type_subscript
-            field_types, field_names = parse_type_subscript(node, visitor.type_resolver)
-            struct_type = create_struct_type(field_types, field_names)
-            # Return as ValueRef with type as value (for callable protocol)
-            return wrap_value(struct_type, kind="python", type_hint=struct_type)
         
         # VALUE SUBSCRIPT: s[0] - field access by index
         # Ensure field types are resolved
