@@ -408,10 +408,11 @@ def wrap_value(value: Union[ir.Value, AnyType], kind: str,
     if kind not in valid_kinds:
         raise ValueError(f"Invalid kind: {kind}, must be one of {valid_kinds}")
     
-    # Auto-detect kind for Python types (but allow pyconst_field for pyconst struct fields)
+    # Python types can use 'python', 'pyconst_field', or 'address' (for zero-sized alloca)
+    # The 'address' kind is allowed because pyconst has zero-sized LLVM type {}
     if hasattr(type_hint, 'is_python_type') and type_hint.is_python_type():
-        if kind not in ('python', 'pyconst_field'):
-            raise ValueError(f"Python type requires kind='python' or 'pyconst_field', got '{kind}'")
+        if kind not in ('python', 'pyconst_field', 'address'):
+            raise ValueError(f"Python type requires kind='python', 'pyconst_field', or 'address', got '{kind}'")
     
     # address kind requires address field (except for special cases)
     if kind == "address" and address is None:
