@@ -108,23 +108,6 @@ class SubscriptsMixin:
         attr_name = node.attr
         
         return attributable.handle_attribute(self, result, attr_name, node)
-
-    def _ensure_struct_pointer(self, value):
-        """Ensure value is a pointer to struct, handling both direct pointers and allocas"""
-        value_ir = ensure_ir(value)
-        value_type = value_ir.type
-        
-        if isinstance(value_type, ir.PointerType):
-            pointee = value_type.pointee
-            if isinstance(pointee, (ir.LiteralStructType, ir.IdentifiedStructType)):
-                # Already a pointer to struct
-                return value_ir, pointee
-            elif isinstance(pointee, ir.PointerType):
-                # Pointer to pointer - load once
-                loaded = self.builder.load(value_ir)
-                return loaded, pointee.pointee
-        
-        raise TypeError(f"Expected pointer to struct, got {value_type}")
     
     def _handle_varargs_subscript(self, node: ast.Subscript) -> ValueRef:
         """Handle args[i] for union/enum varargs (va_list based)

@@ -578,30 +578,6 @@ class LLVMCompiler:
         type_resolver = TypeResolver(self.module.context, user_globals=self.user_globals)
         return type_resolver.annotation_to_llvm_type(annotation)
     
-    def _parse_tuple_type_annotation(self, slice_node):
-        """Parse tuple type annotation: tuple[T1, T2, ...] or tuple[T]
-        
-        Delegates to TypeResolver.
-        """
-        type_resolver = TypeResolver(self.module.context, user_globals=self.user_globals)
-        fake_subscript = ast.Subscript(
-            value=ast.Name(id='tuple'),
-            slice=slice_node
-        )
-        return type_resolver.annotation_to_llvm_type(fake_subscript)
-    
-    def _parse_array_type_annotation(self, slice_node):
-        """Parse array type annotation: array[T, N] or array[T, N, M]
-        
-        Delegates to TypeResolver.
-        """
-        type_resolver = TypeResolver(self.module.context, user_globals=self.user_globals)
-        fake_subscript = ast.Subscript(
-            value=ast.Name(id='array'),
-            slice=slice_node
-        )
-        return type_resolver.annotation_to_llvm_type(fake_subscript)
-    
     def get_ir(self) -> str:
         """Get the LLVM IR as a string"""
         if self.module is None:
