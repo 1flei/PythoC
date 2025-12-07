@@ -57,6 +57,25 @@ class AssignmentsMixin:
         result = self.visit_expression(node)
         return result.as_lvalue()
 
+    def _apply_assign_decay(self, value_ref: ValueRef) -> ValueRef:
+        """Apply assignment decay to rvalue if its type supports it.
+        
+        This implements C-like array-to-pointer decay for untyped assignments.
+        Uses duck typing: if type_hint has handle_assign_decay method, call it.
+        
+        Args:
+            value_ref: The rvalue to potentially decay
+            
+        Returns:
+            Decayed ValueRef if applicable, otherwise original value_ref
+        """
+        type_hint = value_ref.get_pc_type()
+        # Duck typing: check if type has handle_assign_decay method
+        if hasattr(type_hint, 'handle_assign_decay'):
+            return type_hint.handle_assign_decay(self, value_ref)
+        
+        return value_ref
+
     def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef, pc_type=None, source="inference") -> ValueRef:
         """Visit lvalue or define new variable if it doesn't exist
         
@@ -124,62 +143,18 @@ class AssignmentsMixin:
     def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef):
         """Store value to lvalue with type conversion and qualifier checks
         
-        Special handling for pyconst fields.
+        Special handling for pyconst fields (zero-sized, no actual store).
         """
-        # Special case: pyconst field assignment
-        if lvalue.kind == "pyconst_field":
-            # Type-check the value
-            if not hasattr(lvalue, '_pyconst_value') or not hasattr(lvalue, '_pyconst_type'):
-                raise TypeError("Invalid pyconst field lvalue")
-            
-            expected_value = lvalue._pyconst_value
-            pyconst_type = lvalue._pyconst_type
-            
-            # Extract assigned value
-            if rvalue.is_python_value():
-                assigned_value = rvalue.value
-            elif hasattr(rvalue.value, 'constant'):
-                # LLVM constant
-                assigned_value = rvalue.value.constant
-            else:
-                raise TypeError(
-                    f"Cannot assign runtime value to pyconst field. "
-                    f"pyconst fields require compile-time constant values."
-                )
-            
-            # Type check: value must match exactly
-            if assigned_value != expected_value:
-                raise TypeError(
-                    f"Type mismatch: cannot assign {repr(assigned_value)} to pyconst field "
-                    f"of type {pyconst_type.get_instance_name()}. "
-                    f"Expected value: {repr(expected_value)}"
-                )
-            
-            # Assignment is valid but is a no-op (zero-sized field)
-            return
-        
-        assert lvalue.kind == 'address', f"Expected lvalue with kind='address', got kind='{lvalue.kind}'"
-        
-        target_pc_type = lvalue.type_hint
-        target_llvm_type = lvalue.ir_value.type.pointee
+        target_pc_type = lvalue.get_pc_type()
         
         # Convert value to target type (type_converter will handle Python value promotion)
-        source_llvm_type = get_type(rvalue) if not rvalue.is_python_value() else None
+        rvalue = self.type_converter.convert(rvalue, target_pc_type)
         
-        if source_llvm_type is None or source_llvm_type != target_llvm_type:
-            # Convert using PC type directly (this includes Python value promotion)
-            rvalue = self.type_converter.convert(rvalue, target_pc_type)
-        
-        # Special handling for arrays: if rvalue is already a pointer to array,
-        # we need to copy the array contents (load + store), not store the pointer
-        rvalue_ir = ensure_ir(rvalue)
-        if isinstance(rvalue_ir.type, ir.PointerType) and isinstance(rvalue_ir.type.pointee, ir.ArrayType):
-            # Array literal case: rvalue is pointer to array, need to copy contents
-            if isinstance(target_llvm_type, ir.ArrayType):
-                # Load the array value and store to lvalue
-                array_value = self.builder.load(rvalue_ir)
-                self.builder.store(array_value, ensure_ir(lvalue))
-                return
+        # Special case: pyconst target - type checking done in convert(), no actual store needed
+        from ..builtin_entities.python_type import PythonType
+        if isinstance(target_pc_type, PythonType):
+            # pyconst fields are zero-sized, assignment is a no-op after type check
+            return
         
         # Use safe_store for qualifier-aware storage (handles const check + volatile)
         safe_store(self.builder, ensure_ir(rvalue), ensure_ir(lvalue), target_pc_type)
@@ -264,15 +239,19 @@ class AssignmentsMixin:
             if isinstance(target, ast.Name):
                 var_info = self.lookup_variable(target.id)
                 if not var_info:
-                    # New variable: use visit_lvalue_or_define for unified logic
-                    lvalue = self.visit_lvalue_or_define(target, value_ref=rvalue, source="inference")
+                    # New variable: apply assign decay before type inference
+                    # This handles C-like array-to-pointer decay
+                    decayed_rvalue = self._apply_assign_decay(rvalue)
+                    
+                    # Use visit_lvalue_or_define for unified logic
+                    lvalue = self.visit_lvalue_or_define(target, value_ref=decayed_rvalue, source="inference")
                     
                     # If Python constant was created (lvalue is None), skip to next target
                     if lvalue is None:
                         continue
                     
                     # PC value was created, store it
-                    self._store_to_lvalue(lvalue, rvalue)
+                    self._store_to_lvalue(lvalue, decayed_rvalue)
                     
                     # Handle linear token transfer for new variable
                     if rvalue_is_linear:

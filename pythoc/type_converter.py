@@ -150,6 +150,39 @@ class TypeConverter:
             )
         
         logger.debug("Type conversion", value=value, target=target_type, is_python=value.is_python_value())
+        
+        # Step 0: Handle PythonType (pyconst) target - type checking only, no IR conversion
+        from .builtin_entities.python_type import PythonType
+        if isinstance(stripped_target, PythonType):
+            # Target is pyconst[value] - this is a zero-sized type
+            # Only type checking is needed, no actual conversion
+            if value.is_python_value():
+                assigned_value = value.get_python_value()
+            elif hasattr(value.value, 'constant'):
+                # LLVM constant - extract value
+                assigned_value = value.value.constant
+            else:
+                raise TypeError(
+                    f"Cannot assign runtime value to pyconst field. "
+                    f"pyconst fields require compile-time constant values."
+                )
+            
+            # Type check: value must match exactly
+            expected_value = stripped_target.get_constant_value()
+            if assigned_value != expected_value:
+                raise TypeError(
+                    f"Type mismatch: cannot assign {repr(assigned_value)} to "
+                    f"{stripped_target.get_instance_name()}. "
+                    f"Expected value: {repr(expected_value)}"
+                )
+            
+            # Return a pyconst ValueRef (no actual IR value needed)
+            return wrap_value(
+                assigned_value,
+                kind="python",
+                type_hint=target_type
+            )
+        
         # Step 1: Auto-promote Python values to PC values
         if isinstance(value, ValueRef) and value.is_python_value():
             value = self._promote_python_to_pc(value.get_python_value(), stripped_target)

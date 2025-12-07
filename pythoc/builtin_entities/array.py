@@ -170,6 +170,23 @@ class array(BuiltinType):
         # array[i32, 10] -> ptr[i32]
         return ptr_class[cls.element_type]
 
+    @classmethod
+    def handle_assign_decay(cls, visitor, value_ref):
+        """Handle array decay for assignment without type annotation.
+        
+        In C, arrays decay to pointers in most expression contexts.
+        This method converts an array ValueRef to a pointer ValueRef.
+        
+        Args:
+            visitor: AST visitor instance
+            value_ref: ValueRef with array type
+            
+        Returns:
+            ValueRef with decayed pointer type
+        """
+        decay_ptr_type = cls.get_decay_pointer_type()
+        return visitor.type_converter.convert(value_ref, decay_ptr_type)
+
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node: ast.Subscript):
