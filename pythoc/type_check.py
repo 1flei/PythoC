@@ -11,6 +11,7 @@ TYPE_CHECK_METHODS = [
     "is_struct_type",
     "is_enum_type",
     "is_pc_type",
+    "is_python_value",
 ]
 
 

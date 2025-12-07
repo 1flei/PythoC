@@ -37,6 +37,7 @@ from .builtin_entities import (
 )
 from .registry import get_unified_registry
 from .valueref import ValueRef, wrap_value
+from .type_check import is_python_value
 
 
 class TypeResolver:
@@ -162,7 +163,7 @@ class TypeResolver:
             return None
 
         if isinstance(value_ref, ValueRef):
-            if value_ref.kind != "python":
+            if not is_python_value(value_ref):
                 raise TypeError(f"Expected Python type ValueRef, got kind='{value_ref.kind}'")
             value = value_ref.value
         else:
