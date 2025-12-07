@@ -76,6 +76,69 @@ class AssignmentsMixin:
         
         return value_ref
 
+    def _check_linear_rvalue_copy(self, rvalue: ValueRef, node) -> None:
+        """Check if rvalue is an active linear token - forbid copy.
+        
+        Linear tokens cannot be copied; they must be moved explicitly.
+        Raises error via logger if attempting to copy an active linear token.
+        
+        Args:
+            rvalue: The rvalue being assigned
+            node: AST node for error reporting (lineno)
+        """
+        if not (hasattr(rvalue, 'var_name') and rvalue.var_name and 
+                hasattr(rvalue, 'linear_path') and rvalue.linear_path is not None):
+            return
+        
+        rvalue_var_info = self.lookup_variable(rvalue.var_name)
+        if not rvalue_var_info:
+            return
+        
+        rvalue_state = self._get_linear_state(rvalue_var_info, rvalue.linear_path)
+        if rvalue_state == 'active':
+            # Format path for error message
+            if rvalue.linear_path:
+                path_str = f"{rvalue.var_name}[{']['.join(map(str, rvalue.linear_path))}]"
+            else:
+                path_str = rvalue.var_name
+            logger.error(
+                f"Cannot assign linear token '{path_str}' "
+                f"(use move() to transfer ownership)",
+                node
+            )
+
+    def _check_linear_lvalue_overwrite(self, lvalue: ValueRef, node) -> None:
+        """Check if lvalue holds an unconsumed linear token - forbid overwrite.
+        
+        Cannot reassign to a location that holds an active linear token
+        without first consuming it.
+        Raises error via logger if attempting to overwrite an unconsumed linear token.
+        
+        Args:
+            lvalue: The lvalue being assigned to
+            node: AST node for error reporting (lineno)
+        """
+        if not (hasattr(lvalue, 'var_name') and lvalue.var_name and 
+                hasattr(lvalue, 'linear_path') and lvalue.linear_path is not None):
+            return
+        
+        target_var_info = self.lookup_variable(lvalue.var_name)
+        if not target_var_info:
+            return
+        
+        target_state = self._get_linear_state(target_var_info, lvalue.linear_path)
+        if target_state == 'active':
+            # Format path for error message
+            if lvalue.linear_path:
+                path_str = f"{lvalue.var_name}[{']['.join(map(str, lvalue.linear_path))}]"
+            else:
+                path_str = lvalue.var_name
+            logger.error(
+                f"Cannot reassign '{path_str}': linear token not consumed "
+                f"(declared at line {target_var_info.line_number})",
+                node
+            )
+
     def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef, pc_type=None, source="inference") -> ValueRef:
         """Visit lvalue or define new variable if it doesn't exist
         
@@ -86,7 +149,7 @@ class AssignmentsMixin:
             source: Source for variable declaration
             
         Returns:
-            ValueRef with kind='address' (lvalue), or None if Python constant was created
+            ValueRef with kind='address' (lvalue)
         """
         if not isinstance(node, ast.Name):
             # For complex expressions, just return lvalue
@@ -98,21 +161,8 @@ class AssignmentsMixin:
             return self.visit_lvalue(node)
         else:
             # Variable doesn't exist, create it
-            # Special case: Python values without explicit pc_type should remain as Python constants
-            if pc_type is None and value_ref is not None and value_ref.is_python_value():
-                # Python constant (e.g., x = 1, MyType = i32)
-                # Store as Python constant without allocating LLVM storage
-                self.declare_variable(
-                    name=node.id,
-                    type_hint=value_ref.type_hint,
-                    alloca=None,  # No LLVM storage needed
-                    value_ref=value_ref,  # Store ValueRef directly
-                    source="python_constant",
-                    line_number=getattr(node, 'lineno', 0)
-                )
-                return None  # No lvalue for Python constants
-            
-            # PC value or explicit pc_type: create alloca
+            # Infer pc_type from value_ref if not provided
+            # For Python values, this returns PythonType which has zero-sized LLVM type {}
             if pc_type is None and value_ref is not None:
                 pc_type = self.infer_pc_type_from_value(value_ref)
             
@@ -120,6 +170,7 @@ class AssignmentsMixin:
                 raise TypeError(f"Cannot determine type for new variable '{node.id}'")
             
             # Create alloca and declare variable
+            # For pyconst/PythonType, this creates a zero-sized alloca {}
             llvm_type = pc_type.get_llvm_type(self.module.context)
             alloca = self._create_alloca_in_entry(llvm_type, f"{node.id}_addr")
             
@@ -131,13 +182,15 @@ class AssignmentsMixin:
                 line_number=getattr(node, 'lineno', 0)
             )
             
-            # Return lvalue for the new variable
+            # Return lvalue for the new variable with linear tracking info
             from ..valueref import wrap_value
             return wrap_value(
                 alloca,
                 kind='address',
                 type_hint=pc_type,
-                address=alloca
+                address=alloca,
+                var_name=node.id,
+                linear_path=()
             )
     
     def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef):
@@ -147,17 +200,71 @@ class AssignmentsMixin:
         """
         target_pc_type = lvalue.get_pc_type()
         
-        # Convert value to target type (type_converter will handle Python value promotion)
-        rvalue = self.type_converter.convert(rvalue, target_pc_type)
-        
-        # Special case: pyconst target - type checking done in convert(), no actual store needed
+        # Special case: pyconst target - zero-sized, assignment is a no-op
+        # Must check before convert() since Python values don't have ir_value
         from ..builtin_entities.python_type import PythonType
         if isinstance(target_pc_type, PythonType):
+            # Type check: if target is pyconst[X], rvalue must be X
+            if target_pc_type.is_constant():
+                expected_value = target_pc_type.get_constant_value()
+                if rvalue.is_python_value():
+                    actual_value = rvalue.value
+                else:
+                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node)
+                if actual_value != expected_value:
+                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node)
             # pyconst fields are zero-sized, assignment is a no-op after type check
             return
         
+        # Convert value to target type (type_converter will handle Python value promotion)
+        rvalue = self.type_converter.convert(rvalue, target_pc_type)
+        
         # Use safe_store for qualifier-aware storage (handles const check + volatile)
         safe_store(self.builder, ensure_ir(rvalue), ensure_ir(lvalue), target_pc_type)
+
+    def _assign_to_target(self, target: ast.AST, rvalue: ValueRef, node, pc_type=None) -> None:
+        """Unified single-target assignment: lvalue resolution, linear checks, store, and linear registration.
+        
+        Args:
+            target: AST node for assignment target (ast.Name, ast.Attribute, ast.Subscript)
+            rvalue: Value to assign
+            node: AST node for error reporting
+            pc_type: Explicit PC type (optional, overrides inference)
+        """
+        decayed_rvalue = self._apply_assign_decay(rvalue)
+        
+        # Get or create lvalue
+        lvalue = self.visit_lvalue_or_define(target, value_ref=decayed_rvalue, pc_type=pc_type, source="inference")
+        
+        # Check if lvalue holds an unconsumed linear token (forbid overwrite)
+        self._check_linear_lvalue_overwrite(lvalue, node)
+        
+        # Store value to lvalue
+        self._store_to_lvalue(lvalue, decayed_rvalue)
+        
+        # Handle linear token registration
+        rvalue_pc_type = rvalue.get_pc_type()
+        if self._is_linear_type(rvalue_pc_type):
+            lvalue_var_name = getattr(lvalue, 'var_name', None)
+            lvalue_linear_path = getattr(lvalue, 'linear_path', None)
+            
+            if lvalue_var_name and lvalue_linear_path is not None:
+                # Check if rvalue is undefined
+                from llvmlite import ir as llvm_ir
+                is_undefined = (
+                    rvalue.kind == 'value' and 
+                    isinstance(rvalue.value, llvm_ir.Constant) and
+                    hasattr(rvalue.value, 'constant') and
+                    rvalue.value.constant == llvm_ir.Undefined
+                )
+                
+                if hasattr(rvalue, 'var_name') and rvalue.var_name:
+                    # Variable reference - transfer ownership
+                    self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
+                    self._transfer_linear_ownership(rvalue, reason="assignment")
+                elif not is_undefined:
+                    # Initialized value (function return, linear(), etc.)
+                    self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
     
     def _store_to_new_lvalue(self, node, var_name, pc_type, rvalue: ValueRef):
         """Create new lvalue for assignment"""
@@ -193,163 +300,19 @@ class AssignmentsMixin:
             self.builder.store(rvalue_ir, alloca)
     
     def visit_Assign(self, node: ast.Assign):
-        """Handle assignment statements with automatic type inference
-        
-        Refactored to use lvalue computation for cleaner code.
-        """
+        """Handle assignment statements with automatic type inference"""
         # Evaluate rvalue once
         rvalue = self.visit_expression(node.value)
         
-        # Check if rvalue is a linear type (for linear token registration)
-        rvalue_is_linear = False
-        if hasattr(rvalue, 'type_hint') and self._is_linear_type(rvalue.type_hint):
-            rvalue_is_linear = True
-        
-        # Check if rvalue is a reference to a linear variable/field (cannot copy)
-        # Use ValueRef's var_name and linear_path if available
-        if hasattr(rvalue, 'var_name') and rvalue.var_name and hasattr(rvalue, 'linear_path') and rvalue.linear_path is not None:
-            rvalue_var_name = rvalue.var_name
-            rvalue_path = rvalue.linear_path
-            rvalue_var_info = self.lookup_variable(rvalue_var_name)
-            if rvalue_var_info:
-                # Check if the specific path is in active state
-                rvalue_state = self._get_linear_state(rvalue_var_info, rvalue_path)
-                if rvalue_state == 'active':
-                    # Format path for error message
-                    if rvalue_path:
-                        path_str = f"{rvalue_var_name}[{']['.join(map(str, rvalue_path))}]"
-                    else:
-                        path_str = rvalue_var_name
-                    raise TypeError(
-                        f"Cannot assign linear token '{path_str}' "
-                        f"(use move() to transfer ownership, line {node.lineno})"
-                    )
-        
-        # Note: Do NOT promote Python values here - keep them as Python values
-        # Promotion happens when the value is used in PC context (operations, return, etc.)
+        # Check if rvalue is an active linear token (forbid copy)
+        self._check_linear_rvalue_copy(rvalue, node)
         
         # Handle multiple targets
         for target in node.targets:
-            # Handle tuple unpacking separately
             if isinstance(target, ast.Tuple):
                 self._handle_tuple_unpacking(target, node.value, rvalue)
-                continue
-            
-            # For ast.Name targets, try visit_lvalue_or_define first
-            if isinstance(target, ast.Name):
-                var_info = self.lookup_variable(target.id)
-                if not var_info:
-                    # New variable: apply assign decay before type inference
-                    # This handles C-like array-to-pointer decay
-                    decayed_rvalue = self._apply_assign_decay(rvalue)
-                    
-                    # Use visit_lvalue_or_define for unified logic
-                    lvalue = self.visit_lvalue_or_define(target, value_ref=decayed_rvalue, source="inference")
-                    
-                    # If Python constant was created (lvalue is None), skip to next target
-                    if lvalue is None:
-                        continue
-                    
-                    # PC value was created, store it
-                    self._store_to_lvalue(lvalue, decayed_rvalue)
-                    
-                    # Handle linear token transfer for new variable
-                    if rvalue_is_linear:
-                        # Activate if:
-                        # 1. rvalue is a variable reference (ownership transfer)
-                        # 2. rvalue is an initialized value (not ir.Undefined)
-                        from llvmlite import ir as llvm_ir
-                        is_undefined = (
-                            rvalue.kind == 'value' and 
-                            isinstance(rvalue.value, llvm_ir.Constant) and
-                            rvalue.value.constant == llvm_ir.Undefined
-                        )
-                        
-                        if hasattr(rvalue, 'var_name') and rvalue.var_name:
-                            # Variable reference - transfer ownership
-                            self._register_linear_token(target.id, lvalue.type_hint, node, path=())
-                            self._transfer_linear_ownership(rvalue, reason="assignment")
-                        elif not is_undefined:
-                            # Initialized value (function return, linear(), etc.)
-                            self._register_linear_token(target.id, lvalue.type_hint, node, path=())
-                    continue
-                else:
-                    # Variable exists - check const/linear constraints
-                    # Check if variable is const
-                    if hasattr(var_info.type_hint, 'is_const') and var_info.type_hint.is_const():
-                        raise TypeError(
-                            f"Cannot reassign to const variable '{target.id}' "
-                            f"(declared at line {var_info.line_number}, line {node.lineno})"
-                        )
-                    
-                    # Variable exists - check if it's a Python constant variable
-                    if var_info.is_python_constant:
-                        # This is a Python constant variable - update it
-                        if rvalue.is_python_value():
-                            # Update Python constant value_ref
-                            raise RuntimeError("Cannot re-assign a Python Type Value in pc function")
-                        else:
-                            # Trying to assign PC value to Python constant variable
-                            # Need to convert variable to PC type with alloca
-                            inferred_llvm_type = get_type(rvalue)
-                            alloca = self._create_alloca_in_entry(inferred_llvm_type, f"{target.id}_addr")
-                            self.builder.store(ensure_ir(rvalue), alloca)
-                            
-                            # Update variable info with alloca and new value_ref
-                            inferred_pc_type = self.infer_pc_type_from_value(rvalue)
-                            from ..valueref import wrap_value
-                            var_info.alloca = alloca
-                            var_info.value_ref = wrap_value(
-                                alloca,
-                                kind='address',
-                                type_hint=inferred_pc_type,
-                                address=alloca
-                            )
-                            continue
-            
-            # Check if reassigning to unconsumed linear token (for all lvalue types)
-            # Use lvalue's var_name and linear_path from ValueRef
-            lvalue = self.visit_lvalue(target)
-            if hasattr(lvalue, 'var_name') and lvalue.var_name and hasattr(lvalue, 'linear_path') and lvalue.linear_path is not None:
-                target_var_info = self.lookup_variable(lvalue.var_name)
-                if target_var_info:
-                    target_state = self._get_linear_state(target_var_info, lvalue.linear_path)
-                    if target_state == 'active':
-                        # Format path for error message
-                        if lvalue.linear_path:
-                            path_str = f"{lvalue.var_name}[{']['.join(map(str, lvalue.linear_path))}]"
-                        else:
-                            path_str = lvalue.var_name
-                        raise TypeError(
-                            f"Cannot reassign '{path_str}': linear token not consumed "
-                            f"(declared at line {target_var_info.line_number}, line {node.lineno})"
-                        )
-            
-            # For existing variables or complex lvalues, store the value
-            self._store_to_lvalue(lvalue, rvalue)
-            
-            # After storing, register linear token if rvalue is linear type
-            # This handles undefined/consumed -> active transition
-            if rvalue_is_linear:
-                if hasattr(lvalue, 'var_name') and lvalue.var_name and hasattr(lvalue, 'linear_path') and lvalue.linear_path is not None:
-                    # Activate if:
-                    # 1. rvalue is a variable reference (ownership transfer)
-                    # 2. rvalue is an initialized value (not ir.Undefined)
-                    from llvmlite import ir as llvm_ir
-                    is_undefined = (
-                        rvalue.kind == 'value' and 
-                        isinstance(rvalue.value, llvm_ir.Constant) and
-                        hasattr(rvalue.value, 'constant') and
-                        rvalue.value.constant == llvm_ir.Undefined
-                    )
-                    
-                    if hasattr(rvalue, 'var_name') and rvalue.var_name:
-                        # Variable reference - transfer ownership
-                        self._register_linear_token(lvalue.var_name, rvalue.type_hint, node, path=lvalue.linear_path)
-                        self._transfer_linear_ownership(rvalue, reason="assignment")
-                    elif not is_undefined:
-                        # Initialized value (function return, linear(), etc.)
-                        self._register_linear_token(lvalue.var_name, rvalue.type_hint, node, path=lvalue.linear_path)
+            else:
+                self._assign_to_target(target, rvalue, node)
     
     def _handle_tuple_unpacking(self, target: ast.Tuple, value_node: ast.AST, rvalue: ValueRef):
         """Handle tuple unpacking assignment"""
@@ -365,13 +328,7 @@ class AssignmentsMixin:
                 from ..builtin_entities.python_type import PythonType
                 val_ref = wrap_value(py_val, kind='python',
                                  type_hint=PythonType.wrap(py_val, is_constant=True))
-                
-                # Get or create lvalue (may return None for Python constants)
-                lvalue = self.visit_lvalue_or_define(elt, value_ref=val_ref)
-                
-                # Store the value (skip if Python constant was created)
-                if lvalue is not None:
-                    self._store_to_lvalue(lvalue, val_ref)
+                self._assign_to_target(elt, val_ref, target)
         elif hasattr(rvalue, 'type_hint') and hasattr(rvalue.type_hint, '_field_types'):
             # Struct unpacking: a, b = func() where func() returns struct
             struct_type = rvalue.type_hint
@@ -386,22 +343,9 @@ class AssignmentsMixin:
                 field_pc_type = field_types[i]
                 from ..valueref import wrap_value
                 field_val_ref = wrap_value(field_value, kind='value', type_hint=field_pc_type)
-                
-                # Get or create lvalue (with explicit pc_type to force PC value)
-                lvalue = self.visit_lvalue_or_define(elt, value_ref=field_val_ref, pc_type=field_pc_type)
-                
-                # Store the value
-                self._store_to_lvalue(lvalue, field_val_ref)
-                
-                # Register linear token if needed
-                if isinstance(elt, ast.Name) and self._is_linear_type(field_pc_type):
-                    self._register_linear_token(elt.id, field_pc_type, target)
+                self._assign_to_target(elt, field_val_ref, target, pc_type=field_pc_type)
         else:
-            # Cannot unpack from this type
-            raise NotImplementedError(
-                f"Cannot unpack from type {rvalue.type_hint}. "
-                f"Expected struct type with _field_types, tuple literal, or Python tuple."
-            )
+            logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", value_node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         """Handle annotated assignment statements (variable declarations with types)
