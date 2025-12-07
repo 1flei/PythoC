@@ -126,9 +126,19 @@ class ptr(BuiltinType):
     def get_type_id(cls) -> str:
         """Generate unique type ID for pointer types."""
         if cls.pointee_type is not None:
+            pointee = cls.pointee_type
+            
+            # Resolve forward reference if pointee_type is a string
+            if isinstance(pointee, str):
+                from ..forward_ref import get_defined_type
+                resolved = get_defined_type(pointee)
+                if resolved is None:
+                    raise TypeError(f"ptr.get_type_id: unresolved forward reference '{pointee}'")
+                pointee = resolved
+            
             # Import here to avoid circular dependency
             from ..type_id import get_type_id
-            pointee_id = get_type_id(cls.pointee_type)
+            pointee_id = get_type_id(pointee)
             return f'P{pointee_id}'
         return 'Pv'  # void pointer
     
@@ -136,36 +146,46 @@ class ptr(BuiltinType):
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM pointer type"""
         if cls.pointee_type is not None:
+            pointee = cls.pointee_type
+            
+            # Resolve forward reference if pointee_type is a string
+            if isinstance(pointee, str):
+                from ..forward_ref import get_defined_type
+                resolved = get_defined_type(pointee)
+                if resolved is None:
+                    raise TypeError(f"ptr.get_llvm_type: unresolved forward reference '{pointee}'")
+                pointee = resolved
+            
             # Determine pointee LLVM type from either PC type or direct LLVM type
-            if hasattr(cls.pointee_type, 'get_llvm_type'):
+            if hasattr(pointee, 'get_llvm_type'):
                 pointee_llvm = None
                 if module_context is not None:
                     # Prefer passing module_context for identified/opaque structs
                     try:
-                        pointee_llvm = cls.pointee_type.get_llvm_type(module_context)
+                        pointee_llvm = pointee.get_llvm_type(module_context)
                     except TypeError as e:
                         if "positional argument" in str(e) or "takes" in str(e):
-                            pointee_llvm = cls.pointee_type.get_llvm_type()
+                            pointee_llvm = pointee.get_llvm_type()
                         else:
                             raise
                 else:
                     # No context available: still prefer passing module_context when possible
                     try:
                         # Always prefer module_context for identified/opaque struct types
-                        pointee_llvm = cls.pointee_type.get_llvm_type(module_context)
+                        pointee_llvm = pointee.get_llvm_type(module_context)
                     except TypeError:
                         # Fallback only if the type truly does not accept a context
-                        pointee_llvm = cls.pointee_type.get_llvm_type()
+                        pointee_llvm = pointee.get_llvm_type()
                 if pointee_llvm is None:
-                    raise TypeError(f"ptr.get_llvm_type: failed to obtain pointee LLVM type for {cls.pointee_type}")
-            elif isinstance(cls.pointee_type, ir.Type):
+                    raise TypeError(f"ptr.get_llvm_type: failed to obtain pointee LLVM type for {pointee}")
+            elif isinstance(pointee, ir.Type):
                 # ANTI-PATTERN: pointee_type should be BuiltinEntity, not ir.Type
                 raise TypeError(
-                    f"ptr.get_llvm_type: pointee_type is raw LLVM type {cls.pointee_type}. "
+                    f"ptr.get_llvm_type: pointee_type is raw LLVM type {pointee}. "
                     f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
                 )
             else:
-                raise TypeError(f"ptr.get_llvm_type: unknown pointee type {cls.pointee_type}")
+                raise TypeError(f"ptr.get_llvm_type: unknown pointee type {pointee}")
             return ir.PointerType(pointee_llvm)
         return ir.PointerType(ir.IntType(8))  # Default to i8*
     
@@ -505,6 +525,14 @@ class ptr(BuiltinType):
         
         # Now current_type_hint should be ptr[Struct] where Struct is the final type
         struct_type = current_type_hint.pointee_type
+        
+        # Resolve forward reference if struct_type is a string
+        if isinstance(struct_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(struct_type)
+            if resolved is None:
+                raise TypeError(f"ptr attribute access: unresolved forward reference '{struct_type}'")
+            struct_type = resolved
         
         # Require PC struct type; do not accept raw LLVM struct types
         if not (isinstance(struct_type, type) and hasattr(struct_type, 'handle_attribute')):

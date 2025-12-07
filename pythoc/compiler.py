@@ -598,12 +598,20 @@ class LLVMCompiler:
             return False
         
         # Parse the module to check for errors
-        logger.debug(f"Verifying LLVM module... {self.module.name}:{self.module}")
+        logger.debug(f"Verifying LLVM module... {self.module.name}")
         try:
-            llvm_module = binding.parse_assembly(str(self.module))
+            module_str = str(self.module)
+            logger.debug(f"Module IR:\n{module_str}")
+            llvm_module = binding.parse_assembly(module_str)
             llvm_module.verify()
         except Exception as e:
-            logger.error(f"Verification failed: {e}, ir: {str(self.module)}")
+            # Try to get module string for error reporting, but handle failures
+            try:
+                ir_str = str(self.module)
+            except Exception:
+                ir_str = "<failed to serialize module>"
+            logger.error(f"Verification failed: {e}")
+            logger.error(f"Module IR:\n{ir_str}")
             raise e
         return True
     

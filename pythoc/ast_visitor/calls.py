@@ -131,8 +131,9 @@ class CallsMixin:
         field_types = struct_type_hint._field_types
         field_names = getattr(struct_type_hint, '_field_names', None)
         
+        # Empty struct unpacks to no arguments
         if not field_types:
-            raise TypeError(f"Struct type {struct_type_hint} has no fields")
+            return []
         
         # Extract each field value
         expanded_args = []

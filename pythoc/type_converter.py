@@ -346,7 +346,22 @@ class TypeConverter:
             str_const = self._visitor._create_string_constant(python_val)
             return wrap_value(str_const, kind="value", type_hint=ptr[i8])
 
-        llvm_type = target_type.get_llvm_type()
+        # Get module_context for types that require it (e.g., structs with forward refs)
+        module = getattr(self._visitor, 'module', None)
+        module_context = getattr(module, 'context', None) if module else None
+        llvm_type = target_type.get_llvm_type(module_context)
+        
+        # Handle pointer types specially - convert integer to pointer via inttoptr
+        if hasattr(target_type, 'is_pointer') and target_type.is_pointer():
+            if isinstance(python_val, int):
+                # Create integer constant first, then convert to pointer
+                from .builtin_entities import i64
+                int_val = ir.Constant(i64.get_llvm_type(), python_val)
+                ptr_val = self._visitor.builder.inttoptr(int_val, llvm_type)
+                return wrap_value(ptr_val, kind="value", type_hint=target_type)
+            else:
+                raise TypeError(f"Cannot promote Python {type(python_val).__name__} to pointer type")
+        
         ir_val = ir.Constant(llvm_type, python_val)
         logger.debug("Promote to PC", target_type=target_type, llvm_type=llvm_type, ir_val=ir_val)
         return wrap_value(ir_val, kind="value", type_hint=target_type)

@@ -1,0 +1,339 @@
+"""
+Test c_ast module: linear ownership, refined types, and type construction.
+
+Tests cover:
+1. Linear allocation: alloc returns (proof, ptr), must consume proof
+2. Refined types: CTypeRef guarantees non-null
+3. Type construction: make_* functions with ownership transfer
+4. Free functions: recursive free with proof consumption
+5. Match-case dispatch on CType variants
+"""
+
+import unittest
+from pythoc import compile, i32, i8, ptr, sizeof, struct, consume, assume, nullptr, bool
+from pythoc.libc.stdlib import malloc, free
+from pythoc.libc.stdio import printf
+
+# Import from c_ast module
+from pythoc.bindings.c_ast import (
+    # Types
+    Span, CType, QualType, PtrType, ArrayType, FuncType, 
+    StructType, EnumType, EnumValue, FieldInfo, ParamInfo,
+    Decl, DeclKind,
+    # Refined types
+    CTypeRef, QualTypeRef, ctype_nonnull,
+    # Proof types
+    CTypeProof, QualTypeProof,
+    # Allocation
+    alloc, ctype_alloc, qualtype_alloc, ptrtype_alloc,
+    paraminfo_alloc, fieldinfo_alloc, enumvalue_alloc,
+    # Type constructors
+    prim, make_qualtype, make_ptr_type, make_array_type,
+    make_func_type, make_struct_type, make_typedef_type,
+    # Free functions
+    ctype_free, qualtype_free,
+    # Span helpers
+    span_empty, span_is_empty,
+    # Constants
+    QUAL_NONE, QUAL_CONST,
+)
+
+
+# =============================================================================
+# Test 1: Linear allocation - proof must be consumed
+# =============================================================================
+
+@compile
+def test_linear_alloc_and_free() -> i32:
+    """Test that linear alloc returns proof and ptr, free consumes proof."""
+    # Allocate with linear tracking
+    prf, ty = ctype_alloc()
+    
+    # Use the pointer
+    ty[0] = CType(CType.Int)
+    
+    # Free must consume proof
+    ctype_free(prf, ty)
+    
+    return 0
+
+
+@compile
+def test_linear_qualtype() -> i32:
+    """Test QualType linear allocation."""
+    qt_prf, qt = qualtype_alloc()
+    ty_prf, ty = ctype_alloc()
+    
+    ty[0] = CType(CType.Char)
+    qt.type = ty
+    qt.quals = QUAL_CONST
+    
+    # Free QualType (which owns CType)
+    # We need to consume both proofs since we're manually managing
+    consume(ty_prf)  # CType ownership transferred to QualType
+    qualtype_free(qt_prf, qt)
+    
+    return 0
+
+
+# =============================================================================
+# Test 2: Primitive type constructors via prim API
+# =============================================================================
+
+@compile
+def test_prim_api() -> i32:
+    """Test primitive type construction via prim API."""
+    # Create int type
+    int_prf, int_ty = prim.int()
+    
+    # Verify tag
+    result: i32 = 0
+    match int_ty[0]:
+        case (CType.Int):
+            result = 1
+        case _:
+            result = 0
+    
+    ctype_free(int_prf, int_ty)
+    return result
+
+
+@compile
+def test_multiple_prims() -> i32:
+    """Test creating multiple primitive types."""
+    void_prf, void_ty = prim.void()
+    char_prf, char_ty = prim.char()
+    long_prf, long_ty = prim.long()
+    
+    count: i32 = 0
+    
+    match void_ty[0]:
+        case (CType.Void):
+            count = count + 1
+        case _:
+            pass
+    
+    match char_ty[0]:
+        case (CType.Char):
+            count = count + 1
+        case _:
+            pass
+    
+    match long_ty[0]:
+        case (CType.Long):
+            count = count + 1
+        case _:
+            pass
+    
+    ctype_free(void_prf, void_ty)
+    ctype_free(char_prf, char_ty)
+    ctype_free(long_prf, long_ty)
+    
+    return count  # Should be 3
+
+
+# =============================================================================
+# Test 3: Compound type construction with ownership transfer
+# =============================================================================
+
+@compile
+def test_make_qualtype_ownership() -> i32:
+    """Test make_qualtype transfers CType ownership."""
+    # Create a CType
+    ty_prf, ty = prim.int()
+    
+    # make_qualtype takes ownership of ty (consumes ty_prf)
+    qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_CONST)
+    
+    # Verify
+    result: i32 = 0
+    if qt.quals == QUAL_CONST:
+        match qt.type[0]:
+            case (CType.Int):
+                result = 1
+            case _:
+                result = 0
+    
+    # Free QualType (owns the CType now)
+    qualtype_free(qt_prf, qt)
+    
+    return result
+
+
+@compile
+def test_make_ptr_type() -> i32:
+    """Test pointer type construction."""
+    # Create pointee: const int
+    int_prf, int_ty = prim.int()
+    qt_prf, qt = make_qualtype(int_prf, int_ty, QUAL_CONST)
+    
+    # Create pointer to const int
+    ptr_prf, ptr_ty = make_ptr_type(qt_prf, qt, QUAL_NONE)
+    
+    # Verify it's a pointer type
+    result: i32 = 0
+    match ptr_ty[0]:
+        case (CType.Ptr, pt):
+            # Check pointee is const int
+            if pt.pointee.quals == QUAL_CONST:
+                match pt.pointee.type[0]:
+                    case (CType.Int):
+                        result = 1
+                    case _:
+                        result = 0
+        case _:
+            result = 0
+    
+    ctype_free(ptr_prf, ptr_ty)
+    return result
+
+
+@compile
+def test_make_array_type() -> i32:
+    """Test array type construction."""
+    # Create element type: int
+    int_prf, int_ty = prim.int()
+    qt_prf, qt = make_qualtype(int_prf, int_ty, QUAL_NONE)
+    
+    # Create array[10] of int
+    arr_prf, arr_ty = make_array_type(qt_prf, qt, 10)
+    
+    # Verify
+    result: i32 = 0
+    match arr_ty[0]:
+        case (CType.Array, at):
+            if at.size == 10:
+                match at.elem.type[0]:
+                    case (CType.Int):
+                        result = 1
+                    case _:
+                        result = 0
+        case _:
+            result = 0
+    
+    ctype_free(arr_prf, arr_ty)
+    return result
+
+
+# =============================================================================
+# Test 4: Span functions
+# =============================================================================
+
+@compile
+def test_span_empty() -> i32:
+    """Test span_empty and span_is_empty."""
+    s: Span = span_empty()
+    
+    if span_is_empty(s):
+        return 1
+    return 0
+
+
+# =============================================================================
+# Test 5: Match-case dispatch on CType
+# =============================================================================
+
+@compile
+def test_ctype_match() -> i32:
+    """Test match-case dispatch on different CType variants."""
+    int_prf, int_ty = prim.int()
+    void_prf, void_ty = prim.void()
+    
+    # Create a pointer type
+    qt_prf, qt = make_qualtype(void_prf, void_ty, QUAL_NONE)
+    ptr_prf, ptr_ty = make_ptr_type(qt_prf, qt, QUAL_NONE)
+    
+    count: i32 = 0
+    
+    # Match int
+    match int_ty[0]:
+        case (CType.Int):
+            count = count + 1
+        case _:
+            pass
+    
+    # Match pointer
+    match ptr_ty[0]:
+        case (CType.Ptr, pt):
+            count = count + 1
+        case _:
+            pass
+    
+    ctype_free(int_prf, int_ty)
+    ctype_free(ptr_prf, ptr_ty)
+    
+    return count  # Should be 2
+
+
+# =============================================================================
+# Test 6: Typedef type
+# =============================================================================
+
+@compile
+def test_typedef_type() -> i32:
+    """Test typedef type construction."""
+    name: Span = span_empty()
+    
+    td_prf, td_ty = make_typedef_type(name)
+    
+    result: i32 = 0
+    match td_ty[0]:
+        case (CType.Typedef, span):
+            if span_is_empty(span):
+                result = 1
+        case _:
+            result = 0
+    
+    ctype_free(td_prf, td_ty)
+    return result
+
+
+# =============================================================================
+# Test runner
+# =============================================================================
+
+class TestCAst(unittest.TestCase):
+    def test_linear_alloc_and_free(self):
+        result = test_linear_alloc_and_free()
+        self.assertEqual(result, 0)
+    
+    def test_linear_qualtype(self):
+        result = test_linear_qualtype()
+        self.assertEqual(result, 0)
+    
+    def test_prim_api(self):
+        result = test_prim_api()
+        self.assertEqual(result, 1)
+    
+    def test_multiple_prims(self):
+        result = test_multiple_prims()
+        self.assertEqual(result, 3)
+    
+    def test_make_qualtype_ownership(self):
+        result = test_make_qualtype_ownership()
+        self.assertEqual(result, 1)
+    
+    def test_make_ptr_type(self):
+        result = test_make_ptr_type()
+        self.assertEqual(result, 1)
+    
+    def test_make_array_type(self):
+        result = test_make_array_type()
+        self.assertEqual(result, 1)
+    
+    def test_span_empty(self):
+        result = test_span_empty()
+        self.assertEqual(result, 1)
+    
+    def test_ctype_match(self):
+        result = test_ctype_match()
+        self.assertEqual(result, 2)
+    
+    def test_typedef_type(self):
+        result = test_typedef_type()
+        self.assertEqual(result, 1)
+
+
+if __name__ == '__main__':
+    print("=== C AST Module Tests ===\n")
+    unittest.main(verbosity=2)
