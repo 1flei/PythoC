@@ -155,10 +155,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # Do not infer from LLVM; require explicit type hints
         return None
     
-    def _infer_pc_type_from_llvm_type(self, llvm_type: ir.Type) -> Optional[Any]:
-        """No longer supported: LLVM->PC inference disabled"""
-        return None
-    
     def declare_variable(self, name: str, type_hint: Any, alloca: Optional[ir.AllocaInstr] = None,
                         source: str = "unknown", line_number: Optional[int] = None,
                         is_parameter: bool = False, allow_redeclare: bool = False,
@@ -400,34 +396,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
         """Check if variable exists in registry"""
         return self.ctx.var_registry.lookup(name) is not None
     
-    def store_variable(self, name: str, value: ir.Value):
-        """Store value to variable"""
-        var_info = self.ctx.var_registry.lookup(name)
-        if var_info:
-            self.builder.store(value, var_info.alloca)
-        else:
-            raise NameError(f"Variable '{name}' not defined")
-    
-    def _store_python_constant(self, name: str, value: ValueRef):
-        """Store Python constant value in VariableInfo.value_ref"""
-        var_info = self.lookup_variable(name)
-        if var_info:
-            var_info.value_ref = value
-    
-    def _get_python_constant(self, name: str) -> Optional[ValueRef]:
-        """Retrieve Python constant value from VariableInfo.value_ref"""
-        var_info = self.lookup_variable(name)
-        if var_info and var_info.is_python_constant:
-            return var_info.value_ref
-        return None
-    
-    def wrap_value_with_pc_type(self, ir_value: ir.Value, pc_type: Optional[Any] = None,
-                                kind: str = "value", source_node: Optional[ast.AST] = None) -> ValueRef:
-        """Wrap IR value with PC type information"""
-        # Do not infer PC type from LLVM; preserve None to surface errors upstream
-        
-        return wrap_value(ir_value, kind=kind, type_hint=pc_type, source_node=source_node)
-    
     def visit_expression(self, expr):
         """Visit an expression and return a ValueRef preserving type hints"""
         result = self.visit(expr)
@@ -549,118 +517,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
             var_info.linear_scope_depth = self.scope_depth
             logger.debug(f"Initialized linear states for '{var_info.name}': {paths} -> {initial_state}")
     
-    def _parse_subscript_path(self, node: ast.AST) -> Tuple[str, Tuple[int, ...]]:
-        """Parse variable name and index path from subscript AST node
-        
-        Similar to consume._parse_linear_path but for assignment targets.
-        
-        Examples:
-            t -> ('t', ())
-            t[0] -> ('t', (0,))
-            t[1][0] -> ('t', (1, 0))
-        
-        Returns:
-            (var_name, path_tuple)
-        """
-        path = []
-        current = node
-        
-        # Walk backwards through subscript chain to build path
-        while isinstance(current, ast.Subscript):
-            # Extract index (must be constant integer)
-            if isinstance(current.slice, ast.Constant):
-                idx = current.slice.value
-                if not isinstance(idx, int):
-                    raise TypeError(f"Subscript assignment requires integer index, got {type(idx).__name__}")
-                path.insert(0, idx)
-            elif hasattr(ast, 'Index') and isinstance(current.slice, ast.Index):  # Python < 3.9 compatibility
-                if isinstance(current.slice.value, ast.Constant):
-                    idx = current.slice.value.value
-                    if not isinstance(idx, int):
-                        raise TypeError(f"Subscript assignment requires integer index, got {type(idx).__name__}")
-                    path.insert(0, idx)
-                else:
-                    raise TypeError("Subscript assignment requires constant integer index")
-            else:
-                raise TypeError("Subscript assignment requires constant integer index")
-            
-            current = current.value
-        
-        # Base must be a variable name
-        if not isinstance(current, ast.Name):
-            raise TypeError(f"Subscript assignment requires variable name, got {type(current).__name__}")
-        
-        return current.id, tuple(path)
-    
-    def _parse_lvalue_path(self, node: ast.AST) -> Tuple[str, Tuple[int, ...]]:
-        """Parse variable name and index path from any lvalue AST node
-        
-        Supports:
-        - ast.Name: direct variable access
-        - ast.Subscript: array/struct subscript (with constant index)
-        - ast.Attribute: struct field access (mapped to index internally)
-        
-        Examples:
-            t -> ('t', ())
-            t[0] -> ('t', (0,))
-            t[1][0] -> ('t', (1, 0))
-            t.field -> ('t', (field_index,))  # if type info available
-        
-        Returns:
-            (var_name, path_tuple)
-        """
-        if isinstance(node, ast.Name):
-            return node.id, ()
-        
-        if isinstance(node, ast.Subscript):
-            return self._parse_subscript_path(node)
-        
-        if isinstance(node, ast.Attribute):
-            # For attribute access, we need to map field name to index
-            # First, get the base variable
-            base_node = node.value
-            if isinstance(base_node, ast.Name):
-                var_name = base_node.id
-                var_info = self.lookup_variable(var_name)
-                if var_info and hasattr(var_info.type_hint, '_field_names'):
-                    field_names = var_info.type_hint._field_names
-                    field_name = node.attr
-                    if field_name in field_names:
-                        field_idx = field_names.index(field_name)
-                        return var_name, (field_idx,)
-                    else:
-                        raise TypeError(f"Field '{field_name}' not found in type {var_info.type_hint}")
-                else:
-                    # Cannot determine field index without type info
-                    raise TypeError(f"Cannot determine field index for attribute access without type info")
-            elif isinstance(base_node, ast.Subscript):
-                # Nested access like cs.fp[0]
-                base_var, base_path = self._parse_subscript_path(base_node)
-                var_info = self.lookup_variable(base_var)
-                if var_info:
-                    # Walk through the path to get the type at that position
-                    current_type = var_info.type_hint
-                    for idx in base_path:
-                        if hasattr(current_type, '_field_types'):
-                            current_type = current_type._field_types[idx]
-                        else:
-                            raise TypeError(f"Cannot navigate path {base_path} in type {var_info.type_hint}")
-                    
-                    # Now get the field index from current_type
-                    if hasattr(current_type, '_field_names'):
-                        field_names = current_type._field_names
-                        field_name = node.attr
-                        if field_name in field_names:
-                            field_idx = field_names.index(field_name)
-                            return base_var, base_path + (field_idx,)
-                        else:
-                            raise TypeError(f"Field '{field_name}' not found in type {current_type}")
-                raise TypeError(f"Cannot determine type for nested attribute access")
-            else:
-                raise TypeError(f"Unsupported attribute base: {type(base_node).__name__}")
-        
-        raise TypeError(f"Unsupported lvalue type: {type(node).__name__}")
-    
     def _register_linear_token(self, var_name: str, type_hint, node: ast.AST, path: Tuple[int, ...] = ()):
         """Register/update linear token states when value is assigned
         
@@ -682,59 +538,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     self._set_linear_state(var_info, lin_path, 'active')
                 var_info.linear_scope_depth = self.scope_depth
                 logger.debug(f"Linear token '{var_name}' paths {linear_paths} transitioned to active")
-    
-    def _consume_linear(self, var_name: str, node: ast.AST, path: Tuple[int, ...] = ()):
-        """Mark a linear token as consumed
-        
-        Can only consume tokens in 'active' state.
-        undefined/consumed states cannot be consumed.
-        
-        Args:
-            var_name: Variable name
-            node: AST node for error reporting
-            path: Index path to the linear token
-        """
-        var_info = self.lookup_variable(var_name)
-        if not var_info:
-            raise TypeError(f"Variable '{var_name}' not found (line {getattr(node, 'lineno', '?')})")
-        
-        state = self._get_linear_state(var_info, path)
-        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-        
-        if state is None:
-            raise TypeError(f"Variable '{path_str}' is not a linear token (line {getattr(node, 'lineno', '?')})")
-        
-        if state == 'consumed':
-            raise TypeError(
-                f"Linear token '{path_str}' already consumed "
-                f"(declared at line {var_info.line_number}, "
-                f"attempting to consume again at line {getattr(node, 'lineno', '?')})"
-            )
-        
-        if state == 'undefined':
-            raise TypeError(
-                f"Cannot consume undefined linear token '{path_str}' "
-                f"(declared at line {var_info.line_number}, "
-                f"line {getattr(node, 'lineno', '?')})"
-            )
-        
-        if state == 'moved':
-            raise TypeError(
-                f"Linear token '{path_str}' was already moved "
-                f"(cannot use at line {getattr(node, 'lineno', '?')})"
-            )
-        
-        # Check loop scope restriction: cannot consume external token inside loop
-        if self.scope_depth > var_info.linear_scope_depth:
-            raise TypeError(
-                f"Cannot consume external linear token '{path_str}' inside loop "
-                f"(token declared at scope depth {var_info.linear_scope_depth}, "
-                f"attempting to consume at depth {self.scope_depth}, "
-                f"line {getattr(node, 'lineno', '?')})"
-            )
-        
-        self._set_linear_state(var_info, path, 'consumed')
-        logger.debug(f"Consumed linear token '{path_str}'")
     
     def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer"):
         """Transfer ownership of linear tokens from a ValueRef
