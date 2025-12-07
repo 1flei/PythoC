@@ -126,7 +126,6 @@ def linear_wrap(acquire_func, release_func, struct_name=None):
     # Build release function
     ReleaseParams = struct[tuple(release_param_types)]
 
-    # Raw linear: consume directly
     @compile(suffix=deterministic_suffix)
     def wrapped_release(prf: ProofType, *args: ReleaseParams):
         release_func(*args)

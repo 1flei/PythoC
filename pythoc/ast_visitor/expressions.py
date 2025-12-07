@@ -417,12 +417,29 @@ class ExpressionsMixin:
             result = self.builder.fcmp_ordered(predicate, ensure_ir(left), ensure_ir(right))
             return wrap_value(result, kind="value", type_hint=bool_type)
         else:
+            # Verify operands are comparable (must be integers or pointers)
+            left_ir = ensure_ir(left)
+            right_ir = ensure_ir(right)
+            if not isinstance(left_ir.type, (ir.IntType, ir.PointerType)):
+                left_hint = get_type_hint(left)
+                raise TypeError(
+                    f"Cannot compare type '{left_hint}' with icmp. "
+                    f"Only integers and pointers support == comparison. "
+                    f"For enum types, use match or extract tag with e[0]."
+                )
+            if not isinstance(right_ir.type, (ir.IntType, ir.PointerType)):
+                right_hint = get_type_hint(right)
+                raise TypeError(
+                    f"Cannot compare type '{right_hint}' with icmp. "
+                    f"Only integers and pointers support == comparison. "
+                    f"For enum types, use match or extract tag with e[0]."
+                )
             # Choose signed or unsigned based on operand type hints
             left_hint = get_type_hint(left)
             right_hint = get_type_hint(right)
             use_unsigned = (is_unsigned_int(left_hint) or is_unsigned_int(right_hint))
             icmp = self.builder.icmp_unsigned if use_unsigned else self.builder.icmp_signed
-            result = icmp(predicate, ensure_ir(left), ensure_ir(right))
+            result = icmp(predicate, left_ir, right_ir)
             return wrap_value(result, kind="value", type_hint=bool_type)
     
 

@@ -141,6 +141,41 @@ class EnumType(CompositeType):
         return ir.LiteralStructType([tag_llvm, payload_llvm])
     
     @classmethod
+    def get_size_bytes(cls) -> int:
+        """Get size in bytes for enum type
+        
+        Enum is struct { tag, union_payload }, so size is:
+        tag_size + padding + union_size, aligned to max alignment
+        """
+        if cls._tag_type is None or cls._union_payload is None:
+            return 0
+        
+        tag_size = cls._tag_type.get_size_bytes()
+        union_size = cls._union_payload.get_size_bytes()
+        
+        # Calculate alignment
+        tag_align = min(tag_size, 8)
+        union_align = min(union_size, 8) if union_size > 0 else 1
+        max_align = max(tag_align, union_align)
+        
+        # Calculate total size with padding
+        # Start with tag
+        total = tag_size
+        
+        # Align for union
+        if total % union_align != 0 and union_size > 0:
+            total += union_align - (total % union_align)
+        
+        # Add union size
+        total += union_size
+        
+        # Align total to max alignment
+        if total % max_align != 0:
+            total += max_align - (total % max_align)
+        
+        return total
+    
+    @classmethod
     def _setup_field_types(cls):
         """Setup _field_types and _field_names for CompositeType base class
         
@@ -626,6 +661,10 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     
     # Preserve original module for debugging
     enum_cls.__module__ = cls.__module__
+    
+    # Register in forward reference system so other types can reference this enum
+    from ..forward_ref import mark_type_defined
+    mark_type_defined(cls.__name__, enum_cls)
     
     # handle_attribute is inherited from EnumType base class (no need to override)
     
