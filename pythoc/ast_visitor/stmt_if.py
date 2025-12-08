@@ -21,6 +21,9 @@ class IfStatementMixin:
         
         Callables receive no arguments and should generate code in current block.
         This allows match statements to bind variables before executing body.
+        
+        Returns:
+            tuple: (then_terminated, else_terminated) - whether each branch terminates
         """
         logger.debug(f"If condition={condition}")
         
@@ -29,10 +32,11 @@ class IfStatementMixin:
             py_cond = condition.get_python_value()
             if py_cond:
                 then_fn()
+                return (True, False)  # Only then branch executed
             else:
                 if else_fn:
                     else_fn()
-            return
+                return (False, True)  # Only else branch executed
 
         condition = self._to_boolean(condition)
         
@@ -75,6 +79,8 @@ class IfStatementMixin:
         # For if-else, merge is unreachable only if both branches terminate
         if else_fn and then_terminated and else_terminated:
             self.builder.unreachable()
+        
+        return (then_terminated, else_terminated)
     
     def visit_If(self, node: ast.If):
         """Handle if statements with proper control flow"""
@@ -83,11 +89,12 @@ class IfStatementMixin:
             return
 
         # Save linear token states (path-based) before if statement
+        # Use list_all_visible() to include variables from outer scopes
         linear_states_before = {}
-        for var_info in self.ctx.var_registry.get_all_in_current_scope():
+        for name, var_info in self.ctx.var_registry.list_all_visible().items():
             if var_info.linear_states:
                 # Deep copy the states dict
-                linear_states_before[var_info.name] = dict(var_info.linear_states)
+                linear_states_before[name] = dict(var_info.linear_states)
         
         # Normalize to callables
         def make_branch_fn(branch):
@@ -116,17 +123,17 @@ class IfStatementMixin:
         # Execute branches and capture linear token states
         def then_fn_tracked():
             then_fn()
-            # Capture states after then branch
+            # Capture states after then branch (from all visible scopes)
             nonlocal then_linear_states
-            for var_info in self.ctx.var_registry.get_all_in_current_scope():
+            for name, var_info in self.ctx.var_registry.list_all_visible().items():
                 if var_info.linear_states:
-                    then_linear_states[var_info.name] = dict(var_info.linear_states)
+                    then_linear_states[name] = dict(var_info.linear_states)
         
         def else_fn_tracked():
             if else_fn:
                 # Reset to state before if for else branch
-                # First, clear any linear states added in then branch
-                for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                # Clear linear states for all visible variables
+                for name, var_info in self.ctx.var_registry.list_all_visible().items():
                     if var_info.linear_states:
                         var_info.linear_states.clear()
                 
@@ -137,11 +144,11 @@ class IfStatementMixin:
                         var_info.linear_states = dict(states_dict)
                 
                 else_fn()
-                # Capture states after else branch
+                # Capture states after else branch (from all visible scopes)
                 nonlocal else_linear_states
-                for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                for name, var_info in self.ctx.var_registry.list_all_visible().items():
                     if var_info.linear_states:
-                        else_linear_states[var_info.name] = dict(var_info.linear_states)
+                        else_linear_states[name] = dict(var_info.linear_states)
         
         # Execute condition processing with tracked branches
         if else_fn:
@@ -175,21 +182,39 @@ class IfStatementMixin:
                             f"then={then_state}, else={else_state} (line {getattr(node, 'lineno', '?')})"
                         )
         else:
-            # Simple if without else - linear tokens must remain active
-            self.process_condition(condition, then_fn_tracked, None)
+            # Simple if without else - check linear token handling
+            then_terminated, _ = self.process_condition(condition, then_fn_tracked, None)
             
-            # For simple if, tokens can only remain active
-            # Check all paths haven't changed
-            for var_name, states_before in linear_states_before.items():
-                var_info = self.lookup_variable(var_name)
-                states_after = var_info.linear_states if var_info else {}
-                
-                for path, state_before in states_before.items():
-                    state_after = states_after.get(path, 'unknown')
-                    if state_before == 'active' and state_after != 'active':
-                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                        raise TypeError(
-                            f"Linear token '{path_str}' modified in if without else branch. "
-                            f"All branches must handle tokens consistently (line {getattr(node, 'lineno', '?')})"
-                        )
+            logger.debug(f"Simple if without else: linear_states_before={linear_states_before}")
+            logger.debug(f"Simple if without else: then_linear_states={then_linear_states}")
+            logger.debug(f"Simple if without else: then_terminated={then_terminated}")
+            
+            # If then branch terminates (return/break/continue), the code after the if
+            # only executes when the condition is false. In this case, linear tokens
+            # should be restored to their state before the if.
+            if then_terminated:
+                # Restore linear states to before if (for code after if)
+                for name, states_dict in linear_states_before.items():
+                    var_info = self.lookup_variable(name)
+                    if var_info:
+                        var_info.linear_states = dict(states_dict)
+                logger.debug(f"Simple if: then terminated, restored linear states to before if")
+            else:
+                # Then branch doesn't terminate - check that linear tokens weren't modified
+                # Because the code after if could execute after either branch
+                for var_name, states_before in linear_states_before.items():
+                    var_info = self.lookup_variable(var_name)
+                    states_after = var_info.linear_states if var_info else {}
+                    logger.debug(f"Simple if: var={var_name}, states_before={states_before}, states_after={states_after}")
+                    
+                    for path, state_before in states_before.items():
+                        state_after = states_after.get(path, 'unknown')
+                        logger.debug(f"Simple if: path={path}, state_before={state_before}, state_after={state_after}")
+                        if state_before == 'active' and state_after != 'active':
+                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                            logger.debug(f"Simple if: RAISING ERROR for {path_str}")
+                            raise TypeError(
+                                f"Linear token '{path_str}' modified in if without else branch. "
+                                f"All branches must handle tokens consistently (line {getattr(node, 'lineno', '?')})"
+                            )
 

@@ -88,7 +88,18 @@ class MatchStatementMixin:
         return True
     
     def _visit_match_as_switch(self, node: ast.Match, subject_ir):
-        """Compile match to LLVM switch instruction (optimized path)"""
+        """Compile match to LLVM switch instruction (optimized path)
+        
+        For linear token handling, this works like if-elif-else:
+        - All cases must handle linear tokens consistently
+        - If there's no wildcard case, linear tokens cannot be consumed in any case
+        """
+        # Save linear token states before match
+        linear_states_before = {}
+        for name, var_info in self.ctx.var_registry.list_all_visible().items():
+            if var_info.linear_states:
+                linear_states_before[name] = dict(var_info.linear_states)
+        
         # Create merge block
         merge_block = self.current_function.append_basic_block(
             self.get_next_label("match_merge")
@@ -101,8 +112,10 @@ class MatchStatementMixin:
                 default_case_idx = idx
                 break
         
+        has_wildcard = default_case_idx is not None
+        
         # Create default block
-        if default_case_idx is not None:
+        if has_wildcard:
             default_block = self.current_function.append_basic_block(
                 self.get_next_label(f"case_default")
             )
@@ -140,18 +153,92 @@ class MatchStatementMixin:
             const_val = ir.Constant(subject_ir.type, value)
             switch.add_case(const_val, block)
         
+        # Track linear states for each case
+        all_case_linear_states = []
+        
         # Generate code for each case
         for idx, case in enumerate(node.cases):
             self.builder.position_at_end(case_blocks[idx])
             
-            # Execute case body
-            for stmt in case.body:
-                if not self.builder.block.is_terminated:
-                    self.visit(stmt)
+            # Reset linear states to before match for this case
+            for name, var_info in self.ctx.var_registry.list_all_visible().items():
+                if var_info.linear_states:
+                    var_info.linear_states.clear()
+            for name, states_dict in linear_states_before.items():
+                var_info = self.lookup_variable(name)
+                if var_info:
+                    var_info.linear_states = dict(states_dict)
+            
+            # Enter scope for case body
+            self.ctx.var_registry.enter_scope()
+            try:
+                # Execute case body
+                for stmt in case.body:
+                    if not self.builder.block.is_terminated:
+                        self.visit(stmt)
+            finally:
+                self.ctx.var_registry.exit_scope()
+            
+            # Capture linear states after this case
+            case_linear_states = {}
+            for name, var_info in self.ctx.var_registry.list_all_visible().items():
+                if var_info.linear_states:
+                    case_linear_states[name] = dict(var_info.linear_states)
+            all_case_linear_states.append(case_linear_states)
             
             # Branch to merge if not terminated
             if not self.builder.block.is_terminated:
                 self.builder.branch(merge_block)
+        
+        # Verify all cases handle linear tokens consistently
+        if len(all_case_linear_states) > 1:
+            first_states = all_case_linear_states[0]
+            for case_idx, case_states in enumerate(all_case_linear_states[1:], 1):
+                all_vars = set(first_states.keys()) | set(case_states.keys())
+                for var_name in all_vars:
+                    first_var_states = first_states.get(var_name, {})
+                    case_var_states = case_states.get(var_name, {})
+                    
+                    all_paths = set(first_var_states.keys()) | set(case_var_states.keys())
+                    for path in all_paths:
+                        first_state = first_var_states.get(path, 'unknown')
+                        case_state = case_var_states.get(path, 'unknown')
+                        
+                        states_compatible = (
+                            first_state == case_state or
+                            (first_state == 'consumed' and case_state == 'unknown') or
+                            (first_state == 'unknown' and case_state == 'consumed')
+                        )
+                        
+                        if not states_compatible:
+                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                            raise TypeError(
+                                f"Linear token '{path_str}' must be handled consistently in all match cases: "
+                                f"case 0={first_state}, case {case_idx}={case_state} (line {getattr(node, 'lineno', '?')})"
+                            )
+        
+        # If no wildcard, check that linear tokens weren't modified
+        if not has_wildcard and linear_states_before:
+            # Without wildcard, there's an implicit "no match" path that goes to merge
+            # Linear tokens must not be consumed in any case
+            if all_case_linear_states:
+                for var_name, states_before in linear_states_before.items():
+                    case_states = all_case_linear_states[0].get(var_name, {})
+                    for path, state_before in states_before.items():
+                        state_after = case_states.get(path, 'unknown')
+                        if state_before == 'active' and state_after != 'active':
+                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                            raise TypeError(
+                                f"Linear token '{path_str}' modified in match without wildcard case. "
+                                f"All cases must handle tokens consistently (line {getattr(node, 'lineno', '?')})"
+                            )
+        
+        # Set final linear states (use first case's states if all are consistent)
+        if all_case_linear_states:
+            for name, states_dict in all_case_linear_states[0].items():
+                var_info = self.lookup_variable(name)
+                if var_info:
+                    var_info.linear_states = dict(states_dict)
         
         # Continue at merge block
         self.builder.position_at_end(merge_block)
