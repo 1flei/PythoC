@@ -30,14 +30,26 @@ from pythoc.libc.stdlib import malloc, free
 
 
 # =============================================================================
-# Span: Zero-copy string reference
+# Span: Zero-copy string reference with lifetime tracking
 # =============================================================================
+
+# SpanProof is a refined linear type that ties Span to source buffer lifetime
+# To create a Span, you need a SourceProof (representing the source buffer)
+# To release a Span, you must return the SourceProof, ensuring source outlives span
+SpanProof = refined[linear, "SpanProof"]
+
 
 @compile
 class Span:
     """Zero-copy reference to source text
     
-    Note: Caller must ensure source buffer outlives all Spans referencing it.
+    Lifetime is enforced via linear types:
+    - span_from_source(src, src_prf) -> (Span, SpanProof, SourceProof)
+    - span_release(span, span_prf, src_prf) -> SourceProof
+    
+    This ensures Span cannot outlive the source buffer.
+    For AST nodes, the SpanProof is consumed when the node is created,
+    and the source buffer must outlive the entire AST.
     """
     start: ptr[i8]
     len: i32
@@ -45,10 +57,70 @@ class Span:
 
 span_nonnull, SpanRef = nonnull_wrap(ptr[Span])
 
+# SourceProof represents ownership/lifetime of a source buffer
+# When parsing, you create a SourceProof for the source buffer,
+# and all Spans must be released before the source buffer can be freed
+SourceProof = refined[linear, "SourceProof"]
+
+
+@compile
+def source_begin(source: ptr[i8]) -> SourceProof:
+    """Begin a parsing session with a source buffer.
+    
+    Returns a SourceProof that must be held until all Spans are released.
+    The source buffer must remain valid while SourceProof exists.
+    """
+    return assume(linear(), "SourceProof")
+
+
+@compile
+def source_end(src_prf: SourceProof) -> void:
+    """End a parsing session, allowing source buffer to be freed.
+    
+    All SpanProofs must have been released before calling this.
+    """
+    consume(src_prf)
+
+
+@compile
+def span_from_cstr(start: ptr[i8], length: i32, src_prf: SourceProof) -> struct[Span, SpanProof, SourceProof]:
+    """Create a Span from a C string pointer within the source buffer.
+    
+    Args:
+        start: Pointer into the source buffer
+        length: Length of the span
+        src_prf: Source proof (passed through)
+    
+    Returns:
+        span: The created Span
+        span_prf: Proof that span is valid (must be released via span_release)
+        src_prf: Source proof passed through
+    """
+    s: Span
+    s.start = start
+    s.len = length
+    span_prf: SpanProof = assume(linear(), "SpanProof")
+    return s, span_prf, src_prf
+
+
+@compile
+def span_release(s: Span, span_prf: SpanProof, src_prf: SourceProof) -> SourceProof:
+    """Release a Span, returning the source proof.
+    
+    This enforces that Span cannot outlive the source buffer:
+    - To release a span, you must have the source proof
+    - This proves the source is still alive when the span is released
+    """
+    consume(span_prf)
+    return src_prf
+
 
 @compile
 def span_empty() -> Span:
-    """Create an empty span"""
+    """Create an empty span (no source reference, no proof needed)
+    
+    Empty spans are safe because they don't reference any source buffer.
+    """
     s: Span
     s.start = nullptr
     s.len = 0
