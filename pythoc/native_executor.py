@@ -119,9 +119,9 @@ class MultiSOExecutor:
         all_libs_to_load = []
         visited = set()
         
-        # First collect all dependencies
+        # First collect all dependencies (regardless of whether .so exists yet)
         for dep_source, dep_so in dependencies:
-            if dep_so not in visited and os.path.exists(dep_so):
+            if dep_so not in visited:
                 dep_deps = self._get_library_dependencies(dep_source, dep_so)
                 self._collect_all_libs(dep_so, dep_deps, visited, all_libs_to_load)
         
@@ -168,9 +168,9 @@ class MultiSOExecutor:
         
         visited.add(so_file)
         
-        # First recursively collect dependencies
+        # First recursively collect dependencies (regardless of whether .so exists yet)
         for dep_source, dep_so in dependencies:
-            if dep_so not in visited and os.path.exists(dep_so):
+            if dep_so not in visited:
                 dep_deps = self._get_library_dependencies(dep_source, dep_so)
                 self._collect_all_libs(dep_so, dep_deps, visited, result)
         
@@ -581,12 +581,8 @@ class MultiSOExecutor:
         # Collect dependencies from compiler
         dependencies = self._get_dependencies(wrapper._compiler, source_file)
         
-        # Compile dependencies if needed
-        for dep_source_file, dep_so_file in dependencies:
-            dep_obj_file = dep_so_file.replace('.so', '.o')
-            if os.path.exists(dep_obj_file):
-                if not os.path.exists(dep_so_file) or os.path.getmtime(dep_obj_file) > os.path.getmtime(dep_so_file):
-                    self.compile_source_to_so(dep_obj_file, dep_so_file)
+        # Compile dependencies recursively if needed
+        self._compile_dependencies_recursive(dependencies, set())
         
         # Load library with dependencies
         self.load_library_with_dependencies(source_file, so_file, dependencies)
@@ -594,6 +590,45 @@ class MultiSOExecutor:
         # Get and cache the native function
         native_func = self.get_function(actual_func_name, compiler, so_file)
         return native_func
+    
+    def _compile_dependencies_recursive(self, dependencies: List[Tuple[str, str]], visited: Set[str]):
+        """
+        Recursively compile all dependencies before loading
+        
+        This ensures all .so files exist before we try to load them.
+        
+        Args:
+            dependencies: List of (dep_source_file, dep_so_file) tuples
+            visited: Set of already processed so_files to avoid infinite loops
+        """
+        for dep_source_file, dep_so_file in dependencies:
+            if dep_so_file in visited:
+                continue
+            visited.add(dep_so_file)
+            
+            # First, recursively compile this dependency's dependencies
+            dep_deps = self._get_library_dependencies(dep_source_file, dep_so_file)
+            if dep_deps:
+                self._compile_dependencies_recursive(dep_deps, visited)
+            
+            # Now compile this dependency if needed
+            dep_obj_file = dep_so_file.replace('.so', '.o')
+            if os.path.exists(dep_obj_file):
+                need_compile = False
+                if not os.path.exists(dep_so_file):
+                    need_compile = True
+                else:
+                    # Check if .o is newer than .so
+                    if os.path.getmtime(dep_obj_file) > os.path.getmtime(dep_so_file):
+                        need_compile = True
+                    # Also check .ll timestamp
+                    dep_ll_file = dep_so_file.replace('.so', '.ll')
+                    if os.path.exists(dep_ll_file):
+                        if os.path.getmtime(dep_ll_file) > os.path.getmtime(dep_so_file):
+                            need_compile = True
+                
+                if need_compile:
+                    self.compile_source_to_so(dep_obj_file, dep_so_file)
     
     def _get_dependencies(self, compiler, source_file: str) -> List[Tuple[str, str]]:
         """
