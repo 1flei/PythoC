@@ -137,17 +137,30 @@ class YieldExitRule(ExitPointRule):
         Becomes:
             loop_var: i32 = i32(1)
             <loop_body>
+    
+    For tuple unpacking:
+        def gen() -> struct[i32, i32]:
+            yield a, b
+        
+        for x, y in gen():
+            ...
+        
+        Becomes:
+            _tmp = (a, b)
+            x = _tmp[0]
+            y = _tmp[1]
+            <loop_body>
     """
     
     def __init__(
         self, 
-        loop_var: str, 
+        loop_var: ast.AST,  # Can be Name or Tuple
         loop_body: List[ast.stmt],
         return_type_annotation: Optional[ast.expr] = None
     ):
         """
         Args:
-            loop_var: Loop variable name (target of for loop)
+            loop_var: Loop variable target (Name or Tuple AST node)
             loop_body: Statements in the for loop body
             return_type_annotation: Return type annotation from function (optional)
         """
@@ -166,7 +179,18 @@ class YieldExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        yield expr  -->  loop_var = type_annotation(expr); <loop_body>
+        yield expr  -->  loop_var = move(expr); <loop_body>
+        
+        The move() wrapper is essential for linear types because:
+        - yield is semantically a continuation call: yield x <==> continuation(x)
+        - Function calls transfer ownership of linear arguments
+        - But the AST transformation converts this to an assignment
+        - Wrapping in move() restores the ownership transfer semantic
+        
+        For non-linear types, move() is a no-op.
+        
+        For tuple unpacking:
+            yield a, b  -->  x, y = move((a, b)); <loop_body>
         """
         # Extract yield value
         if isinstance(exit_node, ast.Expr) and isinstance(exit_node.value, ast.Yield):
@@ -190,17 +214,54 @@ class YieldExitRule(ExitPointRule):
                     self.return_type_annotation
                 )
             
-            # Create simple assignment (loop variable is pre-declared by yield_adapter)
-            # We should NOT use AnnAssign here because the variable has already been declared
-            assign = ast.Assign(
-                targets=[ast.Name(id=self.loop_var, ctx=ast.Store())],
-                value=renamed_value
+            # Wrap in move() for ownership transfer
+            # This is essential for linear types: yield is semantically a continuation call,
+            # which transfers ownership. The move() wrapper makes this explicit to the compiler.
+            # For non-linear types, move() is a no-op.
+            moved_value = ast.Call(
+                func=ast.Name(id='move', ctx=ast.Load()),
+                args=[renamed_value],
+                keywords=[]
             )
-            stmts.append(assign)
+            
+            # Handle tuple unpacking vs simple assignment
+            if isinstance(self.loop_var, ast.Tuple):
+                # Tuple unpacking: a, b = move((x, y))
+                stmts.extend(self._create_tuple_unpack_stmts(moved_value))
+            else:
+                # Simple assignment (loop variable is pre-declared by yield_adapter)
+                loop_var_name = self.loop_var.id if isinstance(self.loop_var, ast.Name) else str(self.loop_var)
+                assign = ast.Assign(
+                    targets=[ast.Name(id=loop_var_name, ctx=ast.Store())],
+                    value=moved_value
+                )
+                stmts.append(assign)
         
         # Insert loop body (deep copy to avoid mutation)
         for stmt in self.loop_body:
             stmts.append(copy.deepcopy(stmt))
+        
+        return stmts
+    
+    def _create_tuple_unpack_stmts(self, value: ast.expr) -> List[ast.stmt]:
+        """Create statements for tuple unpacking
+        
+        For: for a, b in gen(): ...
+        Where gen() yields (x, y)
+        
+        Creates a single tuple unpacking assignment:
+            a, b = (x, y)
+        
+        This uses Python's native tuple unpacking syntax, which pythoc's
+        assignment visitor will handle correctly for linear types.
+        """
+        # Create tuple unpacking assignment: a, b = value
+        # The target is already a Tuple AST node from the for loop
+        unpack_assign = ast.Assign(
+            targets=[copy.deepcopy(self.loop_var)],  # Tuple target
+            value=value
+        )
+        return [unpack_assign]
         
         return stmts
     
