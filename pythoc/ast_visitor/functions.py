@@ -168,11 +168,16 @@ class FunctionsMixin:
         
         func_name = node.name
         
+        # Capture the current user_globals at closure definition time
+        # This is the caller's globals context
+        closure_globals = self.ctx.user_globals
+        
         # Create a closure wrapper with handle_call
         class ClosureWrapper:
-            def __init__(self, func_ast, visitor):
+            def __init__(self, func_ast, visitor, func_globals):
                 self.func_ast = func_ast
                 self.visitor = visitor
+                self.func_globals = func_globals
             
             def handle_call(self, visitor, args, call_node):
                 """Execute closure inline using ClosureAdapter"""
@@ -185,12 +190,12 @@ class FunctionsMixin:
                     )
                 param_bindings = dict(zip(param_names, args))
                 
-                # Use ClosureAdapter to inline the closure
-                adapter = ClosureAdapter(visitor, param_bindings)
+                # Use ClosureAdapter to inline the closure with captured globals
+                adapter = ClosureAdapter(visitor, param_bindings, func_globals=self.func_globals)
                 return adapter.execute_closure(self.func_ast)
         
-        # Create wrapper instance
-        wrapper = ClosureWrapper(node, self)
+        # Create wrapper instance with captured globals
+        wrapper = ClosureWrapper(node, self, closure_globals)
         
         # Register as a variable in current scope
         var_info = VariableInfo(

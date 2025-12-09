@@ -96,8 +96,9 @@ def inline(func=None, *, cls_method=False, method=False):
                 param_bindings = dict(zip(param_names, args))
             
             # Execute inline to generate IR using unified kernel
+            # Pass func_globals so adapter can merge them with caller's globals
             from ..inline import InlineAdapter
-            adapter = InlineAdapter(visitor, param_bindings)
+            adapter = InlineAdapter(visitor, param_bindings, func_globals=f.__globals__)
             result = adapter.execute_inline(func_ast)
             return result
 
