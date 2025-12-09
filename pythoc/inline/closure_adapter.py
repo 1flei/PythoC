@@ -7,7 +7,7 @@ Handles captured variables from outer scopes.
 
 import ast
 from typing import Dict, Optional, Any, TYPE_CHECKING
-from .kernel import InlineKernel
+from .kernel import InlineKernel, InlineResult
 from .exit_rules import ReturnExitRule
 from .scope_analyzer import ScopeContext
 from ..valueref import ValueRef, wrap_value
@@ -31,16 +31,19 @@ class ClosureAdapter:
     The kernel's ScopeAnalyzer automatically detects captured variables.
     """
     
-    def __init__(self, parent_visitor: 'LLVMIRVisitor', param_bindings: Dict[str, Any]):
+    def __init__(self, parent_visitor: 'LLVMIRVisitor', param_bindings: Dict[str, Any],
+                 func_globals: Dict[str, Any] = None):
         """
         Initialize closure adapter
         
         Args:
             parent_visitor: The visitor that's calling the closure
             param_bindings: Dict mapping parameter names to ValueRefs or Python objects
+            func_globals: The closure's __globals__ (for name resolution)
         """
         self.visitor = parent_visitor
         self.param_bindings = param_bindings
+        self.func_globals = func_globals
         self.kernel = InlineKernel()
     
     
@@ -80,14 +83,15 @@ class ClosureAdapter:
             keywords=[]
         )
         
-        # Create inline operation (kernel will detect captures)
+        # Create inline operation with func_globals (kernel will detect captures)
         try:
             inline_op = self.kernel.create_inline_op(
                 callee_func=func_ast,
                 call_site=call_site,
                 call_args=arg_exprs,
                 caller_context=caller_context,
-                exit_rule=exit_rule
+                exit_rule=exit_rule,
+                callee_globals=self.func_globals
             )
             
             # Log captured variables for debugging
@@ -98,12 +102,24 @@ class ClosureAdapter:
             logger.error(f"ClosureAdapter: failed to create inline op: {e}")
             raise
         
-        # Execute inline transformation
+        # Execute inline transformation - get InlineResult
         try:
-            inlined_stmts = self.kernel.execute_inline(inline_op)
+            inline_result = self.kernel.execute_inline(inline_op)
         except Exception as e:
             logger.error(f"ClosureAdapter: kernel execution failed: {e}")
             raise
+        
+        inlined_stmts = inline_result.stmts
+        
+        # Merge required_globals into visitor's user_globals
+        # Order: old_user_globals first, then required_globals
+        # This ensures intrinsics like 'move' from kernel take precedence
+        old_user_globals = self.visitor.ctx.user_globals
+        merged_globals = {}
+        if old_user_globals:
+            merged_globals.update(old_user_globals)
+        merged_globals.update(inline_result.required_globals)
+        self.visitor.ctx.user_globals = merged_globals
         
         # Fix AST locations
         for stmt in inlined_stmts:
@@ -118,12 +134,17 @@ class ClosureAdapter:
         for stmt in inlined_stmts:
             self.visitor.visit(stmt)
         
+        # Restore user_globals
+        self.visitor.ctx.user_globals = old_user_globals
+        
         # Return result if function has return value
         has_return = self._has_return_value(func_ast)
         if has_return:
             return self._lookup_result_var(result_var)
         
-        return None
+        # For void functions, return a void ValueRef
+        from ..builtin_entities import void
+        return wrap_value(None, kind='python', type_hint=void)
     
     def _create_arg_temps(self) -> Dict[str, str]:
         """
@@ -133,6 +154,10 @@ class ClosureAdapter:
             Mapping of parameter names to temporary variable names
             
         IMPORTANT: These temps have NO alloca - they are pure value references.
+        
+        CRITICAL for linear types: We clear var_name from the ValueRef so that
+        the temporary variable is not tracked for consumption. The ownership
+        was already transferred when the caller evaluated the arguments.
         """
         arg_temps = {}
         closure_id = get_next_id()
@@ -147,6 +172,16 @@ class ClosureAdapter:
                 from ..builtin_entities.python_type import PythonType
                 param_value = wrap_value(param_value, kind="python",
                                      type_hint=PythonType.wrap(param_value, is_constant=True))
+            else:
+                # Create a fresh ValueRef without var_name tracking
+                # This is critical for linear types: the ownership was already
+                # transferred when the caller evaluated the arguments
+                param_value = wrap_value(
+                    param_value.value,
+                    kind=param_value.kind,
+                    type_hint=param_value.type_hint,
+                    address=param_value.address if hasattr(param_value, 'address') else None
+                )
             
             # Register temp variable WITHOUT alloca
             temp_info = VariableInfo(
@@ -179,7 +214,13 @@ class ClosureAdapter:
         return ScopeContext(available_vars=available_vars)
     
     def _has_return_value(self, func_ast: ast.FunctionDef) -> bool:
-        """Check if function has return statements with values"""
+        """Check if function has non-void return value"""
+        # Check return type annotation
+        if func_ast.returns:
+            if isinstance(func_ast.returns, ast.Name) and func_ast.returns.id == 'void':
+                return False
+            return True
+        # Check for return statements with values
         for node in ast.walk(func_ast):
             if isinstance(node, ast.Return) and node.value is not None:
                 return True

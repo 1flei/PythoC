@@ -9,9 +9,9 @@ This is a simple forwarding layer with minimal logic.
 
 import ast
 import copy
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
-from .kernel import InlineKernel
+from .kernel import InlineKernel, InlineResult
 from .scope_analyzer import ScopeContext
 from .exit_rules import YieldExitRule
 
@@ -82,46 +82,21 @@ class YieldInlineAdapter:
             return_type_annotation=return_type_annotation
         )
         
-        # CRITICAL: Merge callee's globals into visitor's user_globals
-        # This allows inlined code to access functions/builtins from the original module
-        # NOTE: Caller MUST restore globals after visiting returned statements!
+        # Get callee's globals for kernel
+        callee_globals = None
         if func_obj and hasattr(func_obj, '__globals__'):
-            from ..logger import logger
-            logger.debug(f"Merging globals from func_obj: {func_obj}")
-            logger.debug(f"func_obj.__globals__ has {len(func_obj.__globals__)} keys")
-            old_user_globals = self.visitor.ctx.user_globals
-            # Create merged globals: callee's globals + current globals
-            # Current globals take precedence (to avoid overriding)
-            merged_globals = dict(func_obj.__globals__)
-            if old_user_globals:
-                merged_globals.update(old_user_globals)
-            
-            # CRITICAL: Inject 'move' intrinsic for linear type ownership transfer
-            # The yield transformation wraps values in move() to handle linear types
-            from ..builtin_entities import move
-            merged_globals['move'] = move
-            
-            self.visitor.ctx.user_globals = merged_globals
-            logger.debug(f"Merged user_globals now has {len(self.visitor.ctx.user_globals)} keys")
-            if 'assume' in self.visitor.ctx.user_globals:
-                logger.debug("'assume' IS in merged user_globals")
-            else:
-                logger.debug("'assume' NOT in merged user_globals")
-                logger.debug(f"Keys in merged globals: {list(self.visitor.ctx.user_globals.keys())}")
-        else:
-            from ..logger import logger
-            logger.debug(f"NOT merging globals: func_obj={func_obj}, has__globals__={hasattr(func_obj, '__globals__') if func_obj else 'N/A'}")
-            old_user_globals = None
+            callee_globals = func_obj.__globals__
         
         try:
-            # Create inline operation
+            # Create inline operation with callee_globals
             try:
                 op = self.kernel.create_inline_op(
                     callee_func=func_ast,
                     call_site=for_node.iter,  # The call expression
                     call_args=call_args,
                     caller_context=caller_context,
-                    exit_rule=exit_rule
+                    exit_rule=exit_rule,
+                    callee_globals=callee_globals
                 )
             except Exception as e:
                 # If kernel rejects the operation, cannot inline
@@ -129,12 +104,23 @@ class YieldInlineAdapter:
                 logger.debug(f"Kernel rejected yield inline: {e}")
                 return (None, None)
             
-            # Execute inlining
+            # Execute inlining - kernel now returns InlineResult
             try:
                 from ..logger import logger
-                logger.debug(f"Before execute_inline: user_globals has {len(self.visitor.ctx.user_globals)} keys, 'assume' in it: {'assume' in self.visitor.ctx.user_globals}")
-                inlined_stmts = self.kernel.execute_inline(op)
-                logger.debug(f"After execute_inline: user_globals has {len(self.visitor.ctx.user_globals)} keys, 'assume' in it: {'assume' in self.visitor.ctx.user_globals}")
+                inline_result = self.kernel.execute_inline(op)
+                inlined_stmts = inline_result.stmts
+                
+                # Merge required_globals into visitor's user_globals
+                # Order: old_user_globals first, then required_globals
+                # This ensures intrinsics like 'move' from kernel take precedence
+                old_user_globals = self.visitor.ctx.user_globals
+                merged_globals = {}
+                if old_user_globals:
+                    merged_globals.update(old_user_globals)
+                merged_globals.update(inline_result.required_globals)
+                self.visitor.ctx.user_globals = merged_globals
+                
+                logger.debug(f"Merged user_globals now has {len(self.visitor.ctx.user_globals)} keys")
                 
                 # CRITICAL: Pre-declare loop variable(s) before the inlined statements
                 # This is needed because yield points will only assign to them, not declare them
@@ -151,14 +137,8 @@ class YieldInlineAdapter:
                 logger.warning(f"Yield inlining failed: {e}")
                 import traceback
                 logger.warning(traceback.format_exc())
-                # Restore globals before returning on error
-                if old_user_globals is not None:
-                    self.visitor.ctx.user_globals = old_user_globals
                 return (None, None)
         except Exception as e:
-            # Restore globals on any outer exception
-            if old_user_globals is not None:
-                self.visitor.ctx.user_globals = old_user_globals
             raise
     
     def _extract_loop_var(self, for_node: ast.For) -> Optional[ast.AST]:

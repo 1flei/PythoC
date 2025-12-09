@@ -5,7 +5,7 @@ A unified framework for all inlining operations in the pc compiler.
 Supports @inline, closures, yield, and future extensions.
 """
 
-from .kernel import InlineKernel, InlineOp
+from .kernel import InlineKernel, InlineOp, InlineResult
 from .exit_rules import ExitPointRule, ReturnExitRule, YieldExitRule, MacroExitRule
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
 from .transformers import InlineBodyTransformer
@@ -16,6 +16,7 @@ from .closure_adapter import ClosureAdapter
 __all__ = [
     'InlineKernel',
     'InlineOp',
+    'InlineResult',
     'ExitPointRule',
     'ReturnExitRule',
     'YieldExitRule',

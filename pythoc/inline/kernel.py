@@ -6,8 +6,8 @@ The core inlining engine that handles all inlining scenarios.
 
 import ast
 import copy
-from dataclasses import dataclass
-from typing import List, Set, Dict, Optional, TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import List, Set, Dict, Optional, Any, TYPE_CHECKING
 
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
 from .transformers import InlineBodyTransformer
@@ -15,6 +15,20 @@ from ..utils import get_next_id
 
 if TYPE_CHECKING:
     from .exit_rules import ExitPointRule
+
+
+@dataclass
+class InlineResult:
+    """
+    Result of inline execution
+    
+    Contains:
+    - stmts: Generated AST statements
+    - required_globals: Globals that must be merged into caller's user_globals
+                        before visiting the statements
+    """
+    stmts: List[ast.stmt]
+    required_globals: Dict[str, Any]
 
 
 @dataclass
@@ -48,6 +62,9 @@ class InlineOp:
     
     # Uniqueness
     inline_id: str
+    
+    # Callee's globals (for name resolution in inlined code)
+    callee_globals: Dict[str, Any] = field(default_factory=dict)
 
 
 class InlineKernel:
@@ -73,7 +90,8 @@ class InlineKernel:
         call_site: ast.expr,
         call_args: List[ast.expr],
         caller_context: ScopeContext,
-        exit_rule: 'ExitPointRule'
+        exit_rule: 'ExitPointRule',
+        callee_globals: Dict[str, Any] = None
     ) -> InlineOp:
         """
         Create an InlineOp by analyzing callee and caller
@@ -86,6 +104,7 @@ class InlineKernel:
             call_args: Argument expressions from call site
             caller_context: Caller's scope information
             exit_rule: Rule for transforming exit points
+            callee_globals: Callee function's __globals__ (for name resolution)
             
         Returns:
             InlineOp ready for execution
@@ -97,7 +116,8 @@ class InlineKernel:
                 call_site=call_node,
                 call_args=[Name('x'), Constant(10)],
                 caller_context=ScopeContext(['x', 'y']),
-                exit_rule=ReturnExitRule('_result')
+                exit_rule=ReturnExitRule('_result'),
+                callee_globals=add_func.__globals__
             )
         """
         # Generate unique ID using global generator
@@ -133,10 +153,11 @@ class InlineKernel:
             local_vars=local_vars,
             param_vars=param_vars,
             exit_rule=exit_rule,
-            inline_id=inline_id
+            inline_id=inline_id,
+            callee_globals=callee_globals or {}
         )
     
-    def execute_inline(self, op: InlineOp) -> List[ast.stmt]:
+    def execute_inline(self, op: InlineOp) -> InlineResult:
         """
         Execute inlining operation
         
@@ -146,7 +167,9 @@ class InlineKernel:
             op: InlineOp from create_inline_op
             
         Returns:
-            List of statements to replace the call site
+            InlineResult containing:
+            - stmts: List of statements to replace the call site
+            - required_globals: Globals that must be merged into caller's user_globals
             
         Example:
             Input:
@@ -202,9 +225,14 @@ class InlineKernel:
                 if op.callee_func and hasattr(op.callee_func, 'returns') and op.callee_func.returns:
                     result_type = op.callee_func.returns
                 
+                # Skip result declaration for void return type
+                is_void = False
+                if result_type and isinstance(result_type, ast.Name) and result_type.id == 'void':
+                    is_void = True
+                
                 # Create result variable declaration (without initialization)
                 # We'll let the first return assign to it
-                if result_type:
+                if result_type and not is_void:
                     result_decl = ast.AnnAssign(
                         target=ast.Name(id=op.exit_rule.result_var, ctx=ast.Store()),
                         annotation=copy.deepcopy(result_type),
@@ -263,7 +291,45 @@ class InlineKernel:
             local_count=len(op.local_vars)
         )
         
-        return result
+        # Build required_globals: callee's globals + intrinsics needed by inlined code
+        required_globals = self._build_required_globals(op)
+        
+        return InlineResult(stmts=result, required_globals=required_globals)
+    
+    def _build_required_globals(self, op: InlineOp) -> Dict[str, Any]:
+        """
+        Build the globals dict that must be merged into caller's user_globals
+        
+        This includes:
+        1. Callee's __globals__ (for name resolution in inlined code)
+        2. Intrinsics needed by the transformation (e.g., 'move' for linear types)
+        
+        IMPORTANT: Intrinsics are stored with a special key prefix '_pc_intrinsic_'
+        to avoid being overwritten during merge. The adapter should apply them last.
+        
+        Args:
+            op: InlineOp with callee_globals
+            
+        Returns:
+            Dict of globals to merge
+        """
+        required = {}
+        
+        # Start with callee's globals
+        if op.callee_globals:
+            required.update(op.callee_globals)
+        
+        # Add 'move' intrinsic for linear type ownership transfer
+        # This is needed because yield/inline transformations wrap values in move()
+        # CRITICAL: This must take precedence over any user-defined 'move'
+        from ..builtin_entities import move, bool as pc_bool
+        required['move'] = move
+        
+        # Add 'bool' type for flag variable declarations
+        # This is needed because kernel generates: _is_return: bool = False
+        required['bool'] = pc_bool
+        
+        return required
     
     def _create_rename_map(self, op: InlineOp) -> Dict[str, str]:
         """
@@ -318,10 +384,13 @@ class InlineKernel:
         Create parameter binding statements
         
         For each parameter, create:
-            renamed_param_name = arg_value (with type conversion if needed)
+            renamed_param_name = move(arg_value) (with type conversion if needed)
             
         With proper type annotations and automatic type conversion.
         Parameter names are renamed according to rename_map.
+        
+        CRITICAL: All parameter bindings use move() to handle linear type ownership.
+        For non-linear types, move() is a no-op.
         
         Args:
             op: InlineOp with parameter information
@@ -339,8 +408,8 @@ class InlineKernel:
             
             Result:
                 [
-                    AnnAssign(target=Name('a_inline_0'), annotation=Name('i32'), value=Name('x')),
-                    AnnAssign(target=Name('b_inline_0'), annotation=Name('i32'), value=Call(func=Name('i32'), args=[Constant(1)]))
+                    AnnAssign(target=Name('a_inline_0'), annotation=Name('i32'), value=Call(move, [Name('x')])),
+                    AnnAssign(target=Name('b_inline_0'), annotation=Name('i32'), value=Call(move, [Call(i32, [Constant(1)])]))
                 ]
         """
         bindings = []
@@ -368,16 +437,30 @@ class InlineKernel:
                 if isinstance(arg_value, ast.Constant):
                     arg_value = self._wrap_with_type_conversion(arg_value, param.annotation)
                 
+                # Wrap in move() for ownership transfer (essential for linear types)
+                moved_value = ast.Call(
+                    func=ast.Name(id='move', ctx=ast.Load()),
+                    args=[arg_value],
+                    keywords=[]
+                )
+                
                 binding = ast.AnnAssign(
                     target=ast.Name(id=renamed_param_name, ctx=ast.Store()),
                     annotation=copy.deepcopy(param.annotation),
-                    value=arg_value,
+                    value=moved_value,
                     simple=1
                 )
             else:
+                # Wrap in move() for ownership transfer
+                moved_value = ast.Call(
+                    func=ast.Name(id='move', ctx=ast.Load()),
+                    args=[arg_value],
+                    keywords=[]
+                )
+                
                 binding = ast.Assign(
                     targets=[ast.Name(id=renamed_param_name, ctx=ast.Store())],
-                    value=arg_value
+                    value=moved_value
                 )
             
             bindings.append(binding)
