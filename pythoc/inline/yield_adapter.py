@@ -95,6 +95,12 @@ class YieldInlineAdapter:
             merged_globals = dict(func_obj.__globals__)
             if old_user_globals:
                 merged_globals.update(old_user_globals)
+            
+            # CRITICAL: Inject 'move' intrinsic for linear type ownership transfer
+            # The yield transformation wraps values in move() to handle linear types
+            from ..builtin_entities import move
+            merged_globals['move'] = move
+            
             self.visitor.ctx.user_globals = merged_globals
             logger.debug(f"Merged user_globals now has {len(self.visitor.ctx.user_globals)} keys")
             if 'assume' in self.visitor.ctx.user_globals:
@@ -130,17 +136,12 @@ class YieldInlineAdapter:
                 inlined_stmts = self.kernel.execute_inline(op)
                 logger.debug(f"After execute_inline: user_globals has {len(self.visitor.ctx.user_globals)} keys, 'assume' in it: {'assume' in self.visitor.ctx.user_globals}")
                 
-                # CRITICAL: Pre-declare loop variable before the inlined statements
-                # This is needed because yield points will only assign to it, not declare it
+                # CRITICAL: Pre-declare loop variable(s) before the inlined statements
+                # This is needed because yield points will only assign to them, not declare them
                 if return_type_annotation and inlined_stmts:
-                    loop_var_decl = ast.AnnAssign(
-                        target=ast.Name(id=loop_var, ctx=ast.Store()),
-                        annotation=copy.deepcopy(return_type_annotation),
-                        value=None,  # No initial value, just declaration
-                        simple=1
-                    )
-                    ast.copy_location(loop_var_decl, for_node)
-                    inlined_stmts.insert(0, loop_var_decl)
+                    decls = self._create_loop_var_declarations(loop_var, return_type_annotation, for_node)
+                    for decl in reversed(decls):
+                        inlined_stmts.insert(0, decl)
                 
                 # Return the statements AND old_user_globals for caller to restore
                 # Caller MUST restore globals after visiting all statements!
@@ -160,12 +161,105 @@ class YieldInlineAdapter:
                 self.visitor.ctx.user_globals = old_user_globals
             raise
     
-    def _extract_loop_var(self, for_node: ast.For) -> Optional[str]:
-        """Extract loop variable name from for node"""
-        if isinstance(for_node.target, ast.Name):
-            return for_node.target.id
-        # Tuple unpacking and other complex targets not supported yet
+    def _extract_loop_var(self, for_node: ast.For) -> Optional[ast.AST]:
+        """Extract loop variable target from for node
+        
+        Returns the target AST node (Name or Tuple), or None if unsupported.
+        Supports:
+        - Simple Name: for x in ...
+        - Tuple unpacking: for a, b in ...
+        """
+        target = for_node.target
+        if isinstance(target, ast.Name):
+            return target
+        if isinstance(target, ast.Tuple):
+            # Verify all elements are Names (no nested tuples for now)
+            for elt in target.elts:
+                if not isinstance(elt, ast.Name):
+                    return None
+            return target
+        # Other complex targets not supported
         return None
+    
+    def _create_loop_var_declarations(
+        self, 
+        loop_var: ast.AST, 
+        return_type_annotation: ast.expr,
+        for_node: ast.For
+    ) -> List[ast.stmt]:
+        """Create variable declarations for loop variable(s)
+        
+        For simple Name: creates single AnnAssign
+        For Tuple: creates declarations for each element using subscript types
+        
+        Args:
+            loop_var: Loop variable target (Name or Tuple)
+            return_type_annotation: Return type annotation (e.g., struct[i32, i32])
+            for_node: Original for node for location info
+            
+        Returns:
+            List of AnnAssign statements for variable declarations
+        """
+        decls = []
+        
+        if isinstance(loop_var, ast.Name):
+            # Simple case: single variable
+            decl = ast.AnnAssign(
+                target=ast.Name(id=loop_var.id, ctx=ast.Store()),
+                annotation=copy.deepcopy(return_type_annotation),
+                value=None,
+                simple=1
+            )
+            ast.copy_location(decl, for_node)
+            decls.append(decl)
+        elif isinstance(loop_var, ast.Tuple):
+            # Tuple unpacking: declare each element
+            # For struct[T1, T2, ...], extract element types
+            for i, elt in enumerate(loop_var.elts):
+                if isinstance(elt, ast.Name):
+                    # Create type annotation for this element
+                    # If return_type_annotation is struct[T1, T2], we need T_i
+                    element_type = self._extract_tuple_element_type(return_type_annotation, i)
+                    
+                    decl = ast.AnnAssign(
+                        target=ast.Name(id=elt.id, ctx=ast.Store()),
+                        annotation=element_type,
+                        value=None,
+                        simple=1
+                    )
+                    ast.copy_location(decl, for_node)
+                    decls.append(decl)
+        
+        return decls
+    
+    def _extract_tuple_element_type(self, type_annotation: ast.expr, index: int) -> ast.expr:
+        """Extract the type of a tuple element from a struct type annotation
+        
+        For struct[T1, T2, ...], returns T_index
+        If we can't determine the type, returns the full annotation
+        
+        Args:
+            type_annotation: The full type annotation (e.g., struct[i32, i32])
+            index: The element index
+            
+        Returns:
+            Type annotation for the element
+        """
+        # Check if it's a Subscript like struct[T1, T2]
+        if isinstance(type_annotation, ast.Subscript):
+            slice_node = type_annotation.slice
+            
+            # Handle Tuple slice: struct[T1, T2]
+            if isinstance(slice_node, ast.Tuple):
+                if index < len(slice_node.elts):
+                    return copy.deepcopy(slice_node.elts[index])
+            
+            # Handle single element: struct[T] (shouldn't happen for tuple unpacking)
+            elif index == 0:
+                return copy.deepcopy(slice_node)
+        
+        # Fallback: return the full annotation (might cause type errors, but better than nothing)
+        return copy.deepcopy(type_annotation)
     
     def _build_caller_context(self) -> ScopeContext:
         """

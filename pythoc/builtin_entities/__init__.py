@@ -37,6 +37,9 @@ from ..std.float_types import f16, bf16, f128
 # Linear token type
 from .linear import linear
 
+# Move intrinsic for linear ownership transfer
+from .move import move
+
 # Import complex types split into modules
 from .array import array
 from .func import func
@@ -108,6 +111,9 @@ __all__ = [
     
     # Linear token type
     'linear',
+    
+    # Move intrinsic
+    'move',
     
     # Array type
     'array',

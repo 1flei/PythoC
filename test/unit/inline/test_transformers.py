@@ -235,13 +235,16 @@ def f():
         transformer = InlineBodyTransformer(rule, rename_map)
         new_body = transformer.transform(body)
         
-        # Should have: loop_var = i; x = x + 1
+        # Should have: loop_var = move(i); x = x + 1
         self.assertGreaterEqual(len(new_body), 2)
         
-        # First: loop_var = i
+        # First: loop_var = move(i)
         assign = new_body[0]
         self.assertEqual(assign.targets[0].id, 'loop_var')
-        self.assertEqual(assign.value.id, 'i')
+        # Value is now wrapped in move() for linear type support
+        self.assertIsInstance(assign.value, ast.Call)
+        self.assertEqual(assign.value.func.id, 'move')
+        self.assertEqual(assign.value.args[0].id, 'i')
         
         # Second: x = x + 1 (from loop body)
         loop_assign = new_body[1]
