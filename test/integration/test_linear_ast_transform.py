@@ -66,99 +66,87 @@ def test_yield_linear_loop() -> i32:
 # Test 3: Yield Tuple with Linear Element
 # =============================================================================
 
-# TODO: Currently fails - tuple unpacking with linear types
-# Uncomment when fixed
-#
-# @compile
-# def yield_linear_tuple() -> struct[linear, i32]:
-#     """Yield function that yields tuple with linear element"""
-#     prf = linear()
-#     yield prf, 42
-#
-# @compile
-# def test_yield_linear_tuple() -> i32:
-#     """Test yield tuple with linear element"""
-#     for prf, val in yield_linear_tuple():
-#         consume(prf)
-#     return 0
+@compile
+def yield_linear_tuple() -> struct[linear, i32]:
+    """Yield function that yields tuple with linear element"""
+    prf = linear()
+    yield prf, 42
+
+
+@compile
+def test_yield_linear_tuple() -> i32:
+    """Test yield tuple with linear element"""
+    for prf, val in yield_linear_tuple():
+        consume(prf)
+    return 0
 
 
 # =============================================================================
 # Test 4: Inline Function with Linear Argument
 # =============================================================================
 
-# TODO: Currently fails - inline arg transformation doesn't wrap in move()
-# Uncomment when fixed
-#
-# @inline
-# def consume_inline(t: linear) -> void:
-#     """Inline function that consumes a linear token"""
-#     consume(t)
-#
-# @compile
-# def test_inline_linear_arg() -> i32:
-#     """Test inline function with linear argument"""
-#     t = linear()
-#     consume_inline(t)
-#     return 0
+@inline
+def consume_inline(t: linear) -> void:
+    """Inline function that consumes a linear token"""
+    consume(t)
+
+
+@compile
+def test_inline_linear_arg() -> i32:
+    """Test inline function with linear argument"""
+    t = linear()
+    consume_inline(t)
+    return 0
 
 
 # =============================================================================
 # Test 5: Inline Function Returning Linear
 # =============================================================================
 
-# TODO: Currently fails - inline return transformation doesn't wrap in move()
-# Uncomment when fixed
-#
-# @inline
-# def create_inline() -> linear:
-#     """Inline function that creates and returns a linear token"""
-#     t = linear()
-#     return move(t)
-#
-# @compile
-# def test_inline_linear_return() -> i32:
-#     """Test inline function returning linear"""
-#     t = create_inline()
-#     consume(t)
-#     return 0
+@inline
+def create_inline() -> linear:
+    """Inline function that creates and returns a linear token"""
+    t = linear()
+    return move(t)
+
+
+@compile
+def test_inline_linear_return() -> i32:
+    """Test inline function returning linear"""
+    t = create_inline()
+    consume(t)
+    return 0
 
 
 # =============================================================================
 # Test 6: Closure with Linear Argument
 # =============================================================================
 
-# TODO: Currently fails - closure arg transformation doesn't wrap in move()
-# Uncomment when fixed
-#
-# @compile
-# def test_closure_linear_arg() -> i32:
-#     """Test closure with linear argument"""
-#     def consume_closure(t: linear) -> void:
-#         consume(t)
-#     
-#     t = linear()
-#     consume_closure(t)
-#     return 0
+@compile
+def test_closure_linear_arg() -> i32:
+    """Test closure with linear argument"""
+    def consume_closure(t: linear) -> void:
+        consume(t)
+    
+    t = linear()
+    consume_closure(t)
+    return 0
 
 
 # =============================================================================
 # Test 7: Closure Returning Linear
 # =============================================================================
 
-# TODO: Currently fails - closure return transformation doesn't wrap in move()
-# Uncomment when fixed
-#
-# @compile
-# def test_closure_linear_return() -> i32:
-#     """Test closure returning linear"""
-#     def create_closure() -> linear:
-#         t = linear()
-#         return move(t)
-#     
-#     t = create_closure()
-#     consume(t)
-#     return 0
+@compile
+def test_closure_linear_return() -> i32:
+    """Test closure returning linear"""
+    def create_closure() -> linear:
+        t = linear()
+        return move(t)
+    
+    t = create_closure()
+    consume(t)
+    return 0
 
 
 # =============================================================================
@@ -184,24 +172,22 @@ def test_yield_linear_loop() -> i32:
 # Test 9: Conditional Yield with Linear
 # =============================================================================
 
-# TODO: This requires proper handling of non-yield branches
-# Uncomment when fixed
-#
-# @compile
-# def yield_conditional(flag: i8) -> linear:
-#     """Yield function with conditional yield"""
-#     prf = linear()
-#     if flag == 1:
-#         yield prf
-#     else:
-#         consume(prf)  # Consume internally if not yielding
-#
-# @compile
-# def test_conditional_yield_linear() -> i32:
-#     """Test conditional yield with linear type"""
-#     for prf in yield_conditional(1):
-#         consume(prf)
-#     return 0
+@compile
+def yield_conditional(flag: i8) -> linear:
+    """Yield function with conditional yield"""
+    prf = linear()
+    if flag == 1:
+        yield prf
+    else:
+        consume(prf)  # Consume internally if not yielding
+
+
+@compile
+def test_conditional_yield_linear() -> i32:
+    """Test conditional yield with linear type"""
+    for prf in yield_conditional(1):
+        consume(prf)
+    return 0
 
 
 # =============================================================================
@@ -278,43 +264,51 @@ class TestLinearASTTransform(unittest.TestCase):
         result = test_yield_linear_loop()
         self.assertEqual(result, 3)
     
+    def test_yield_linear_tuple(self):
+        """Test yield tuple with linear element"""
+        result = test_yield_linear_tuple()
+        self.assertEqual(result, 0)
+    
     # =========================================================================
-    # TODO tests - uncomment when implementations are fixed
+    # Inline tests - now working with move() in kernel
     # =========================================================================
     
-    # def test_yield_linear_tuple(self):
-    #     """Test yield tuple with linear element"""
-    #     result = test_yield_linear_tuple()
-    #     self.assertEqual(result, 0)
+    def test_inline_linear_arg(self):
+        """Test inline function with linear argument"""
+        result = test_inline_linear_arg()
+        self.assertEqual(result, 0)
     
-    # def test_inline_linear_arg(self):
-    #     """Test inline function with linear argument"""
-    #     result = test_inline_linear_arg()
-    #     self.assertEqual(result, 0)
+    def test_inline_linear_return(self):
+        """Test inline function returning linear"""
+        result = test_inline_linear_return()
+        self.assertEqual(result, 0)
     
-    # def test_inline_linear_return(self):
-    #     """Test inline function returning linear"""
-    #     result = test_inline_linear_return()
-    #     self.assertEqual(result, 0)
+    # =========================================================================
+    # Closure tests - now working with move() in kernel
+    # =========================================================================
     
-    # def test_closure_linear_arg(self):
-    #     """Test closure with linear argument"""
-    #     result = test_closure_linear_arg()
-    #     self.assertEqual(result, 0)
+    def test_closure_linear_arg(self):
+        """Test closure with linear argument"""
+        result = test_closure_linear_arg()
+        self.assertEqual(result, 0)
     
-    # def test_closure_linear_return(self):
-    #     """Test closure returning linear"""
-    #     result = test_closure_linear_return()
-    #     self.assertEqual(result, 0)
+    def test_closure_linear_return(self):
+        """Test closure returning linear"""
+        result = test_closure_linear_return()
+        self.assertEqual(result, 0)
+    
+    # =========================================================================
+    # TODO tests - complex cases requiring more design work
+    # =========================================================================
+    
+    def test_conditional_yield_linear(self):
+        """Test conditional yield with linear type"""
+        result = test_conditional_yield_linear()
+        self.assertEqual(result, 0)
     
     # def test_closure_capture_linear(self):
     #     """Test closure capturing linear from outer scope"""
     #     result = test_closure_capture_linear()
-    #     self.assertEqual(result, 0)
-    
-    # def test_conditional_yield_linear(self):
-    #     """Test conditional yield with linear type"""
-    #     result = test_conditional_yield_linear()
     #     self.assertEqual(result, 0)
 
 

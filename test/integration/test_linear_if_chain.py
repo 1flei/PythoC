@@ -162,8 +162,8 @@ def test_if_without_else_no_return_error():
             # ERROR: no else, no return - token might not be consumed
         
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "without else" in str(e).lower() or "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -186,8 +186,8 @@ def test_if_elif_missing_else_error():
             # ERROR: no else branch
         
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "without else" in str(e).lower() or "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -211,8 +211,8 @@ def test_if_elif_inconsistent_error():
                 consume(t)
         
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -237,8 +237,8 @@ def test_if_return_missing_final_consume_error():
             # ERROR: missing consume(t) here
         
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "not consumed" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"

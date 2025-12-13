@@ -353,8 +353,8 @@ def test_if_match_inconsistent_error():
                 consume(t)
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -379,8 +379,8 @@ def test_match_if_inconsistent_error():
                     consume(t)
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -399,8 +399,8 @@ def test_loop_if_consume_error():
                     consume(t)  # ERROR: consumed in loop
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -422,8 +422,8 @@ def test_loop_match_consume_error():
                         pass
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -446,8 +446,8 @@ def test_complex_missing_consume_error():
             # ERROR: else branch missing, token not consumed
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)

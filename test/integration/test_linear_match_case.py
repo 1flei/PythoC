@@ -186,8 +186,8 @@ def test_match_missing_wildcard_error():
                 # ERROR: no wildcard case - what if code is 3?
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -210,8 +210,8 @@ def test_match_inconsistent_cases_error():
                     consume(t)
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -236,8 +236,8 @@ def test_match_wildcard_inconsistent_error():
                     pass  # ERROR: wildcard doesn't consume
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -264,8 +264,8 @@ def test_match_nested_inconsistent_error():
                     consume(t)
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "consistently" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"

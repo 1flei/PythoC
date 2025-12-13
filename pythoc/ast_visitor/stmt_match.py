@@ -201,20 +201,23 @@ class MatchStatementMixin:
                     
                     all_paths = set(first_var_states.keys()) | set(case_var_states.keys())
                     for path in all_paths:
-                        first_state = first_var_states.get(path, 'unknown')
-                        case_state = case_var_states.get(path, 'unknown')
+                        first_state = first_var_states.get(path)
+                        case_state = case_var_states.get(path)
                         
-                        states_compatible = (
-                            first_state == case_state or
-                            (first_state == 'consumed' and case_state == 'unknown') or
-                            (first_state == 'unknown' and case_state == 'consumed')
-                        )
-                        
-                        if not states_compatible:
+                        # Both cases must have the path tracked
+                        if first_state is None or case_state is None:
                             path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            raise TypeError(
+                            missing_in = "case 0" if first_state is None else f"case {case_idx}"
+                            logger.error(
+                                f"Linear token '{path_str}' not tracked in {missing_in}", node
+                            )
+                        
+                        # States must match: active==active or consumed==consumed
+                        if first_state != case_state:
+                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                            logger.error(
                                 f"Linear token '{path_str}' must be handled consistently in all match cases: "
-                                f"case 0={first_state}, case {case_idx}={case_state} (line {getattr(node, 'lineno', '?')})"
+                                f"case 0={first_state}, case {case_idx}={case_state}", node
                             )
         
         # If no wildcard, check that linear tokens weren't modified
@@ -225,12 +228,17 @@ class MatchStatementMixin:
                 for var_name, states_before in linear_states_before.items():
                     case_states = all_case_linear_states[0].get(var_name, {})
                     for path, state_before in states_before.items():
-                        state_after = case_states.get(path, 'unknown')
+                        state_after = case_states.get(path)
+                        if state_after is None:
+                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                            logger.error(
+                                f"Linear token '{path_str}' not tracked in match case", node
+                            )
                         if state_before == 'active' and state_after != 'active':
                             path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            raise TypeError(
+                            logger.error(
                                 f"Linear token '{path_str}' modified in match without wildcard case. "
-                                f"All cases must handle tokens consistently (line {getattr(node, 'lineno', '?')})"
+                                f"All cases must handle tokens consistently", node
                             )
         
         # Set final linear states (use first case's states if all are consistent)

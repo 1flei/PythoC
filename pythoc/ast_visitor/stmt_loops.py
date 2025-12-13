@@ -49,9 +49,9 @@ class LoopsMixin:
             for var_info in self.ctx.var_registry.get_all_in_current_scope():
                 if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
                     if var_info.linear_state != 'consumed':
-                        raise TypeError(
+                        logger.error(
                             f"Linear token '{var_info.name}' not consumed in loop "
-                            f"(declared at line {var_info.line_number})"
+                            f"(declared at line {var_info.line_number})", node
                         )
                     # Clean up consumed token
                     var_info.linear_state = None
@@ -359,9 +359,9 @@ class LoopsMixin:
                     for var_info in self.ctx.var_registry.get_all_in_current_scope():
                         if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
                             if var_info.linear_state != 'consumed':
-                                raise TypeError(
+                                logger.error(
                                     f"Linear token '{var_info.name}' not consumed in loop iteration "
-                                    f"(declared at line {var_info.line_number})"
+                                    f"(declared at line {var_info.line_number})", node
                                 )
                 finally:
                     # Pop loop context

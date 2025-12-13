@@ -206,7 +206,7 @@ class TestYieldComplexControlFlow(unittest.TestCase):
             result = test_if_else()
             # 0 + 2 + 2 + 6 = 10 (0, 1*2, 2, 3*2)
             self.assertEqual(result, 10)
-        except TypeError as e:
+        except RuntimeError as e:
             if "inlining failed" in str(e).lower():
                 self.skipTest(f"Known limitation: {e}")
             raise
@@ -217,7 +217,7 @@ class TestYieldComplexControlFlow(unittest.TestCase):
             result = test_if_elif_else()
             # 0 + 1 + 2 + 3 + 4 = 10 (code=1, so yield i)
             self.assertEqual(result, 10)
-        except TypeError as e:
+        except RuntimeError as e:
             if "inlining failed" in str(e).lower():
                 self.skipTest(f"Known limitation: {e}")
             raise
@@ -228,7 +228,7 @@ class TestYieldComplexControlFlow(unittest.TestCase):
             result = test_multiple_yields()
             # (0 + 100) + (1 + 101) + (2 + 102) = 306
             self.assertEqual(result, 306)
-        except TypeError as e:
+        except RuntimeError as e:
             if "inlining failed" in str(e).lower():
                 self.skipTest(f"Known limitation: {e}")
             raise
@@ -239,7 +239,7 @@ class TestYieldComplexControlFlow(unittest.TestCase):
             result = test_nested_if()
             # i=1: 1, i=2: 2, i=3: 6, i=4: 8 = 17
             self.assertEqual(result, 17)
-        except TypeError as e:
+        except RuntimeError as e:
             if "inlining failed" in str(e).lower():
                 self.skipTest(f"Known limitation: {e}")
             raise
@@ -250,7 +250,7 @@ class TestYieldComplexControlFlow(unittest.TestCase):
             result = test_dispatch()
             # i=0: tok=0 -> 10, i=1: tok=1 -> 20, i=2: tok=2 -> 30 = 60
             self.assertEqual(result, 60)
-        except TypeError as e:
+        except RuntimeError as e:
             if "inlining failed" in str(e).lower():
                 self.skipTest(f"Known limitation: {e}")
             raise

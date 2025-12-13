@@ -390,8 +390,8 @@ def test_error_dual_not_consumed():
             # ERROR: dt[1] not consumed
         
         flush_all_pending_outputs()  # Trigger deferred compilation
-        print("FAIL test_error_dual_not_consumed failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_dual_not_consumed failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "not consumed" in str(e):
             print(f"OK test_error_dual_not_consumed passed: {e}")
         else:
@@ -413,8 +413,8 @@ def test_error_nested_not_consumed():
             # ERROR: nr.file not consumed
         
         flush_all_pending_outputs()  # Trigger deferred compilation
-        print("FAIL test_error_nested_not_consumed failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_nested_not_consumed failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "not consumed" in str(e):
             print(f"OK test_error_nested_not_consumed passed: {e}")
         else:
@@ -436,8 +436,8 @@ def test_error_double_consume_in_dual():
             consume(dt[1])
         
         flush_all_pending_outputs()  # Trigger deferred compilation
-        print("FAIL test_error_double_consume_in_dual failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_double_consume_in_dual failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "already consumed" in str(e):
             print(f"OK test_error_double_consume_in_dual passed: {e}")
         else:
@@ -462,8 +462,8 @@ def test_error_inconsistent_if_composite():
                 # ERROR: dt[1] not consumed in this branch
         
         flush_all_pending_outputs()  # Trigger deferred compilation
-        print("FAIL test_error_inconsistent_if_composite failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_inconsistent_if_composite failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "consistently" in str(e).lower() or "not consumed" in str(e):
             print(f"OK test_error_inconsistent_if_composite passed: {e}")
         else:
@@ -487,8 +487,8 @@ def test_error_loop_external_composite():
             consume(dt[1])
         
         flush_all_pending_outputs()  # Trigger deferred compilation
-        print("FAIL test_error_loop_external_composite failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_loop_external_composite failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "external" in str(e).lower() or "scope" in str(e).lower():
             print(f"OK test_error_loop_external_composite passed: {e}")
         else:

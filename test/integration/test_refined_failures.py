@@ -165,7 +165,7 @@ def test_refine_used_outside_for_loop():
             result = should_fail_refine_outside()
             print(f"  WARNING: Compiled but may fail at runtime (result={result})")
             return True  # Not a hard failure, just a warning
-        except RuntimeError as e:
+        except TypeError as e:
             print(f"  PASS: Runtime error as expected: {e}")
             return True
     except Exception as e:

@@ -34,8 +34,8 @@ def test_if_without_else_error():
                 consume(t)
             # ERROR: else branch doesn't consume
         
-        print("FAIL test_if_without_else_error failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_if_without_else_error failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "modified in if without else" in str(e).lower() or "consistently" in str(e).lower():
             print(f"OK test_if_without_else_error passed: {e}")
         else:
@@ -53,8 +53,8 @@ def test_if_else_inconsistent_error():
             else:
                 pass  # ERROR: doesn't consume
         
-        print("FAIL test_if_else_inconsistent_error failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_if_else_inconsistent_error failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "consistently" in str(e).lower():
             print(f"OK test_if_else_inconsistent_error passed: {e}")
         else:
@@ -85,8 +85,8 @@ def test_loop_cannot_consume_external_token():
                 consume(t)  # ERROR: external token
                 i = i + 1
         
-        print("FAIL test_loop_cannot_consume_external_token failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_loop_cannot_consume_external_token failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "external" in str(e).lower() or "scope" in str(e).lower():
             print(f"OK test_loop_cannot_consume_external_token passed: {e}")
         else:

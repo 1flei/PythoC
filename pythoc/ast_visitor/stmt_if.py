@@ -164,22 +164,24 @@ class IfStatementMixin:
                 # Get all paths for this variable
                 all_paths = set(then_states.keys()) | set(else_states.keys())
                 for path in all_paths:
-                    then_state = then_states.get(path, 'unknown')
-                    else_state = else_states.get(path, 'unknown')
+                    then_state = then_states.get(path)
+                    else_state = else_states.get(path)
                     
-                    # 'consumed' states are considered handled, compatible with 'unknown' or 'consumed'
-                    # But 'active' must match exactly
-                    states_compatible = (
-                        then_state == else_state or
-                        (then_state == 'consumed' and else_state == 'unknown') or
-                        (then_state == 'unknown' and else_state == 'consumed')
-                    )
-                    
-                    if not states_compatible:
+                    # Both branches must have the path tracked
+                    if then_state is None or else_state is None:
                         path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                        raise TypeError(
+                        missing_in = "then" if then_state is None else "else"
+                        logger.error(
+                            f"Linear token '{path_str}' not tracked in {missing_in} branch", node
+                        )
+                    
+                    # States must match: active==active or consumed==consumed
+                    # 'active' cannot be mixed with 'consumed'
+                    if then_state != else_state:
+                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                        logger.error(
                             f"Linear token '{path_str}' must be handled consistently in all branches: "
-                            f"then={then_state}, else={else_state} (line {getattr(node, 'lineno', '?')})"
+                            f"then={then_state}, else={else_state}", node
                         )
         else:
             # Simple if without else - check linear token handling
@@ -208,13 +210,18 @@ class IfStatementMixin:
                     logger.debug(f"Simple if: var={var_name}, states_before={states_before}, states_after={states_after}")
                     
                     for path, state_before in states_before.items():
-                        state_after = states_after.get(path, 'unknown')
+                        state_after = states_after.get(path)
                         logger.debug(f"Simple if: path={path}, state_before={state_before}, state_after={state_after}")
+                        if state_after is None:
+                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                            logger.error(
+                                f"Linear token '{path_str}' not tracked after if branch", node
+                            )
                         if state_before == 'active' and state_after != 'active':
                             path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
                             logger.debug(f"Simple if: RAISING ERROR for {path_str}")
-                            raise TypeError(
+                            logger.error(
                                 f"Linear token '{path_str}' modified in if without else branch. "
-                                f"All branches must handle tokens consistently (line {getattr(node, 'lineno', '?')})"
+                                f"All branches must handle tokens consistently", node
                             )
 
