@@ -121,69 +121,19 @@ class InlineBodyTransformer(ast.NodeTransformer):
     def visit_If(self, node: ast.If) -> ast.If:
         """Transform if statement (recursively transform branches)
         
-        For yield inlining: if one branch contains yield and the other doesn't,
-        add 'continue' to the non-yield branch to skip the loop body.
-        """
-        from .exit_rules import YieldExitRule
+        For yield inlining: branches are transformed recursively.
+        The loop body is only inserted at yield points (via YieldExitRule.transform_exit),
+        so non-yield branches naturally don't execute the loop body.
         
+        Note: We do NOT add 'continue' to non-yield branches because the inlined
+        code is not wrapped in a loop. The yield transformation already handles
+        this correctly by only inserting the loop body at yield points.
+        """
         new_test = self.visit(node.test)
         new_body = self.transform(node.body)
         new_orelse = self.transform(node.orelse) if node.orelse else []
         
-        # For YieldExitRule, check if we need to add continue to non-yield branches
-        if isinstance(self.exit_rule, YieldExitRule):
-            then_has_yield = self._branch_contains_yield(node.body)
-            else_has_yield = self._branch_contains_yield(node.orelse) if node.orelse else False
-            
-            # If one branch has yield and the other doesn't, add continue to non-yield branch
-            if then_has_yield and not else_has_yield and node.orelse:
-                # else branch doesn't have yield, add continue at the end
-                if not self._ends_with_control_flow(new_orelse):
-                    new_orelse.append(ast.Continue())
-            elif else_has_yield and not then_has_yield:
-                # then branch doesn't have yield, add continue at the end
-                if not self._ends_with_control_flow(new_body):
-                    new_body.append(ast.Continue())
-        
         return ast.If(test=new_test, body=new_body, orelse=new_orelse)
-    
-    def _branch_contains_yield(self, stmts: List[ast.stmt]) -> bool:
-        """Check if a branch contains any yield statements"""
-        if not stmts:
-            return False
-        
-        class YieldFinder(ast.NodeVisitor):
-            def __init__(self):
-                self.found = False
-            
-            def visit_Yield(self, node):
-                self.found = True
-            
-            def visit_FunctionDef(self, node):
-                # Don't recurse into nested functions
-                pass
-            
-            def visit_AsyncFunctionDef(self, node):
-                # Don't recurse into nested async functions
-                pass
-            
-            def visit_Lambda(self, node):
-                # Don't recurse into lambdas
-                pass
-        
-        finder = YieldFinder()
-        for stmt in stmts:
-            finder.visit(stmt)
-            if finder.found:
-                return True
-        return False
-    
-    def _ends_with_control_flow(self, stmts: List[ast.stmt]) -> bool:
-        """Check if a statement list ends with a control flow statement"""
-        if not stmts:
-            return False
-        last_stmt = stmts[-1]
-        return isinstance(last_stmt, (ast.Return, ast.Break, ast.Continue, ast.Raise))
     
     def visit_For(self, node: ast.For) -> List[ast.stmt]:
         """Transform for loop (recursively transform body)

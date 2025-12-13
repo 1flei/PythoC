@@ -215,9 +215,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         
         # Initialize linear states for all linear paths in the type
         # For parameters, initialize as 'active' (passed in with ownership)
-        # For other variables, initialize as 'undefined' (not yet assigned)
+        # For other variables, initialize as 'consumed' (not yet assigned, no ownership)
         if self._is_linear_type(type_hint):
-            initial_state = 'active' if is_parameter else 'undefined'
+            initial_state = 'active' if is_parameter else 'consumed'
             self._init_linear_states(var_info, type_hint, initial_state=initial_state)
         
         return var_info
@@ -508,7 +508,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         logger.debug(f"Set linear state, var_info={var_info.name}, path={path}, state={state}")
         var_info.linear_states[path] = state
     
-    def _init_linear_states(self, var_info, type_hint, initial_state: str = 'undefined'):
+    def _init_linear_states(self, var_info, type_hint, initial_state: str = 'consumed'):
         """Initialize linear states for all linear paths in a type"""
         paths = self._get_linear_paths(type_hint)
         for path in paths:
@@ -598,13 +598,13 @@ class LLVMIRVisitor(ast.NodeVisitor):
             path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
             
             if state == 'undefined':
-                raise TypeError(
+                logger.error(
                     f"Cannot {reason} undefined linear token '{path_str}' "
                     f"(declared at line {var_info.line_number})"
                 )
             
             if state == 'consumed':
-                raise TypeError(
+                logger.error(
                     f"Cannot {reason} already consumed linear token '{path_str}' "
                     f"(declared at line {var_info.line_number})"
                 )
@@ -612,7 +612,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             if state == 'active':
                 # Check loop scope restriction: cannot consume external token inside loop
                 if self.scope_depth > var_info.linear_scope_depth:
-                    raise TypeError(
+                    logger.error(
                         f"Cannot {reason} external linear token '{path_str}' inside loop "
                         f"(token declared at scope depth {var_info.linear_scope_depth}, "
                         f"attempting to use at depth {self.scope_depth})"
@@ -638,7 +638,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                         unconsumed.append(f"'{path_str}' (declared at line {var_info.line_number})")
         
         if unconsumed:
-            raise TypeError(
+            logger.error(
                 f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}"
             )
 

@@ -291,11 +291,11 @@ class AssignmentsMixin:
         # Handle multiple targets
         for target in node.targets:
             if isinstance(target, ast.Tuple):
-                self._handle_tuple_unpacking(target, node.value, rvalue)
+                self._handle_tuple_unpacking(target, node.value, rvalue, node)
             else:
                 self._assign_to_target(target, rvalue, node)
     
-    def _handle_tuple_unpacking(self, target: ast.Tuple, value_node: ast.AST, rvalue: ValueRef):
+    def _handle_tuple_unpacking(self, target: ast.Tuple, value_node: ast.AST, rvalue: ValueRef, node: ast.AST):
         """Handle tuple unpacking assignment"""
         if rvalue.is_python_value():
             # Python tuple unpacking: a, b = (1, 2) where (1, 2) is Python value
@@ -318,12 +318,27 @@ class AssignmentsMixin:
             if len(target.elts) != len(field_types):
                 raise TypeError(f"Unpacking mismatch: {len(target.elts)} variables, {len(field_types)} fields")
             
+            from ..valueref import wrap_value
+            from ..builtin_entities.python_type import PythonType
+            
             for i, elt in enumerate(target.elts):
-                # Extract field value from struct
-                field_value = self.builder.extract_value(ensure_ir(rvalue), i)
                 field_pc_type = field_types[i]
-                from ..valueref import wrap_value
-                field_val_ref = wrap_value(field_value, kind='value', type_hint=field_pc_type)
+                
+                # Special handling for pyconst fields (zero-sized, value is in type)
+                if isinstance(field_pc_type, PythonType) and field_pc_type.is_constant():
+                    # pyconst field: value is stored in the type itself, no LLVM extraction
+                    const_value = field_pc_type.get_constant_value()
+                    field_val_ref = wrap_value(const_value, kind='python', type_hint=field_pc_type)
+                else:
+                    # Regular field: extract from LLVM struct
+                    # Use _get_llvm_field_index to handle pyconst fields (zero-sized)
+                    llvm_index = struct_type._get_llvm_field_index(i)
+                    if llvm_index == -1:
+                        # This shouldn't happen since we already handled pyconst above
+                        logger.error(f"Zero-sized field [{i}] has no LLVM representation", node)
+                    field_value = self.builder.extract_value(ensure_ir(rvalue), llvm_index)
+                    field_val_ref = wrap_value(field_value, type_hint=field_pc_type, node=node)
+                
                 self._assign_to_target(elt, field_val_ref, target, pc_type=field_pc_type)
         else:
             logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", value_node)

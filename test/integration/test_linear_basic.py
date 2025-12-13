@@ -103,8 +103,8 @@ def test_error_not_consumed():
             t = linear()
             # Missing consume(t)
         
-        print("FAIL test_error_not_consumed failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_not_consumed failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "not consumed" in str(e):
             print(f"OK test_error_not_consumed passed: {e}")
         else:
@@ -120,8 +120,8 @@ def test_error_double_consume():
             consume(t)
             consume(t)  # ERROR
         
-        print("FAIL test_error_double_consume failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_double_consume failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "already consumed" in str(e):
             print(f"OK test_error_double_consume passed: {e}")
         else:
@@ -138,8 +138,8 @@ def test_error_use_after_move():
             consume(t)  # ERROR: t was consumed by move()
             consume(t2)
         
-        print("FAIL test_error_use_after_move failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_use_after_move failed - should have raised RuntimeError")
+    except RuntimeError as e:
         # move() is a @compile function, so it consumes its argument
         if "already consumed" in str(e):
             print(f"OK test_error_use_after_move passed: {e}")
@@ -156,8 +156,8 @@ def test_error_assignment():
             t2 = t  # ERROR: cannot copy
             consume(t2)
         
-        print("FAIL test_error_assignment failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_assignment failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "Cannot assign linear token" in str(e) or "use move()" in str(e):
             print(f"OK test_error_assignment passed: {e}")
         else:
@@ -173,8 +173,8 @@ def test_error_reassignment():
             t = linear()  # ERROR: first token not consumed
             consume(t)
         
-        print("FAIL test_error_reassignment failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_reassignment failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "not consumed" in str(e) or "Cannot reassign" in str(e):
             print(f"OK test_error_reassignment passed: {e}")
         else:
@@ -189,8 +189,8 @@ def test_error_undefined_consume():
             t: linear
             consume(t)
         
-        print("FAIL test_error_undefined_consume failed - should have raised TypeError")
-    except TypeError as e:
+        print("FAIL test_error_undefined_consume failed - should have raised RuntimeError")
+    except RuntimeError as e:
         if "undefined" in str(e) or "Cannot consume" in str(e):
             print(f"OK test_error_undefined_consume passed: {e}")
         else:

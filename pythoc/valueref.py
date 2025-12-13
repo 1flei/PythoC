@@ -372,25 +372,71 @@ def get_pc_type(value: ValueRef) -> Optional['Any']:
     return get_type_hint(value)
 
 
-def wrap_value(value: Union[ir.Value, AnyType], kind: str, 
-               type_hint: Optional['Any'],
+def _infer_kind(value: Union[ir.Value, AnyType], 
+                type_hint: Optional['Any'],
+                address: Optional[ir.Value]) -> str:
+    """Infer the kind of ValueRef based on value and type_hint.
+    
+    Inference rules:
+    1. If address is provided -> 'address' (lvalue with address)
+    2. If type_hint is a Python type -> 'python'
+    3. If value is an ir.Value with pointer type -> 'pointer' or 'address'
+    4. Otherwise -> 'value'
+    
+    Args:
+        value: The value to wrap
+        type_hint: Optional type hint
+        address: Optional address for lvalue
+    
+    Returns:
+        Inferred kind string
+    """
+    # Rule 1: If address is provided, it's an lvalue
+    if address is not None:
+        return 'address'
+    
+    # Rule 2: Check if type_hint indicates a Python type
+    if type_hint is not None:
+        if hasattr(type_hint, 'is_python_type') and type_hint.is_python_type():
+            return 'python'
+    
+    # Rule 3: Check if value is an LLVM pointer type
+    if isinstance(value, ir.Value):
+        if isinstance(value.type, ir.PointerType):
+            # Pointer value - could be 'pointer' or 'address'
+            # Default to 'pointer' (rvalue pointer)
+            return 'pointer'
+        else:
+            # Non-pointer LLVM value
+            return 'value'
+    
+    # Rule 4: Non-LLVM value (Python object)
+    # If we reach here without a Python type_hint, it's likely a Python value
+    return 'python'
+
+
+def wrap_value(value: Union[ir.Value, AnyType],
+               kind: Optional[str] = None, 
+               type_hint: Optional['Any'] = None,
                address: Optional[ir.Value] = None,  # Address for lvalue operations
                source_node: Optional[ast.AST] = None,
                var_name: Optional[str] = None,  # Variable name for linear tracking
                linear_path: Optional[tuple] = None,  # Linear path for tracking
-               vref_id: Optional[str] = None) -> ValueRef:  # Unique ID for ValueRef tracking
+               vref_id: Optional[str] = None,
+               node: Optional[ast.AST] = None) -> ValueRef:  # Unique ID for ValueRef tracking
     """Wrap a value (LLVM IR or Python) in ValueRef with type information.
     
     Args:
         value: LLVM IR value for PC types, or Python object for Python types
-        kind: Value kind ('address', 'value', or 'python')
+        kind: Optional value kind ('address', 'value', 'python', 'pointer').
+              If None, will be inferred from value and type_hint.
         type_hint: Optional language-level type information (BuiltinType or PythonType class)
-        pc_type: Backward compatibility parameter (same as type_hint)
         address: Optional address (pointer) for lvalue operations
         source_node: Optional source AST node for debugging
         var_name: Optional variable name for linear token tracking
         linear_path: Optional index path tuple for linear token tracking
         vref_id: Optional unique ID for ValueRef tracking
+        node: Optional AST node for error reporting
     
     Returns:
         ValueRef with type information
@@ -403,6 +449,10 @@ def wrap_value(value: Union[ir.Value, AnyType], kind: str,
             f"requested kind={kind}, requested type_hint={type_hint}"
         )
 
+    # Infer kind if not provided
+    if kind is None:
+        kind = _infer_kind(value, type_hint, address)
+
     # Valid kinds: address, value, python, pointer, pyconst_field, varargs
     valid_kinds = {'address', 'value', 'python', 'pointer', 'pyconst_field', 'varargs'}
     if kind not in valid_kinds:
@@ -412,7 +462,7 @@ def wrap_value(value: Union[ir.Value, AnyType], kind: str,
     # The 'address' kind is allowed because pyconst has zero-sized LLVM type {}
     if hasattr(type_hint, 'is_python_type') and type_hint.is_python_type():
         if kind not in ('python', 'pyconst_field', 'address'):
-            raise ValueError(f"Python type requires kind='python', 'pyconst_field', or 'address', got '{kind}'")
+            logger.error(f"Python type requires kind='python', 'pyconst_field', or 'address', got '{kind}', type={type_hint}", node)
     
     # address kind requires address field (except for special cases)
     if kind == "address" and address is None:

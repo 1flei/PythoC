@@ -193,9 +193,9 @@ def test_error_const_reassignment():
             x = 100  # ERROR: Cannot reassign to const variable
             return x
         
-        print("FAIL test_error_const_reassignment failed - should have raised TypeError")
+        print("FAIL test_error_const_reassignment failed - should have raised RuntimeError")
         return False
-    except TypeError as e:
+    except RuntimeError as e:
         if "Cannot reassign to const variable" in str(e):
             print(f"OK test_error_const_reassignment passed: {e}")
             return True
@@ -213,9 +213,9 @@ def test_error_const_array_modification():
             arr[0] = 99  # ERROR: Cannot modify const array
             return arr[0]
         
-        print("FAIL test_error_const_array_modification failed - should have raised TypeError")
+        print("FAIL test_error_const_array_modification failed - should have raised RuntimeError")
         return False
-    except TypeError as e:
+    except RuntimeError as e:
         if "const" in str(e).lower():
             print(f"OK test_error_const_array_modification passed: {e}")
             return True
@@ -235,9 +235,9 @@ def test_error_const_pointer_reassignment():
             p = ptr[i32](y)  # ERROR: Cannot reassign const pointer
             return 0
         
-        print("FAIL test_error_const_pointer_reassignment failed - should have raised TypeError")
+        print("FAIL test_error_const_pointer_reassignment failed - should have raised RuntimeError")
         return False
-    except TypeError as e:
+    except RuntimeError as e:
         if "Cannot reassign to const variable" in str(e):
             print(f"OK test_error_const_pointer_reassignment passed: {e}")
             return True
@@ -255,9 +255,9 @@ def test_error_static_const_modification():
             x = 200  # ERROR: Cannot modify static const
             return x
         
-        print("FAIL test_error_static_const_modification failed - should have raised TypeError")
+        print("FAIL test_error_static_const_modification failed - should have raised RuntimeError")
         return False
-    except TypeError as e:
+    except RuntimeError as e:
         if "Cannot reassign to const variable" in str(e):
             print(f"OK test_error_static_const_modification passed: {e}")
             return True
@@ -278,9 +278,9 @@ def test_error_const_in_loop():
                 i = i + 1
             return x
         
-        print("FAIL test_error_const_in_loop failed - should have raised TypeError")
+        print("FAIL test_error_const_in_loop failed - should have raised RuntimeError")
         return False
-    except TypeError as e:
+    except RuntimeError as e:
         if "Cannot reassign to const variable" in str(e):
             print(f"OK test_error_const_in_loop passed: {e}")
             return True

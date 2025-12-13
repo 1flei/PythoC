@@ -185,7 +185,7 @@ class Logger:
             **kwargs: Additional key-value pairs to log
         """
         self._log(LogLevel.ERROR, "ERROR", msg, node=node, **kwargs)
-        raise RuntimeError("Compilation failed")
+        raise RuntimeError(msg)
 
 
 # Global logger instance

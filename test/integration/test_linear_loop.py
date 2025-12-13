@@ -180,8 +180,8 @@ def test_for_consume_in_body_error():
                 consume(t)  # ERROR: would consume multiple times
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -201,8 +201,8 @@ def test_while_consume_in_body_error():
                 i = i + 1
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -220,8 +220,8 @@ def test_for_token_not_consumed_error():
                 # ERROR: t not consumed in this iteration
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "not consumed" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
@@ -245,8 +245,8 @@ def test_for_else_inconsistent_error():
                 consume(t)
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -265,8 +265,8 @@ def test_nested_loop_outer_consume_inner_error():
                     consume(t)  # ERROR: would consume multiple times
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         return True, str(e)
     finally:
         clear_failed_group(group_key)
@@ -285,8 +285,8 @@ def test_token_after_loop_not_consumed_error():
             # ERROR: t not consumed
 
         flush_all_pending_outputs()
-        return False, "should have raised TypeError"
-    except TypeError as e:
+        return False, "should have raised RuntimeError"
+    except RuntimeError as e:
         if "not consumed" in str(e).lower():
             return True, str(e)
         return False, f"wrong error: {e}"
