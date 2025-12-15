@@ -51,12 +51,12 @@ class func(BuiltinType):
                 param_llvm_types.append(param_type.get_llvm_type(module_context))
             elif isinstance(param_type, ir.Type):
                 # ANTI-PATTERN: param_type should be BuiltinEntity, not ir.Type
-                raise TypeError(
+                logger.error(
                     f"function param type is raw LLVM type {param_type}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
-                )
+                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                    node=None, exc_type=TypeError)
             else:
-                raise TypeError(f"Unknown function param type {param_type}")
+                logger.error(f"Unknown function param type {param_type}", node=None, exc_type=TypeError)
         
         # Get return LLVM type
         if hasattr(cls.return_type, 'get_llvm_type'):
@@ -64,12 +64,12 @@ class func(BuiltinType):
             return_llvm_type = cls.return_type.get_llvm_type(module_context)
         elif isinstance(cls.return_type, ir.Type):
             # ANTI-PATTERN: return_type should be BuiltinEntity, not ir.Type
-            raise TypeError(
+            logger.error(
                 f"function return type is raw LLVM type {cls.return_type}. "
-                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
-            )
+                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                node=None, exc_type=TypeError)
         else:
-            raise TypeError(f"Unknown function return type {cls.return_type}")
+            logger.error(f"Unknown function return type {cls.return_type}", node=None, exc_type=TypeError)
         
         # Create function type and return pointer to it
         func_type = ir.FunctionType(return_llvm_type, param_llvm_types)
@@ -114,7 +114,7 @@ class func(BuiltinType):
         
         # Get parameter and return types from this func type
         if cls.param_types is None or cls.return_type is None:
-            raise TypeError(f"Function pointer has incomplete type")
+            logger.error(f"Function pointer has incomplete type", node=node, exc_type=TypeError)
         
         # Convert PC types to LLVM types
         param_llvm_types = []
@@ -123,7 +123,7 @@ class func(BuiltinType):
                 # All PC types now accept module_context parameter uniformly
                 param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
             else:
-                raise TypeError(f"Cannot get LLVM type from {pc_param_type}")
+                logger.error(f"Cannot get LLVM type from {pc_param_type}", node=node, exc_type=TypeError)
         
         # args are already pre-evaluated by visit_Call
         
@@ -164,12 +164,12 @@ class func(BuiltinType):
                 param_llvm_types.append(param_type.get_llvm_type(module_context))
             elif isinstance(param_type, ir.Type):
                 # ANTI-PATTERN: param_type should be BuiltinEntity, not ir.Type
-                raise TypeError(
+                logger.error(
                     f"function param type is raw LLVM type {param_type}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
-                )
+                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                    node=None, exc_type=TypeError)
             else:
-                raise TypeError(f"Unknown function param type {param_type}")
+                logger.error(f"Unknown function param type {param_type}", node=None, exc_type=TypeError)
         
         # Get return LLVM type
         if hasattr(cls.return_type, 'get_llvm_type'):
@@ -177,12 +177,12 @@ class func(BuiltinType):
             return_llvm_type = cls.return_type.get_llvm_type(module_context)
         elif isinstance(cls.return_type, ir.Type):
             # ANTI-PATTERN: return_type should be BuiltinEntity, not ir.Type
-            raise TypeError(
+            logger.error(
                 f"function return type is raw LLVM type {cls.return_type}. "
-                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
-            )
+                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                node=None, exc_type=TypeError)
         else:
-            raise TypeError(f"Unknown function return type {cls.return_type}")
+            logger.error(f"Unknown function return type {cls.return_type}", node=None, exc_type=TypeError)
         
         return ir.FunctionType(return_llvm_type, param_llvm_types)
     
@@ -218,7 +218,7 @@ class func(BuiltinType):
         if not isinstance(items, builtins.tuple):
             items = (items,)
         if len(items) == 0:
-            raise TypeError("func requires at least a return type: func[return_type]")
+            logger.error("func requires at least a return type: func[return_type]", node=None, exc_type=TypeError)
         # Last item is return type
         *param_items, ret_item = items
         ret_name_opt, return_type = ret_item

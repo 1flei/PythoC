@@ -348,7 +348,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
                             if pc_param_type and hasattr(pc_param_type, 'get_llvm_type'):
                                 param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
                             else:
-                                raise TypeError(f"Invalid parameter type hint for '{param_name}' in function '{actual_func_name}'")
+                                logger.error(f"Invalid parameter type hint for '{param_name}' in function '{actual_func_name}'",
+                                            node=node, exc_type=TypeError)
                         
                         if self.func_info.return_type_hint and hasattr(self.func_info.return_type_hint, 'get_llvm_type'):
                             return_llvm_type = self.func_info.return_type_hint.get_llvm_type(visitor.module.context)
@@ -400,7 +401,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         """Visit an expression and return a ValueRef preserving type hints"""
         result = self.visit(expr)
         if result is None:
-            raise ValueError(f"Expression {ast.dump(expr)} returned None")
+            logger.error(f"Expression {ast.dump(expr)} returned None", node=expr, exc_type=ValueError)
         
         # Return the result directly without tracking
         # Linear expressions will be checked at the statement level (visit_Expr)

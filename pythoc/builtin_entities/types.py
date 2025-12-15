@@ -133,7 +133,8 @@ class ptr(BuiltinType):
                 from ..forward_ref import get_defined_type
                 resolved = get_defined_type(pointee)
                 if resolved is None:
-                    raise TypeError(f"ptr.get_type_id: unresolved forward reference '{pointee}'")
+                    logger.error(f"ptr.get_type_id: unresolved forward reference '{pointee}'", node=None, exc_type=TypeError)
+                pointee = resolved
                 pointee = resolved
             
             # Import here to avoid circular dependency
@@ -153,7 +154,8 @@ class ptr(BuiltinType):
                 from ..forward_ref import get_defined_type
                 resolved = get_defined_type(pointee)
                 if resolved is None:
-                    raise TypeError(f"ptr.get_llvm_type: unresolved forward reference '{pointee}'")
+                    logger.error(f"ptr.get_llvm_type: unresolved forward reference '{pointee}'", node=None, exc_type=TypeError)
+                pointee = resolved
                 pointee = resolved
             
             # Determine pointee LLVM type from either PC type or direct LLVM type
@@ -177,15 +179,16 @@ class ptr(BuiltinType):
                         # Fallback only if the type truly does not accept a context
                         pointee_llvm = pointee.get_llvm_type()
                 if pointee_llvm is None:
-                    raise TypeError(f"ptr.get_llvm_type: failed to obtain pointee LLVM type for {pointee}")
+                    logger.error(f"ptr.get_llvm_type: failed to obtain pointee LLVM type for {pointee}", node=None, exc_type=TypeError)
             elif isinstance(pointee, ir.Type):
                 # ANTI-PATTERN: pointee_type should be BuiltinEntity, not ir.Type
-                raise TypeError(
+                logger.error(
                     f"ptr.get_llvm_type: pointee_type is raw LLVM type {pointee}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
+                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                    node=None, exc_type=TypeError
                 )
             else:
-                raise TypeError(f"ptr.get_llvm_type: unknown pointee type {pointee}")
+                logger.error(f"ptr.get_llvm_type: unknown pointee type {pointee}", node=None, exc_type=TypeError)
             return ir.PointerType(pointee_llvm)
         return ir.PointerType(ir.IntType(8))  # Default to i8*
     
@@ -227,7 +230,7 @@ class ptr(BuiltinType):
             node: Original ast.Call node
         """
         if len(node.args) != 1:
-            raise ValueError("ptr() requires exactly one argument")
+            logger.error("ptr() requires exactly one argument", node=node, exc_type=ValueError)
         
         arg_node = node.args[0]
         
@@ -236,7 +239,7 @@ class ptr(BuiltinType):
             lvalue = visitor.visit_lvalue(arg_node)
             address_ptr = lvalue.ir_value
             if not lvalue.type_hint:
-                raise TypeError("ptr(): missing PC type hint for lvalue; cannot infer pointee type")
+                logger.error("ptr(): missing PC type hint for lvalue; cannot infer pointee type", node=node, exc_type=TypeError)
             pointee_type = lvalue.type_hint
             ptr_type = cls[pointee_type]
             
@@ -251,7 +254,7 @@ class ptr(BuiltinType):
             pointee_type = lvalue.type_hint
         else:
             # No PC type hint available; do not infer from LLVM
-            raise TypeError("ptr(): missing PC type hint for lvalue; cannot infer pointee type")
+            logger.error("ptr(): missing PC type hint for lvalue; cannot infer pointee type", node=node, exc_type=TypeError)
         
         # Create ptr[T] type hint
         ptr_type = cls[pointee_type]
@@ -263,8 +266,8 @@ class ptr(BuiltinType):
     def handle_type_conversion(cls, visitor, node: ast.Call) -> ir.Value:
         """Handle type conversion to pointer type using TypeConverter"""
         if len(node.args) != 1:
-            raise TypeError(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)")
-        
+            logger.error(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)", node=node, exc_type=TypeError)
+
         arg = visitor.visit_expression(node.args[0])
         # Note: TypeConverter will extract LLVM type from pythoc type with module_context
         # So we don't need to call get_llvm_type here
@@ -277,7 +280,7 @@ class ptr(BuiltinType):
             )
             return result
         except TypeError as e:
-            raise TypeError(f"Cannot convert to {cls.get_name()}: {e}")
+            logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)
     
     @classmethod
     def handle_add(cls, visitor, left, right, node: ast.BinOp):
@@ -321,7 +324,7 @@ class ptr(BuiltinType):
             pointee_type_hint = base.type_hint.pointee_type
         
         if pointee_type_hint is None:
-            raise TypeError(f"Cannot infer pointee type for pointer subscript {base}")
+            logger.error(f"Cannot infer pointee type for pointer subscript {base}", node=node, exc_type=TypeError)
 
         # Propagate qualifiers from pointer type to pointee type
         # If we have const[ptr[i32]], accessing it should give const[i32]
@@ -419,7 +422,7 @@ class ptr(BuiltinType):
         from .array import array
         
         if not isinstance(items, builtins.tuple) or len(items) == 0:
-            raise TypeError("ptr requires at least one type argument")
+            logger.error("ptr requires at least one type argument", node=None, exc_type=TypeError)
         
         # Extract types from normalized format
         types_and_dims = [item[1] for item in items]
@@ -512,7 +515,7 @@ class ptr(BuiltinType):
         current_type_hint = get_type_hint(base)
 
         if not current_type_hint or not hasattr(current_type_hint, 'pointee_type'):
-            raise TypeError("Cannot access attribute on untyped pointer")
+            logger.error("Cannot access attribute on untyped pointer", node=node, exc_type=TypeError)
         
         # Penetrate ptr[ptr[...]] layers by loading
         # Stop when pointee is not a ptr type
@@ -531,18 +534,20 @@ class ptr(BuiltinType):
             from ..forward_ref import get_defined_type
             resolved = get_defined_type(struct_type)
             if resolved is None:
-                raise TypeError(f"ptr attribute access: unresolved forward reference '{struct_type}'")
+                logger.error(f"ptr attribute access: unresolved forward reference '{struct_type}'", node=node, exc_type=TypeError)
+            struct_type = resolved
             struct_type = resolved
         
         # Require PC struct type; do not accept raw LLVM struct types
         if not (isinstance(struct_type, type) and hasattr(struct_type, 'handle_attribute')):
-            raise TypeError("ptr attribute access requires PC struct type; got non-PC type")
+            logger.error("ptr attribute access requires PC struct type; got non-PC type", node=node, exc_type=TypeError)
         
         # Delegate to struct's handle_attribute
         if not hasattr(struct_type, 'handle_attribute'):
-            raise AttributeError(
+            logger.error(
                 f"Cannot access attribute '{attr_name}' on ptr[{getattr(struct_type, '__name__', struct_type)}]: "
-                f"pointee type does not support attribute access"
+                f"pointee type does not support attribute access",
+                node=node, exc_type=AttributeError
             )
         
         struct_value = visitor.builder.load(current_ir)
@@ -568,7 +573,7 @@ class ptr(BuiltinType):
             node: Original ast.Call node
         """
         if len(args) != 1:
-            raise TypeError(f"ptr[T]() takes exactly 1 argument ({len(args)} given)")
+            logger.error(f"ptr[T]() takes exactly 1 argument ({len(args)} given)", node=node, exc_type=TypeError)
         
         # Delegate to type converter, just like other types do
         value = args[0]
@@ -578,7 +583,7 @@ class ptr(BuiltinType):
             logger.debug("Typed pointer call conversion", value=value, result=result)
             return result
         except TypeError as e:
-            raise TypeError(f"Cannot convert to {cls.get_name()}: {e}")
+            logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)
     
     def __init__(self, pointee_type=None, _runtime_data=None):
         """Support runtime pointer operations"""
@@ -599,7 +604,8 @@ class ptr(BuiltinType):
         if (self.pointee_type and hasattr(self.pointee_type, '__annotations__') 
             and name in self.pointee_type.__annotations__):
             return None
-        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+        logger.error(f"'{self.__class__.__name__}' object has no attribute '{name}'",
+                    node=None, exc_type=AttributeError)
     
     def __setattr__(self, name, value):
         """Support field assignment for struct pointers"""

@@ -106,10 +106,11 @@ class LoopsMixin:
             return
         
         # No vtable support - error if not handled above
-        raise TypeError(
+        logger.error(
             f"Unsupported iterator type: {iter_val}. "
             f"Only yield functions (via inlining) and compile-time constants are supported. "
-            f"Vtable iterator protocol has been removed."
+            f"Vtable iterator protocol has been removed.",
+            node=node, exc_type=TypeError
         )
     
     def _visit_for_with_yield_inline(self, node: ast.For, iter_val):
@@ -132,9 +133,10 @@ class LoopsMixin:
         
         if inlined_stmts is None:
             # Inlining failed - this is now an error
-            raise TypeError(
+            logger.error(
                 f"Yield function inlining failed for '{ast.unparse(node.iter)}'. "
-                f"Yield functions must be inlinable (no complex control flow, recursion, etc.)"
+                f"Yield functions must be inlinable (no complex control flow, recursion, etc.)",
+                node=node, exc_type=TypeError
             )
         
         logger.debug(f"Successfully inlined yield function using universal kernel")
@@ -252,10 +254,12 @@ class LoopsMixin:
                 if isinstance(elt, ast.Name):
                     loop_var_names.append(elt.id)
                 else:
-                    raise NotImplementedError("Nested tuple unpacking not supported in constant unroll")
+                    logger.error("Nested tuple unpacking not supported in constant unroll",
+                                node=node, exc_type=NotImplementedError)
             is_tuple_unpack = True
         else:
-            raise NotImplementedError("Complex loop targets not supported in constant unroll")
+            logger.error("Complex loop targets not supported in constant unroll",
+                        node=node, exc_type=NotImplementedError)
         
         # Create loop exit block
         loop_exit = self.current_function.append_basic_block(
@@ -309,8 +313,9 @@ class LoopsMixin:
                 if is_tuple_unpack:
                     # Unpack tuple element
                     if not isinstance(element, (tuple, list)) or len(element) != len(loop_var_names):
-                        raise TypeError(
-                            f"Cannot unpack {element} into {len(loop_var_names)} variables"
+                        logger.error(
+                            f"Cannot unpack {element} into {len(loop_var_names)} variables",
+                            node=node, exc_type=TypeError
                         )
                     for var_name, elem_val in zip(loop_var_names, element):
                         elem_value_ref = wrap_value(

@@ -79,12 +79,12 @@ class ExpressionsMixin:
                 if var_info.value_ref:
                     # Return the value_ref directly (e.g., for nullptr)
                     return var_info.value_ref
-                raise RuntimeError(f"Variable '{node.id}' has no alloca and no value_ref")
+                logger.error(f"Variable '{node.id}' has no alloca and no value_ref", node=node, exc_type=RuntimeError)
             type_hint = var_info.type_hint
             # Ensure we have a type_hint
             # Note: This fallback is expected for variables without explicit type annotations
             if type_hint is None:
-                raise TypeError(f"Variable '{node.id}' has no type hint")
+                logger.error(f"Variable '{node.id}' has no type hint", node=node, exc_type=TypeError)
             
             # Special case: global function (source == "function")
             if var_info.source == "function":
@@ -159,7 +159,7 @@ class ExpressionsMixin:
         
         # Otherwise raise error
         logger.debug(f"Variable '{node.id}' not found, available: {list(self.ctx.user_globals.keys())}")
-        raise NameError(f"Variable '{node.id}' not defined")
+        logger.error(f"Variable '{node.id}' not defined", node=node, exc_type=NameError)
     
 
     def visit_Constant(self, node: ast.Constant):
@@ -233,7 +233,7 @@ class ExpressionsMixin:
             return rhandler(self, left, right, node)
         
         # Fallback to default binary operation
-        return self._perform_binary_operation(node.op, left, right)
+        return self._perform_binary_operation(node.op, left, right, node)
     
 
     def visit_UnaryOp(self, node: ast.UnaryOp):
@@ -273,7 +273,8 @@ class ExpressionsMixin:
         
         op_key = type(node.op)
         if op_key not in unary_op_dispatch:
-            raise NotImplementedError(f"Unary operator {type(node.op).__name__} not supported")
+            logger.error(f"Unary operator {type(node.op).__name__} not supported", node=node,
+                        exc_type=NotImplementedError)
         
         return unary_op_dispatch[op_key](operand)
     
@@ -319,7 +320,7 @@ class ExpressionsMixin:
         
         for op, comparator in zip(node.ops, node.comparators):
             right = self.visit_expression(comparator)
-            cmp_result = self._perform_comparison(op, current_left, right)
+            cmp_result = self._perform_comparison(op, current_left, right, comparator)
             
             # Chain comparisons with AND
             if result is None:
@@ -346,7 +347,8 @@ class ExpressionsMixin:
         return result
     
 
-    def _perform_comparison(self, op: ast.cmpop, left: ValueRef, right: ValueRef):
+    def _perform_comparison(self, op: ast.cmpop, left: ValueRef, right: ValueRef,
+                            node: ast.AST = None):
         """Unified comparison handler with table-driven dispatch"""
         # Handle Python value comparisons directly (constant folding)
         if left.is_python_value() and right.is_python_value():
@@ -372,7 +374,8 @@ class ExpressionsMixin:
             elif isinstance(op, ast.IsNot):
                 result = left_py is not right_py
             else:
-                raise NotImplementedError(f"Comparison operator {type(op).__name__} not supported for Python values")
+                logger.error(f"Comparison operator {type(op).__name__} not supported for Python values",
+                            node=node, exc_type=NotImplementedError)
             
             # Return as Python value (for constant propagation)
             python_type_inst = PythonType.wrap(result, is_constant=True)
@@ -403,11 +406,12 @@ class ExpressionsMixin:
         op_key = (type(op), is_float_cmp)
         if op_key not in cmp_dispatch:
             if isinstance(op, ast.In):
-                raise NotImplementedError("'in' operator not yet supported")
+                logger.error("'in' operator not yet supported", node=node, exc_type=NotImplementedError)
             elif isinstance(op, ast.NotIn):
-                raise NotImplementedError("'not in' operator not yet supported")
+                logger.error("'not in' operator not yet supported", node=node, exc_type=NotImplementedError)
             else:
-                raise NotImplementedError(f"Comparison operator {type(op).__name__} not supported")
+                logger.error(f"Comparison operator {type(op).__name__} not supported", node=node,
+                            exc_type=NotImplementedError)
         
         predicate = cmp_dispatch[op_key]
         
@@ -422,17 +426,19 @@ class ExpressionsMixin:
             right_ir = ensure_ir(right)
             if not isinstance(left_ir.type, (ir.IntType, ir.PointerType)):
                 left_hint = get_type_hint(left)
-                raise TypeError(
+                logger.error(
                     f"Cannot compare type '{left_hint}' with icmp. "
                     f"Only integers and pointers support == comparison. "
-                    f"For enum types, use match or extract tag with e[0]."
+                    f"For enum types, use match or extract tag with e[0].",
+                    node=node, exc_type=TypeError
                 )
             if not isinstance(right_ir.type, (ir.IntType, ir.PointerType)):
                 right_hint = get_type_hint(right)
-                raise TypeError(
+                logger.error(
                     f"Cannot compare type '{right_hint}' with icmp. "
                     f"Only integers and pointers support == comparison. "
-                    f"For enum types, use match or extract tag with e[0]."
+                    f"For enum types, use match or extract tag with e[0].",
+                    node=node, exc_type=TypeError
                 )
             # Choose signed or unsigned based on operand type hints
             left_hint = get_type_hint(left)
@@ -453,7 +459,8 @@ class ExpressionsMixin:
         
         op_key = type(node.op)
         if op_key not in bool_op_dispatch:
-            raise NotImplementedError(f"Boolean operator {type(node.op).__name__} not supported")
+            logger.error(f"Boolean operator {type(node.op).__name__} not supported", node=node,
+                        exc_type=NotImplementedError)
         
         label_prefix, short_circuit_on_true, short_circuit_value = bool_op_dispatch[op_key]
         return self._visit_short_circuit_op(node.values, label_prefix, short_circuit_on_true, short_circuit_value)
@@ -651,7 +658,7 @@ class ExpressionsMixin:
         
         # Extract field name as STRING (not variable lookup!)
         if node.lower is None:
-            raise TypeError("Slice must have lower bound (field name)")
+            logger.error("Slice must have lower bound (field name)", node=node, exc_type=TypeError)
         
         if isinstance(node.lower, ast.Name):
             # x: i32 -> "x" (Name.id as string literal)
@@ -660,11 +667,12 @@ class ExpressionsMixin:
             # "x": i32 -> "x" (already a string)
             field_name = node.lower.value
         else:
-            raise TypeError(f"Invalid field name in slice, expected name or string: {ast.dump(node.lower)}")
+            logger.error(f"Invalid field name in slice, expected name or string: {ast.dump(node.lower)}",
+                        node=node.lower, exc_type=TypeError)
         
         # Visit field type (upper bound)
         if node.upper is None:
-            raise TypeError("Slice must have upper bound (field type)")
+            logger.error("Slice must have upper bound (field type)", node=node, exc_type=TypeError)
         
         field_type_ref = self.visit_expression(node.upper)
         
@@ -749,7 +757,7 @@ class ExpressionsMixin:
 
     def visit_JoinedStr(self, node: ast.JoinedStr):
         """Handle f-string expressions by converting to simple string"""
-        raise NotImplementedError("F-string expressions not implemented")
+        logger.error("F-string expressions not implemented", node=node, exc_type=NotImplementedError)
     
 
     def _promote_to_float(self, value, target_type):
@@ -757,7 +765,7 @@ class ExpressionsMixin:
         return self.type_converter.promote_to_float(value, target_type)
     
 
-    def _to_boolean(self, value):
+    def _to_boolean(self, value, node: ast.AST = None):
         """Convert value to boolean (i1)"""
         # Handle Python values - convert to IR first
         if isinstance(value, ValueRef) and value.is_python_value():
@@ -773,10 +781,11 @@ class ExpressionsMixin:
         elif isinstance(vtype, (ir.FloatType, ir.DoubleType)):
             return self.builder.fcmp_ordered('!=', ensure_ir(value), ir.Constant(vtype, 0.0))
         else:
-            raise TypeError(f"Cannot convert {vtype} to boolean")
+            logger.error(f"Cannot convert {vtype} to boolean", node=node, exc_type=TypeError)
 
     
-    def _perform_binary_operation(self, op: ast.operator, left: ValueRef, right: ValueRef) -> ValueRef:
+    def _perform_binary_operation(self, op: ast.operator, left: ValueRef, right: ValueRef,
+                                   node: ast.AST = None) -> ValueRef:
         """Unified binary operation handler with table-driven dispatch
         
         This method handles all binary operations with automatic type promotion
@@ -844,7 +853,8 @@ class ExpressionsMixin:
         # Lookup and execute operation
         op_key = (type(op), is_float_op)
         if op_key not in op_dispatch:
-            raise NotImplementedError(f"Binary operator {type(op).__name__} not supported")
+            logger.error(f"Binary operator {type(op).__name__} not supported", node=node,
+                        exc_type=NotImplementedError)
         
         method_name, needs_intrinsic = op_dispatch[op_key]
         builder_method = getattr(self.builder, method_name)

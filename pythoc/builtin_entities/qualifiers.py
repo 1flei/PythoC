@@ -1,5 +1,6 @@
 from llvmlite import ir
 from .base import BuiltinType, BuiltinEntityMeta
+from ..logger import logger
 
 
 class TypeQualifierMeta(BuiltinEntityMeta):
@@ -49,7 +50,8 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
     @classmethod
     def get_qualifier_name(cls) -> str:
         """Override in subclasses to return qualifier name"""
-        raise NotImplementedError
+        logger.error("get_qualifier_name() must be implemented in subclass",
+                    node=None, exc_type=NotImplementedError)
     
     @classmethod
     def get_name(cls) -> str:
@@ -100,7 +102,8 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
             Qualifier subclass with qualified_type set
         """
         if item is None:
-            raise TypeError(f"{cls.get_qualifier_name()} requires a type parameter: {cls.get_qualifier_name()}[T]")
+            logger.error(f"{cls.get_qualifier_name()} requires a type parameter: {cls.get_qualifier_name()}[T]",
+                        node=None, exc_type=TypeError)
         
         # Unwrap normalized tuple if needed
         import builtins

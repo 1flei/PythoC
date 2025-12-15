@@ -35,7 +35,8 @@ class FunctionsMixin:
         
         func = self.module.get_global(func_name)
         if func is None:
-            raise ValueError(f"Function {func_name} not found in module")
+            from ..logger import logger
+            logger.error(f"Function {func_name} not found in module", node=node, exc_type=ValueError)
         
         # Store current function for block creation
         self.current_function = func
@@ -184,9 +185,11 @@ class FunctionsMixin:
                 # Build parameter bindings
                 param_names = [arg.arg for arg in self.func_ast.args.args]
                 if len(args) != len(param_names):
-                    raise TypeError(
+                    from ...logger import logger
+                    logger.error(
                         f"Closure {self.func_ast.name}() takes {len(param_names)} "
-                        f"arguments, got {len(args)}"
+                        f"arguments, got {len(args)}",
+                        node=call_node, exc_type=TypeError
                     )
                 param_bindings = dict(zip(param_names, args))
                 

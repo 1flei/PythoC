@@ -1,5 +1,6 @@
 from .base import BuiltinFunction
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 
 
@@ -34,14 +35,16 @@ class consume(BuiltinFunction):
         from .types import void
         
         if len(args) != 1:
-            raise TypeError("consume() takes exactly 1 argument")
+            logger.error("consume() takes exactly 1 argument", node=node, exc_type=TypeError)
         
         arg_value = args[0]
         if not hasattr(arg_value, 'type_hint') or not arg_value.type_hint:
-            raise TypeError(f"consume() argument must have type information (line {node.lineno})")
+            logger.error(f"consume() argument must have type information (line {node.lineno})",
+                        node=node, exc_type=TypeError)
         
         if hasattr(arg_value.type_hint, 'is_linear') and not arg_value.type_hint.is_linear():
-            raise TypeError(f"consume() requires a linear type argument (line {node.lineno})")
+            logger.error(f"consume() requires a linear type argument (line {node.lineno})",
+                        node=node, exc_type=TypeError)
         
         return wrap_value(None, kind='python', type_hint=void)
     
@@ -64,22 +67,27 @@ class consume(BuiltinFunction):
             if isinstance(current.slice, ast.Constant):
                 idx = current.slice.value
                 if not isinstance(idx, int):
-                    raise TypeError(f"consume() requires integer index, got {type(idx).__name__}")
+                    logger.error(f"consume() requires integer index, got {type(idx).__name__}",
+                                node=current, exc_type=TypeError)
                 path.insert(0, idx)
             elif isinstance(current.slice, ast.Index):
                 if isinstance(current.slice.value, ast.Constant):
                     idx = current.slice.value.value
                     if not isinstance(idx, int):
-                        raise TypeError(f"consume() requires integer index, got {type(idx).__name__}")
+                        logger.error(f"consume() requires integer index, got {type(idx).__name__}",
+                                    node=current, exc_type=TypeError)
                     path.insert(0, idx)
                 else:
-                    raise TypeError("consume() requires constant integer index")
+                    logger.error("consume() requires constant integer index",
+                                node=current, exc_type=TypeError)
             else:
-                raise TypeError("consume() requires constant integer index")
+                logger.error("consume() requires constant integer index",
+                            node=current, exc_type=TypeError)
             
             current = current.value
         
         if not isinstance(current, ast.Name):
-            raise TypeError(f"consume() requires variable name, got {type(current).__name__}")
+            logger.error(f"consume() requires variable name, got {type(current).__name__}",
+                        node=current, exc_type=TypeError)
         
         return current.id, tuple(path)

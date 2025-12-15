@@ -21,6 +21,16 @@ Log levels (in order of severity):
     DEBUG: Detailed diagnostic information (includes file:line, disabled by default)
     WARNING: Warning messages that don't stop compilation (includes file:line)
     ERROR: Error messages for compilation failures (includes file:line)
+
+Environment variables:
+    PC_LOG_LEVEL: 0=DEBUG, 1=WARNING, 2=ERROR (default: 1)
+    PC_RAISE_ON_ERROR: Set to "1" to raise exceptions on errors (for tests)
+
+Error handling:
+    By default, logger.error() exits with code 1 (production mode).
+    For tests that need to catch exceptions, use:
+        from pythoc.logger import set_raise_on_error
+        set_raise_on_error(True)
 """
 
 import sys
@@ -46,6 +56,8 @@ class Logger:
         self.enabled = True
         self.current_source_file = None  # Track current source file being compiled
         self.current_line_offset = 0  # Line offset for AST nodes (function start line - 1)
+        # Default: exit on error (production mode). Set to True for tests that expect exceptions.
+        self.raise_on_error = os.environ.get('PC_RAISE_ON_ERROR') == '1'
     
     def _get_level_from_env(self, default_level: LogLevel) -> LogLevel:
         """Get log level from environment variable PC_LOG_LEVEL or use default"""
@@ -90,6 +102,15 @@ class Logger:
         """
         self.current_source_file = filename
         self.current_line_offset = line_offset
+    
+    def set_raise_on_error(self, raise_on_error: bool):
+        """Set whether to raise exception on error or exit.
+        
+        Args:
+            raise_on_error: If True, raise exception on error (for tests).
+                           If False, exit with code 1 (default, for production).
+        """
+        self.raise_on_error = raise_on_error
     
     def _get_source_location(self, node: Optional[Union[ast.AST, Any]] = None) -> str:
         """Get source code location from AST node or caller info"""
@@ -176,16 +197,31 @@ class Logger:
         """
         self._log(LogLevel.WARNING, "WARNING", msg, node=node, **kwargs)
     
-    def error(self, msg: str, node: Optional[ast.AST] = None, **kwargs):
-        """Log error message (compilation failures)
+    def error(self, msg: str, node: Optional[ast.AST] = None, 
+              exc_type: type = RuntimeError, **kwargs):
+        """Log error message and raise exception or exit (compilation failures)
         
         Args:
             msg: Message to log
             node: Optional AST node for source location (recommended for PC code errors)
+            exc_type: Exception type to raise (default: RuntimeError)
             **kwargs: Additional key-value pairs to log
+        
+        Raises:
+            exc_type: The specified exception type with the message (if raise_on_error=True)
+        
+        Note:
+            By default, exits with code 1 (production mode).
+            Set raise_on_error=True or PC_RAISE_ON_ERROR=1 to raise exceptions (for tests).
         """
         self._log(LogLevel.ERROR, "ERROR", msg, node=node, **kwargs)
-        raise RuntimeError(msg)
+        
+        if self.raise_on_error:
+            # Test mode: raise exception with full stack trace
+            raise exc_type(msg)
+        else:
+            # Production mode (default): exit cleanly without stack trace
+            sys.exit(1)
 
 
 # Global logger instance
@@ -210,6 +246,16 @@ def set_line_offset(offset: int):
 def set_source_context(filename: Optional[str], line_offset: int = 0):
     """Set both source file and line offset at once"""
     logger.set_source_context(filename, line_offset)
+
+
+def set_raise_on_error(raise_on_error: bool):
+    """Set whether to raise exception on error or exit.
+    
+    Args:
+        raise_on_error: If True, raise exception on error (for tests).
+                       If False, exit with code 1 (default, for production).
+    """
+    logger.set_raise_on_error(raise_on_error)
 
 
 def enable_logging():

@@ -7,6 +7,7 @@ and returning the value for use elsewhere.
 import ast
 from .base import BuiltinFunction
 from ..valueref import wrap_value
+from ..logger import logger
 
 
 class move(BuiltinFunction):
@@ -54,7 +55,7 @@ class move(BuiltinFunction):
             New ValueRef with the same value but no var_name tracking
         """
         if len(args) != 1:
-            raise TypeError("move() takes exactly 1 argument")
+            logger.error("move() takes exactly 1 argument", node=node, exc_type=TypeError)
         
         arg_value = args[0]
         

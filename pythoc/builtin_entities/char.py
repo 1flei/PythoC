@@ -1,6 +1,7 @@
 from llvmlite import ir
 from .base import BuiltinFunction
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 
 
@@ -40,12 +41,14 @@ class char(BuiltinFunction):
         from .python_type import PythonType
         
         if len(args) != 1:
-            raise TypeError(f"char() takes exactly 1 argument ({len(args)} given)")
+            logger.error(f"char() takes exactly 1 argument ({len(args)} given)",
+                        node=node, exc_type=TypeError)
         
         arg = args[0]
         
         if not arg.is_python_value():
-            raise TypeError(f"char() only accepts Python int or str values, got {arg.type_hint}")
+            logger.error(f"char() only accepts Python int or str values, got {arg.type_hint}",
+                        node=node, exc_type=TypeError)
         
         py_value = arg.get_python_value()
         
@@ -57,7 +60,8 @@ class char(BuiltinFunction):
         elif isinstance(py_value, int):
             char_value = py_value
         else:
-            raise TypeError(f"char() only accepts int or str, got {type(py_value).__name__}")
+            logger.error(f"char() only accepts int or str, got {type(py_value).__name__}",
+                        node=node, exc_type=TypeError)
 
         python_type = PythonType.wrap(char_value, is_constant=True)
         return wrap_value(char_value, kind="python", type_hint=python_type)

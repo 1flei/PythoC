@@ -5,6 +5,10 @@ Unit tests for array.get_decay_pointer_type()
 import unittest
 from pythoc.builtin_entities.array import array
 from pythoc.builtin_entities.types import i32, f64, ptr
+from pythoc.logger import set_raise_on_error
+
+# Enable exception raising for tests that expect to catch exceptions
+set_raise_on_error(True)
 
 
 class TestArrayDecayPointerType(unittest.TestCase):

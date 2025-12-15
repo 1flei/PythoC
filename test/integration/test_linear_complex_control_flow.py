@@ -18,6 +18,10 @@ from pythoc.decorators.compile import compile
 from pythoc.builtin_entities import linear, consume, void, i32, i8
 from pythoc.std.utility import move
 from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
+from pythoc.logger import set_raise_on_error
+
+# Enable exception raising for tests that expect to catch exceptions
+set_raise_on_error(True)
 from pythoc import seq
 
 

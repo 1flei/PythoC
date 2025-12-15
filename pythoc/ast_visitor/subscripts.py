@@ -61,7 +61,7 @@ class SubscriptsMixin:
         if result.type_hint and hasattr(result.type_hint, 'handle_subscript'):
             return result.type_hint.handle_subscript(self, result, index, node)
         
-        raise TypeError(f"Object does not support subscripting: valueref: {result}")
+        logger.error(f"Object does not support subscripting: valueref: {result}", node=node, exc_type=TypeError)
     
     def visit_Attribute(self, node: ast.Attribute):
         """Handle attribute access with unified duck typing protocol
@@ -93,7 +93,8 @@ class SubscriptsMixin:
             attr_name = node.attr
             if hasattr(result.value, 'handle_attribute') and callable(result.value.handle_attribute):
                 return result.value.handle_attribute(self, result, attr_name, node)
-            raise AttributeError(f"Enum '{result.value.__name__}' has no attribute '{attr_name}' or handle_attribute method")
+            logger.error(f"Enum '{result.value.__name__}' has no attribute '{attr_name}' or handle_attribute method",
+                        node=node, exc_type=AttributeError)
         
         # Extract the object that implements handle_attribute
         attributable = None
@@ -102,7 +103,7 @@ class SubscriptsMixin:
         elif result.type_hint and hasattr(result.type_hint, 'handle_attribute'):
             attributable = result.type_hint
         else:
-            raise TypeError(f"Object does not support attribute access: valueref: {result}")
+            logger.error(f"Object does not support attribute access: valueref: {result}", node=node, exc_type=TypeError)
         
         # Extract attribute name
         attr_name = node.attr
@@ -124,11 +125,12 @@ class SubscriptsMixin:
         index = extract_constant_index(index_val, "varargs subscript")
         
         if index < 0:
-            raise IndexError(f"Varargs index must be a non-negative integer, got {index}")
+            logger.error(f"Varargs index must be a non-negative integer, got {index}",
+                        node=node, exc_type=IndexError)
         # Check if we have type information for this index
         element_types = varargs_info['element_types']
         if not element_types:
-            raise TypeError("Cannot access union varargs without type information")
+            logger.error("Cannot access union varargs without type information", node=node, exc_type=TypeError)
         
         # For union varargs, all elements have the same possible types
         # Use the first type in the list as default, or cycle through if multiple
@@ -192,7 +194,8 @@ class SubscriptsMixin:
         access_count = varargs_info.get('access_count', 0)
         
         if index != access_count:
-            raise TypeError(f"Union varargs must be accessed sequentially. Expected args[{access_count}], got args[{index}]")
+            logger.error(f"Union varargs must be accessed sequentially. Expected args[{access_count}], got args[{index}]",
+                        node=node, exc_type=TypeError)
         
         # Read the argument using platform-specific varargs handling
         # This is a simplified version - full implementation would need platform ABI

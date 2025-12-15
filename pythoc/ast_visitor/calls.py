@@ -99,7 +99,7 @@ class CallsMixin:
         if hasattr(result, 'type_hint') and result.type_hint and hasattr(result.type_hint, 'handle_call'):
             return result.type_hint
         
-        raise TypeError(f"Object does not support calling: {result}")
+        logger.error(f"Object does not support calling: {result}", node=func_node, exc_type=TypeError)
     
     def _expand_starred_struct(self, struct_expr):
         """Expand *struct_instance to individual field values
@@ -121,11 +121,11 @@ class CallsMixin:
         # Get struct type information
         struct_type_hint = struct_val.type_hint
         if not struct_type_hint:
-            raise TypeError(f"Cannot unpack value without type information")
+            logger.error(f"Cannot unpack value without type information", node=struct_expr, exc_type=TypeError)
         
         # Check if it's a struct type by checking for _field_types attribute
         if not hasattr(struct_type_hint, '_field_types'):
-            raise TypeError(f"Cannot unpack non-struct type: {struct_type_hint}")
+            logger.error(f"Cannot unpack non-struct type: {struct_type_hint}", node=struct_expr, exc_type=TypeError)
         
         # Get field information from the struct type directly
         field_types = struct_type_hint._field_types
@@ -209,7 +209,8 @@ class CallsMixin:
                     converted_args.append(ensure_ir(arg))
                 else:
                     func_name_dbg = getattr(func_callable, 'name', '<unknown>')
-                    raise TypeError(f"Function '{func_name_dbg}' parameter {idx} missing PC type hint; cannot convert")
+                    logger.error(f"Function '{func_name_dbg}' parameter {idx} missing PC type hint; cannot convert",
+                                node=node, exc_type=TypeError)
         
         # Make the call
         # Debug: check argument count
@@ -217,7 +218,8 @@ class CallsMixin:
         expected_param_count = len(func_callable.function_type.args)
         actual_arg_count = len(converted_args)
         if expected_param_count != actual_arg_count:
-            raise TypeError(f"Function '{func_name}' expects {expected_param_count} arguments, got {actual_arg_count}")
+            logger.error(f"Function '{func_name}' expects {expected_param_count} arguments, got {actual_arg_count}",
+                        node=node, exc_type=TypeError)
         
         call_result = self.builder.call(func_callable, converted_args)
         
@@ -233,7 +235,8 @@ class CallsMixin:
         # Return type must be available
         if return_type_hint is None:
             func_name = getattr(func_callable, 'name', '<unknown>')
-            raise TypeError(f"Cannot infer return type for function '{func_name}' - missing type hint")
+            logger.error(f"Cannot infer return type for function '{func_name}' - missing type hint",
+                        node=node, exc_type=TypeError)
         
         # Return with type hint (tracking happens in visit_expression if needed)
         result = wrap_value(call_result, kind="value", type_hint=return_type_hint)

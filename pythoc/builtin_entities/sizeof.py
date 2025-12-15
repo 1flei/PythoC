@@ -1,6 +1,7 @@
 from llvmlite import ir
 from .base import BuiltinFunction, BuiltinEntity, _get_unified_registry
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 import ctypes
 
@@ -20,13 +21,15 @@ class sizeof(BuiltinFunction):
         This eliminates ~150 lines of duplicate type parsing logic.
         """
         if len(node.args) != 1:
-            raise TypeError(f"sizeof() takes exactly 1 argument ({len(node.args)} given)")
+            logger.error(f"sizeof() takes exactly 1 argument ({len(node.args)} given)",
+                        node=node, exc_type=TypeError)
         
         arg = node.args[0]
         
         pc_type = visitor.type_resolver.parse_annotation(arg)
         if pc_type is None:
-            raise TypeError(f"sizeof() argument must be a type, got: {ast.dump(arg)}")
+            logger.error(f"sizeof() argument must be a type, got: {ast.dump(arg)}",
+                        node=node, exc_type=TypeError)
         
         size = cls._get_type_size(pc_type, visitor)
         from .python_type import PythonType
@@ -53,15 +56,16 @@ class sizeof(BuiltinFunction):
             if registry.has_struct(struct_name):
                 struct_info = registry.get_struct(struct_name)
                 return cls._calculate_struct_size(struct_info, registry)
-            raise TypeError(f"sizeof(): struct '{struct_name}' not found in registry")
+            logger.error(f"sizeof(): struct '{struct_name}' not found in registry",
+                        node=None, exc_type=TypeError)
         
         if isinstance(pc_type, ir.Type):
-            raise TypeError(
+            logger.error(
                 f"sizeof() received ir.Type ({pc_type}). This is a bug - "
-                "use BuiltinEntity (i32, f64, ptr[T], etc.) instead."
-            )
+                "use BuiltinEntity (i32, f64, ptr[T], etc.) instead.",
+                node=None, exc_type=TypeError)
         
-        raise TypeError(f"sizeof(): unknown or unsupported type {pc_type}")
+        logger.error(f"sizeof(): unknown or unsupported type {pc_type}", node=None, exc_type=TypeError)
     
     @classmethod
     def _align_to(cls, size: int, alignment: int) -> int:
@@ -97,7 +101,7 @@ class sizeof(BuiltinFunction):
         if hasattr(field_type, 'pointee_type') or (hasattr(field_type, '__name__') and field_type.__name__ == 'ptr'):
             return ctypes.sizeof(ctypes.c_void_p)
         
-        raise TypeError("sizeof(): unknown field type for size calculation")
+        logger.error("sizeof(): unknown field type for size calculation", node=None, exc_type=TypeError)
     
     @classmethod
     def _get_field_alignment(cls, field_type, struct_registry) -> int:
@@ -128,7 +132,7 @@ class sizeof(BuiltinFunction):
         if hasattr(field_type, 'pointee_type') or (hasattr(field_type, '__name__') and field_type.__name__ == 'ptr'):
             return ctypes.sizeof(ctypes.c_void_p)
         
-        raise TypeError("sizeof(): unknown field type for size calculation")
+        logger.error("sizeof(): unknown field type for size calculation", node=None, exc_type=TypeError)
     
     @classmethod
     def _calculate_struct_alignment(cls, struct_info, struct_registry) -> int:

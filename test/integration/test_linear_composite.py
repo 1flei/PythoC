@@ -17,6 +17,10 @@ from pythoc import compile, linear, consume, void, i32, struct, ptr, i8
 from pythoc.std.utility import move
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.stdio import fopen, fclose
+from pythoc.logger import set_raise_on_error
+
+# Enable exception raising for tests that expect to catch exceptions
+set_raise_on_error(True)
 
 
 # ============================================================================

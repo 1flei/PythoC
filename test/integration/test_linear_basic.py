@@ -9,6 +9,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from pythoc.decorators.compile import compile
 from pythoc.builtin_entities import linear, consume, void
 from pythoc.std.utility import move
+from pythoc.logger import set_raise_on_error
+
+# Enable exception raising for tests that expect to catch exceptions
+set_raise_on_error(True)
 
 
 def test_basic_linear_create_and_consume():

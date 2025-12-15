@@ -442,8 +442,9 @@ class MatchStatementMixin:
             return self._generate_sequence_pattern(pattern, subject)
         
         else:
-            raise NotImplementedError(
-                f"Match pattern type {type(pattern).__name__} not yet supported"
+            logger.error(
+                f"Match pattern type {type(pattern).__name__} not yet supported",
+                node=pattern if hasattr(pattern, 'lineno') else None, exc_type=NotImplementedError
             )
     
     def _generate_multi_subject_pattern(self, pattern, subjects):
@@ -461,14 +462,16 @@ class MatchStatementMixin:
         """
         # Pattern must be a sequence (tuple) for multiple subjects
         if not isinstance(pattern, ast.MatchSequence):
-            raise TypeError(
-                f"Multiple subjects require sequence pattern, got {type(pattern).__name__}"
+            logger.error(
+                f"Multiple subjects require sequence pattern, got {type(pattern).__name__}",
+                node=pattern if hasattr(pattern, 'lineno') else None, exc_type=TypeError
             )
         
         # Number of patterns must match number of subjects
         if len(pattern.patterns) != len(subjects):
-            raise ValueError(
-                f"Pattern count {len(pattern.patterns)} != subject count {len(subjects)}"
+            logger.error(
+                f"Pattern count {len(pattern.patterns)} != subject count {len(subjects)}",
+                node=pattern if hasattr(pattern, 'lineno') else None, exc_type=ValueError
             )
         
         # Match each subject against corresponding pattern
@@ -506,19 +509,22 @@ class MatchStatementMixin:
         
         # Get struct type from subject
         if not isinstance(subject, ValueRef):
-            raise TypeError(f"Expected ValueRef for struct pattern, got {type(subject)}")
+            logger.error(f"Expected ValueRef for struct pattern, got {type(subject)}",
+                        node=pattern.cls if hasattr(pattern, 'cls') else None, exc_type=TypeError)
         
         # Extract struct class name
         if isinstance(pattern.cls, ast.Name):
             struct_name = pattern.cls.id
         else:
-            raise NotImplementedError(f"Complex struct class patterns not supported: {pattern.cls}")
+            logger.error(f"Complex struct class patterns not supported: {pattern.cls}",
+                        node=pattern.cls, exc_type=NotImplementedError)
         
         # Verify subject type matches pattern type  
         registry = get_unified_registry()
         struct_info = registry.get_struct(struct_name)
         if struct_info is None:
-            raise TypeError(f"Unknown struct type: {struct_name}")
+            logger.error(f"Unknown struct type: {struct_name}",
+                        node=pattern.cls, exc_type=TypeError)
         
         # Build conditions and bindings from keyword patterns
         conditions = []
@@ -530,7 +536,8 @@ class MatchStatementMixin:
             if subject_type and hasattr(subject_type, 'handle_attribute'):
                 field_value = subject_type.handle_attribute(self, subject, field_name, None)
             else:
-                raise TypeError(f"Struct type does not support attribute access: {subject_type}")
+                logger.error(f"Struct type does not support attribute access: {subject_type}",
+                            node=None, exc_type=TypeError)
             
             # Recursively match field pattern
             field_cond, field_bindings = self._generate_match_pattern(field_pattern, field_value)
@@ -573,7 +580,8 @@ class MatchStatementMixin:
         - Bind x to the specific variant's payload type (not the full union)
         """
         if not isinstance(subject, ValueRef):
-            raise TypeError(f"Expected ValueRef for sequence pattern, got {type(subject)}")
+            logger.error(f"Expected ValueRef for sequence pattern, got {type(subject)}",
+                        node=None, exc_type=TypeError)
         
         # Check if this is enum pattern matching: (EnumClass.Variant, x)
         subject_type = subject.type_hint
@@ -718,7 +726,8 @@ class MatchStatementMixin:
         from ..builtin_entities import i32
         
         if not isinstance(subject, ValueRef):
-            raise TypeError(f"Expected ValueRef for subscript access, got {type(subject)}")
+            logger.error(f"Expected ValueRef for subscript access, got {type(subject)}",
+                        node=None, exc_type=TypeError)
         
         logger.debug("Subscript access in match", subject_type=subject.type_hint.__name__ if hasattr(subject.type_hint, '__name__') else str(subject.type_hint), index=index, subject_kind=subject.kind)
         
@@ -750,7 +759,8 @@ class MatchStatementMixin:
             logger.debug("Direct subscript result", result_kind=result.kind if hasattr(result, 'kind') else 'N/A')
             return result
         
-        raise TypeError(f"Type {subject_type} does not support subscript access")
+        logger.error(f"Type {subject_type} does not support subscript access",
+                    node=None, exc_type=TypeError)
     
     def _get_array_element(self, array_value, index):
         """Legacy method - now uses _subscript_access"""
@@ -787,7 +797,8 @@ class MatchStatementMixin:
                 cmp_ir = self.builder.icmp_signed('==', left_ir, right_ir)
             return wrap_value(cmp_ir, kind="value", type_hint=pc_bool)
         else:
-            raise NotImplementedError(f"Comparison operator {type(op).__name__}")
+            logger.error(f"Comparison operator {type(op).__name__}",
+                        node=None, exc_type=NotImplementedError)
     
     def _bind_match_variable(self, var_name, var_value):
         """Bind a variable from match pattern
@@ -796,12 +807,14 @@ class MatchStatementMixin:
         Similar to variable declaration but without type annotation.
         """
         if not isinstance(var_value, ValueRef):
-            raise TypeError(f"Expected ValueRef for match binding, got {type(var_value)}")
+            logger.error(f"Expected ValueRef for match binding, got {type(var_value)}",
+                        node=None, exc_type=TypeError)
         
         # Get PC type from the value
         pc_type = var_value.type_hint
         if pc_type is None:
-            raise TypeError(f"Cannot bind variable '{var_name}' - value has no type")
+            logger.error(f"Cannot bind variable '{var_name}' - value has no type",
+                        node=None, exc_type=TypeError)
         
         # Create alloca for the variable
         llvm_type = pc_type.get_llvm_type(self.module.context)

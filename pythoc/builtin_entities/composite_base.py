@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from llvmlite import ir
 
 from .base import BuiltinType
+from ..logger import logger
 
 
 class CompositeType(BuiltinType):
@@ -76,12 +77,15 @@ class CompositeType(BuiltinType):
             if isinstance(node.slice.value, ast.Constant):
                 index_val = node.slice.value.value
             else:
-                raise TypeError(f"{cls.get_name()} subscript index must be a constant")
+                logger.error(f"{cls.get_name()} subscript index must be a constant",
+                            node=node, exc_type=TypeError)
         else:
-            raise TypeError(f"{cls.get_name()} subscript index must be a constant")
+            logger.error(f"{cls.get_name()} subscript index must be a constant",
+                        node=node, exc_type=TypeError)
         
         if not isinstance(index_val, int):
-            raise TypeError(f"{cls.get_name()} subscript index must be an integer, got {type(index_val)}")
+            logger.error(f"{cls.get_name()} subscript index must be an integer, got {type(index_val)}",
+                        node=node, exc_type=TypeError)
         
         return index_val
     
@@ -154,7 +158,8 @@ class CompositeType(BuiltinType):
         from ..valueref import wrap_value
         
         if len(args) != 0:
-            raise TypeError(f"{cls.get_name()}() takes no arguments ({len(args)} given)")
+            logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given)",
+                        node=node, exc_type=TypeError)
         
         llvm_type = cls.get_llvm_type(visitor.module.context)
         value = ir.Constant(llvm_type, ir.Undefined)
@@ -209,10 +214,10 @@ class CompositeType(BuiltinType):
                 try:
                     resolved = type_resolver.parse_annotation(ftype)
                     if resolved is None:
-                        raise TypeError(f"Cannot resolve field type: {ftype}")
+                        logger.error(f"Cannot resolve field type: {ftype}", node=None, exc_type=TypeError)
                     resolved_types.append(resolved)
                 except Exception as e:
-                    raise TypeError(f"Failed to resolve field type '{ftype}': {e}")
+                    logger.error(f"Failed to resolve field type '{ftype}': {e}", node=None, exc_type=TypeError)
             else:
                 resolved_types.append(ftype)
         
@@ -233,12 +238,12 @@ class CompositeType(BuiltinType):
             AttributeError: If field name doesn't exist
         """
         if cls._field_names is None:
-            raise AttributeError(f"{cls.get_name()} has no named fields")
+            logger.error(f"{cls.get_name()} has no named fields", node=None, exc_type=AttributeError)
         
         try:
             return cls._field_names.index(name)
         except ValueError:
-            raise AttributeError(f"{cls.get_name()} has no field named '{name}'")
+            logger.error(f"{cls.get_name()} has no field named '{name}'", node=None, exc_type=AttributeError)
     
     @classmethod
     def has_field(cls, name: str) -> bool:
@@ -264,7 +269,7 @@ class CompositeType(BuiltinType):
             IndexError: If index is out of range
         """
         if cls._field_types is None or index >= len(cls._field_types):
-            raise IndexError(f"{cls.get_name()} field index {index} out of range")
+            logger.error(f"{cls.get_name()} field index {index} out of range", node=None, exc_type=IndexError)
         return cls._field_types[index]
     
     @classmethod

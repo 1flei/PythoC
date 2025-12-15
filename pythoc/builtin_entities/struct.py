@@ -120,7 +120,7 @@ class StructType(CompositeType):
         return cls._llvm_field_map.get(pc_field_index, -1)
     
     @classmethod
-    def get_llvm_type(cls, module_context=None) -> ir.Type:
+    def get_llvm_type(cls, module_context=None, node=None) -> ir.Type:
         """Get LLVM struct type
         
         New Strategy:
@@ -130,12 +130,13 @@ class StructType(CompositeType):
         
         Args:
             module_context: Optional IR module context for IdentifiedStructType
+            node: Optional AST node for error reporting
         
         Returns:
             LiteralStructType or IdentifiedStructType
         """
         if cls._field_types is None:
-            raise TypeError("struct type requires field types")
+            logger.error("struct type requires field types", node=node, exc_type=TypeError)
         
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
@@ -143,9 +144,9 @@ class StructType(CompositeType):
         # Rule: @compile class always uses IdentifiedStructType
         if cls._is_compile_class():
             if module_context is None:
-                raise TypeError(
-                    f"@compile class '{cls._canonical_name}' requires module_context for IdentifiedStructType"
-                )
+                logger.error(
+                    f"@compile class '{cls._canonical_name}' requires module_context for IdentifiedStructType",
+                    node=node, exc_type=TypeError)
             # Get or create the IdentifiedStructType (opaque initially)
             # Use Python class name, not canonical name, for @compile classes
             # This ensures consistency with registry lookups
@@ -181,7 +182,7 @@ class StructType(CompositeType):
                             if llvm_type is not None:
                                 llvm_field_types.append(llvm_type)
                         else:
-                            raise TypeError(f"Unknown struct field type {field_type}")
+                            logger.error(f"Unknown struct field type {field_type}", node=node, exc_type=TypeError)
                     
                     # Set body (this will set elements attribute)
                     llvm_struct_type.set_body(*llvm_field_types)
@@ -198,7 +199,8 @@ class StructType(CompositeType):
         cls._ensure_field_types_resolved()
         
         if any(isinstance(ft, str) for ft in cls._field_types):
-            raise TypeError(f"Cannot create LiteralStructType with unresolved field types: {cls._field_types}")
+            logger.error(f"Cannot create LiteralStructType with unresolved field types: {cls._field_types}",
+                        node=node, exc_type=TypeError)
         
         # Build LLVM field types, filtering out zero-sized fields (pyconst)
         llvm_field_types = []
@@ -221,12 +223,12 @@ class StructType(CompositeType):
                         llvm_field_types.append(llvm_type)
             elif isinstance(field_type, ir.Type):
                 # ANTI-PATTERN: field_type should be BuiltinEntity, not ir.Type
-                raise TypeError(
+                logger.error(
                     f"struct field type is raw LLVM type {field_type}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
-                )
+                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                    node=node, exc_type=TypeError)
             else:
-                raise TypeError(f"Unknown struct field type {field_type}")
+                logger.error(f"Unknown struct field type {field_type}", node=node, exc_type=TypeError)
         
         # Return LiteralStructType
         return ir.LiteralStructType(llvm_field_types)
@@ -360,7 +362,8 @@ class StructType(CompositeType):
         from ..valueref import wrap_value
         
         if len(args) != 0:
-            raise TypeError(f"{cls.get_name()}() takes no arguments ({len(args)} given)")
+            logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given)",
+                        node=node, exc_type=TypeError)
         
         # Get LLVM struct type
         struct_type = cls.get_llvm_type(visitor.module.context)
@@ -392,7 +395,8 @@ class StructType(CompositeType):
         
         # Check if it's a field access
         if not cls.has_field(attr_name):
-            raise AttributeError(f"struct '{cls.get_name()}' has no field named '{attr_name}'")
+            logger.error(f"struct '{cls.get_name()}' has no field named '{attr_name}'",
+                        node=node, exc_type=AttributeError)
         
         field_index = cls.get_field_index(attr_name)
         field_type = cls._field_types[field_index]
@@ -413,7 +417,8 @@ class StructType(CompositeType):
         llvm_field_index = cls._get_llvm_field_index(field_index)
         if llvm_field_index == -1:
             # This shouldn't happen if handle_field_access is implemented correctly
-            raise TypeError(f"Zero-sized field '{attr_name}' has no LLVM representation")
+            logger.error(f"Zero-sized field '{attr_name}' has no LLVM representation",
+                        node=node, exc_type=TypeError)
         
         # Priority 1: Check if base has an address (for lvalue support)
         if base.kind == "address":
@@ -429,7 +434,8 @@ class StructType(CompositeType):
                 # For struct values without address, we can't provide lvalue
                 return wrap_value(field_value, kind="value", type_hint=field_type)
             else:
-                raise ValueError(f"Cannot access field '{attr_name}' on non-struct type {base_ir_type}")
+                logger.error(f"Cannot access field '{attr_name}' on non-struct type {base_ir_type}",
+                            node=node, exc_type=ValueError)
         
         # Use GEP to get field address
         zero = ir.Constant(ir.IntType(32), 0)
@@ -481,7 +487,8 @@ class StructType(CompositeType):
         index_val = extract_constant_index(index, "struct subscript")
         
         if index_val < 0 or index_val >= len(cls._field_types):
-            raise IndexError(f"struct index {index_val} out of range (0-{len(cls._field_types)-1})")
+            logger.error(f"struct index {index_val} out of range (0-{len(cls._field_types)-1})",
+                        node=node, exc_type=IndexError)
         
         field_type = cls._field_types[index_val]
         
@@ -494,7 +501,8 @@ class StructType(CompositeType):
         # Get LLVM field index
         llvm_index_val = cls._get_llvm_field_index(index_val)
         if llvm_index_val == -1:
-            raise TypeError(f"Zero-sized field [{index_val}] has no LLVM representation")
+            logger.error(f"Zero-sized field [{index_val}] has no LLVM representation",
+                        node=node, exc_type=TypeError)
         
         # Priority: if base has address, use GEP for lvalue support
         # Otherwise, if base is a struct value, use extract_value
@@ -522,7 +530,8 @@ class StructType(CompositeType):
             field_value = visitor.builder.extract_value(struct_value, llvm_index_val)
             return wrap_value(field_value, kind="value", type_hint=field_type)
         else:
-            raise ValueError(f"Cannot access field [{index_val}] on non-struct type")
+            logger.error(f"Cannot access field [{index_val}] on non-struct type",
+                        node=node, exc_type=ValueError)
         
         # Use GEP to get field address
         zero = ir.Constant(ir.IntType(32), 0)
@@ -667,7 +676,7 @@ class struct(StructType):
         import builtins
         
         if not isinstance(items, builtins.tuple):
-            raise TypeError("struct subscript must be a tuple")
+            logger.error("struct subscript must be a tuple", node=None, exc_type=TypeError)
         
         # Extract field types and names from normalized format
         field_types = []

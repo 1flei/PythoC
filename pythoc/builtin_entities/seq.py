@@ -1,5 +1,6 @@
 from .base import BuiltinFunction
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 
 
@@ -50,4 +51,4 @@ class seq(BuiltinFunction):
         elif len(args) == 3:
             return counter_range_step.handle_call(visitor, args, node)
         else:
-            raise ValueError("seq() takes 1 to 3 arguments")
+            logger.error("seq() takes 1 to 3 arguments", node=node, exc_type=ValueError)
