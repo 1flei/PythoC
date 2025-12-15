@@ -20,7 +20,7 @@ def read_version():
         for line in f:
             if line.startswith('__version__'):
                 return line.split('=')[1].strip().strip('"').strip("'")
-    return '0.2.0'
+    return '0.2.1'
 
 setup(
     name='pythoc',
