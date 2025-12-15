@@ -1,6 +1,7 @@
 from llvmlite import ir
 from .base import BuiltinFunction, BuiltinEntity
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 
 
@@ -51,7 +52,8 @@ class typeof(BuiltinFunction):
         3. If arg evaluates to ValueRef with LLVM value -> return its type_hint
         """
         if len(node.args) != 1:
-            raise TypeError(f"typeof() takes exactly 1 argument ({len(node.args)} given)")
+            logger.error(f"typeof() takes exactly 1 argument ({len(node.args)} given)",
+                        node=node, exc_type=TypeError)
         
         arg_node = node.args[0]
         
@@ -75,4 +77,5 @@ class typeof(BuiltinFunction):
             from .python_type import PythonType
             return wrap_value(value_ref.type_hint, kind="python", type_hint=PythonType.wrap(value_ref.type_hint))
         
-        raise TypeError(f"typeof() cannot determine type of {ast.dump(arg_node)}")
+        logger.error(f"typeof() cannot determine type of {ast.dump(arg_node)}",
+                    node=node, exc_type=TypeError)

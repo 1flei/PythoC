@@ -208,7 +208,8 @@ class InlineVisitor(
                 # Create alloca for parameter (so it can be reassigned)
                 param_type = param_value.type_hint if hasattr(param_value, 'type_hint') else None
                 if param_type is None:
-                    raise ValueError(f"Cannot determine type for parameter {param_name}")
+                    logger.error(f"Cannot determine type for parameter {param_name}",
+                                node=func_ast, exc_type=ValueError)
                 logger.debug("Inline param binding", name=param_name, value=param_value)
                 
                 if param_value.is_python_value():
@@ -308,7 +309,8 @@ class InlineVisitor(
                                 break
                 
                 if target_llvm_type is None:
-                    raise ValueError("Cannot determine return type for inline function")
+                    logger.error("Cannot determine return type for inline function",
+                                node=func_ast, exc_type=ValueError)
                 
                 # Create phi node
                 phi = self.builder.phi(target_llvm_type)

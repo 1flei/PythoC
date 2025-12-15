@@ -8,6 +8,7 @@ from abc import ABC, ABCMeta, abstractmethod
 from llvmlite import ir
 from typing import Any, Optional
 import ast
+from ..logger import logger
 
 
 def _get_unified_registry():
@@ -37,7 +38,7 @@ class BuiltinEntityMeta(ABCMeta):
                     mcs._pending_registrations = []
                 mcs._pending_registrations.append((entity_name, cls))
             except Exception as e:
-                raise RuntimeError(f"Failed to register builtin entity {name}: {e}")
+                logger.error(f"Failed to register builtin entity {name}: {e}", node=None, exc_type=RuntimeError)
         
         return cls
     
@@ -182,10 +183,10 @@ class BuiltinType(BuiltinEntity):
         # Case 1: Python runtime slice object
         if isinstance(item, builtins.slice):
             if item.start is None or item.stop is None:
-                raise TypeError("Named field requires both name and type")
+                logger.error("Named field requires both name and type", node=None, exc_type=TypeError)
             field_name = item.start
             if not isinstance(field_name, str):
-                raise TypeError(f"Field name must be a string, got {type(field_name)}")
+                logger.error(f"Field name must be a string, got {type(field_name)}", node=None, exc_type=TypeError)
             return (field_name, item.stop)
         
         # Case 2: Already normalized ("name", type) tuple
@@ -203,7 +204,8 @@ class BuiltinType(BuiltinEntity):
             # "tuple" tag should be handled at normalize_subscript_items level, not here
             # If we get here with "tuple" tag, something is wrong
             if "tuple" in tags:
-                raise TypeError("refined[..., 'tuple'] should be unwrapped at normalize_subscript_items level")
+                logger.error("refined[..., 'tuple'] should be unwrapped at normalize_subscript_items level",
+                            node=None, exc_type=TypeError)
         
         # Case 4: Unnamed item
         return (None, item)
@@ -216,12 +218,13 @@ class BuiltinType(BuiltinEntity):
         """
         base_type = getattr(refined_type, '_base_type', None)
         if base_type is None:
-            raise TypeError(f"Invalid slice type: {refined_type}")
+            logger.error(f"Invalid slice type: {refined_type}", node=None, exc_type=TypeError)
         
         # base_type is struct[pyconst["name"], pyconst[type]]
         field_types = getattr(base_type, '_field_types', [])
         if len(field_types) != 2:
-            raise TypeError(f"Slice must have exactly 2 fields (name, type), got {len(field_types)}")
+            logger.error(f"Slice must have exactly 2 fields (name, type), got {len(field_types)}",
+                        node=None, exc_type=TypeError)
         
         # Extract name from pyconst["name"]
         name_type = field_types[0]
@@ -230,7 +233,7 @@ class BuiltinType(BuiltinEntity):
         elif hasattr(name_type, 'get_python_object'):
             name = name_type.get_python_object()
         else:
-            raise TypeError(f"Cannot extract name from {name_type}")
+            logger.error(f"Cannot extract name from {name_type}", node=None, exc_type=TypeError)
         
         # Extract type from pyconst[type]
         type_type = field_types[1]
@@ -239,7 +242,7 @@ class BuiltinType(BuiltinEntity):
         elif hasattr(type_type, 'get_python_object'):
             field_type = type_type.get_python_object()
         else:
-            raise TypeError(f"Cannot extract type from {type_type}")
+            logger.error(f"Cannot extract type from {type_type}", node=None, exc_type=TypeError)
         
         return (name, field_type)
     
@@ -258,7 +261,7 @@ class BuiltinType(BuiltinEntity):
         
         base_type = getattr(refined_type, '_base_type', None)
         if base_type is None:
-            raise TypeError(f"Invalid tuple type: {refined_type}")
+            logger.error(f"Invalid tuple type: {refined_type}", node=None, exc_type=TypeError)
         
         field_types = getattr(base_type, '_field_types', [])
         items = []
@@ -305,7 +308,7 @@ class BuiltinType(BuiltinEntity):
         Raises:
             TypeError: If the type doesn't support subscript syntax
         """
-        raise TypeError(f"{cls.get_name()} does not support subscript syntax")
+        logger.error(f"{cls.get_name()} does not support subscript syntax", node=None, exc_type=TypeError)
     
     def __class_getitem__(cls, item):
         """Python runtime entry point for type subscript syntax
@@ -434,7 +437,8 @@ class BuiltinType(BuiltinEntity):
     def handle_type_conversion(cls, visitor, node: ast.Call) -> ir.Value:
         """Convert value to this type using TypeConverter"""
         if len(node.args) != 1:
-            raise TypeError(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)")
+            logger.error(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
+                        node=node, exc_type=TypeError)
         
         arg = visitor.visit_expression(node.args[0])
         # Note: TypeConverter will extract LLVM type from pythoc type with module_context
@@ -451,7 +455,7 @@ class BuiltinType(BuiltinEntity):
             )
             return result
         except TypeError as e:
-            raise TypeError(f"Cannot convert to {cls.get_name()}: {e}")
+            logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)
     
     # Binary operation handlers for numeric types (unified call protocol)
     @classmethod

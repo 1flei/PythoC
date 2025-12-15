@@ -1,5 +1,6 @@
 from .base import BuiltinFunction
 from ..valueref import wrap_value, ValueRef
+from ..logger import logger
 import ast
 
 
@@ -86,7 +87,7 @@ class refine(BuiltinFunction):
         import copy
         
         if len(call_node.args) < 2:
-            raise TypeError("refine() requires at least 2 arguments")
+            logger.error("refine() requires at least 2 arguments", node=call_node, exc_type=TypeError)
         
         user_globals = {}
         if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):

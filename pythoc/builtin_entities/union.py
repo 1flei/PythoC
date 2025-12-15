@@ -31,7 +31,7 @@ class UnionType(CompositeType):
             module_context: Optional IR module context (not used)
         """
         if cls._field_types is None:
-            raise TypeError("union type requires field types")
+            logger.error("union type requires field types", node=None, exc_type=TypeError)
         
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
@@ -46,7 +46,8 @@ class UnionType(CompositeType):
                     continue
                 field_align = min(field_size, 8)
             else:
-                raise TypeError(f"union.get_llvm_type: unknown field type {field_type}")
+                logger.error(f"union.get_llvm_type: unknown field type {field_type}",
+                            node=None, exc_type=TypeError)
             max_size = max(max_size, field_size)
             max_align = max(max_align, field_align)
         
@@ -77,7 +78,8 @@ class UnionType(CompositeType):
                     continue
                 field_align = min(field_size, 8)
             else:
-                raise TypeError(f"union.get_size_bytes: unknown field type {field_type}")
+                logger.error(f"union.get_size_bytes: unknown field type {field_type}",
+                            node=None, exc_type=TypeError)
             max_size = max(max_size, field_size)
             max_align = max(max_align, field_align)
         
@@ -112,7 +114,8 @@ class UnionType(CompositeType):
         index_val = extract_constant_index(index, "union subscript")
         
         if index_val < 0 or index_val >= len(cls._field_types):
-            raise IndexError(f"union index {index_val} out of range (0-{len(cls._field_types)-1})")
+            logger.error(f"union index {index_val} out of range (0-{len(cls._field_types)-1})",
+                        node=node, exc_type=IndexError)
         
         field_type = cls._field_types[index_val]
         
@@ -128,7 +131,8 @@ class UnionType(CompositeType):
             except TypeError:
                 field_llvm_type = field_type.get_llvm_type()
         else:
-            raise TypeError(f"union field type {field_type} has no get_llvm_type method")
+            logger.error(f"union field type {field_type} has no get_llvm_type method",
+                        node=node, exc_type=TypeError)
         
         # Bitcast union pointer to field type pointer
         field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
@@ -151,7 +155,7 @@ class UnionType(CompositeType):
         
         # Check if union has this field
         if not cls.has_field(attr_name):
-            raise AttributeError(f"union has no field named '{attr_name}'")
+            logger.error(f"union has no field named '{attr_name}'", node=node, exc_type=AttributeError)
         
         field_index = cls.get_field_index(attr_name)
         field_type = cls._field_types[field_index]
@@ -172,7 +176,8 @@ class UnionType(CompositeType):
             except TypeError:
                 field_llvm_type = field_type.get_llvm_type()
         else:
-            raise TypeError(f"union field type {field_type} has no get_llvm_type method")
+            logger.error(f"union field type {field_type} has no get_llvm_type method",
+                        node=node, exc_type=TypeError)
         
         field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
         
@@ -274,7 +279,7 @@ class union(UnionType):
             items = (items,)
         
         if len(items) == 0:
-            raise TypeError("union requires at least one field")
+            logger.error("union requires at least one field", node=None, exc_type=TypeError)
         
         field_types = []
         field_names = []

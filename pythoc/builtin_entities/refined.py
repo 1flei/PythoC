@@ -89,7 +89,7 @@ class RefinedType(CompositeType):
             if hasattr(cls._base_type, 'get_llvm_type'):
                 return cls._base_type.get_llvm_type(module_context)
             else:
-                raise TypeError(f"{cls.get_name()} base type has no get_llvm_type method")
+                logger.error(f"{cls.get_name()} base type has no get_llvm_type method", node=None, exc_type=TypeError)
         
         # Multi-parameter predicate: use struct type
         if cls._struct_type is not None:
@@ -101,7 +101,7 @@ class RefinedType(CompositeType):
             if hasattr(param_type, 'get_llvm_type'):
                 return param_type.get_llvm_type(module_context)
         
-        raise TypeError(f"{cls.get_name()} has no type information")
+        logger.error(f"{cls.get_name()} has no type information", node=None, exc_type=TypeError)
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
@@ -120,13 +120,14 @@ class RefinedType(CompositeType):
         # Case 2: Value subscript (refined_value[i])
         if cls._base_type is not None:
             if cls._struct_type is None:
-                raise TypeError(
-                    f"{cls.get_name()} subscript depends on base type {cls._base_type}"
+                logger.error(
+                    f"{cls.get_name()} subscript depends on base type {cls._base_type}",
+                    node=node, exc_type=TypeError
                 )
         
         # Multi-parameter: delegate to underlying struct
         if cls._struct_type is None:
-            raise TypeError(f"{cls.get_name()} has no underlying struct for subscript access")
+            logger.error(f"{cls.get_name()} has no underlying struct for subscript access", node=node, exc_type=TypeError)
         
         return cls._struct_type.handle_subscript(visitor, base, index, node)
     
@@ -159,7 +160,7 @@ class RefinedType(CompositeType):
             args_list = [args]
         
         if len(args_list) == 0:
-            raise TypeError("refined requires at least one argument")
+            logger.error("refined requires at least one argument", node=node, exc_type=TypeError)
         
         # Parse arguments into: base_type, predicates, tags
         base_type = None
@@ -172,7 +173,7 @@ class RefinedType(CompositeType):
                 if arg.kind == 'python' and arg.value is not None:
                     arg_value = arg.value
                 else:
-                    raise TypeError(f"refined argument must be a type, predicate, or string tag")
+                    logger.error(f"refined argument must be a type, predicate, or string tag", node=node, exc_type=TypeError)
             else:
                 arg_value = arg
             
@@ -188,13 +189,13 @@ class RefinedType(CompositeType):
                 if base_type is None and i == 0:
                     base_type = arg_value
                 else:
-                    raise TypeError(f"refined can only have one base type (position 0), got type at position {i}")
+                    logger.error(f"refined can only have one base type (position 0), got type at position {i}", node=node, exc_type=TypeError)
             else:
-                raise TypeError(f"refined argument must be a type, callable predicate, or string tag, got {type(arg_value)}")
+                logger.error(f"refined argument must be a type, callable predicate, or string tag, got {type(arg_value)}", node=node, exc_type=TypeError)
         
         # Validate combinations
         if len(predicates) == 0 and len(tags) == 0:
-            raise TypeError("refined requires at least one predicate or tag")
+            logger.error("refined requires at least one predicate or tag", node=node, exc_type=TypeError)
         
         # Case 1: Only predicates, no base type (backward compat: refined[pred])
         if base_type is None and len(predicates) == 1 and len(tags) == 0:
@@ -206,12 +207,13 @@ class RefinedType(CompositeType):
         
         # Case 3: Multiple predicates without base type
         if base_type is None and len(predicates) > 0:
-            raise TypeError(
+            logger.error(
                 "refined with multiple predicates requires explicit base type: "
-                "refined[T, pred1, pred2, ...]"
+                "refined[T, pred1, pred2, ...]",
+                node=node, exc_type=TypeError
             )
         
-        raise TypeError(f"Invalid refined type specification: {args_list}")
+        logger.error(f"Invalid refined type specification: {args_list}", node=node, exc_type=TypeError)
     
     @classmethod
     def _create_from_single_predicate(cls, predicate, visitor):
@@ -225,7 +227,7 @@ class RefinedType(CompositeType):
         try:
             sig = inspect.signature(predicate)
         except (ValueError, TypeError) as e:
-            raise TypeError(f"Cannot inspect predicate function signature: {e}")
+            logger.error(f"Cannot inspect predicate function signature: {e}", node=None, exc_type=TypeError)
         
         param_names = []
         param_types = []
@@ -236,9 +238,10 @@ class RefinedType(CompositeType):
             param_names.append(param_name)
             
             if param.annotation == inspect.Parameter.empty:
-                raise TypeError(
+                logger.error(
                     f"Predicate function '{predicate.__name__}' parameter '{param_name}' "
-                    f"must have type annotation"
+                    f"must have type annotation",
+                    node=None, exc_type=TypeError
                 )
             
             if isinstance(param.annotation, str):
@@ -249,18 +252,19 @@ class RefinedType(CompositeType):
                 try:
                     pc_type = type_resolver.parse_annotation(param.annotation)
                 except Exception as e:
-                    raise TypeError(f"Cannot parse type annotation for parameter '{param_name}': {e}")
+                    logger.error(f"Cannot parse type annotation for parameter '{param_name}': {e}", node=None, exc_type=TypeError)
             
             if pc_type is None:
-                raise TypeError(
+                logger.error(
                     f"Predicate function '{predicate.__name__}' parameter '{param_name}' "
-                    f"has invalid type annotation: {param.annotation}"
+                    f"has invalid type annotation: {param.annotation}",
+                    node=None, exc_type=TypeError
                 )
             
             param_types.append(pc_type)
         
         if len(param_types) == 0:
-            raise TypeError(f"Predicate function '{predicate.__name__}' must have at least one parameter")
+            logger.error(f"Predicate function '{predicate.__name__}' must have at least one parameter", node=None, exc_type=TypeError)
         
         # Single parameter: base_type = param_type
         if len(param_types) == 1:
@@ -308,19 +312,20 @@ class RefinedType(CompositeType):
                 sig = inspect.signature(pred)
                 params = list(sig.parameters.values())
                 if len(params) != 1:
-                    raise TypeError(
+                    logger.error(
                         f"Predicate '{pred.__name__}' for refined[{base_type}, ...] "
-                        f"must have exactly one parameter, got {len(params)}"
+                        f"must have exactly one parameter, got {len(params)}",
+                        node=None, exc_type=TypeError
                     )
             except (ValueError, TypeError) as e:
-                raise TypeError(f"Cannot inspect predicate function signature: {e}")
+                logger.error(f"Cannot inspect predicate function signature: {e}", node=None, exc_type=TypeError)
         
         # Create name
         base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
         pred_names = [p.__name__ for p in predicates]
         tag_names = [f'"{t}"' for t in tags]
         all_names = [base_name] + pred_names + tag_names
-        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('\"', '') for n in all_names)}"
+        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('"', '') for n in all_names)}"
         
         new_refined_type = type(class_name, (RefinedType,), {
             '_base_type': base_type,
@@ -353,9 +358,10 @@ class RefinedType(CompositeType):
             # Refinement types cannot be constructed from nothing
             # Must use assume(base_value, ...) instead
             if len(args) == 0:
-                raise TypeError(
+                logger.error(
                     f"{cls.get_name()} cannot be constructed without arguments. "
-                    f"Refinement types must be created from a base value using assume(base_value, ...)"
+                    f"Refinement types must be created from a base value using assume(base_value, ...)",
+                    node=node, exc_type=TypeError
                 )
             elif len(args) == 1:
                 arg = args[0]
@@ -367,15 +373,15 @@ class RefinedType(CompositeType):
                 
                 return wrap_value(ensure_ir(arg), kind='value', type_hint=cls)
             else:
-                raise TypeError(f"{cls.get_name()} takes 0 or 1 argument ({len(args)} given)")
+                logger.error(f"{cls.get_name()} takes 0 or 1 argument ({len(args)} given)", node=node, exc_type=TypeError)
         
         # For multi-param predicates: expect N args
         expected_count = len(cls._param_types) if cls._param_types else 0
         if len(args) != expected_count:
-            raise TypeError(f"{cls.get_name()} takes {expected_count} argument(s) ({len(args)} given)")
+            logger.error(f"{cls.get_name()} takes {expected_count} argument(s) ({len(args)} given)", node=node, exc_type=TypeError)
         
         if cls._struct_type is None:
-            raise TypeError(f"{cls.get_name()} cannot be called (no struct type)")
+            logger.error(f"{cls.get_name()} cannot be called (no struct type)", node=node, exc_type=TypeError)
         
         struct_llvm_type = cls._struct_type.get_llvm_type(visitor.module.context)
         struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
@@ -410,11 +416,11 @@ class RefinedType(CompositeType):
                 )
                 return underlying_type.handle_attribute(visitor, base_with_underlying_type, attr_name, node)
             else:
-                raise AttributeError(f"{cls.get_name()} (refined {underlying_type}) has no attribute '{attr_name}'")
+                logger.error(f"{cls.get_name()} (refined {underlying_type}) has no attribute '{attr_name}'", node=node, exc_type=AttributeError)
         
         # For multi-param: delegate to struct
         if cls._struct_type is None:
-            raise TypeError(f"{cls.get_name()} has no fields")
+            logger.error(f"{cls.get_name()} has no fields", node=node, exc_type=TypeError)
         
         return cls._struct_type.handle_attribute(visitor, base, attr_name, node)
 
@@ -450,7 +456,8 @@ class refined(metaclass=type):
             try:
                 sig = inspect.signature(predicate)
             except (ValueError, TypeError) as e:
-                raise TypeError(f"Cannot inspect predicate function signature: {e}")
+                logger.error(f"Cannot inspect predicate function signature: {e}",
+                            node=None, exc_type=TypeError)
             
             param_names = []
             param_types = []
@@ -464,7 +471,8 @@ class refined(metaclass=type):
                     param_types.append(param.annotation)
             
             if len(param_names) == 0:
-                raise TypeError(f"Predicate function must have at least one parameter")
+                logger.error(f"Predicate function must have at least one parameter",
+                            node=None, exc_type=TypeError)
             
             is_single_param = (len(param_names) == 1)
             
@@ -511,12 +519,15 @@ class refined(metaclass=type):
                 if base_type is None and i == 0:
                     base_type = arg
                 else:
-                    raise TypeError(f"refined can only have one base type at position 0")
+                    logger.error(f"refined can only have one base type at position 0",
+                                node=None, exc_type=TypeError)
             else:
-                raise TypeError(f"refined argument must be a type, callable predicate, or string tag")
+                logger.error(f"refined argument must be a type, callable predicate, or string tag",
+                            node=None, exc_type=TypeError)
         
         if base_type is None:
-            raise TypeError("refined[...] requires a base type as first argument")
+            logger.error("refined[...] requires a base type as first argument",
+                        node=None, exc_type=TypeError)
         
         # Validate predicates
         for pred in predicates:
@@ -524,16 +535,18 @@ class refined(metaclass=type):
                 sig = inspect.signature(pred)
                 params = list(sig.parameters.values())
                 if len(params) != 1:
-                    raise TypeError(f"Predicate for refined[{base_type}, ...] must have exactly one parameter")
+                    logger.error(f"Predicate for refined[{base_type}, ...] must have exactly one parameter",
+                                node=None, exc_type=TypeError)
             except (ValueError, TypeError) as e:
-                raise TypeError(f"Cannot inspect predicate function signature: {e}")
+                logger.error(f"Cannot inspect predicate function signature: {e}",
+                            node=None, exc_type=TypeError)
         
         # Create class name
         base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
         pred_names = [p.__name__ for p in predicates]
         tag_names = [f'"{t}"' for t in tags]
         all_names = [base_name] + pred_names + tag_names
-        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('\"', '') for n in all_names)}"
+        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('"', '') for n in all_names)}"
         
         new_refined_type = type(class_name, (RefinedType,), {
             '_base_type': base_type,

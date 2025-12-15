@@ -11,6 +11,10 @@ import os
 from pythoc import compile, i32, bool
 from pythoc.builtin_entities import refined, assume, refine
 from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
+from pythoc.logger import set_raise_on_error
+
+# Enable exception raising for tests that expect to catch exceptions
+set_raise_on_error(True)
 
 
 # Predicate definitions

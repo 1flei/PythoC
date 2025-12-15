@@ -1,5 +1,6 @@
 from .base import BuiltinFunction
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 
 
@@ -53,9 +54,9 @@ class assume(BuiltinFunction):
         from ..valueref import ValueRef
         
         if len(args) < 2:
-            raise TypeError("assume() requires at least 2 arguments")
+            logger.error("assume() requires at least 2 arguments", node=node, exc_type=TypeError)
         if len(node.args) < 2:
-            raise TypeError("assume() requires at least 2 arguments")
+            logger.error("assume() requires at least 2 arguments", node=node, exc_type=TypeError)
         
         last_arg = args[-1]
         is_multi_param_form = False
@@ -111,7 +112,7 @@ class assume(BuiltinFunction):
                 elif predicate_arg.kind == 'pointer':
                     pred_callable = predicate
                 else:
-                    raise TypeError("assume() last argument must be a predicate")
+                    logger.error("assume() last argument must be a predicate", node=node, exc_type=TypeError)
             else:
                 pred_callable = predicate_arg
             
@@ -143,20 +144,24 @@ class assume(BuiltinFunction):
                                 elif callable(obj):
                                     constraint_args.append(obj)
                                 else:
-                                    raise TypeError(f"assume() constraint must be callable or string, got {type(obj)}")
+                                    logger.error(f"assume() constraint must be callable or string, got {type(obj)}",
+                                                node=node, exc_type=TypeError)
                             else:
-                                raise TypeError(f"assume() constraint '{arg_node.id}' not found")
+                                logger.error(f"assume() constraint '{arg_node.id}' not found",
+                                            node=node, exc_type=TypeError)
                         else:
-                            raise TypeError(f"assume() constraint must be a name reference")
+                            logger.error(f"assume() constraint must be a name reference",
+                                        node=node, exc_type=TypeError)
                     else:
-                        raise TypeError(f"Cannot resolve constraint argument")
+                        logger.error(f"Cannot resolve constraint argument", node=node, exc_type=TypeError)
                 else:
-                    raise TypeError(f"assume() constraint must be Python value or function reference")
+                    logger.error(f"assume() constraint must be Python value or function reference",
+                                node=node, exc_type=TypeError)
             else:
                 constraint_args.append(arg)
         
         if not isinstance(value_arg, ValueRef):
-            raise TypeError("assume() first argument must be a value")
+            logger.error("assume() first argument must be a value", node=node, exc_type=TypeError)
         
         base_type = value_arg.type_hint
         
@@ -187,10 +192,12 @@ class assume(BuiltinFunction):
                     from .types import f64
                     base_type = f64
                 else:
-                    raise TypeError(f"Cannot infer PC type for Python value of type {type(py_value)}")
+                    logger.error(f"Cannot infer PC type for Python value of type {type(py_value)}",
+                                node=node, exc_type=TypeError)
         
         if base_type is None or isinstance(base_type, PythonType):
-            raise TypeError("assume() value must have PC type information or provide a predicate for type inference")
+            logger.error("assume() value must have PC type information or provide a predicate for type inference",
+                        node=node, exc_type=TypeError)
         
         refined_args = [base_type] + constraint_args
         
@@ -239,7 +246,7 @@ class assume(BuiltinFunction):
         pred_names = [p.__name__ for p in predicates]
         tag_names = [f'"{t}"' for t in tags]
         all_names = [base_name] + pred_names + tag_names
-        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('\"', '') for n in all_names)}"
+        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('"', '') for n in all_names)}"
         
         new_refined_type = type(class_name, (RefinedType,), {
             '_base_type': base_type,

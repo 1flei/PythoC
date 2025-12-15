@@ -33,7 +33,7 @@ class AssignmentsMixin:
         with both loaded value and address, then extracts the address for lvalue context.
         """
         if isinstance(node, ast.Tuple):
-            raise ValueError("Tuple unpacking should be handled by caller")
+            logger.error("Tuple unpacking should be handled by caller", node=node, exc_type=ValueError)
         
         result = self.visit_expression(node)
         return result.as_lvalue()
@@ -148,7 +148,7 @@ class AssignmentsMixin:
                 pc_type = self.infer_pc_type_from_value(value_ref)
             
             if pc_type is None:
-                raise TypeError(f"Cannot determine type for new variable '{node.id}'")
+                logger.error(f"Cannot determine type for new variable '{node.id}'", node=node, exc_type=TypeError)
             
             # Create alloca and declare variable
             # For pyconst/PythonType, this creates a zero-sized alloca {}
@@ -174,7 +174,7 @@ class AssignmentsMixin:
                 linear_path=()
             )
     
-    def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef):
+    def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef, node: ast.AST = None):
         """Store value to lvalue with type conversion and qualifier checks
         
         Special handling for pyconst fields (zero-sized, no actual store).
@@ -191,9 +191,9 @@ class AssignmentsMixin:
                 if rvalue.is_python_value():
                     actual_value = rvalue.value
                 else:
-                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node)
+                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node=node, exc_type=TypeError)
                 if actual_value != expected_value:
-                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node)
+                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node=node, exc_type=TypeError)
             # pyconst fields are zero-sized, assignment is a no-op after type check
             return
         
@@ -221,7 +221,7 @@ class AssignmentsMixin:
         self._check_linear_lvalue_overwrite(lvalue, node)
         
         # Store value to lvalue
-        self._store_to_lvalue(lvalue, decayed_rvalue)
+        self._store_to_lvalue(lvalue, decayed_rvalue, node)
         
         # Handle linear token registration
         rvalue_pc_type = rvalue.get_pc_type()
@@ -301,7 +301,8 @@ class AssignmentsMixin:
             # Python tuple unpacking: a, b = (1, 2) where (1, 2) is Python value
             tuple_value = rvalue.get_python_value()
             if len(tuple_value) != len(target.elts):
-                raise TypeError(f"Unpacking mismatch: {len(target.elts)} variables, {len(tuple_value)} values")
+                logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(tuple_value)} values",
+                            node=target, exc_type=TypeError)
             
             for py_val, elt in zip(tuple_value, target.elts):
                 # Convert Python value to ValueRef
@@ -316,7 +317,8 @@ class AssignmentsMixin:
             field_types = struct_type._field_types
             
             if len(target.elts) != len(field_types):
-                raise TypeError(f"Unpacking mismatch: {len(target.elts)} variables, {len(field_types)} fields")
+                logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(field_types)} fields",
+                            node=target, exc_type=TypeError)
             
             from ..valueref import wrap_value
             from ..builtin_entities.python_type import PythonType
@@ -335,13 +337,13 @@ class AssignmentsMixin:
                     llvm_index = struct_type._get_llvm_field_index(i)
                     if llvm_index == -1:
                         # This shouldn't happen since we already handled pyconst above
-                        logger.error(f"Zero-sized field [{i}] has no LLVM representation", node)
+                        logger.error(f"Zero-sized field [{i}] has no LLVM representation", node=node, exc_type=RuntimeError)
                     field_value = self.builder.extract_value(ensure_ir(rvalue), llvm_index)
                     field_val_ref = wrap_value(field_value, type_hint=field_pc_type, node=node)
                 
                 self._assign_to_target(elt, field_val_ref, target, pc_type=field_pc_type)
         else:
-            logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", value_node)
+            logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", node=value_node, exc_type=TypeError)
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         """Handle annotated assignment statements (variable declarations with types)
@@ -353,16 +355,17 @@ class AssignmentsMixin:
         logger.debug(f"visit_AnnAssign: {ast_module.unparse(node)}")
         
         if not isinstance(node.target, ast.Name):
-            raise RuntimeError("AnnAssign only supports simple names")
+            logger.error("AnnAssign only supports simple names", node=node, exc_type=RuntimeError)
         var_name = node.target.id
         
         # Check if variable already exists in CURRENT scope - AnnAssign is declaration, not reassignment
         # Allow shadowing variables from outer scopes (C-like behavior)
         if self.ctx.var_registry.is_declared_in_current_scope(var_name):
             existing = self.ctx.var_registry.lookup(var_name)
-            raise RuntimeError(
+            logger.error(
                 f"Cannot redeclare variable '{var_name}': already declared in this scope at line {existing.line_number} "
-                f"(attempting redeclaration at line {node.lineno})"
+                f"(attempting redeclaration at line {node.lineno})",
+                node=node, exc_type=RuntimeError
             )
         
         # Get PC type from annotation
@@ -386,7 +389,6 @@ class AssignmentsMixin:
             rvalue = wrap_value(undef_value, kind="value", type_hint=pc_type)
         else:
             rvalue = self.visit_expression(node.value)
-            logger.debug("AnnAssign rvalue", rvalue=rvalue, from_type=rvalue.type_hint, to_type=pc_type)
 
             # If the type of RHS does not match pc_type, convert it
             if rvalue.type_hint != pc_type:
@@ -440,7 +442,7 @@ class AssignmentsMixin:
         )
         
         # Perform the operation using unified binary operation logic
-        result = self._perform_binary_operation(fake_binop.op, current_val_ref, rhs_value)
+        result = self._perform_binary_operation(fake_binop.op, current_val_ref, rhs_value, node)
         
         # Store the result back
         self.builder.store(ensure_ir(result), ensure_ir(target_addr))

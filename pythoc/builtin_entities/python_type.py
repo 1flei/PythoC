@@ -12,6 +12,7 @@ enabling zero-overhead conditional struct layouts.
 from .base import BuiltinEntity
 from typing import Any, Optional
 from ..valueref import wrap_value
+from ..logger import logger
 import ast
 
 
@@ -123,7 +124,7 @@ class PythonType(_PythonTypeBase):
     def get_constant_value(self) -> Any:
         """Get the constant value if this is a constant."""
         if not self._is_constant:
-            raise ValueError(f"{self.get_instance_name()} is not a constant")
+            logger.error(f"{self.get_instance_name()} is not a constant", node=None, exc_type=ValueError)
         return self._constant_value
     
     def get_llvm_type(self, module_context=None):
@@ -152,7 +153,7 @@ class PythonType(_PythonTypeBase):
             ValueRef with constant value and special metadata for assignment
         """
         if not self._is_constant:
-            raise TypeError(f"Cannot access non-constant Python field '{field_name}'")
+            logger.error(f"Cannot access non-constant Python field '{field_name}'", node=node, exc_type=TypeError)
         
         # Create a ValueRef that acts as both constant value and assignable lvalue
         # Strategy: Return as Python value but with special attributes
@@ -195,7 +196,7 @@ class PythonType(_PythonTypeBase):
             None (assignment is a no-op for zero-sized fields)
         """
         if not self._is_constant:
-            raise TypeError(f"Cannot assign to non-constant Python field '{field_name}'")
+            logger.error(f"Cannot assign to non-constant Python field '{field_name}'", node=node, exc_type=TypeError)
         
         # Extract the value being assigned
         if value_ref.is_python_value():
@@ -204,17 +205,19 @@ class PythonType(_PythonTypeBase):
             # LLVM constant
             assigned_value = value_ref.value.constant
         else:
-            raise TypeError(
+            logger.error(
                 f"Cannot assign runtime value to pyconst field '{field_name}'. "
-                f"pyconst fields require compile-time constant values."
+                f"pyconst fields require compile-time constant values.",
+                node=node, exc_type=TypeError
             )
         
         # Type check: value must match exactly
         if assigned_value != self._constant_value:
-            raise TypeError(
+            logger.error(
                 f"Type mismatch: cannot assign {repr(assigned_value)} to field '{field_name}' "
                 f"of type pyconst[{repr(self._constant_value)}]. "
-                f"pyconst fields require exact value match."
+                f"pyconst fields require exact value match.",
+                node=node, exc_type=TypeError
             )
         
         # Assignment is valid but is a no-op (zero-sized field)
@@ -243,9 +246,10 @@ class PythonType(_PythonTypeBase):
             # Default behavior: compile-time evaluation
             return self._eval_call(visitor, node, self._python_object)
         
-        raise NotImplementedError(
+        logger.error(
             f"Cannot call Python object '{self._python_type.__name__}' in compiled code.\n"
-            f"Hint: Only compile-time callable constants with constant arguments are supported."
+            f"Hint: Only compile-time callable constants with constant arguments are supported.",
+            node=node, exc_type=NotImplementedError
         )
     
     def handle_attribute(self, visitor, base, attr_name, node: ast.Attribute):
@@ -266,15 +270,17 @@ class PythonType(_PythonTypeBase):
             return self._python_object.handle_attribute(visitor, base, attr_name, node)
         
         if not self._is_constant:
-            raise NotImplementedError(
-                f"Cannot access attribute '{attr_name}' on non-constant Python object '{self._python_type.__name__}'"
+            logger.error(
+                f"Cannot access attribute '{attr_name}' on non-constant Python object '{self._python_type.__name__}'",
+                node=node, exc_type=NotImplementedError
             )
         
         try:
             attr_value = getattr(self._python_object, attr_name)
         except AttributeError:
-            raise AttributeError(
-                f"Python object '{self._python_type.__name__}' has no attribute '{attr_name}'"
+            logger.error(
+                f"Python object '{self._python_type.__name__}' has no attribute '{attr_name}'",
+                node=node, exc_type=AttributeError
             )
         
         # Wrap the attribute as a new PythonType
@@ -296,16 +302,19 @@ class PythonType(_PythonTypeBase):
         This is kept for backward compatibility.
         """
         if not self._is_constant:
-            raise NotImplementedError(
-                f"Cannot call method '{method_name}' on non-constant Python object '{self._python_type.__name__}'"
+            logger.error(
+                f"Cannot call method '{method_name}' on non-constant Python object '{self._python_type.__name__}'",
+                node=node, exc_type=NotImplementedError
             )
         base_obj = self._python_object
         try:
             target = getattr(base_obj, method_name)
         except AttributeError:
-            raise AttributeError(f"Python object '{self._python_type.__name__}' has no attribute '{method_name}'")
+            logger.error(f"Python object '{self._python_type.__name__}' has no attribute '{method_name}'",
+                        node=node, exc_type=AttributeError)
         if not callable(target):
-            raise TypeError(f"Attribute '{method_name}' of '{self._python_type.__name__}' is not callable")
+            logger.error(f"Attribute '{method_name}' of '{self._python_type.__name__}' is not callable",
+                        node=node, exc_type=TypeError)
         return self._eval_call(visitor, node, target)
     
     def _eval_call(self, visitor, node: ast.Call, target_callable):
@@ -348,7 +357,7 @@ class PythonType(_PythonTypeBase):
         except Exception as e:
             import traceback
             tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
-            raise ValueError(f"Python call failed: {e}\nOriginal traceback:\n{tb_str}")
+            logger.error(f"Python call failed: {e}\nOriginal traceback:\n{tb_str}", node=node, exc_type=ValueError)
         
         # Wrap result back
         return self._wrap_constant_result(visitor, result)
@@ -385,7 +394,7 @@ class PythonType(_PythonTypeBase):
                 # Extract items from the struct's _field_types
                 items = self._extract_struct_type_items(index.type_hint)
             else:
-                raise TypeError(f"Type subscript index must be a python value, got {index}")
+                logger.error(f"Type subscript index must be a python value, got {index}", node=node, exc_type=TypeError)
             
             normalized = self._python_object.normalize_subscript_items(items)
             result_type = self._python_object.handle_type_subscript(normalized)
@@ -401,7 +410,8 @@ class PythonType(_PythonTypeBase):
             if isinstance(node.slice, ast.Constant):
                 index_val = node.slice.value
             else:
-                raise TypeError(f"List subscript requires constant index at compile time, got {type(node.slice)}")
+                logger.error(f"List subscript requires constant index at compile time, got {type(node.slice)}",
+                            node=node, exc_type=TypeError)
         
         result = self._python_object[index_val]
         return self._wrap_constant_result(visitor, result)
@@ -423,7 +433,7 @@ class PythonType(_PythonTypeBase):
         
         field_types = getattr(struct_type, '_field_types', [])
         if not field_types:
-            raise TypeError(f"Struct type has no field types: {struct_type}")
+            logger.error(f"Struct type has no field types: {struct_type}", node=None, exc_type=TypeError)
         
         items = []
         for field_type in field_types:
@@ -474,7 +484,7 @@ class PythonType(_PythonTypeBase):
             ValueRef with LLVM IR value and target PC type hint
         """
         if not self._is_constant:
-            raise TypeError(f"Cannot promote non-constant Python value to PC type")
+            logger.error(f"Cannot promote non-constant Python value to PC type", node=None, exc_type=TypeError)
         
         from llvmlite import ir
         from ..valueref import wrap_value
@@ -487,16 +497,19 @@ class PythonType(_PythonTypeBase):
         # Convert based on target type
         if isinstance(target_llvm_type, ir.IntType):
             if not isinstance(python_val, (bool, int)):
-                raise TypeError(f"Cannot convert {type(python_val).__name__} to integer type")
+                logger.error(f"Cannot convert {type(python_val).__name__} to integer type",
+                            node=None, exc_type=TypeError)
             ir_val = ir.Constant(target_llvm_type, int(python_val))
             return wrap_value(ir_val, kind="value", type_hint=target_pc_type)
         elif isinstance(target_llvm_type, (ir.FloatType, ir.DoubleType)):
             if not isinstance(python_val, (int, float)):
-                raise TypeError(f"Cannot convert {type(python_val).__name__} to float type")
+                logger.error(f"Cannot convert {type(python_val).__name__} to float type",
+                            node=None, exc_type=TypeError)
             ir_val = ir.Constant(target_llvm_type, float(python_val))
             return wrap_value(ir_val, kind="value", type_hint=target_pc_type)
         else:
-            raise TypeError(f"Cannot promote Python value to PC type {target_pc_type}")
+            logger.error(f"Cannot promote Python value to PC type {target_pc_type}",
+                        node=None, exc_type=TypeError)
     
     def promote_to_default_pc_type(self):
         """Promote this Python value to default PC type based on Python type.
@@ -510,7 +523,7 @@ class PythonType(_PythonTypeBase):
             ValueRef with LLVM IR value and default PC type hint
         """
         if not self._is_constant:
-            raise TypeError(f"Cannot promote non-constant Python value to PC type")
+            logger.error(f"Cannot promote non-constant Python value to PC type", node=None, exc_type=TypeError)
         
         from llvmlite import ir
         from ..valueref import wrap_value
@@ -534,7 +547,8 @@ class PythonType(_PythonTypeBase):
             ir_val = ir.Constant(ir.DoubleType(), python_val)
             return wrap_value(ir_val, kind="value", type_hint=f64)
         else:
-            raise TypeError(f"Cannot promote Python type {type(python_val).__name__} to PC type")
+            logger.error(f"Cannot promote Python type {type(python_val).__name__} to PC type",
+                        node=None, exc_type=TypeError)
 
 
 def is_python_type(type_hint) -> bool:

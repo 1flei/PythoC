@@ -49,7 +49,7 @@ class ControlFlowMixin:
     def visit_Break(self, node: ast.Break):
         """Handle break statements"""
         if not self.loop_stack:
-            raise SyntaxError("'break' outside loop")
+            logger.error("'break' outside loop", node=node, exc_type=SyntaxError)
         
         if not self.builder.block.is_terminated:
             # Set break flag if for-else is active
@@ -64,7 +64,7 @@ class ControlFlowMixin:
     def visit_Continue(self, node: ast.Continue):
         """Handle continue statements"""
         if not self.loop_stack:
-            raise SyntaxError("'continue' outside loop")
+            logger.error("'continue' outside loop", node=node, exc_type=SyntaxError)
         
         if not self.builder.block.is_terminated:
             # Get the continue target (loop header block)
@@ -78,9 +78,10 @@ class ControlFlowMixin:
         # Check for dangling linear expressions
         # Linear values must be either assigned to a variable or passed to a function
         if isinstance(result, ValueRef) and self._is_linear_type(result.type_hint):
-            raise TypeError(
+            logger.error(
                 f"Linear expression at line {node.lineno} is not consumed. "
-                f"Assign it to a variable or pass it to a function."
+                f"Assign it to a variable or pass it to a function.",
+                node=node, exc_type=TypeError
             )
         
         return result

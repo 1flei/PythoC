@@ -1,5 +1,9 @@
 from pythoc import i32, i64, f64, ptr, array, compile, const, static, volatile, nullptr, u32
 from pythoc.libc.stdio import printf
+from pythoc.logger import set_raise_on_error
+
+# Enable exception raising for tests that expect to catch exceptions
+set_raise_on_error(True)
 
 @compile
 def test_const_basic() -> i32:

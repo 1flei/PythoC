@@ -2,6 +2,7 @@ from llvmlite import ir
 import ast
 from .base import BuiltinType
 from ..valueref import wrap_value, ensure_ir
+from ..logger import logger
 
 # Array type (exact copy from entities_impl.py)
 class array(BuiltinType):
@@ -37,19 +38,20 @@ class array(BuiltinType):
             module_context: Optional IR module context (passed to element type)
         """
         if cls.element_type is None or cls.dimensions is None:
-            raise TypeError("array type requires element type and dimensions")
+            logger.error("array type requires element type and dimensions", node=None, exc_type=TypeError)
         
         # Get element LLVM type
         if hasattr(cls.element_type, 'get_llvm_type'):
             elem_llvm = cls.element_type.get_llvm_type(module_context)
         elif isinstance(cls.element_type, ir.Type):
             # ANTI-PATTERN: element_type should be BuiltinEntity, not ir.Type
-            raise TypeError(
+            logger.error(
                 f"array.get_llvm_type: element_type is raw LLVM type {cls.element_type}. "
-                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead."
-            )
+                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
+                node=None, exc_type=TypeError)
         else:
-            raise TypeError(f"array.get_llvm_type: unknown element type {cls.element_type}")
+            logger.error(f"array.get_llvm_type: unknown element type {cls.element_type}",
+                        node=None, exc_type=TypeError)
         
         # Build nested array type for multi-dimensional arrays
         # array[i32, 2, 3] -> [2 x [3 x i32]]
@@ -82,14 +84,18 @@ class array(BuiltinType):
                 if dim_node.id in user_globals:
                     dim_value = user_globals[dim_node.id]
                     if not isinstance(dim_value, int):
-                        raise TypeError(f"array dimension '{dim_node.id}' must be an integer, got {type(dim_value)}")
+                        logger.error(f"array dimension '{dim_node.id}' must be an integer, got {type(dim_value)}",
+                                    node=dim_node, exc_type=TypeError)
                 else:
-                    raise TypeError(f"array dimension '{dim_node.id}' not found in scope")
+                    logger.error(f"array dimension '{dim_node.id}' not found in scope",
+                                node=dim_node, exc_type=TypeError)
             else:
-                raise TypeError(f"array dimensions must be constants or variable names, got {ast.dump(dim_node)}")
+                logger.error(f"array dimensions must be constants or variable names, got {ast.dump(dim_node)}",
+                            node=dim_node, exc_type=TypeError)
             
             if dim_value is None:
-                raise TypeError(f"Failed to resolve array dimension: {ast.dump(dim_node)}")
+                logger.error(f"Failed to resolve array dimension: {ast.dump(dim_node)}",
+                            node=dim_node, exc_type=TypeError)
             
             dimensions.append(dim_value)
         return dimensions
@@ -127,10 +133,10 @@ class array(BuiltinType):
             node: Original ast.Call node
         """
         if cls.element_type is None or cls.dimensions is None:
-            raise TypeError("array type requires element type and dimensions")
+            logger.error("array type requires element type and dimensions", node=None, exc_type=TypeError)
         
         if len(args) != 0:
-            raise TypeError(f"array[T, N]() takes no arguments ({len(args)} given)")
+            logger.error(f"array[T, N]() takes no arguments ({len(args)} given)", node=node, exc_type=TypeError)
         # Get LLVM array type
         array_type = cls.get_llvm_type()
 
@@ -155,7 +161,7 @@ class array(BuiltinType):
             TypeError: If element_type is None
         """
         if cls.element_type is None:
-            raise TypeError("Cannot decay array without element_type")
+            logger.error("Cannot decay array without element_type", node=None, exc_type=TypeError)
         
         from .types import ptr as ptr_class
         
@@ -238,14 +244,15 @@ class array(BuiltinType):
         if not isinstance(items, builtins.tuple):
             items = (items,)
         if len(items) < 2:
-            raise TypeError("array requires at least element type and one dimension")
+            logger.error("array requires at least element type and one dimension", node=None, exc_type=TypeError)
         # First item is element type
         elem_name_opt, element_type = items[0]
         # Remaining items are dimensions
         dimensions = []
         for name_opt, dim in items[1:]:
             if not isinstance(dim, int) or dim <= 0:
-                raise TypeError(f"array dimensions must be positive integers, got {dim}")
+                logger.error(f"array dimensions must be positive integers, got {dim}",
+                            node=None, exc_type=TypeError)
             dimensions.append(dim)
         elem_name = getattr(element_type, 'get_name', lambda: str(element_type))()
         dims_str = ', '.join(str(d) for d in dimensions)

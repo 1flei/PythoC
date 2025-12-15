@@ -27,6 +27,7 @@ from .composite_base import CompositeType
 from .types import i8, i32, i64, void
 from .union import union as union_type
 from ..valueref import ValueRef, wrap_value, extract_constant_index
+from ..logger import logger
 
 
 def _create_enum_type(variants, tag_type, class_name=None):
@@ -134,7 +135,7 @@ class EnumType(CompositeType):
         from llvmlite import ir
         
         if cls._tag_type is None or cls._union_payload is None:
-            raise TypeError(f"{cls.get_name()} requires tag type and union payload")
+            logger.error(f"{cls.get_name()} requires tag type and union payload", node=None, exc_type=TypeError)
         
         tag_llvm = cls._tag_type.get_llvm_type(module_context)
         payload_llvm = cls._union_payload.get_llvm_type(module_context)
@@ -204,7 +205,8 @@ class EnumType(CompositeType):
         from .types import void
         
         if len(args) < 1 or len(args) > 2:
-            raise TypeError(f"{cls.get_name()}() requires 1-2 arguments: (tag) or (tag, payload)")
+            logger.error(f"{cls.get_name()}() requires 1-2 arguments: (tag) or (tag, payload)",
+                        node=node, exc_type=TypeError)
         
         tag_val = args[0]
         payload_val = args[1] if len(args) == 2 else None
@@ -276,7 +278,8 @@ class EnumType(CompositeType):
                 # Unknown variant or runtime tag - infer type from payload
                 val_type = get_type_hint(payload_val)
                 if val_type is None:
-                    raise TypeError(f"Enum payload requires PC type hint when tag is not compile-time constant")
+                    logger.error(f"Enum payload requires PC type hint when tag is not compile-time constant",
+                                node=node, exc_type=TypeError)
                 
                 # Skip void types
                 if val_type == void:
@@ -321,7 +324,8 @@ class EnumType(CompositeType):
                 python_type_inst = PythonType.wrap(tag_value, is_constant=True)
                 return wrap_value(tag_value, kind="python", type_hint=python_type_inst)
         
-        raise AttributeError(f"Enum type {cls.get_name()} has no attribute '{attr_name}'")
+        logger.error(f"Enum type {cls.get_name()} has no attribute '{attr_name}'",
+                    node=node, exc_type=AttributeError)
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
@@ -377,13 +381,15 @@ class EnumType(CompositeType):
                     elif isinstance(item.lower, ast.Constant) and isinstance(item.lower.value, str):
                         var_name = item.lower.value
                     else:
-                        raise TypeError(f"Enum variant name must be an identifier or string, got {ast.dump(item.lower)}")
+                        logger.error(f"Enum variant name must be an identifier or string, got {ast.dump(item.lower)}",
+                                    node=node, exc_type=TypeError)
                     
                     # Parse payload type
                     var_type = visitor.type_resolver.parse_annotation(item.upper)
                     variants.append((var_name, var_type))
                 else:
-                    raise TypeError(f"Invalid enum variant syntax: {ast.dump(item)}")
+                    logger.error(f"Invalid enum variant syntax: {ast.dump(item)}",
+                                node=node, exc_type=TypeError)
             
             # Assign auto tags and build variant list for factory
             resolved_variants = []
@@ -399,7 +405,7 @@ class EnumType(CompositeType):
             return wrap_value(enum_cls, kind="python", type_hint=enum_cls)
         else:
             # Value subscript: should not happen on enum types
-            raise TypeError("Enum types do not support value subscripting")
+            logger.error("Enum types do not support value subscripting", node=node, exc_type=TypeError)
     
     @classmethod
     def handle_type_subscript(cls, items):
@@ -413,13 +419,14 @@ class EnumType(CompositeType):
             items = (items,)
         
         if len(items) == 0:
-            raise TypeError("enum requires at least one variant")
+            logger.error("enum requires at least one variant", node=None, exc_type=TypeError)
         
         # Parse variants
         variants = []
         for name, var_type in items:
             if name is None:
-                raise TypeError(f"Enum variants must have names, got unnamed type {var_type}")
+                logger.error(f"Enum variants must have names, got unnamed type {var_type}",
+                            node=None, exc_type=TypeError)
             variants.append((name, var_type))
         
         # Assign auto tags and build variant list for factory
@@ -467,7 +474,7 @@ class enum_meta(type):
             elif isinstance(it, builtins.slice):
                 # Name: Type syntax comes as a slice
                 if it.step is not None:
-                    raise TypeError(f"Invalid enum variant syntax: {it}")
+                    logger.error(f"Invalid enum variant syntax: {it}", node=None, exc_type=TypeError)
                 
                 # Get variant name
                 if isinstance(it.start, str):
@@ -481,7 +488,7 @@ class enum_meta(type):
                 next_tag += 1
             else:
                 # Unknown format
-                raise TypeError(f"Invalid enum variant: {it}")
+                logger.error(f"Invalid enum variant: {it}", node=None, exc_type=TypeError)
         
         # Use unified factory to create enum type
         return _create_enum_type(variants, i8)

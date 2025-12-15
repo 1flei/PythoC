@@ -8,6 +8,7 @@ They must be consumed exactly once before leaving scope.
 import ast
 from llvmlite import ir
 from .base import BuiltinType
+from ..logger import logger
 
 
 class linear(BuiltinType):
@@ -47,7 +48,7 @@ class linear(BuiltinType):
             ValueRef containing zero-size token (will be tracked automatically)
         """
         if len(args) != 0:
-            raise TypeError("linear() takes no arguments")
+            logger.error("linear() takes no arguments", node=node, exc_type=TypeError)
         
         # Return zero-size token (compile-time only)
         # Tracking happens automatically in visit_expression
