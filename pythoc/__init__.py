@@ -22,6 +22,7 @@ from .builtin_entities import (
 
 # Provide lowercase alias for convenience
 from .decorators import compile, jit, extern, inline, get_compiler, list_compiled_functions, clear_registry
+from .effect import effect
 from .decorators.compile import flush_all_pending_outputs
 from .compiler import LLVMCompiler
 from .utils import (
@@ -65,6 +66,9 @@ __all__ = [
     
     # Decorators
     'compile', 'jit', 'extern', 'inline',
+    
+    # Effect system
+    'effect',
     
     # C Library
     'libc',

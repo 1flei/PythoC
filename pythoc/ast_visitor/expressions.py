@@ -49,12 +49,13 @@ class ExpressionsMixin:
         # Unified lookup: variables and functions
         var_info = self.lookup_variable(node.id)
         if var_info:
-            # If we have a value_ref, return it directly
+            # If we have a value_ref, check for handle_cast first
             if var_info.value_ref:
                 if hasattr(var_info.value_ref.value, 'handle_cast'):
                     return var_info.value_ref.value.handle_cast(self, node)
                 
                 # Check if value has handle_call (e.g., ExternFunctionWrapper)
+                # If so, return value_ref directly (no handle_cast available)
                 if hasattr(var_info.value_ref.value, 'handle_call'):
                     return var_info.value_ref
             

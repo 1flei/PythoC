@@ -52,10 +52,7 @@ def get_definition_scope():
             '/pythoc/builtin_entities/' in filename or
             '/pythoc/ast_visitor/' in filename or
             '/pythoc/std/' in filename or
-            '/pc/decorators/' in filename or 
-            '/pc/builtin_entities/' in filename or
-            '/pc/ast_visitor/' in filename or
-            '/pc/std/' in filename):
+            '/pythoc/effect.py' in filename):
             temp_frame = temp_frame.f_back
             continue
         
