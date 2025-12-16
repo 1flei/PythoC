@@ -56,13 +56,36 @@ def get_compiler(source_file, user_globals, suffix=None):
 
 
 
-def compile(func_or_class=None, anonymous=False, suffix=None):
+def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_module=None, _effect_group_key=None):
+    """
+    Compile a Python function or class to native code.
+    
+    Args:
+        func_or_class: Function or class to compile
+        anonymous: If True, generate unique suffix for this function
+        suffix: Explicit suffix for function naming
+        _effect_caller_module: Internal parameter for effect override imports.
+            When set, the compiled function is grouped with the caller's module
+            instead of the original source file. This avoids symbol conflicts
+            when the same function is compiled with different effect contexts.
+        _effect_group_key: Internal parameter for transitive effect propagation.
+            When set, the compiled function is added to this specific group
+            (same .so file as the caller). Takes precedence over _effect_caller_module.
+    """
     # Normalize suffix early
     suffix = normalize_suffix(suffix)
     
+    # If no explicit suffix, check effect context for suffix
+    if suffix is None:
+        from ..effect import get_current_effect_suffix
+        effect_suffix = get_current_effect_suffix()
+        if effect_suffix is not None:
+            suffix = effect_suffix
+    
     if func_or_class is None:
         def decorator(f):
-            return compile(f, anonymous=anonymous, suffix=suffix)
+            return compile(f, anonymous=anonymous, suffix=suffix, 
+                          _effect_caller_module=_effect_caller_module)
         return decorator
 
     if inspect.isclass(func_or_class):
@@ -277,22 +300,55 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
     # Determine grouping key and output paths
     output_manager = get_output_manager()
     
-    if suffix:
-        # Suffix functions: group by (definition_file, scope, suffix)
-        definition_file = source_file
-        scope_name = get_definition_scope()
-        safe_suffix = sanitize_filename(suffix)
-        group_key = (definition_file, scope_name, safe_suffix)
-        
-        # Build file paths with scope and suffix
-        cwd = os.getcwd()
-        if definition_file.startswith(cwd):
-            rel_path = os.path.relpath(definition_file, cwd)
+    # Transitive effect propagation: use the caller's group key if provided
+    # This ensures transitive suffix versions are compiled into the same .so file
+    if _effect_group_key is not None:
+        group_key = _effect_group_key
+        logger.debug(f"Using _effect_group_key: {_effect_group_key}")
+        # Get existing group info to reuse paths
+        existing_group = output_manager.get_group(_effect_group_key)
+        logger.debug(f"existing_group: {existing_group}")
+        if existing_group:
+            ir_file = existing_group.get('ir_file')
+            obj_file = existing_group.get('obj_file')
+            so_file = existing_group.get('so_file')
+            skip_codegen = existing_group.get('skip_codegen', False)
         else:
-            rel_path = definition_file
-        build_dir = os.path.join('build', os.path.dirname(rel_path))
-        base_name = os.path.splitext(os.path.basename(definition_file))[0]
-        file_base = f"{base_name}.{scope_name}.{safe_suffix}"
+            # Fallback: shouldn't happen, but handle gracefully
+            build_dir, ir_file, obj_file, so_file = get_build_paths(source_file)
+            skip_codegen = BuildCache.check_timestamp_skip(ir_file, obj_file, source_file)
+    elif suffix:
+        safe_suffix = sanitize_filename(suffix)
+        
+        # Effect override imports: group by caller module to avoid symbol conflicts
+        if _effect_caller_module is not None:
+            # Use effect_override as scope to distinguish from regular suffix functions
+            scope_name = 'effect_override'
+            # Use caller module for grouping - all effect overrides from same caller
+            # with same suffix go to the same .so file
+            group_key = (_effect_caller_module, scope_name, safe_suffix)
+            
+            # Build file paths based on caller module
+            # Convert module name to path (e.g., 'test.integration.test_foo' -> 'test/integration/test_foo')
+            caller_path = _effect_caller_module.replace('.', os.sep)
+            build_dir = os.path.join('build', os.path.dirname(caller_path))
+            base_name = os.path.basename(caller_path)
+            file_base = f"{base_name}.{scope_name}.{safe_suffix}"
+        else:
+            # Regular suffix functions: group by (definition_file, scope, suffix)
+            definition_file = source_file
+            scope_name = get_definition_scope()
+            group_key = (definition_file, scope_name, safe_suffix)
+            
+            # Build file paths with scope and suffix
+            cwd = os.getcwd()
+            if definition_file.startswith(cwd):
+                rel_path = os.path.relpath(definition_file, cwd)
+            else:
+                rel_path = definition_file
+            build_dir = os.path.join('build', os.path.dirname(rel_path))
+            base_name = os.path.splitext(os.path.basename(definition_file))[0]
+            file_base = f"{base_name}.{scope_name}.{safe_suffix}"
         
         # Define output file paths
         os.makedirs(build_dir, exist_ok=True)
@@ -333,6 +389,17 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
     compiler = group['compiler']
     skip_codegen = group['skip_codegen']
     
+    # Capture effect context at decoration time
+    # This ensures JIT compilation uses the effect bindings that were active
+    # when @compile was applied, not when the function is first called
+    from ..effect import capture_effect_context, restore_effect_context
+    from ..effect import start_effect_tracking, stop_effect_tracking
+    from ..effect import push_compilation_context, pop_compilation_context
+    _captured_effect_context = capture_effect_context()
+    _current_suffix = suffix  # Capture the suffix for this function
+    _caller_module = _effect_caller_module  # Capture caller module for grouping
+    _group_key = group_key  # Capture group key for transitive propagation
+    
     # Queue compilation callback instead of compiling immediately
     # This enables two-pass compilation for mutual recursion support
     if not skip_codegen:
@@ -346,21 +413,46 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
         _source_file = source_file
         _registry = registry
         _start_line = start_line
+        _func_info = func_info
         
         def compile_callback(comp):
             """Deferred compilation callback"""
-            # Set source context for accurate error messages during compilation
-            set_source_context(_source_file, _start_line - 1)
-            # Compile the function into group's compiler
-            logger.debug(f"Deferred compile {_func_ast.name}")
-            comp.compile_function_from_ast(
-                _func_ast,
-                _func_source,
-                reset_module=False,  # Never reset since forward declarations exist
-                param_type_hints=_param_type_hints,
-                return_type_hint=_return_type_hint,
-                user_globals=_user_globals,
-            )
+            # Start tracking effect usage for this function
+            start_effect_tracking()
+            
+            # Push compilation context so handle_call knows the current suffix
+            # and effect overrides for transitive propagation
+            logger.debug(f"compile_callback: _current_suffix={_current_suffix}, _captured_effect_context={_captured_effect_context}")
+            if _current_suffix:
+                push_compilation_context(_current_suffix, _captured_effect_context, _caller_module, _group_key)
+                logger.debug(f"Pushed compilation context: suffix={_current_suffix}")
+            
+            try:
+                # Restore effect context that was captured at decoration time
+                # This ensures effect.xxx resolves to the correct implementation
+                with restore_effect_context(_captured_effect_context):
+                    # Set source context for accurate error messages during compilation
+                    set_source_context(_source_file, _start_line - 1)
+                    # Compile the function into group's compiler
+                    logger.debug(f"Deferred compile {_func_ast.name}")
+                    comp.compile_function_from_ast(
+                        _func_ast,
+                        _func_source,
+                        reset_module=False,  # Never reset since forward declarations exist
+                        param_type_hints=_param_type_hints,
+                        return_type_hint=_return_type_hint,
+                        user_globals=_user_globals,
+                    )
+            finally:
+                # Pop compilation context
+                if _current_suffix:
+                    pop_compilation_context()
+            
+            # Stop tracking and record effect dependencies
+            effect_deps = stop_effect_tracking()
+            if effect_deps:
+                _func_info.effect_dependencies = effect_deps
+                logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
             
             # After compilation, scan for declared functions and record dependencies
             if not hasattr(comp, 'imported_user_functions'):
@@ -384,6 +476,10 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
     wrapper._original_name = func.__name__
     wrapper._actual_func_name = actual_func_name
     wrapper._group_key = group_key
+    wrapper._captured_effect_context = _captured_effect_context
+    
+    # Store wrapper reference in func_info for on-demand suffix generation
+    func_info.wrapper = wrapper
     
     # Add wrapper to group
     output_manager.add_wrapper_to_group(group_key, wrapper)
@@ -393,11 +489,14 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
     def handle_call(visitor, args, node):
         from llvmlite import ir
         from ..registry import get_unified_registry
+        from ..effect import get_current_compilation_context
+        
         logger.debug(f"@compile handle_call: func={func.__name__}, wrapper._mangled_name={getattr(wrapper, '_mangled_name', None)}")
         lookup_mangled = getattr(wrapper, '_mangled_name', None)
         func_name = func.__name__
         registry = get_unified_registry()
         func_info_lookup = None
+        
         if lookup_mangled:
             # If wrapper carries a specific mangled version, use it directly
             resolved_info = registry.get_function_info_by_mangled(lookup_mangled)
@@ -426,7 +525,6 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
                 if not resolved_info:
                     raise NameError(f"Overloaded function '{func_name}' with signature {[getattr(t,'get_name',lambda:str(t))() for t in arg_types]} not registered")
                 actual_func_name = resolved_info.mangled_name if resolved_info.mangled_name else func_name
-        
 
         # Get or declare the function in the module
         logger.debug(f"Function call: actual_func_name={actual_func_name}, resolved_info.param_names={resolved_info.param_names}")
@@ -517,23 +615,76 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
         """
         from ..valueref import ValueRef
         from ..registry import get_unified_registry
+        from ..effect import get_current_compilation_context
         from llvmlite import ir
         
         # Get function info from registry
         registry = get_unified_registry()
+        func_name = func.__name__
+        suffix_info = None  # Initialize for later use
         
         # Check if this wrapper has a specific mangled name (for overloaded functions)
         lookup_mangled = getattr(wrapper, '_mangled_name', None)
         if lookup_mangled:
             func_info = registry.get_function_info_by_mangled(lookup_mangled)
             if not func_info:
-                raise NameError(f"Function '{func.__name__}' with mangled '{lookup_mangled}' not found in registry")
+                raise NameError(f"Function '{func_name}' with mangled '{lookup_mangled}' not found in registry")
             actual_func_name = func_info.mangled_name
         else:
-            func_info = registry.get_function_info(func.__name__)
+            func_info = registry.get_function_info(func_name)
             if not func_info:
-                raise NameError(f"Function '{func.__name__}' not found in registry")
-            actual_func_name = func_info.mangled_name if func_info.mangled_name else func.__name__
+                raise NameError(f"Function '{func_name}' not found in registry")
+            actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
+        
+        # ========== Transitive Effect Propagation for Function Pointers ==========
+        # When a function is used as a value (function pointer), we also need to
+        # check if we're in a compilation context with effect overrides.
+        # If the function uses an overridden effect, we should return the suffix version.
+        compilation_ctx = get_current_compilation_context()
+        
+        if compilation_ctx and not lookup_mangled:
+            ctx_suffix = compilation_ctx.get('suffix')
+            ctx_effects = compilation_ctx.get('effect_overrides', {})
+            ctx_group_key = compilation_ctx.get('group_key')
+            
+            if ctx_suffix and ctx_effects:
+                # Check if the function uses any overridden effect
+                func_effect_deps = func_info.effect_dependencies if func_info else set()
+                overridden_effects = set(ctx_effects.keys())
+                
+                if func_effect_deps & overridden_effects:
+                    # The function uses an overridden effect
+                    # We need to use/generate a suffix version
+                    suffix_mangled_name = f"{func_name}_{ctx_suffix}"
+                    
+                    # Check if suffix version already exists
+                    suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
+                    
+                    if not suffix_info:
+                        # Generate suffix version on-demand
+                        logger.debug(f"handle_cast: Generating transitive suffix version: {suffix_mangled_name}")
+                        original_wrapper = func_info.wrapper if func_info else None
+                        
+                        if original_wrapper and hasattr(original_wrapper, '__wrapped__'):
+                            # Re-compile with the current effect context
+                            # Use the caller's group_key to ensure the transitive function
+                            # is compiled into the same .so file
+                            from ..effect import restore_effect_context
+                            with restore_effect_context(ctx_effects):
+                                new_wrapper = compile(
+                                    original_wrapper.__wrapped__,
+                                    suffix=ctx_suffix,
+                                    _effect_group_key=ctx_group_key
+                                )
+                            
+                            # Get the newly registered function info
+                            suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
+                    
+                    if suffix_info:
+                        # Use the suffix version
+                        func_info = suffix_info
+                        actual_func_name = suffix_mangled_name
+                        logger.debug(f"handle_cast: Using transitive suffix version: {actual_func_name}")
         
         # Try to get function from module, or declare it
         try:
@@ -568,11 +719,15 @@ def compile(func_or_class=None, anonymous=False, suffix=None):
             func_type_hint = func_type[[], func_info.return_type_hint]
         
         # Return ValueRef with actual IR function pointer
-        return wrap_value(
+        # Return ValueRef with actual IR function pointer
+        # Note: Transitive effect propagation is already handled above by selecting
+        # the correct suffix version. The returned ir_func is the correct function.
+        result = wrap_value(
             ir_func,
             kind='pointer',
             type_hint=func_type_hint,
         )
+        return result
     
     wrapper.handle_call = handle_call
     wrapper.handle_cast = handle_cast

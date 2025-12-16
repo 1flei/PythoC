@@ -109,6 +109,12 @@ class FunctionInfo:
     mangled_name: Optional[str] = None  # For function overloading
     overload_enabled: bool = False  # Whether overloading is enabled for this function
     so_file: Optional[str] = None  # Path to the .so file for this function
+    # Effect system: track which effects this function uses (e.g., {'rng', 'd_impl'})
+    # Used for transitive effect propagation - when a function with suffix calls
+    # another function that uses an overridden effect, we generate a suffix version
+    effect_dependencies: Set[str] = field(default_factory=set)
+    # The wrapper object for this function (used for on-demand suffix generation)
+    wrapper: Optional[Any] = None
 
 
 @dataclass
@@ -510,11 +516,19 @@ class UnifiedCompilationRegistry:
             self._compiled_functions[func_info.source_file].append(func_info.name)
         
         # Store function info under original name
-        self._function_info[func_info.name] = func_info
-        
-        # If has mangled name (overload), also store by mangled
+        # IMPORTANT: Only store under original name if this is the base version (no suffix)
+        # or if no base version exists yet. This prevents suffix versions from
+        # overwriting the base version in the registry.
         if func_info.mangled_name:
+            # This is a suffix/overload version
+            # Only store under original name if no base version exists
+            if func_info.name not in self._function_info:
+                self._function_info[func_info.name] = func_info
+            # Always store by mangled name
             self._function_info_by_mangled[func_info.mangled_name] = func_info
+        else:
+            # This is the base version (no suffix)
+            self._function_info[func_info.name] = func_info
         
         # Store type hints if available
         if func_info.return_type_hint or func_info.param_type_hints:

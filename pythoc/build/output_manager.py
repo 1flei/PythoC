@@ -138,32 +138,55 @@ class OutputManager:
         Phase 1: Forward declare all functions
         Phase 2: Compile all function bodies
         
+        Supports transitive effect propagation: if compiling a function body
+        triggers generation of new suffix versions (e.g., b_get_value_mock),
+        those new functions are also compiled in subsequent iterations.
+        
         Args:
             group_key: Group identifier
             
         Returns:
             bool: True if compilation succeeded, False if failed
         """
-        pending = self._pending_compilations.get(group_key, [])
-        if not pending:
-            return True
-        
         group = self._pending_groups.get(group_key)
         if not group:
             return True
         
         compiler = group['compiler']
         
-        # Clear pending first to avoid re-compilation on error
-        del self._pending_compilations[group_key]
+        # Track all compiled func_infos to avoid re-compilation
+        compiled_funcs = set()
         
-        # Phase 1: Forward declare all functions in this group
-        for callback, func_info in pending:
-            self._forward_declare_function(compiler, func_info)
-        
-        # Phase 2: Compile all function bodies
-        for callback, func_info in pending:
-            callback(compiler)
+        # Loop until no more pending compilations for this group
+        # This handles transitive effect propagation where compiling one function
+        # may trigger generation of new suffix versions
+        while True:
+            pending = self._pending_compilations.get(group_key, [])
+            if not pending:
+                break
+            
+            # Clear pending to avoid re-processing
+            del self._pending_compilations[group_key]
+            
+            # Filter out already compiled functions
+            new_pending = []
+            for callback, func_info in pending:
+                func_key = func_info.mangled_name or func_info.name
+                if func_key not in compiled_funcs:
+                    new_pending.append((callback, func_info))
+                    compiled_funcs.add(func_key)
+            
+            if not new_pending:
+                break
+            
+            # Phase 1: Forward declare all new functions
+            for callback, func_info in new_pending:
+                self._forward_declare_function(compiler, func_info)
+            
+            # Phase 2: Compile all new function bodies
+            # Note: This may add more pending compilations to this group
+            for callback, func_info in new_pending:
+                callback(compiler)
         
         return True
     
