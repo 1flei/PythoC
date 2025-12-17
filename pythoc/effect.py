@@ -426,7 +426,7 @@ class Effect:
         '_resolve_effect', '_get_current_suffix', '_RESERVED',
         'get_effect_impl', 'has_effect', 'list_effects',
         'is_direct_assignment', 'handle_attribute',  # Compiler integration methods
-        'handle_cast', 'handle_call',  # Prevent these from being treated as effects
+        'handle_call',  # Prevent these from being treated as effects
     })
 
     def __init__(self):

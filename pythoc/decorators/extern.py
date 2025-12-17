@@ -14,7 +14,7 @@ class ExternFunctionWrapper:
         self.config = kwargs
         self._ctypes_func = None
 
-    def handle_call(self, visitor, args, node):
+    def handle_call(self, visitor, func_ref, args, node):
         from ..valueref import ensure_ir, wrap_value, get_type
         from llvmlite import ir
         try:

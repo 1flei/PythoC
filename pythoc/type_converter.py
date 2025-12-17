@@ -183,9 +183,15 @@ class TypeConverter:
                 type_hint=target_type
             )
         
-        # Step 1: Auto-promote Python values to PC values
+        # Step 1: Handle @compile wrapper -> func conversion
+        # When source is a Python value that is a @compile wrapper, convert to func pointer
         if isinstance(value, ValueRef) and value.is_python_value():
-            value = self._promote_python_to_pc(value.get_python_value(), stripped_target)
+            python_val = value.get_python_value()
+            if hasattr(python_val, '_is_compiled') and python_val._is_compiled:
+                # This is a @compile wrapper - convert to func pointer
+                return self._convert_compile_wrapper_to_func(python_val, target_type)
+            # Otherwise, auto-promote Python values to PC values
+            value = self._promote_python_to_pc(python_val, stripped_target)
             return value
         
         # For actual conversion operations, use base types (strip refined types too)
@@ -308,14 +314,14 @@ class TypeConverter:
                     # Single element: (tag,) for void variants
                     tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
                     tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
-                    return target_type.handle_call(self._visitor, [tag_ref], None)
+                    return target_type.handle_call(self._visitor, target_type, [tag_ref], None)
                 elif len(python_val) == 2:
                     # Two elements: (tag, payload)
                     tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
                     tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
                     payload_py_type = PythonType.wrap(python_val[1], is_constant=True)
                     payload_ref = wrap_value(python_val[1], kind="python", type_hint=payload_py_type)
-                    return target_type.handle_call(self._visitor, [tag_ref, payload_ref], None)
+                    return target_type.handle_call(self._visitor, target_type, [tag_ref, payload_ref], None)
                 else:
                     raise TypeError(f"Enum initialization requires 1 or 2 elements, got {len(python_val)}")
             elif isinstance(python_val, int):
@@ -323,7 +329,7 @@ class TypeConverter:
                 from .builtin_entities.python_type import PythonType
                 tag_py_type = PythonType.wrap(python_val, is_constant=True)
                 tag_ref = wrap_value(python_val, kind="python", type_hint=tag_py_type)
-                return target_type.handle_call(self._visitor, [tag_ref], None)
+                return target_type.handle_call(self._visitor, target_type, [tag_ref], None)
         
         # Handle list/tuple to array conversion
         if isinstance(python_val, list):
@@ -392,6 +398,110 @@ class TypeConverter:
         else:
             raise TypeError(f"Cannot infer PC type from Python type {type(python_val).__name__}")
     
+    def _convert_compile_wrapper_to_func(self, wrapper, target_type) -> ValueRef:
+        """Convert @compile wrapper to func pointer type.
+        
+        This handles the conversion of a @compile decorated function to a function
+        pointer. The wrapper contains all the metadata needed to declare/get the
+        IR function and build the appropriate func type.
+        
+        Args:
+            wrapper: The @compile wrapper function object
+            target_type: Target func type (may be None for auto-inference)
+        
+        Returns:
+            ValueRef with func pointer type_hint
+        """
+        from .registry import get_unified_registry
+        from .effect import get_current_compilation_context
+        from .builtin_entities import func as func_type_cls
+        from llvmlite import ir
+        
+        registry = get_unified_registry()
+        func_name = wrapper._original_name
+        
+        # Check if this wrapper has a specific mangled name
+        lookup_mangled = getattr(wrapper, '_mangled_name', None)
+        if lookup_mangled:
+            func_info = registry.get_function_info_by_mangled(lookup_mangled)
+            if not func_info:
+                raise NameError(f"Function '{func_name}' with mangled '{lookup_mangled}' not found in registry")
+            actual_func_name = func_info.mangled_name
+        else:
+            func_info = registry.get_function_info(func_name)
+            if not func_info:
+                raise NameError(f"Function '{func_name}' not found in registry")
+            actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
+        
+        # Handle transitive effect propagation
+        compilation_ctx = get_current_compilation_context()
+        
+        if compilation_ctx and not lookup_mangled:
+            ctx_suffix = compilation_ctx.get('suffix')
+            ctx_effects = compilation_ctx.get('effect_overrides', {})
+            ctx_group_key = compilation_ctx.get('group_key')
+            
+            if ctx_suffix and ctx_effects:
+                func_effect_deps = func_info.effect_dependencies if func_info else set()
+                overridden_effects = set(ctx_effects.keys())
+                
+                if func_effect_deps & overridden_effects:
+                    suffix_mangled_name = f"{func_name}_{ctx_suffix}"
+                    suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
+                    
+                    if not suffix_info:
+                        logger.debug(f"Generating transitive suffix version: {suffix_mangled_name}")
+                        original_wrapper = func_info.wrapper if func_info else None
+                        
+                        if original_wrapper and hasattr(original_wrapper, '__wrapped__'):
+                            from .effect import restore_effect_context
+                            from .decorators.compile import compile as compile_decorator
+                            with restore_effect_context(ctx_effects):
+                                compile_decorator(
+                                    original_wrapper.__wrapped__,
+                                    suffix=ctx_suffix,
+                                    _effect_group_key=ctx_group_key
+                                )
+                            suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
+                    
+                    if suffix_info:
+                        func_info = suffix_info
+                        actual_func_name = suffix_mangled_name
+                        logger.debug(f"Using transitive suffix version: {actual_func_name}")
+        
+        # Get or declare the function in the module
+        module = self._visitor.module
+        module_context = module.context
+        
+        try:
+            ir_func = module.get_global(actual_func_name)
+        except KeyError:
+            # Declare the function
+            param_llvm_types = []
+            for param_name in func_info.param_names:
+                param_type = func_info.param_type_hints.get(param_name)
+                if param_type and hasattr(param_type, 'get_llvm_type'):
+                    param_llvm_types.append(param_type.get_llvm_type(module_context))
+                else:
+                    param_llvm_types.append(ir.IntType(32))
+            
+            if func_info.return_type_hint and hasattr(func_info.return_type_hint, 'get_llvm_type'):
+                return_llvm_type = func_info.return_type_hint.get_llvm_type(module_context)
+            else:
+                return_llvm_type = ir.VoidType()
+            
+            llvm_func_type = ir.FunctionType(return_llvm_type, param_llvm_types)
+            ir_func = ir.Function(module, llvm_func_type, actual_func_name)
+        
+        # Build func type hint
+        param_types = [func_info.param_type_hints[p] for p in func_info.param_names]
+        if param_types:
+            func_type_hint = func_type_cls[param_types, func_info.return_type_hint]
+        else:
+            func_type_hint = func_type_cls[[], func_info.return_type_hint]
+        
+        return wrap_value(ir_func, kind='pointer', type_hint=func_type_hint)
+
     def promote_to_pc_default(self, python_val) -> ValueRef:
         """Promote Python value to default PC type
         
@@ -716,7 +826,7 @@ class TypeConverter:
                     f"Variant {variant_names[variant_idx]} requires payload of type {variant_payload_type}, "
                     f"but struct has no payload field"
                 )
-            return target_enum_type.handle_call(self._visitor, [tag_vref], None)
+            return target_enum_type.handle_call(self._visitor, target_enum_type, [tag_vref], None)
         else:
             # Has payload
             payload_vref = source_field_values[1]
@@ -733,7 +843,7 @@ class TypeConverter:
             if payload_type != variant_payload_type:
                 payload_vref = self.convert(payload_vref, variant_payload_type)
             
-            return target_enum_type.handle_call(self._visitor, [tag_vref, payload_vref], None)
+            return target_enum_type.handle_call(self._visitor, target_enum_type, [tag_vref, payload_vref], None)
 
     def _build_conversion_registry(self):
         """Build dispatch table for conversions using LLVM types."""

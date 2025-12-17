@@ -69,7 +69,7 @@ def create_yield_iterator_wrapper(func, func_ast, analyzer, user_globals, source
     placeholder_wrapper._original_ast = func_ast
     
     # Add handle_call that triggers yield inlining
-    def handle_call(visitor, args, node):
+    def handle_call(visitor, func_ref, args, node):
         from ..valueref import wrap_value
         from ..builtin_entities.python_type import PythonType
         # Create a dummy result that will trigger inlining in for loop

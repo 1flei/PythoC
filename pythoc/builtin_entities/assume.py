@@ -39,11 +39,12 @@ class assume(BuiltinFunction):
         return 'assume'
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call):
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle assume(value, pred1, pred2, "tag1", ...) call
         
         Args:
             visitor: AST visitor instance
+            func_ref: ValueRef of the callable (assume function)
             args: Pre-evaluated argument ValueRefs
             node: ast.Call node
             
@@ -117,7 +118,7 @@ class assume(BuiltinFunction):
                 pred_callable = predicate_arg
             
             refined_type = refined[pred_callable]
-            return refined_type.handle_call(visitor, value_args, node)
+            return refined_type.handle_call(visitor, refined_type, value_args, node)
         
         value_arg = args[0]
         
@@ -206,7 +207,7 @@ class assume(BuiltinFunction):
         else:
             refined_type = refined[tuple(refined_args)]
         
-        return refined_type.handle_call(visitor, [value_arg], node)
+        return refined_type.handle_call(visitor, refined_type, [value_arg], node)
     
     @classmethod
     def _create_refined_type_from_predicate(cls, predicate, param_types, visitor):

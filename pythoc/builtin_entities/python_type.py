@@ -222,26 +222,27 @@ class PythonType(_PythonTypeBase):
         
         # Assignment is valid but is a no-op (zero-sized field)
     
-    def handle_call(self, visitor, args, node: ast.Call):
+    def handle_call(self, visitor, func_ref, args, node: ast.Call):
         """Handle calling a Python object.
         
         Strategy:
         1. If the Python object has a 'handle_call' attribute (function): 
-           call it with (visitor, args, node) - allows custom IR generation
+           call it with (visitor, func_ref, args, node) - allows custom IR generation
         2. Otherwise, if constant and callable: evaluate at compile time using constant args
         3. Otherwise: raise error with helpful message
         
         Args:
             visitor: AST visitor
+            func_ref: ValueRef of the callable
             args: Pre-evaluated arguments (list of ValueRef)
             node: ast.Call node
         """
         if self._is_constant and callable(self._python_object):
             # Check if the callable has a custom handle_call method
             if hasattr(self._python_object, 'handle_call') and callable(self._python_object.handle_call):
-                # Call the custom handler with visitor, args, and node
+                # Call the custom handler with visitor, func_ref, args, and node
                 # This allows Python functions to generate IR directly
-                return self._python_object.handle_call(visitor, args, node)
+                return self._python_object.handle_call(visitor, func_ref, args, node)
             
             # Default behavior: compile-time evaluation
             return self._eval_call(visitor, node, self._python_object)

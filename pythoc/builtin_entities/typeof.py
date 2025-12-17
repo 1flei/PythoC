@@ -43,7 +43,7 @@ class typeof(BuiltinFunction):
             return PythonType.wrap(value_or_type, is_constant=True)
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call):
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle typeof(x) call in @compile context
         
         Strategy:

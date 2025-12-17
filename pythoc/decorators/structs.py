@@ -8,11 +8,12 @@ from ..logger import set_source_context
 
 
 def add_struct_handle_call(cls):
-    def handle_call(visitor, args, node):
+    def handle_call(visitor, func_ref, args, node):
         """Handle struct construction with new protocol
         
         Args:
             visitor: AST visitor
+            func_ref: ValueRef of the callable (the struct type itself)
             args: Pre-evaluated arguments (should be empty)
             node: Original ast.Call node
         """

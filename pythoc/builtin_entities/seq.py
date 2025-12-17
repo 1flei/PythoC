@@ -20,7 +20,7 @@ class seq(BuiltinFunction):
         return True
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call):
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle seq(end) or seq(start, end) call
         
         Returns:
@@ -45,10 +45,10 @@ class seq(BuiltinFunction):
             )
         
         if len(args) == 1:
-            return counter.handle_call(visitor, args, node)
+            return counter.handle_call(visitor, func_ref, args, node)
         elif len(args) == 2:
-            return counter_range.handle_call(visitor, args, node)
+            return counter_range.handle_call(visitor, func_ref, args, node)
         elif len(args) == 3:
-            return counter_range_step.handle_call(visitor, args, node)
+            return counter_range_step.handle_call(visitor, func_ref, args, node)
         else:
             logger.error("seq() takes 1 to 3 arguments", node=node, exc_type=ValueError)

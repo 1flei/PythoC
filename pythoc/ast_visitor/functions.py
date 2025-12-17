@@ -180,7 +180,7 @@ class FunctionsMixin:
                 self.visitor = visitor
                 self.func_globals = func_globals
             
-            def handle_call(self, visitor, args, call_node):
+            def handle_call(self, visitor, func_ref, args, call_node):
                 """Execute closure inline using ClosureAdapter"""
                 # Build parameter bindings
                 param_names = [arg.arg for arg in self.func_ast.args.args]

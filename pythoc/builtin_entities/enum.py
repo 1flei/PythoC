@@ -191,11 +191,12 @@ class EnumType(CompositeType):
         cls._field_types_resolved = True
     
     @classmethod
-    def handle_call(cls, visitor, args, node):
+    def handle_call(cls, visitor, func_ref, args, node):
         """Handle enum construction: E(E.Tag, payload) or E(E.Tag)
         
         Args:
             visitor: AST visitor
+            func_ref: ValueRef of the callable (the enum type itself)
             args: [tag_value] or [tag_value, payload_value]
             node: ast.Call node
         """

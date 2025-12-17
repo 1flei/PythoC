@@ -610,8 +610,7 @@ class LLVMCompiler:
                 ir_str = str(self.module)
             except Exception:
                 ir_str = "<failed to serialize module>"
-            logger.error(f"Verification failed: {e}")
-            logger.error(f"Module IR:\n{ir_str}")
+            logger.error(f"Verification failed: {e}\nModule IR:\n{ir_str}")
             raise e
         return True
     

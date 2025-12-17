@@ -345,7 +345,7 @@ class RefinedType(CompositeType):
         return wrap_value(new_refined_type, kind='python', type_hint=PythonType(new_refined_type))
     
     @classmethod
-    def handle_call(cls, visitor, args, node):
+    def handle_call(cls, visitor, func_ref, args, node):
         """Handle refined type constructor call: refined[...](value)
         
         Creates refined type instance without checking predicates.

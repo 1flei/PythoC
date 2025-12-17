@@ -27,11 +27,12 @@ class char(BuiltinFunction):
         return True
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call):
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle char(value) call
         
         Args:
             visitor: AST visitor instance
+            func_ref: ValueRef of the callable (char function)
             args: Pre-evaluated argument ValueRefs
             node: ast.Call node
             

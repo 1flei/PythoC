@@ -14,7 +14,7 @@ class sizeof(BuiltinFunction):
         return 'sizeof'
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call) -> ir.Value:
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
         """Handle sizeof(type) call
         
         Unified implementation using TypeResolver to parse all types.
