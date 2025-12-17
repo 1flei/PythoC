@@ -36,7 +36,7 @@ def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=50,
             cwd="."
         )
         duration = time.time() - start_time

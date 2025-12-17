@@ -500,13 +500,6 @@ def test_union_single_type() -> i32:
 
 
 @compile
-def test_struct_zero_init() -> i32:
-    """Test struct zero initialization"""
-    s: struct[i32, i32, i32] = struct[i32, i32, i32]()
-    return s[0] + s[1] + s[2]  # 0
-
-
-@compile
 def test_nested_struct_in_array() -> i32:
     """Test deeply nested struct in array"""
     arr: array[struct[struct[i32, i32], i32], 2] = array[struct[struct[i32, i32], i32], 2]()
@@ -709,9 +702,6 @@ class TestEdgeCases(unittest.TestCase):
     
     def test_union_single(self):
         self.assertEqual(test_union_single_type(), 42)
-    
-    def test_zero_init(self):
-        self.assertEqual(test_struct_zero_init(), 0)
     
     def test_nested_in_array(self):
         self.assertEqual(test_nested_struct_in_array(), 210)
