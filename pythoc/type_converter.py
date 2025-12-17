@@ -149,8 +149,6 @@ class TypeConverter:
                 linear_path=value.linear_path
             )
         
-        logger.debug("Type conversion", value=value, target=target_type, is_python=value.is_python_value())
-        
         # Step 0: Handle PythonType (pyconst) target - type checking only, no IR conversion
         from .builtin_entities.python_type import PythonType
         if isinstance(stripped_target, PythonType):
@@ -273,8 +271,6 @@ class TypeConverter:
             python_val: Python value to promote
             target_type: Optional target PC type (for context-aware promotion)
         """
-        logger.debug("Promote python to PC", python_val=python_val, target_type=target_type)
-        
         # Handle refined tuple types - extract the actual tuple values
         # This happens when visit_Tuple returns refined[struct[...], "tuple"]
         from .builtin_entities.refined import RefinedType
@@ -369,7 +365,6 @@ class TypeConverter:
                 raise TypeError(f"Cannot promote Python {type(python_val).__name__} to pointer type")
         
         ir_val = ir.Constant(llvm_type, python_val)
-        logger.debug("Promote to PC", target_type=target_type, llvm_type=llvm_type, ir_val=ir_val)
         return wrap_value(ir_val, kind="value", type_hint=target_type)
         
     @staticmethod
@@ -1165,10 +1160,8 @@ class TypeConverter:
             # Both are Python values - return as-is, let caller handle Python-level operations
             return left, right, False
         if not right.is_python_value() and left.is_python_value():
-            logger.debug("Promoting left operand", left=left, right=right)
             left = self._promote_python_to_pc(left.get_python_value(), right.type_hint)
         if not left.is_python_value() and right.is_python_value():
-            logger.debug("Promoting right operand", left=left, right=right)
             right = self._promote_python_to_pc(right.get_python_value(), left.type_hint)
         if not isinstance(left, ValueRef) or left.type_hint is None:
             raise TypeError("unify_binop_types requires ValueRef with type_hint")
@@ -1176,7 +1169,6 @@ class TypeConverter:
             raise TypeError("unify_binop_types requires ValueRef with type_hint")
         left_pc_type = left.type_hint
         right_pc_type = right.type_hint
-        logger.debug("Binary operands", left=left, right=right, left_type=left_pc_type, right_type=right_pc_type)
         left_is_float = hasattr(left_pc_type, '_is_float') and left_pc_type._is_float
         right_is_float = hasattr(right_pc_type, '_is_float') and right_pc_type._is_float
         if left_is_float or right_is_float:

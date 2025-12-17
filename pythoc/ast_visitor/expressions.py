@@ -35,7 +35,6 @@ class ExpressionsMixin:
         if isinstance(value, ValueRef):
             return value
 
-        logger.debug(f"Converting Python constant to IR: {name} = {value}")
         if hasattr(value, 'get_value'):
             return value.get_value()
         
@@ -156,7 +155,6 @@ class ExpressionsMixin:
                 return self._wrap_python_to_valueref(node.id, value)
         
         # Otherwise raise error
-        logger.debug(f"Variable '{node.id}' not found, available: {list(self.ctx.user_globals.keys())}")
         logger.error(f"Variable '{node.id}' not defined", node=node, exc_type=NameError)
     
 

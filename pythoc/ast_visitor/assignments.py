@@ -351,9 +351,6 @@ class AssignmentsMixin:
         Now uses the new context system to track PC types alongside LLVM types.
         Supports static local variables (converted to global variables with internal linkage).
         """
-        import ast as ast_module
-        logger.debug(f"visit_AnnAssign: {ast_module.unparse(node)}")
-        
         if not isinstance(node.target, ast.Name):
             logger.error("AnnAssign only supports simple names", node=node, exc_type=RuntimeError)
         var_name = node.target.id
@@ -381,7 +378,6 @@ class AssignmentsMixin:
                 f"AnnAssign requires valid PC type annotation. annotation: {annotation_str}", node)
 
         # Now parse the RHS
-        logger.debug("AnnAssign processing", has_value=(node.value is not None))
         if node is None or node.value is None:
             # No initialization value - create undefined value (matches C behavior)
             llvm_type = pc_type.get_llvm_type(self.module.context)
@@ -393,10 +389,8 @@ class AssignmentsMixin:
             # If the type of RHS does not match pc_type, convert it
             if rvalue.type_hint != pc_type:
                 rvalue = self.type_converter.convert(rvalue, pc_type)
-                logger.debug("AnnAssign converted", result_type=rvalue.type_hint)
             
         # Store the value
-        logger.debug(f"visit_AnnAssign before store: var_name={var_name}, node={ast_module.unparse(node)}, rvalue={rvalue}, pc_type={pc_type}")
         self._store_to_new_lvalue(node, var_name, pc_type, rvalue)
         
         # Handle linear token registration for the new variable

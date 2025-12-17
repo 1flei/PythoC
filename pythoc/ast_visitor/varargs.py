@@ -49,9 +49,6 @@ def detect_varargs(func_node: ast.FunctionDef, type_resolver) -> Tuple[str, Opti
     # Parse annotation using type_resolver to determine the kind
     parsed_type = type_resolver.parse_annotation(annotation)
     
-    from ..logger import logger
-    logger.debug(f"detect_varargs: annotation={ast.dump(annotation)}, parsed_type={parsed_type}")
-    
     # Check if parsed type is struct, union, or enum
     from ..builtin_entities import struct, union, enum
     from ..builtin_entities.struct import StructType

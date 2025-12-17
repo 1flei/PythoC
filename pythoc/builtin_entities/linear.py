@@ -57,8 +57,6 @@ class linear(BuiltinType):
         token_value = ir.Constant(ir.LiteralStructType([]), [])
         result = wrap_value(token_value, kind='value', type_hint=linear)
         
-        from ..logger import logger
-        logger.debug(f"linear() created token at line {getattr(node, 'lineno', '?')}")
         return result
     
     @classmethod

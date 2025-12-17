@@ -18,7 +18,6 @@ class ControlFlowMixin:
         for name, hint in self.func_type_hints.items():
             pc_func_name = name
             expected_pc_type = hint.get("return")
-        logger.debug("Return statement", func=pc_func_name, expected_type=expected_pc_type)
         if not self.builder.block.is_terminated:
             if node.value:
                 # Evaluate the return value first to get ValueRef with tracking info
@@ -30,9 +29,7 @@ class ControlFlowMixin:
                 
                 # convert to expected_pc_type is specified
                 if expected_pc_type is not None:
-                    logger.debug("Converting return value", value=value, expected_type=expected_pc_type)
                     value = self.type_converter.convert(value, expected_pc_type)
-                logger.debug("Return value", value=value)
                 
                 # Check if return type is void
                 from ..builtin_entities.types import void

@@ -94,7 +94,6 @@ class InlineVisitor(
         if result.kind == "python" and hasattr(result.value, node.attr):
             # Access Python object attribute directly
             attr_value = getattr(result.value, node.attr)
-            logger.debug("Accessing Python object attribute", obj=result.value, attr=node.attr, value=attr_value)
             
             # Determine type hint from attribute annotation if available
             type_hint = None
@@ -192,7 +191,6 @@ class InlineVisitor(
                 # Check if param_value is a raw Python object (not ValueRef)
                 if not isinstance(param_value, ValueRef):
                     # Raw Python object - store it directly
-                    logger.debug("Inline param binding (Python object)", name=param_name, value=param_value)
                     from ..builtin_entities.python_type import PythonType
                     param_info = VariableInfo(
                         name=param_name,
@@ -210,7 +208,6 @@ class InlineVisitor(
                 if param_type is None:
                     logger.error(f"Cannot determine type for parameter {param_name}",
                                 node=func_ast, exc_type=ValueError)
-                logger.debug("Inline param binding", name=param_name, value=param_value)
                 
                 if param_value.is_python_value():
                     param_info = VariableInfo(
@@ -288,7 +285,6 @@ class InlineVisitor(
                     if v and not v.is_python_value():
                         target_llvm_type = ensure_ir(v).type
                         target_pc_type = v.type_hint
-                        logger.debug("Got type from IR return", pc_type=target_pc_type, llvm_type=target_llvm_type)
                         break
                 
                 # If all returns are Python constants, infer type from function signature or first return value
@@ -298,14 +294,12 @@ class InlineVisitor(
                     if inferred_type:
                         target_pc_type = inferred_type
                         target_llvm_type = self.get_llvm_type(inferred_type)
-                        logger.debug("Inferred type from function annotation", pc_type=target_pc_type, llvm_type=target_llvm_type)
                     else:
                         # Use type from first return value
                         for _, v in return_values:
                             if v and v.type_hint:
                                 target_pc_type = v.type_hint
                                 target_llvm_type = self.get_llvm_type(target_pc_type)
-                                logger.debug("Got type from first return value", pc_type=target_pc_type, llvm_type=target_llvm_type)
                                 break
                 
                 if target_llvm_type is None:
@@ -314,7 +308,6 @@ class InlineVisitor(
                 
                 # Create phi node
                 phi = self.builder.phi(target_llvm_type)
-                logger.debug("Created phi node", type=target_llvm_type)
                 
                 for block, val in return_values:
                     if val.is_python_value():
@@ -322,7 +315,6 @@ class InlineVisitor(
                         py_value = val.type_hint.get_python_object()
                         llvm_const = ir.Constant(target_llvm_type, py_value)
                         phi.add_incoming(llvm_const, block)
-                        logger.debug("Added Python constant to phi", value=py_value, block=block.name)
                     else:
                         # LLVM value
                         val_ir = ensure_ir(val)
@@ -334,10 +326,8 @@ class InlineVisitor(
                             converted_ir = ensure_ir(converted)
                             self.builder.position_at_end(saved_block)
                             phi.add_incoming(converted_ir, block)
-                            logger.debug("Added converted IR value to phi", block=block.name)
                         else:
                             phi.add_incoming(val_ir, block)
-                            logger.debug("Added IR value to phi", block=block.name)
                 
                 return wrap_value(phi, kind="value", type_hint=target_pc_type)
             

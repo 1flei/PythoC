@@ -128,7 +128,6 @@ class func(BuiltinType):
         # Type conversion for arguments if needed
         converted_args = []
         for idx, (arg, expected_type) in enumerate(zip(args, param_llvm_types)):
-            logger.debug("Function pointer call arg", func_ptr=func_ptr_ir, idx=idx, arg=arg, expected_type=expected_type)
             target_pc_type = cls.param_types[idx]
             
             # Check if PC types match (including refined types)
