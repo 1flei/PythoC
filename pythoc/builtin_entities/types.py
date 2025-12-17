@@ -288,7 +288,6 @@ class ptr(BuiltinType):
         """Handle pointer addition: ptr + offset """
         from ..valueref import wrap_value, ensure_ir, get_type
 
-        logger.debug("Pointer arithmetic add", left_is_ptr=left, right_is_int=right)
         # cast to pc type for python value
         if right.is_python_value():
             right = visitor.type_converter.convert(right, i64)
@@ -314,8 +313,6 @@ class ptr(BuiltinType):
         """Handle pointer dereference operations (unified duck typing protocol)
 
         """
-
-        logger.debug("Pointer dereference", base=base)
 
         from ..valueref import wrap_value, ensure_ir
         from ..ir_helpers import propagate_qualifiers
@@ -581,7 +578,6 @@ class ptr(BuiltinType):
         
         try:
             result = visitor.type_converter.convert(value, cls)
-            logger.debug("Typed pointer call conversion", value=value, result=result)
             return result
         except TypeError as e:
             logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)

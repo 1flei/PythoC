@@ -92,7 +92,6 @@ class LoopsMixin:
         """
         # First evaluate the iterator expression
         iter_val = self.visit_expression(node.iter)
-        logger.debug(f"Visiting for loop, iterable: {node.iter}, iter_val: {iter_val}")
         
         # Check for compile-time constant (Python value)
         if iter_val.is_python_value() and hasattr(iter_val.get_python_value(), "__iter__"):
@@ -138,8 +137,6 @@ class LoopsMixin:
                 f"Yield functions must be inlinable (no complex control flow, recursion, etc.)",
                 node=node, exc_type=TypeError
             )
-        
-        logger.debug(f"Successfully inlined yield function using universal kernel")
         
         try:
             # If there's an else clause, we need to track if break occurred

@@ -89,9 +89,6 @@ class CallsMixin:
         # Evaluate the callable expression
         result = self.visit_expression(func_node)
         
-        import ast as ast_module
-        logger.debug(f"_get_callable: result={result}, result.value={getattr(result, 'value', None)}, result.type_hint={getattr(result, 'type_hint', None)}")
-        
         # Check if result is a type class (not ValueRef) with handle_call
         # This happens for type expressions like array[T, N], struct[...], etc.
         if isinstance(result, type) and hasattr(result, 'handle_call'):
@@ -99,12 +96,10 @@ class CallsMixin:
     
         # Check value for handle_call (e.g., ExternFunctionWrapper, @compile wrapper)
         if hasattr(result, 'value') and hasattr(result.value, 'handle_call'):
-            logger.debug(f"_get_callable: returning result.value with handle_call, value={result.value}, type={type(result.value)}")
             return result.value, result
             
         # Check type_hint for handle_call (e.g., BuiltinType, PythonType, func type)
         if hasattr(result, 'type_hint') and result.type_hint and hasattr(result.type_hint, 'handle_call'):
-            logger.debug(f"_get_callable: returning result.type_hint with handle_call, type_hint={result.type_hint}")
             return result.type_hint, result
         
         logger.error(f"Object does not support calling: {result}", node=func_node, exc_type=TypeError)
@@ -179,10 +174,6 @@ class CallsMixin:
         Returns:
             ValueRef with call result
         """
-        from ..logger import logger
-        func_name = getattr(func_callable, 'name', '<unknown>')
-        logger.debug(f"_perform_call: func={func_name}, return_type_hint={return_type_hint}, is_linear={hasattr(return_type_hint, 'is_linear') and return_type_hint.is_linear() if return_type_hint else False}")
-        
         # Evaluate arguments (unless already evaluated for overloading)
         if evaluated_args is not None:
             args = evaluated_args
@@ -247,7 +238,4 @@ class CallsMixin:
                         node=node, exc_type=TypeError)
         
         # Return with type hint (tracking happens in visit_expression if needed)
-        result = wrap_value(call_result, kind="value", type_hint=return_type_hint)
-        from ..logger import logger
-        logger.debug(f"Function call result: type={return_type_hint}")
-        return result
+        return wrap_value(call_result, kind="value", type_hint=return_type_hint)

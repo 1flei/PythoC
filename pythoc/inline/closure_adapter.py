@@ -95,8 +95,6 @@ class ClosureAdapter:
             )
             
             # Log captured variables for debugging
-            if inline_op.captured_vars:
-                logger.debug(f"Closure captures: {inline_op.captured_vars}")
             
         except Exception as e:
             logger.error(f"ClosureAdapter: failed to create inline op: {e}")
@@ -192,7 +190,6 @@ class ClosureAdapter:
                 is_parameter=False
             )
             self.visitor.ctx.var_registry.declare(temp_info, allow_shadow=True)
-            logger.debug(f"Created arg temp: {temp_name} for parameter {param_name}")
         
         return arg_temps
     

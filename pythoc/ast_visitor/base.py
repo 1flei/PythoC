@@ -417,7 +417,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if isinstance(result, type):
             return result
 
-        logger.debug("Expression result", result=result)
         return result
     
     # ========================================================================
@@ -572,11 +571,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         
         # Check if ValueRef carries variable tracking info
         if not hasattr(value_ref, 'var_name') or not value_ref.var_name:
-            logger.debug(f"_transfer_linear_ownership: No var_name, skipping ({reason})")
             return  # No tracking info, nothing to transfer
         
         if not hasattr(value_ref, 'linear_path') or value_ref.linear_path is None:
-            logger.debug(f"_transfer_linear_ownership: No linear_path for {value_ref.var_name}, skipping ({reason})")
             return  # No linear path, nothing to transfer
         
         var_name = value_ref.var_name
@@ -584,7 +581,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
         var_info = self.lookup_variable(var_name)
         
         if not var_info:
-            logger.debug(f"_transfer_linear_ownership: Variable '{var_name}' not found, skipping ({reason})")
             return  # Variable not found, skip
         
         # Get all linear paths in this value (starting from base_path)

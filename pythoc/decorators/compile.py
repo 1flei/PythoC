@@ -307,7 +307,6 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
         logger.debug(f"Using _effect_group_key: {_effect_group_key}")
         # Get existing group info to reuse paths
         existing_group = output_manager.get_group(_effect_group_key)
-        logger.debug(f"existing_group: {existing_group}")
         if existing_group:
             ir_file = existing_group.get('ir_file')
             obj_file = existing_group.get('obj_file')
@@ -422,10 +421,8 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
             
             # Push compilation context so handle_call knows the current suffix
             # and effect overrides for transitive propagation
-            logger.debug(f"compile_callback: _current_suffix={_current_suffix}, _captured_effect_context={_captured_effect_context}")
             if _current_suffix:
                 push_compilation_context(_current_suffix, _captured_effect_context, _caller_module, _group_key)
-                logger.debug(f"Pushed compilation context: suffix={_current_suffix}")
             
             try:
                 # Restore effect context that was captured at decoration time
@@ -434,7 +431,6 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
                     # Set source context for accurate error messages during compilation
                     set_source_context(_source_file, _start_line - 1)
                     # Compile the function into group's compiler
-                    logger.debug(f"Deferred compile {_func_ast.name}")
                     comp.compile_function_from_ast(
                         _func_ast,
                         _func_source,

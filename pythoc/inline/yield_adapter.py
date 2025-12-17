@@ -120,8 +120,6 @@ class YieldInlineAdapter:
                 merged_globals.update(inline_result.required_globals)
                 self.visitor.ctx.user_globals = merged_globals
                 
-                logger.debug(f"Merged user_globals now has {len(self.visitor.ctx.user_globals)} keys")
-                
                 # CRITICAL: Pre-declare loop variable(s) before the inlined statements
                 # This is needed because yield points will only assign to them, not declare them
                 if return_type_annotation and inlined_stmts:

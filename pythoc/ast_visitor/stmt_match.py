@@ -265,8 +265,6 @@ class MatchStatementMixin:
             self.get_next_label("match_merge")
         )
 
-        logger.debug(f"Pattern match: cases:{node.cases}, subjects:{len(subjects)}")
-        
         # Process each case as an if-elif branch
         for idx, case in enumerate(node.cases):
             pattern = case.pattern
@@ -729,8 +727,6 @@ class MatchStatementMixin:
             logger.error(f"Expected ValueRef for subscript access, got {type(subject)}",
                         node=None, exc_type=TypeError)
         
-        logger.debug("Subscript access in match", subject_type=subject.type_hint.__name__ if hasattr(subject.type_hint, '__name__') else str(subject.type_hint), index=index, subject_kind=subject.kind)
-        
         # Create constant index
         index_ir = llvm_ir.Constant(llvm_ir.IntType(32), index)
         index_const = wrap_value(index_ir, kind="value", type_hint=i32)
@@ -750,13 +746,11 @@ class MatchStatementMixin:
             ptr_type = subject_type.get_decay_pointer_type()
             ptr_subject = self.type_converter.convert(subject, ptr_type)
             result = ptr_type.handle_subscript(self, ptr_subject, index_const, fake_node)
-            logger.debug("Array subscript result", result_kind=result.kind if hasattr(result, 'kind') else 'N/A')
             return result
         
         # For other types (struct, enum, tuple), use handle_subscript directly
         if hasattr(subject_type, 'handle_subscript'):
             result = subject_type.handle_subscript(self, subject, index_const, fake_node)
-            logger.debug("Direct subscript result", result_kind=result.kind if hasattr(result, 'kind') else 'N/A')
             return result
         
         logger.error(f"Type {subject_type} does not support subscript access",

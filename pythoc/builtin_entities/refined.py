@@ -290,8 +290,6 @@ class RefinedType(CompositeType):
             '_param_names': param_names,
         })
         
-        logger.debug(f"Created refined type from predicate: {class_name} with {len(param_names)} param(s)")
-        
         from ..valueref import wrap_value
         from .python_type import PythonType
         return wrap_value(new_refined_type, kind='python', type_hint=PythonType(new_refined_type))
@@ -337,8 +335,6 @@ class RefinedType(CompositeType):
             '_param_types': [base_type],
             '_param_names': ['value'],
         })
-        
-        logger.debug(f"Created refined type: {class_name} base={base_type}, predicates={pred_names}, tags={tags}")
         
         from ..valueref import wrap_value
         from .python_type import PythonType

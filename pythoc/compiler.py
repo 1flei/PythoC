@@ -199,7 +199,6 @@ class LLVMCompiler:
         user_globals = user_globals or self.user_globals
         type_resolver = TypeResolver(self.module.context, user_globals=user_globals)
         
-        logger.debug(f"Parse func ast_node={ast_node}, name={ast_node.name}, args={ast_node.args.args}")
         # First, create function declaration
         param_types = []
         for arg in ast_node.args.args:
@@ -233,18 +232,15 @@ class LLVMCompiler:
         # Detect varargs type (only call once and save results)
         from .ast_visitor.varargs import detect_varargs
         varargs_kind, element_types, varargs_name = detect_varargs(ast_node, type_resolver)
-        logger.debug(f"detect_varargs returned: kind={varargs_kind}, element_types={element_types}, name={varargs_name}")
         
         # For struct varargs with a @compile decorated class (e.g., *args: Data),
         # element_types will be empty. Extract field types from the struct class.
         if varargs_kind == 'struct' and not element_types and ast_node.args.vararg:
             annotation = ast_node.args.vararg.annotation
             parsed_type = type_resolver.parse_annotation(annotation)
-            logger.debug(f"Struct varargs: parsed_type={parsed_type}, has _struct_fields={hasattr(parsed_type, '_struct_fields')}, has _field_types={hasattr(parsed_type, '_field_types')}")
             if hasattr(parsed_type, '_field_types'):
                 # For struct[...] created types, use _field_types
                 element_types = list(parsed_type._field_types)
-                logger.debug(f"Using _field_types: {element_types}")
             elif hasattr(parsed_type, '_struct_fields'):
                 # Create AST nodes for each field type (for consistency)
                 element_types = []
@@ -274,9 +270,6 @@ class LLVMCompiler:
                     param_types.append(elem_pc_type.get_llvm_type(self.module.context))
                 else:
                     raise TypeError(f"Invalid varargs element type: {elem_type}")
-        
-        if ast_node.args.vararg:
-            logger.debug(f"Func_name={ast_node.name}, Vararg_kind={varargs_kind}, has_llvm_varargs={has_llvm_varargs}")
         
         # Create function type and declaration (or reuse existing forward declaration)
         func_type = ir.FunctionType(return_type, param_types, var_arg=has_llvm_varargs)
@@ -325,7 +318,6 @@ class LLVMCompiler:
         else:
             func_type_hints[ast_node.name] = {'params': param_hints}
         
-        logger.debug(f"Compile ast from func {ast_node.name}! user_globals={'None' if user_globals is None else f'has {len(user_globals)} keys'}")
         visitor = LLVMIRVisitor(self.module, None, func_type_hints, None, compiler=self, user_globals=user_globals)
         
         visitor.current_function = llvm_function
@@ -437,7 +429,6 @@ class LLVMCompiler:
             
             # Create an anonymous struct type
             struct_type_llvm = ir.LiteralStructType(expanded_types_llvm)
-            logger.debug(f"Creating varargs struct: expanded_types_llvm={expanded_types_llvm}, struct_type_llvm={struct_type_llvm}")
             
             # Allocate space for the struct
             varargs_alloca = visitor._create_alloca_in_entry(struct_type_llvm, f"{varargs_name}_struct")
@@ -557,10 +548,8 @@ class LLVMCompiler:
         empty_blocks_cleaned = 0
         for block in llvm_function.blocks:
             instr_list = list(block.instructions)
-            logger.debug(f"Checking block {block.name}: {len(instr_list)} instructions")
             if not instr_list:
                 # Empty block - add unreachable to make it valid LLVM IR
-                logger.debug(f"Adding unreachable to empty block {block.name}")
                 visitor.builder.position_at_end(block)
                 visitor.builder.unreachable()
                 empty_blocks_cleaned += 1
@@ -598,10 +587,8 @@ class LLVMCompiler:
             return False
         
         # Parse the module to check for errors
-        logger.debug(f"Verifying LLVM module... {self.module.name}")
         try:
             module_str = str(self.module)
-            logger.debug(f"Module IR:\n{module_str}")
             llvm_module = binding.parse_assembly(module_str)
             llvm_module.verify()
         except Exception as e:

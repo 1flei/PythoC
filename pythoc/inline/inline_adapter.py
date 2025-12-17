@@ -202,7 +202,6 @@ class InlineAdapter:
                 is_parameter=False
             )
             self.visitor.ctx.var_registry.declare(temp_info, allow_shadow=True)
-            logger.debug(f"Created arg temp: {temp_name} for parameter {param_name}")
         
         return arg_temps
     

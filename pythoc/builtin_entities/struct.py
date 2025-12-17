@@ -402,8 +402,6 @@ class StructType(CompositeType):
         field_index = cls.get_field_index(attr_name)
         field_type = cls._field_types[field_index]
 
-        logger.debug("Struct attribute access", base=base, attr=attr_name, field_idx=field_index, field_type=field_type)
-        
         # Propagate qualifiers from struct type to field type
         # If we have const[struct], accessing field should give const[field_type]
         if base.type_hint:
@@ -478,8 +476,6 @@ class StructType(CompositeType):
         import ast
         from ..valueref import wrap_value, ensure_ir, get_type
 
-        logger.debug(f"handle_subscript: base={base}, index={index}, node={node}")
-        
         # VALUE SUBSCRIPT: s[0] - field access by index
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
@@ -537,9 +533,6 @@ class StructType(CompositeType):
         # Use GEP to get field address
         zero = ir.Constant(ir.IntType(32), 0)
         idx = ir.Constant(ir.IntType(32), llvm_index_val)
-        logger.debug(f"GEP: struct_ptr={struct_ptr}, struct_ptr.type={struct_ptr.type}, index_val={llvm_index_val}, field_types={cls._field_types}")
-        if hasattr(struct_ptr.type, 'pointee'):
-            logger.debug(f"GEP: pointee type={struct_ptr.type.pointee}, pointee elements={getattr(struct_ptr.type.pointee, 'elements', 'N/A')}")
         field_ptr = visitor.builder.gep(struct_ptr, [zero, idx])
         
         # Load value and return with address for lvalue support

@@ -25,8 +25,6 @@ class IfStatementMixin:
         Returns:
             tuple: (then_terminated, else_terminated) - whether each branch terminates
         """
-        logger.debug(f"If condition={condition}")
-        
         # Handle Python constant condition (compile-time evaluation)
         if condition.is_python_value():
             py_cond = condition.get_python_value()
@@ -187,10 +185,6 @@ class IfStatementMixin:
             # Simple if without else - check linear token handling
             then_terminated, _ = self.process_condition(condition, then_fn_tracked, None)
             
-            logger.debug(f"Simple if without else: linear_states_before={linear_states_before}")
-            logger.debug(f"Simple if without else: then_linear_states={then_linear_states}")
-            logger.debug(f"Simple if without else: then_terminated={then_terminated}")
-            
             # If then branch terminates (return/break/continue), the code after the if
             # only executes when the condition is false. In this case, linear tokens
             # should be restored to their state before the if.
@@ -200,18 +194,15 @@ class IfStatementMixin:
                     var_info = self.lookup_variable(name)
                     if var_info:
                         var_info.linear_states = dict(states_dict)
-                logger.debug(f"Simple if: then terminated, restored linear states to before if")
             else:
                 # Then branch doesn't terminate - check that linear tokens weren't modified
                 # Because the code after if could execute after either branch
                 for var_name, states_before in linear_states_before.items():
                     var_info = self.lookup_variable(var_name)
                     states_after = var_info.linear_states if var_info else {}
-                    logger.debug(f"Simple if: var={var_name}, states_before={states_before}, states_after={states_after}")
                     
                     for path, state_before in states_before.items():
                         state_after = states_after.get(path)
-                        logger.debug(f"Simple if: path={path}, state_before={state_before}, state_after={state_after}")
                         if state_after is None:
                             path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
                             logger.error(
@@ -219,7 +210,6 @@ class IfStatementMixin:
                             )
                         if state_before == 'active' and state_after != 'active':
                             path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            logger.debug(f"Simple if: RAISING ERROR for {path_str}")
                             logger.error(
                                 f"Linear token '{path_str}' modified in if without else branch. "
                                 f"All branches must handle tokens consistently", node

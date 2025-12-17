@@ -63,8 +63,6 @@ def inline(func=None, *, cls_method=False, method=False):
         param_names = [arg.arg for arg in func_ast.args.args]
 
         def create_handler(visitor, args, node, self_obj=None):
-            logger.debug("Inline function execution", func=f.__name__, cls_method=cls_method, method=method, args=args, self_obj=self_obj)
-            
             # For method=True, first arg is self (Python object), rest are IR args
             if method:
                 if len(args) < 1:
@@ -172,5 +170,4 @@ def register_inline_handlers(cls):
         if is_cls_method or is_method:
             if hasattr(attr, '_handler_name') and hasattr(attr, '_handler_method'):
                 setattr(cls, attr._handler_name, attr._handler_method)
-                logger.debug(f"Registered {attr._handler_name} on class {cls.__name__}")
     return cls

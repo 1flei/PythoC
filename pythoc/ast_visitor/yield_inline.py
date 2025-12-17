@@ -217,9 +217,6 @@ class YieldInliner:
         for var in local_vars:
             rename_map[var] = f"{var}_inlined{suffix}"
         
-        from ..logger import logger
-        logger.debug(f"Yield inlining: rename_map={rename_map}, local_vars={local_vars}")
-        
         # Don't rename parameters - they will be bound to arguments
         for param in func_ast.args.args:
             if param.arg in rename_map:
