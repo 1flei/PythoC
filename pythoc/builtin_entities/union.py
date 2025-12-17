@@ -91,7 +91,7 @@ class UnionType(CompositeType):
         return max_size
     
     @classmethod
-    def handle_call(cls, visitor, args, node):
+    def handle_call(cls, visitor, func_ref, args, node):
         """Handle union construction: union[i32, f64]()
         
         Creates an uninitialized union value (ir.Undefined).

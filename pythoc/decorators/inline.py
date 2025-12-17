@@ -103,11 +103,11 @@ def inline(func=None, *, cls_method=False, method=False):
             return result
 
         # Create a classmethod handler that ignores the cls parameter
-        def classmethod_handler(cls, visitor, args, node):
+        def classmethod_handler(cls, visitor, func_ref, args, node):
             return create_handler(visitor, args, node)
 
         # Create handle_call for PythonType interception
-        def handle_call_method(visitor, args, node):
+        def handle_call_method(visitor, func_ref, args, node):
             return create_handler(visitor, args, node)
 
         @wraps(f)

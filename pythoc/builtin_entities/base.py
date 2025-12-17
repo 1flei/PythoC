@@ -423,11 +423,12 @@ class BuiltinType(BuiltinEntity):
         )
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call) -> ir.Value:
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
         """Handle type conversion: i32(x)
         
         Args:
             visitor: AST visitor
+            func_ref: ValueRef of the callable (the type itself for type conversions)
             args: Pre-evaluated arguments (list of ValueRef)
             node: ast.Call node
         """

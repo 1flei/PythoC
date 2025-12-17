@@ -31,7 +31,7 @@ class refine(BuiltinFunction):
         return 'refine'
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call):
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle refine(value, pred1, "tag1", ...) call
         
         This function is special - it's a yield function that should be
@@ -39,6 +39,7 @@ class refine(BuiltinFunction):
         
         Args:
             visitor: AST visitor instance
+            func_ref: ValueRef of the callable (refine function)
             args: Pre-evaluated argument ValueRefs (NOT used - we need AST)
             node: ast.Call node
             

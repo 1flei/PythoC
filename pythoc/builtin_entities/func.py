@@ -80,7 +80,7 @@ class func(BuiltinType):
         return True  # func type can be called (represents function pointers)
     
     @classmethod
-    def handle_call(cls, visitor, args, node):
+    def handle_call(cls, visitor, func_ref, args, node):
         """Handle function pointer call
         
         This is called when we have a func-typed value that needs to be called.
@@ -90,7 +90,8 @@ class func(BuiltinType):
         
         Args:
             visitor: AST visitor
-            args: Pre-evaluated arguments (list of ValueRef)
+            func_ref: ValueRef of the function pointer
+            args: Pre-evaluated arguments (actual call arguments)
             node: ast.Call node
         
         Returns:
@@ -98,9 +99,8 @@ class func(BuiltinType):
         """
         from ..valueref import ensure_ir, wrap_value, get_type
         
-        # Get the function pointer value from the call expression
-        # node.func should evaluate to a ValueRef with type_hint=func[...]
-        func_value = visitor.visit_expression(node.func)
+        # Get the function pointer value from func_ref
+        func_value = func_ref
         
         # Check if we need to load the function pointer
         # If func_value.value is an alloca, we need to load it
@@ -124,8 +124,6 @@ class func(BuiltinType):
                 param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
             else:
                 logger.error(f"Cannot get LLVM type from {pc_param_type}", node=node, exc_type=TypeError)
-        
-        # args are already pre-evaluated by visit_Call
         
         # Type conversion for arguments if needed
         converted_args = []

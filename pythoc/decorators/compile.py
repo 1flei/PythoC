@@ -485,251 +485,29 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
     output_manager.add_wrapper_to_group(group_key, wrapper)
     
 
-
-    def handle_call(visitor, args, node):
-        from llvmlite import ir
-        from ..registry import get_unified_registry
-        from ..effect import get_current_compilation_context
+    def handle_call(visitor, func_ref, args, node):
+        """Handle calling a @compile function.
         
-        logger.debug(f"@compile handle_call: func={func.__name__}, wrapper._mangled_name={getattr(wrapper, '_mangled_name', None)}")
-        lookup_mangled = getattr(wrapper, '_mangled_name', None)
-        func_name = func.__name__
-        registry = get_unified_registry()
-        func_info_lookup = None
-        
-        if lookup_mangled:
-            # If wrapper carries a specific mangled version, use it directly
-            resolved_info = registry.get_function_info_by_mangled(lookup_mangled)
-            if not resolved_info:
-                raise NameError(f"Function '{func_name}' with mangled '{lookup_mangled}' not found in registry")
-            actual_func_name = resolved_info.mangled_name
-        else:
-            func_info_lookup = registry.get_function_info(func_name)
-            if not func_info_lookup:
-                raise NameError(f"Function '{func_name}' not found in registry")
-            
-            # If overloading is enabled and we don't have a specific mangled target, resolve by args
-            resolved_info = func_info_lookup
-            actual_func_name = func_info_lookup.mangled_name if func_info_lookup.mangled_name else func_name
-            if func_info_lookup.overload_enabled:
-                # Use pre-evaluated arguments to determine their PC types
-                arg_types = []
-                for arg in args:
-                    if hasattr(arg, 'type_hint') and arg.type_hint:
-                        arg_types.append(arg.type_hint)
-                    else:
-                        raise TypeError("Overloaded call requires PC type hints for arguments; missing type_hint")
-                
-                mangled = _mangle_function_name(func_name, arg_types)
-                resolved_info = registry.get_function_info_by_mangled(mangled)
-                if not resolved_info:
-                    raise NameError(f"Overloaded function '{func_name}' with signature {[getattr(t,'get_name',lambda:str(t))() for t in arg_types]} not registered")
-                actual_func_name = resolved_info.mangled_name if resolved_info.mangled_name else func_name
-
-        # Get or declare the function in the module
-        logger.debug(f"Function call: actual_func_name={actual_func_name}, resolved_info.param_names={resolved_info.param_names}")
-        try:
-            ir_func = visitor.module.get_global(actual_func_name)
-        except KeyError:
-            param_llvm_types = []
-            for param_name in resolved_info.param_names:
-                pc_param_type = resolved_info.param_type_hints.get(param_name)
-                if pc_param_type and hasattr(pc_param_type, 'get_llvm_type'):
-                    # All PC types now accept module_context parameter uniformly
-                    param_llvm_types.append(pc_param_type.get_llvm_type(compiler.module.context))
-                else:
-                    raise TypeError(f"Invalid parameter type hint for '{param_name}' in function '{actual_func_name}'")
-            if resolved_info.return_type_hint and hasattr(resolved_info.return_type_hint, 'get_llvm_type'):
-                # All PC types now accept module_context parameter uniformly
-                return_llvm_type = resolved_info.return_type_hint.get_llvm_type(compiler.module.context)
-            else:
-                return_llvm_type = ir.VoidType()
-            func_type = ir.FunctionType(return_llvm_type, param_llvm_types)
-            ir_func = ir.Function(visitor.module, func_type, actual_func_name)
-            
-            # Automatically track function dependency when declaring it
-            # Add to visitor.compiler if available, otherwise to visitor
-            target_deps = getattr(visitor, 'compiler', visitor)
-            if resolved_info.source_file:
-                if not hasattr(target_deps, 'imported_user_functions'):
-                    target_deps.imported_user_functions = {}
-                if actual_func_name not in target_deps.imported_user_functions:
-                    target_deps.imported_user_functions[actual_func_name] = resolved_info.source_file
-        
-        # Propagate transitive dependencies: if the called function has its own dependencies,
-        # add them to the current visitor's compiler dependency list
-        if hasattr(compiler, 'imported_user_functions'):
-            target_deps = getattr(visitor, 'compiler', visitor)
-            if not hasattr(target_deps, 'imported_user_functions'):
-                target_deps.imported_user_functions = {}
-            for dep_func_name, dep_source_file in compiler.imported_user_functions.items():
-                if dep_func_name not in target_deps.imported_user_functions:
-                    target_deps.imported_user_functions[dep_func_name] = dep_source_file
-        
-        # Perform the call using resolved function info
-        # Get module context for struct types
-        module_context = visitor.module.context if hasattr(visitor, 'module') else None
-        
-        # Build parameter LLVM types with proper module_context handling
-        param_llvm_types = []
-        for p in resolved_info.param_names:
-            param_type = resolved_info.param_type_hints[p]
-            # All PC types now accept module_context parameter uniformly
-            param_llvm_types.append(param_type.get_llvm_type(module_context))
-        
-        logger.debug(f"@compile handle_call: func={actual_func_name}, return_type={resolved_info.return_type_hint}, is_linear={hasattr(resolved_info.return_type_hint, 'is_linear') and resolved_info.return_type_hint.is_linear()}")
-        
-        result = visitor._perform_call(
-            node,
-            ir_func,
-            param_llvm_types,
-            resolved_info.return_type_hint,
-            evaluated_args=args,  # Pass pre-evaluated arguments
-        )
-        
-        # If this is a yield-generated function, mark the result for potential inlining
-        if hasattr(wrapper, '_is_yield_generated') and wrapper._is_yield_generated:
-            result._yield_inline_info = {
-                'func_obj': wrapper,
-                'original_ast': getattr(wrapper, '_original_ast', None),
-                'call_node': node,
-                'call_args': args
-            }
-        
-        return result
-
-    def handle_cast(visitor, node):
-        """Handle casting @compile function to function pointer type
-        
-        This is called when a @compile function is used as a value (e.g., returned or assigned).
-        It returns a ValueRef containing the function pointer.
-        
-        Unified protocol:
-        - Signature: handle_cast(visitor, node) -> ValueRef
-        - visitor: AST visitor instance (provides module, builder, etc.)
-        - node: ast.Name node (the reference to the function)
-        
-        Args:
-            visitor: AST visitor instance (needed to access module and declare function)
-            node: ast.Name node (the function reference)
+        This converts the wrapper to a func pointer via type_converter,
+        then delegates to func.handle_call to generate the call instruction.
         """
-        from ..valueref import ValueRef
-        from ..registry import get_unified_registry
-        from ..effect import get_current_compilation_context
-        from llvmlite import ir
-        
-        # Get function info from registry
-        registry = get_unified_registry()
-        func_name = func.__name__
-        suffix_info = None  # Initialize for later use
-        
-        # Check if this wrapper has a specific mangled name (for overloaded functions)
-        lookup_mangled = getattr(wrapper, '_mangled_name', None)
-        if lookup_mangled:
-            func_info = registry.get_function_info_by_mangled(lookup_mangled)
-            if not func_info:
-                raise NameError(f"Function '{func_name}' with mangled '{lookup_mangled}' not found in registry")
-            actual_func_name = func_info.mangled_name
-        else:
-            func_info = registry.get_function_info(func_name)
-            if not func_info:
-                raise NameError(f"Function '{func_name}' not found in registry")
-            actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
-        
-        # ========== Transitive Effect Propagation for Function Pointers ==========
-        # When a function is used as a value (function pointer), we also need to
-        # check if we're in a compilation context with effect overrides.
-        # If the function uses an overridden effect, we should return the suffix version.
-        compilation_ctx = get_current_compilation_context()
-        
-        if compilation_ctx and not lookup_mangled:
-            ctx_suffix = compilation_ctx.get('suffix')
-            ctx_effects = compilation_ctx.get('effect_overrides', {})
-            ctx_group_key = compilation_ctx.get('group_key')
-            
-            if ctx_suffix and ctx_effects:
-                # Check if the function uses any overridden effect
-                func_effect_deps = func_info.effect_dependencies if func_info else set()
-                overridden_effects = set(ctx_effects.keys())
-                
-                if func_effect_deps & overridden_effects:
-                    # The function uses an overridden effect
-                    # We need to use/generate a suffix version
-                    suffix_mangled_name = f"{func_name}_{ctx_suffix}"
-                    
-                    # Check if suffix version already exists
-                    suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
-                    
-                    if not suffix_info:
-                        # Generate suffix version on-demand
-                        logger.debug(f"handle_cast: Generating transitive suffix version: {suffix_mangled_name}")
-                        original_wrapper = func_info.wrapper if func_info else None
-                        
-                        if original_wrapper and hasattr(original_wrapper, '__wrapped__'):
-                            # Re-compile with the current effect context
-                            # Use the caller's group_key to ensure the transitive function
-                            # is compiled into the same .so file
-                            from ..effect import restore_effect_context
-                            with restore_effect_context(ctx_effects):
-                                new_wrapper = compile(
-                                    original_wrapper.__wrapped__,
-                                    suffix=ctx_suffix,
-                                    _effect_group_key=ctx_group_key
-                                )
-                            
-                            # Get the newly registered function info
-                            suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
-                    
-                    if suffix_info:
-                        # Use the suffix version
-                        func_info = suffix_info
-                        actual_func_name = suffix_mangled_name
-                        logger.debug(f"handle_cast: Using transitive suffix version: {actual_func_name}")
-        
-        # Try to get function from module, or declare it
-        try:
-            ir_func = visitor.module.get_global(actual_func_name)
-        except KeyError:
-            # Declare the function
-            param_llvm_types = []
-            for param_name in func_info.param_names:
-                param_type = func_info.param_type_hints.get(param_name)
-                if param_type and hasattr(param_type, 'get_llvm_type'):
-                    # All PC types now accept module_context parameter uniformly
-                    param_llvm_types.append(param_type.get_llvm_type(wrapper._compiler.module.context))
-                else:
-                    param_llvm_types.append(ir.IntType(32))
-            
-            if func_info.return_type_hint and hasattr(func_info.return_type_hint, 'get_llvm_type'):
-                # All PC types now accept module_context parameter uniformly
-                return_llvm_type = func_info.return_type_hint.get_llvm_type(wrapper._compiler.module.context)
-            else:
-                return_llvm_type = ir.IntType(32)
-            
-            func_type = ir.FunctionType(return_llvm_type, param_llvm_types)
-            ir_func = ir.Function(visitor.module, func_type, actual_func_name)
-        
-        # Build func type hint
-        from ..builtin_entities import func as func_type
         from ..valueref import wrap_value
-        param_types = [func_info.param_type_hints[p] for p in func_info.param_names]
-        if param_types:
-            func_type_hint = func_type[param_types, func_info.return_type_hint]
-        else:
-            func_type_hint = func_type[[], func_info.return_type_hint]
+        from ..builtin_entities import func as func_type_cls
+        from ..builtin_entities.python_type import PythonType
         
-        # Return ValueRef with actual IR function pointer
-        # Return ValueRef with actual IR function pointer
-        # Note: Transitive effect propagation is already handled above by selecting
-        # the correct suffix version. The returned ir_func is the correct function.
-        result = wrap_value(
-            ir_func,
-            kind='pointer',
-            type_hint=func_type_hint,
-        )
-        return result
-    
+        # Wrap the wrapper as a Python value
+        wrapper_ref = wrap_value(wrapper, kind="python", type_hint=PythonType.wrap(wrapper))
+        
+        # Convert wrapper to func pointer using type_converter
+        # This will call _convert_compile_wrapper_to_func internally
+        converted_func_ref = visitor.type_converter.convert(wrapper_ref, func_type_cls, node)
+        
+        # Get the actual func type from the converted result
+        func_type = converted_func_ref.type_hint
+        
+        # Delegate to func.handle_call to generate the call instruction
+        return func_type.handle_call(visitor, converted_func_ref, args, node)
+
     wrapper.handle_call = handle_call
-    wrapper.handle_cast = handle_cast
     wrapper._is_compiled = True
     return wrapper

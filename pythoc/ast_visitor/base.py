@@ -331,7 +331,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     self.func_name = func_name
                     self.func_info = func_info
                 
-                def handle_call(self, visitor, args, node):
+                def handle_call(self, visitor, func_ref, args, node):
                     """Handle calls to functions registered in unified registry"""
                     from llvmlite import ir as llvm_ir
                     

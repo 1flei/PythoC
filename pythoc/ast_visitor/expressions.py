@@ -49,17 +49,14 @@ class ExpressionsMixin:
         # Unified lookup: variables and functions
         var_info = self.lookup_variable(node.id)
         if var_info:
-            # If we have a value_ref, check for handle_cast first
             if var_info.value_ref:
-                if hasattr(var_info.value_ref.value, 'handle_cast'):
-                    return var_info.value_ref.value.handle_cast(self, node)
-                
                 # Check if value has handle_call (e.g., ExternFunctionWrapper)
-                # If so, return value_ref directly (no handle_cast available)
                 if hasattr(var_info.value_ref.value, 'handle_call'):
                     return var_info.value_ref
             
-            # Check if it's a Python type (for backward compatibility)
+            # Check if it's a Python type - return Python value directly
+            # This handles pyconst variables that have alloca (zero-sized {})
+            # but should still return the original Python value
             if var_info.type_hint and hasattr(var_info.type_hint, 'is_python_type'):
                 try:
                     if var_info.type_hint.is_python_type():
@@ -70,7 +67,7 @@ class ExpressionsMixin:
                             kind="python",
                             type_hint=var_info.type_hint
                         )
-                except:
+                except Exception:
                     pass
             
             var = var_info.alloca

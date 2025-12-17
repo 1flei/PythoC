@@ -24,6 +24,15 @@ Log levels (in order of severity):
 
 Environment variables:
     PC_LOG_LEVEL: 0=DEBUG, 1=WARNING, 2=ERROR (default: 1)
+    PC_LOG_MODULES: Comma-separated module path prefixes to enable debug for.
+                    Automatically detects caller module from stack frame.
+                    Examples:
+                      PC_LOG_MODULES=decorators          # pythoc/decorators/*
+                      PC_LOG_MODULES=effect              # pythoc/effect.py
+                      PC_LOG_MODULES=ast_visitor.calls   # pythoc/ast_visitor/calls.py
+                      PC_LOG_MODULES=decorators,effect   # Multiple modules
+                      PC_LOG_MODULES=-build,-registry    # Exclude specific modules
+                    Default: all modules enabled
     PC_RAISE_ON_ERROR: Set to "1" to raise exceptions on errors (for tests)
 
 Error handling:
@@ -58,11 +67,116 @@ class Logger:
         self.current_line_offset = 0  # Line offset for AST nodes (function start line - 1)
         # Default: exit on error (production mode). Set to True for tests that expect exceptions.
         self.raise_on_error = os.environ.get('PC_RAISE_ON_ERROR') == '1'
+        # Module filtering for debug messages
+        self._enabled_modules, self._excluded_modules = self._parse_modules_from_env()
     
     def _get_level_from_env(self, default_level: LogLevel) -> LogLevel:
         """Get log level from environment variable PC_LOG_LEVEL or use default"""
         env_level = int(os.environ.get('PC_LOG_LEVEL', '1'))
         return env_level
+    
+    def _parse_modules_from_env(self) -> tuple:
+        """Parse PC_LOG_MODULES environment variable.
+        
+        Returns:
+            (enabled_modules, excluded_modules): Lists of module prefixes.
+            If enabled_modules is None, all modules are enabled (unless excluded).
+        """
+        env_modules = os.environ.get('PC_LOG_MODULES', '').strip()
+        if not env_modules or env_modules.lower() == 'all':
+            return None, []  # All enabled, none excluded
+        
+        enabled = []
+        excluded = []
+        
+        for mod in env_modules.split(','):
+            mod = mod.strip()
+            if not mod:
+                continue
+            if mod.startswith('-'):
+                # Exclusion: -build means exclude 'build'
+                excluded.append(mod[1:])
+            else:
+                enabled.append(mod)
+        
+        # If only exclusions specified, enable all except excluded
+        if not enabled and excluded:
+            return None, excluded
+        
+        return enabled if enabled else None, excluded
+    
+    def _get_caller_module(self, skip_frames: int = 4) -> Optional[str]:
+        """Get the module path of the caller (relative to pythoc/).
+        
+        Args:
+            skip_frames: Number of frames to skip (default 4 for debug->_log->_get_caller_module)
+        
+        Returns module path like 'decorators.compile' or 'ast_visitor.calls'.
+        """
+        try:
+            frame = inspect.currentframe()
+            # Skip internal logger frames to get to actual caller
+            for _ in range(skip_frames):
+                if frame is not None:
+                    frame = frame.f_back
+            
+            if frame is None:
+                return None
+            
+            filename = frame.f_code.co_filename
+            
+            # Extract module path relative to pythoc/
+            if 'pythoc/' in filename:
+                # Get path after pythoc/
+                rel_path = filename.split('pythoc/')[-1]
+                # Remove .py extension and convert / to .
+                if rel_path.endswith('.py'):
+                    rel_path = rel_path[:-3]
+                module_path = rel_path.replace('/', '.')
+                return module_path
+            
+            return None
+        except Exception:
+            return None
+    
+    def _is_module_enabled(self, caller_module: Optional[str]) -> bool:
+        """Check if a module is enabled for debug logging.
+        
+        Args:
+            caller_module: Module path like 'decorators.compile' or None.
+        
+        Returns:
+            True if the module is enabled, False otherwise.
+        """
+        if caller_module is None:
+            # Unknown caller: enabled unless we have specific module filters
+            return self._enabled_modules is None
+        
+        # Check exclusions first
+        for excluded in self._excluded_modules:
+            if caller_module.startswith(excluded) or caller_module == excluded:
+                return False
+        
+        # If enabled_modules is None, all modules are enabled (except excluded)
+        if self._enabled_modules is None:
+            return True
+        
+        # Otherwise, check if caller matches any enabled prefix
+        for enabled in self._enabled_modules:
+            if caller_module.startswith(enabled) or caller_module == enabled:
+                return True
+        
+        return False
+    
+    def set_modules(self, enabled: Optional[list] = None, excluded: Optional[list] = None):
+        """Programmatically set enabled/excluded modules.
+        
+        Args:
+            enabled: List of module prefixes to enable (None = all modules)
+            excluded: List of module prefixes to exclude
+        """
+        self._enabled_modules = enabled
+        self._excluded_modules = excluded or []
     
     def set_level(self, level: LogLevel):
         """Set minimum log level to display"""
@@ -146,32 +260,46 @@ class Logger:
         return "unknown"
     
     def _format_message(self, level_name: str, msg: str, node: Optional[ast.AST] = None, 
-                       include_location: bool = True, **kwargs) -> str:
+                       include_location: bool = True, caller_module: Optional[str] = None, 
+                       **kwargs) -> str:
         """Format log message with optional key-value pairs and location"""
         location = ""
         if include_location:
             location = f" [{self._get_source_location(node)}]"
         
+        # Include module in output for DEBUG if available
+        module_prefix = f"[{caller_module}] " if caller_module else ""
+        
         if not kwargs:
-            return f"[{level_name}]{location} {msg}"
+            return f"[{level_name}]{location} {module_prefix}{msg}"
         
         # Format key-value pairs (exclude 'node' from kwargs)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k != 'node'}
         if not filtered_kwargs:
-            return f"[{level_name}]{location} {msg}"
+            return f"[{level_name}]{location} {module_prefix}{msg}"
         
         details = " ".join(f"{k}={v}" for k, v in filtered_kwargs.items())
-        return f"[{level_name}]{location} {msg}: {details}"
+        return f"[{level_name}]{location} {module_prefix}{msg}: {details}"
     
-    def _log(self, level: LogLevel, level_name: str, msg: str, node: Optional[ast.AST] = None, **kwargs):
+    def _log(self, level: LogLevel, level_name: str, msg: str, node: Optional[ast.AST] = None, 
+             **kwargs):
         """Internal logging method"""
         if not self.enabled or level < self.level:
             return
         
+        caller_module = None
+        # For DEBUG level, check module filtering
+        if level == LogLevel.DEBUG:
+            # skip_frames=3: debug -> _log -> _get_caller_module
+            caller_module = self._get_caller_module(skip_frames=3)
+            if not self._is_module_enabled(caller_module):
+                return
+        
         # Include location for all log levels
         include_location = True
         formatted = self._format_message(level_name, msg, node=node, 
-                                         include_location=include_location, **kwargs)
+                                         include_location=include_location, 
+                                         caller_module=caller_module, **kwargs)
         
         # Print to stderr for WARNING and ERROR, stdout for DEBUG
         output = sys.stderr if level >= LogLevel.WARNING else sys.stdout
@@ -179,6 +307,9 @@ class Logger:
     
     def debug(self, msg: str, node: Optional[ast.AST] = None, **kwargs):
         """Log debug message (detailed diagnostic info)
+        
+        Filtering is automatic based on caller module.
+        Use PC_LOG_MODULES env var to filter by module path.
         
         Args:
             msg: Message to log

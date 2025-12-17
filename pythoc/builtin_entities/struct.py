@@ -349,13 +349,14 @@ class StructType(CompositeType):
         return cls_names == other_names
     
     @classmethod
-    def handle_call(cls, visitor, args, node):
+    def handle_call(cls, visitor, func_ref, args, node):
         """Handle struct construction: Point() or struct[i32, i32]()
         
         Creates an uninitialized struct value (ir.Undefined).
         
         Args:
             visitor: AST visitor
+            func_ref: ValueRef of the callable (the struct type itself)
             args: Pre-evaluated arguments (should be empty for default constructor)
             node: Original ast.Call node
         """

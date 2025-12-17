@@ -37,7 +37,7 @@ class move(BuiltinFunction):
         return 'move'
     
     @classmethod
-    def handle_call(cls, visitor, args, node: ast.Call):
+    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle move(value) call
         
         move() returns a NEW ValueRef without var_name tracking.
@@ -48,6 +48,7 @@ class move(BuiltinFunction):
         
         Args:
             visitor: AST visitor
+            func_ref: ValueRef of the callable (move function)
             args: Pre-evaluated arguments (ownership already transferred by visit_Call)
             node: ast.Call node
         

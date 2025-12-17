@@ -28,7 +28,7 @@ class _MethodCallWrapper:
         self.base_type = base_type
         self.method_name = method_name
     
-    def handle_call(self, visitor, node):
+    def handle_call(self, visitor, func_ref, args, node):
         """Delegate to base_type's handle_method_call"""
         return self.base_type.handle_method_call(visitor, node, self.method_name)
 
@@ -40,14 +40,16 @@ class CallsMixin:
         """Handle function calls with unified duck typing approach
         
         Design principle (unified protocol):
-        1. Get callable object from node.func
+        1. Get callable object and func_ref from node.func
         2. Pre-evaluate arguments (node.args)
-        3. Delegate to handle_call(visitor, args, node)
+        3. Delegate to handle_call(visitor, func_ref, args, node)
         
-        All callables implement: handle_call(self, visitor, args, node) -> ValueRef
-        where args is a list of pre-evaluated ValueRef objects.
+        All callables implement: handle_call(self, visitor, func_ref, args, node) -> ValueRef
+        where:
+        - func_ref: ValueRef of the callable (for func pointers, this is the pointer value)
+        - args: list of pre-evaluated ValueRef objects
         """
-        callable_obj = self._get_callable(node.func)
+        callable_obj, func_ref = self._get_callable(node.func)
         
         # Pre-evaluate arguments (unified behavior)
         # Handle struct unpacking (*struct_instance)
@@ -65,15 +67,17 @@ class CallsMixin:
             # Transfer linear ownership for function arguments
             self._transfer_linear_ownership(arg, reason="function argument")
         
-        return callable_obj.handle_call(self, args, node)
+        return callable_obj.handle_call(self, func_ref, args, node)
     
     def _get_callable(self, func_node):
-        """Get callable object from function expression
+        """Get callable object and func_ref from function expression
         
         Extracts the object that implements handle_call protocol.
         
         Returns:
-            Object with handle_call method, or None if not found
+            Tuple of (callable_obj, func_ref) where:
+            - callable_obj: Object with handle_call method
+            - func_ref: ValueRef of the callable (for func pointers, etc.)
             
         Protocol implementers:
             - @compile/@inline/@extern functions: wrapper with handle_call
@@ -91,17 +95,17 @@ class CallsMixin:
         # Check if result is a type class (not ValueRef) with handle_call
         # This happens for type expressions like array[T, N], struct[...], etc.
         if isinstance(result, type) and hasattr(result, 'handle_call'):
-            return result
+            return result, result
     
         # Check value for handle_call (e.g., ExternFunctionWrapper, @compile wrapper)
         if hasattr(result, 'value') and hasattr(result.value, 'handle_call'):
             logger.debug(f"_get_callable: returning result.value with handle_call, value={result.value}, type={type(result.value)}")
-            return result.value
+            return result.value, result
             
-        # Check type_hint for handle_call (e.g., BuiltinType, PythonType)
+        # Check type_hint for handle_call (e.g., BuiltinType, PythonType, func type)
         if hasattr(result, 'type_hint') and result.type_hint and hasattr(result.type_hint, 'handle_call'):
             logger.debug(f"_get_callable: returning result.type_hint with handle_call, type_hint={result.type_hint}")
-            return result.type_hint
+            return result.type_hint, result
         
         logger.error(f"Object does not support calling: {result}", node=func_node, exc_type=TypeError)
     

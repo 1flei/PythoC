@@ -88,7 +88,7 @@ class Poly:
         else:
             return arg.type_hint
     
-    def handle_call(self, visitor, args, node: ast.Call):
+    def handle_call(self, visitor, func_ref, args, node: ast.Call):
         """PC callable protocol: dispatch to correct compiled function
         
         Strategy:
@@ -108,7 +108,7 @@ class Poly:
         target_info = self._sig_map.get(sig_key)
         if target_info is not None:
             target_func, _ = target_info
-            return target_func.handle_call(visitor, args, node)
+            return target_func.handle_call(visitor, target_func, args, node)
         
         # Find all enum arguments
         enum_indices = []
@@ -292,5 +292,5 @@ class Poly:
                     
                     return tag_to_func[tags](*params)
 
-        return dynamic_dispatch.handle_call(visitor, args, node)
+        return dynamic_dispatch.handle_call(visitor, dynamic_dispatch, args, node)
         
