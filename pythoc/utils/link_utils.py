@@ -101,7 +101,14 @@ def get_platform_link_flags(shared: bool = False) -> List[str]:
     if sys.platform == 'win32':
         return ['-shared'] if shared else []
     elif sys.platform == 'darwin':
-        return ['-shared', '-undefined', 'dynamic_lookup'] if shared else []
+        # Explicitly specify architecture to avoid x86_64/arm64 mismatch issues
+        import platform
+        arch = platform.machine()
+        arch_flag = ['-arch', arch] if arch in ('arm64', 'x86_64') else []
+        if shared:
+            return arch_flag + ['-shared', '-undefined', 'dynamic_lookup']
+        else:
+            return arch_flag
     else:  # Linux
         if shared:
             # Allow undefined symbols in shared libraries (for circular dependencies)
