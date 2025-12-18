@@ -19,7 +19,7 @@ from ..builtin_entities import (
 )
 from ..builtin_entities import bool as pc_bool
 from ..registry import get_unified_registry, infer_struct_from_access
-from ..builder.llvm_builder import LLVMBuilder
+from ..builder import LLVMBuilder
 
 
 class FunctionsMixin:

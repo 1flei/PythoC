@@ -357,7 +357,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                             return_llvm_type = llvm_ir.VoidType()
                         
                         # Use LLVMBuilder to declare function with C ABI
-                        from ..builder.llvm_builder import LLVMBuilder
+                        from ..builder import LLVMBuilder
                         temp_builder = LLVMBuilder()
                         func_wrapper = temp_builder.declare_function(
                             visitor.module, actual_func_name,

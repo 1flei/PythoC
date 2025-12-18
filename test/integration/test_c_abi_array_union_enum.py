@@ -1126,16 +1126,15 @@ class TestCCallsPythoc_Array(unittest.TestCase):
     
     def _get_pythoc_func_ptr(self, pc_func):
         """Get ctypes function pointer for a pythoc function"""
+        # Use the normal execution path to ensure .so is compiled and loaded
         from pythoc.native_executor import get_multi_so_executor
-        from pythoc.build.output_manager import flush_all_pending_outputs
         executor = get_multi_so_executor()
-        flush_all_pending_outputs()
         
+        # This will compile .so if needed and load the library properly
+        executor.execute_function(pc_func)
+        
+        # Now get the function address from the loaded library
         so_file = pc_func._so_file
-        if so_file not in executor.loaded_libs:
-            lib = ctypes.CDLL(so_file)
-            executor.loaded_libs[so_file] = lib
-        
         lib = executor.loaded_libs[so_file]
         func_name = pc_func._actual_func_name
         native_func = getattr(lib, func_name)
@@ -1199,16 +1198,15 @@ class TestCCallsPythoc_Union(unittest.TestCase):
     
     def _get_pythoc_func_ptr(self, pc_func):
         """Get ctypes function pointer for a pythoc function"""
+        # Use the normal execution path to ensure .so is compiled and loaded
         from pythoc.native_executor import get_multi_so_executor
-        from pythoc.build.output_manager import flush_all_pending_outputs
         executor = get_multi_so_executor()
-        flush_all_pending_outputs()
         
+        # This will compile .so if needed and load the library properly
+        executor.execute_function(pc_func)
+        
+        # Now get the function address from the loaded library
         so_file = pc_func._so_file
-        if so_file not in executor.loaded_libs:
-            lib = ctypes.CDLL(so_file)
-            executor.loaded_libs[so_file] = lib
-        
         lib = executor.loaded_libs[so_file]
         func_name = pc_func._actual_func_name
         native_func = getattr(lib, func_name)
@@ -1272,16 +1270,15 @@ class TestCCallsPythoc_Enum(unittest.TestCase):
     
     def _get_pythoc_func_ptr(self, pc_func):
         """Get ctypes function pointer for a pythoc function"""
+        # Use the normal execution path to ensure .so is compiled and loaded
         from pythoc.native_executor import get_multi_so_executor
-        from pythoc.build.output_manager import flush_all_pending_outputs
         executor = get_multi_so_executor()
-        flush_all_pending_outputs()
         
+        # This will compile .so if needed and load the library properly
+        executor.execute_function(pc_func)
+        
+        # Now get the function address from the loaded library
         so_file = pc_func._so_file
-        if so_file not in executor.loaded_libs:
-            lib = ctypes.CDLL(so_file)
-            executor.loaded_libs[so_file] = lib
-        
         lib = executor.loaded_libs[so_file]
         func_name = pc_func._actual_func_name
         native_func = getattr(lib, func_name)

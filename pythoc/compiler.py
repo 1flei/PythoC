@@ -79,7 +79,7 @@ class LLVMCompiler:
             
             # Declare function with proper ABI handling
             if func_name not in self.module.globals:
-                from .builder.llvm_builder import LLVMBuilder
+                from .builder import LLVMBuilder
                 temp_builder = LLVMBuilder()
                 func_wrapper = temp_builder.declare_function(
                     self.module, func_name,
@@ -278,7 +278,7 @@ class LLVMCompiler:
         
         # Use builder to declare function with C ABI for interop with C code
         # pythoc functions must use C ABI so they can be called from C via function pointers
-        from .builder.llvm_builder import LLVMBuilder, FunctionWrapper
+        from .builder import LLVMBuilder, FunctionWrapper
         temp_builder = LLVMBuilder()
         logger.debug(f"declare_function: {ast_node.name}, param_types={param_types}, return_type={return_type}, existing_func={existing_func}")
         func_wrapper = temp_builder.declare_function(
@@ -366,7 +366,7 @@ class LLVMCompiler:
         
         # Create entry block
         entry_block = llvm_function.append_basic_block('entry')
-        from .builder.llvm_builder import LLVMBuilder
+        from .builder import LLVMBuilder
         ir_builder = ir.IRBuilder(entry_block)
         visitor.builder = LLVMBuilder(ir_builder)
         
