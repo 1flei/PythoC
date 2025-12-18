@@ -59,6 +59,53 @@ class StructType(CompositeType):
         return True
     
     @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes Structure type for FFI.
+        
+        Creates a ctypes.Structure class dynamically based on field types.
+        Uses caching to avoid recreating the same struct type.
+        """
+        import ctypes
+        
+        # Check cache first
+        if hasattr(cls, '_ctypes_struct_cache') and cls._ctypes_struct_cache is not None:
+            return cls._ctypes_struct_cache
+        
+        cls._ensure_field_types_resolved()
+        
+        # Build fields list
+        fields = []
+        for i, field_type in enumerate(cls._field_types):
+            if field_type is None:
+                continue
+            
+            # Get ctypes type for field
+            if hasattr(field_type, 'get_ctypes_type'):
+                field_ctype = field_type.get_ctypes_type()
+            else:
+                # Skip types without ctypes support (e.g., zero-sized types)
+                continue
+            
+            if field_ctype is None:
+                continue
+            
+            # Use field name if available
+            field_name = cls._field_names[i] if cls._field_names and i < len(cls._field_names) else None
+            if field_name is None:
+                field_name = f"field_{i}"
+            
+            fields.append((field_name, field_ctype))
+        
+        # Create ctypes.Structure class dynamically
+        class_name = f"CStruct_{cls.get_name()}"
+        struct_class = type(class_name, (ctypes.Structure,), {
+            '_fields_': fields
+        })
+        
+        cls._ctypes_struct_cache = struct_class
+        return struct_class
+    
+    @classmethod
     def _is_compile_class(cls) -> bool:
         """Check if this struct is from @compile decorated class"""
         return cls._python_class is not None

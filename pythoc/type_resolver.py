@@ -183,7 +183,7 @@ class TypeResolver:
             if issubclass(value, BuiltinEntity) and value.can_be_type():
                 return value
 
-            if getattr(value, "_is_struct", False) or getattr(value, "_is_enum", False):
+            if getattr(value, "_is_struct", False) or getattr(value, "_is_enum", False) or getattr(value, "_is_union", False):
                 return value
 
         if isinstance(value, BuiltinEntity):

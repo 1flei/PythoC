@@ -112,8 +112,9 @@ class ExpressionsMixin:
                 # But DO auto-load union types (which are represented as arrays)
                 if isinstance(pointee_type, ir.ArrayType):
                     # Check if this is a union type (unions use ArrayType for storage)
-                    from ..builtin_entities.union import union
-                    if isinstance(type_hint, type) and issubclass(type_hint, union):
+                    # Use _is_union attribute instead of issubclass check
+                    # because @union decorated classes don't inherit from union
+                    if isinstance(type_hint, type) and getattr(type_hint, '_is_union', False):
                         # Union type: load the value for passing to functions
                         loaded_val = safe_load(self.builder, ensure_ir(var), type_hint, name=f"{node.id}_val")
                         return wrap_value(loaded_val, kind="address", type_hint=type_hint, address=var,

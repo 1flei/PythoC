@@ -341,7 +341,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     try:
                         ir_func = visitor.module.get_global(actual_func_name)
                     except KeyError:
-                        # Declare the function
+                        # Declare the function with proper ABI handling
                         param_llvm_types = []
                         for param_name in self.func_info.param_names:
                             pc_param_type = self.func_info.param_type_hints.get(param_name)
@@ -356,8 +356,14 @@ class LLVMIRVisitor(ast.NodeVisitor):
                         else:
                             return_llvm_type = llvm_ir.VoidType()
                         
-                        func_type = llvm_ir.FunctionType(return_llvm_type, param_llvm_types)
-                        ir_func = llvm_ir.Function(visitor.module, func_type, actual_func_name)
+                        # Use LLVMBuilder to declare function with C ABI
+                        from ..builder.llvm_builder import LLVMBuilder
+                        temp_builder = LLVMBuilder()
+                        func_wrapper = temp_builder.declare_function(
+                            visitor.module, actual_func_name,
+                            param_llvm_types, return_llvm_type
+                        )
+                        ir_func = func_wrapper.ir_function
                     
                     # Build parameter LLVM types
                     param_llvm_types = []

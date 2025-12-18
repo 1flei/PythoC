@@ -412,75 +412,41 @@ class MultiSOExecutor:
         return wrapper
     
     def _get_function_signature(self, func_name: str, compiler) -> Optional[Tuple]:
-        """Get function signature from LLVM module"""
-        if compiler.module is None:
-            return None
+        """Get function signature from registry using pythoc types.
         
-        for func in compiler.module.functions:
-            if func.name == func_name:
-                return_type = self._llvm_type_to_ctypes(func.return_value.type)
-                param_types = [self._llvm_type_to_ctypes(arg.type) for arg in func.args]
-                return (return_type, param_types)
+        Uses pythoc types from registry to get correct ctypes mapping,
+        especially for signed/unsigned distinction that LLVM IR doesn't preserve.
+        """
+        from .registry import get_unified_registry
+        registry = get_unified_registry()
+        func_info = registry.get_function_info(func_name)
+        if not func_info:
+            func_info = registry.get_function_info_by_mangled(func_name)
+        
+        if func_info:
+            # Use pythoc types for accurate ctypes mapping
+            return_type = self._pc_type_to_ctypes(func_info.return_type_hint)
+            param_types = [
+                self._pc_type_to_ctypes(func_info.param_type_hints.get(name))
+                for name in func_info.param_names
+            ]
+            return (return_type, param_types)
         
         return None
     
-    def _llvm_type_to_ctypes(self, llvm_type: ir.Type) -> Any:
-        """Convert LLVM type to ctypes type"""
-        if isinstance(llvm_type, ir.IntType):
-            width = llvm_type.width
-            if width == 1:
-                return ctypes.c_bool
-            elif width == 8:
-                return ctypes.c_int8
-            elif width == 16:
-                return ctypes.c_int16
-            elif width == 32:
-                return ctypes.c_int32
-            elif width == 64:
-                return ctypes.c_int64
-            else:
-                return ctypes.c_int32
-        elif isinstance(llvm_type, ir.FloatType):
-            return ctypes.c_float
-        elif isinstance(llvm_type, ir.DoubleType):
-            return ctypes.c_double
-        elif isinstance(llvm_type, ir.PointerType):
-            return ctypes.c_void_p
-        elif isinstance(llvm_type, ir.VoidType):
+    def _pc_type_to_ctypes(self, pc_type) -> Any:
+        """Convert pythoc type to ctypes type.
+        
+        All pythoc types should implement get_ctypes_type() method.
+        """
+        if pc_type is None:
             return None
-        elif isinstance(llvm_type, (ir.IdentifiedStructType, ir.LiteralStructType)):
-            # Handle struct types by creating a ctypes.Structure
-            # This is critical for C ABI compatibility - small structs
-            # (like Point with 2 x i32 = 8 bytes) are passed/returned
-            # by value through registers, not pointers
-            
-            # Build fields list recursively
-            fields = []
-            for i, field_type in enumerate(llvm_type.elements):
-                field_ctype = self._llvm_type_to_ctypes(field_type)
-                if field_ctype is None:  # void type, skip
-                    continue
-                fields.append((f"field_{i}", field_ctype))
-            
-            # Create ctypes.Structure class dynamically
-            # Use a cache to avoid recreating the same struct type
-            if not hasattr(self, '_struct_type_cache'):
-                self._struct_type_cache = {}
-            
-            # Create cache key from struct elements
-            cache_key = str(llvm_type)
-            if cache_key in self._struct_type_cache:
-                return self._struct_type_cache[cache_key]
-            
-            class_name = f"CStruct_{len(self._struct_type_cache)}"
-            struct_class = type(class_name, (ctypes.Structure,), {
-                '_fields_': fields
-            })
-            
-            self._struct_type_cache[cache_key] = struct_class
-            return struct_class
-        else:
-            return ctypes.c_void_p
+        
+        if hasattr(pc_type, 'get_ctypes_type'):
+            return pc_type.get_ctypes_type()
+        
+        # Fallback for unknown types
+        return ctypes.c_void_p
     
     def clear(self):
         """Clear all loaded libraries and caches"""

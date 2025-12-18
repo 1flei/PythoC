@@ -247,13 +247,10 @@ class TypeConverter:
         converter_func = self._conversion_registry.get(conversion_key)
         if converter_func is None:
             value_hint = get_type_hint(value) if hasattr(value, '__class__') else None
-            raise TypeError(
-                f"No conversion from {source_type} to {target_llvm_type}\
-"
-                f"  value type: {type(value)}, value hint: {value_hint}\
-"
-                f"  target_type: {target_type}"
-            )
+            logger.error(
+                f"No conversion from {source_type} to {target_llvm_type}"
+                f"  value type: {type(value)}, value hint: {value_hint}"
+                f"  target_type: {target_type}", node)
 
         return converter_func(
             value,
@@ -471,7 +468,7 @@ class TypeConverter:
         try:
             ir_func = module.get_global(actual_func_name)
         except KeyError:
-            # Declare the function
+            # Declare the function with proper ABI handling via builder
             param_llvm_types = []
             for param_name in func_info.param_names:
                 param_type = func_info.param_type_hints.get(param_name)
@@ -485,8 +482,14 @@ class TypeConverter:
             else:
                 return_llvm_type = ir.VoidType()
             
-            llvm_func_type = ir.FunctionType(return_llvm_type, param_llvm_types)
-            ir_func = ir.Function(module, llvm_func_type, actual_func_name)
+            # Use LLVMBuilder to declare function with C ABI
+            from .builder.llvm_builder import LLVMBuilder
+            temp_builder = LLVMBuilder()
+            func_wrapper = temp_builder.declare_function(
+                module, actual_func_name,
+                param_llvm_types, return_llvm_type
+            )
+            ir_func = func_wrapper.ir_function
         
         # Build func type hint
         param_types = [func_info.param_type_hints[p] for p in func_info.param_names]
@@ -896,7 +899,13 @@ class TypeConverter:
                 else self.builder.sext(value_ir, target_type)
             )
         elif source_type.width > target_type.width:
-            result = self.builder.trunc(value_ir, target_type)
+            # Special case: converting to bool (i1) should use comparison, not truncation
+            # bool(42) should be True, not False (42's lowest bit is 0)
+            if target_type.width == 1:
+                # Convert to bool: compare != 0
+                result = self.builder.icmp_signed('!=', value_ir, ir.Constant(source_type, 0))
+            else:
+                result = self.builder.trunc(value_ir, target_type)
         else:
             result = value_ir
         return wrap_value(result, kind="value", type_hint=type_hint)

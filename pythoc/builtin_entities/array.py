@@ -16,6 +16,34 @@ class array(BuiltinType):
         return True
     
     @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes array type for FFI.
+        
+        Returns ctypes array type (element_ctype * total_size).
+        """
+        import ctypes
+        
+        if cls.element_type is None or cls.dimensions is None:
+            return ctypes.c_void_p
+        
+        # Get element ctypes type
+        if hasattr(cls.element_type, 'get_ctypes_type'):
+            elem_ctype = cls.element_type.get_ctypes_type()
+        else:
+            return ctypes.c_void_p
+        
+        if elem_ctype is None:
+            return ctypes.c_void_p
+        
+        # Build nested array type for multi-dimensional arrays
+        # array[i32, 2, 3] -> (c_int32 * 3) * 2
+        result_type = elem_ctype
+        for dim in reversed(cls.dimensions):
+            result_type = result_type * dim
+        
+        return result_type
+    
+    @classmethod
     def get_name(cls) -> str:
         return 'array'
     

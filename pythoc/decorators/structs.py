@@ -136,8 +136,8 @@ def add_struct_handle_call(cls):
     return cls
 
 
-def compile_dynamic_class(cls, anonymous=False, suffix=None):
-    """Compile a @compile decorated class into a unified struct type
+def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
+    """Compile a @compile decorated class into a unified struct/union type
     
     This function now uses the unified struct type system with structural typing.
     Handles both overload (generic) and non-overload cases uniformly.
@@ -146,7 +146,12 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None):
         cls: The class to compile
         anonymous: If True, append a unique suffix to the class name in LLVM IR
         suffix: If provided, use this as custom suffix for output files (e.g., "int" for Vector(int))
+        type_factory: Optional factory function to create the type (default: create_struct_type)
+                      For union, pass create_union_type
     """
+    # Default to struct type factory
+    if type_factory is None:
+        type_factory = create_struct_type
     from ..meta import extract_type_parameters_from_closure, create_generic_instantiation
     from ..utils import normalize_suffix
     
@@ -254,7 +259,7 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None):
     
     # === CREATE UNIFIED STRUCT TYPE ===
     field_names = [fname for fname, ftype in cls._struct_fields]
-    unified_type = create_struct_type(parsed_field_types, field_names, python_class=cls)
+    unified_type = type_factory(parsed_field_types, field_names, python_class=cls)
     
     # === HANDLE FORWARD/CIRCULAR REFERENCES ===
     # Check if any field types are still strings (unresolved forward references)
@@ -320,11 +325,16 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None):
     cls.has_field = unified_type.has_field
     cls.get_field_count = unified_type.get_field_count
     cls.get_size_bytes = unified_type.get_size_bytes
+    cls.get_ctypes_type = unified_type.get_ctypes_type
     cls.handle_subscript = unified_type.handle_subscript
-    cls._get_structure_hash = unified_type._get_structure_hash
-    cls._compute_structure_hash = unified_type._compute_structure_hash
     cls._ensure_field_types_resolved = unified_type._ensure_field_types_resolved
     cls.get_type_id = unified_type.get_type_id
+    
+    # Delegate struct-specific methods if available
+    if hasattr(unified_type, '_get_structure_hash'):
+        cls._get_structure_hash = unified_type._get_structure_hash
+    if hasattr(unified_type, '_compute_structure_hash'):
+        cls._compute_structure_hash = unified_type._compute_structure_hash
     
     # Add __iter__ method to support *struct unpacking in Python
     def __iter__(self):
