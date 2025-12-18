@@ -482,3 +482,5 @@ More examples can be found in the `test/` directory.
 ## License
 
 MIT License - see LICENSE file for details
+
+Contact: yfleiii@gmail.com
