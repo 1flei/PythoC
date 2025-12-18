@@ -119,6 +119,37 @@ class EnumType(CompositeType):
         return True
     
     @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes type for enum (struct with tag + union payload).
+        
+        Returns a ctypes.Structure with tag field and payload byte array.
+        """
+        import ctypes
+        
+        if cls._tag_type is None or cls._union_payload is None:
+            return ctypes.c_void_p
+        
+        # Get tag ctypes type
+        if hasattr(cls._tag_type, 'get_ctypes_type'):
+            tag_ctype = cls._tag_type.get_ctypes_type()
+        else:
+            tag_ctype = ctypes.c_int32
+        
+        # Get payload ctypes type (union as byte array)
+        if hasattr(cls._union_payload, 'get_ctypes_type'):
+            payload_ctype = cls._union_payload.get_ctypes_type()
+        else:
+            payload_ctype = ctypes.c_uint8 * 8  # default
+        
+        # Create struct with tag + payload
+        class_name = f"CEnum_{cls.get_name()}"
+        fields = [('tag', tag_ctype)]
+        if payload_ctype is not None:
+            fields.append(('payload', payload_ctype))
+        
+        return type(class_name, (ctypes.Structure,), {'_fields_': fields})
+    
+    @classmethod
     def get_name(cls) -> str:
         if hasattr(cls, '__name__'):
             return cls.__name__

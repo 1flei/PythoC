@@ -11,13 +11,15 @@ class ControlFlowMixin:
     """Mixin for control flow statements: return, break, continue"""
     
     def visit_Return(self, node: ast.Return):
-        """Handle return statements with termination check"""
+        """Handle return statements with termination check
+        
+        ABI coercion for struct returns is handled by LLVMBuilder.ret().
+        """
         # Only add return if block is not already terminated
         expected_pc_type = None
-        pc_func_name = None
         for name, hint in self.func_type_hints.items():
-            pc_func_name = name
-            expected_pc_type = hint.get("return")
+            if name != '_sret_info':  # Skip internal sret info
+                expected_pc_type = hint.get("return")
         if not self.builder.block.is_terminated:
             if node.value:
                 # Evaluate the return value first to get ValueRef with tracking info
@@ -34,9 +36,9 @@ class ControlFlowMixin:
                 # Check if return type is void
                 from ..builtin_entities.types import void
                 if expected_pc_type is not None and expected_pc_type == void:
-                    # Void return - don't return a value
                     self.builder.ret_void()
                 else:
+                    # LLVMBuilder.ret() handles ABI coercion automatically
                     value_ir = ensure_ir(value)
                     self.builder.ret(value_ir)
             else:

@@ -31,6 +31,11 @@ class linear(BuiltinType):
         return True  # Can call linear() to create
     
     @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes type for linear (zero-size, returns None)."""
+        return None
+    
+    @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM type (zero-size empty struct)"""
         return ir.LiteralStructType([])

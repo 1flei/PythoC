@@ -76,6 +76,33 @@ class func(BuiltinType):
         return ir.PointerType(func_type)
     
     @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes function pointer type for FFI.
+        
+        Returns CFUNCTYPE for typed function pointers, c_void_p for untyped.
+        """
+        import ctypes
+        
+        if cls.param_types is None or cls.return_type is None:
+            return ctypes.c_void_p
+        
+        # Get return ctypes type
+        if hasattr(cls.return_type, 'get_ctypes_type'):
+            ret_ctype = cls.return_type.get_ctypes_type()
+        else:
+            ret_ctype = None
+        
+        # Get parameter ctypes types
+        param_ctypes = []
+        for param_type in cls.param_types:
+            if hasattr(param_type, 'get_ctypes_type'):
+                param_ctypes.append(param_type.get_ctypes_type())
+            else:
+                param_ctypes.append(ctypes.c_void_p)
+        
+        return ctypes.CFUNCTYPE(ret_ctype, *param_ctypes)
+    
+    @classmethod
     def can_be_called(cls) -> bool:
         return True  # func type can be called (represents function pointers)
     
@@ -141,8 +168,11 @@ class func(BuiltinType):
             else:
                 converted_args.append(ensure_ir(arg))
         
-        # Call the function pointer
-        result = visitor.builder.call(func_ptr, converted_args)
+        # Call the function pointer - pass return_type_hint and arg_type_hints for ABI coercion
+        logger.debug(f"func.handle_call: calling {getattr(func_ptr, 'name', func_ptr)}, args={len(converted_args)}, return_type={cls.return_type}")
+        logger.debug(f"func.handle_call: func_ptr.function_type={func_ptr.function_type}")
+        logger.debug(f"func.handle_call: converted_args types={[str(a.type) for a in converted_args]}")
+        result = visitor.builder.call(func_ptr, converted_args, return_type_hint=cls.return_type, arg_type_hints=cls.param_types)
         
         # Wrap result with return type hint (tracking happens in visit_expression)
         return wrap_value(result, kind="value", type_hint=cls.return_type)

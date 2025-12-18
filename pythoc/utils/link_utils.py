@@ -74,11 +74,19 @@ def get_link_flags() -> List[str]:
     """Get link flags from registry
     
     Returns:
-        List of linker flags including -l options
+        List of linker flags including -l options and direct library paths
     """
     from ..registry import get_unified_registry
     libs = get_unified_registry().get_link_libraries()
-    lib_flags = [f'-l{lib}' for lib in libs]
+    lib_flags = []
+    
+    for lib in libs:
+        if os.path.isabs(lib) or '/' in lib:
+            # Full path to library - pass directly to linker
+            lib_flags.append(lib)
+        else:
+            # Library name - use -l flag
+            lib_flags.append(f'-l{lib}')
     
     # Add --no-as-needed to ensure all libraries are linked
     # This is critical for libraries like libgcc_s that provide

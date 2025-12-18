@@ -96,7 +96,14 @@ class ExternFunctionWrapper:
                 converted = visitor.type_converter.convert(arg, target_pc_type)
                 converted_args.append(ensure_ir(converted))
         
-        call_result = visitor.builder.call(func, converted_args)
+        # Build arg_type_hints for ABI coercion
+        arg_type_hints = [pt[1] for pt in self.param_types if pt[0] != 'args']
+        
+        call_result = visitor.builder.call(
+            func, converted_args,
+            return_type_hint=self.return_type,
+            arg_type_hints=arg_type_hints
+        )
         if self.return_type is None:
             from ..builtin_entities.types import void
             return wrap_value(call_result, kind="value", type_hint=void)

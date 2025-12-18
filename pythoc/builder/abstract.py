@@ -139,12 +139,12 @@ class AbstractBuilder(ABC):
         pass
     
     @abstractmethod
-    def load(self, ptr: Any, name: str = "") -> Any:
+    def load(self, ptr: Any, name: str = "", align: Any = None) -> Any:
         """Load value from memory."""
         pass
     
     @abstractmethod
-    def store(self, value: Any, ptr: Any) -> Any:
+    def store(self, value: Any, ptr: Any, align: Any = None) -> Any:
         """Store value to memory."""
         pass
     
@@ -228,6 +228,11 @@ class AbstractBuilder(ABC):
         pass
     
     @abstractmethod
+    def switch(self, value: Any, default: Any) -> Any:
+        """Switch statement."""
+        pass
+    
+    @abstractmethod
     def ret(self, value: Any = None) -> Any:
         """Return from function."""
         pass
@@ -257,8 +262,17 @@ class AbstractBuilder(ABC):
     # ========== Function Calls ==========
     
     @abstractmethod
-    def call(self, fn: Any, args: List[Any], name: str = "") -> Any:
-        """Call a function."""
+    def call(self, fn: Any, args: List[Any], name: str = "",
+             return_type_hint: Any = None) -> Any:
+        """Call a function.
+        
+        Args:
+            fn: Function to call
+            args: Arguments to pass
+            name: Optional name for the result
+            return_type_hint: Optional PC type hint for return value
+                             (used by LLVM backend for struct ABI unpacking)
+        """
         pass
     
     # ========== Aggregate Operations ==========
@@ -294,6 +308,11 @@ class AbstractBuilder(ABC):
     @abstractmethod
     def position_before(self, instr: Any) -> None:
         """Position builder before instruction."""
+        pass
+    
+    @abstractmethod
+    def position_after(self, instr: Any) -> None:
+        """Position builder after instruction."""
         pass
     
     # ========== Misc ==========

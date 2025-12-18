@@ -78,6 +78,24 @@ class RefinedType(CompositeType):
         return "refined"
     
     @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes type for refined type.
+        
+        Delegates to the base type or struct type.
+        """
+        # If we have a base type, use it
+        if cls._base_type is not None:
+            if hasattr(cls._base_type, 'get_ctypes_type'):
+                return cls._base_type.get_ctypes_type()
+        
+        # Multi-parameter predicate: use struct type
+        if cls._struct_type is not None:
+            if hasattr(cls._struct_type, 'get_ctypes_type'):
+                return cls._struct_type.get_ctypes_type()
+        
+        return None
+    
+    @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Returns underlying LLVM type
         

@@ -173,6 +173,8 @@ class CallsMixin:
         
         Returns:
             ValueRef with call result
+            
+        Note: ABI coercion for struct returns is handled by LLVMBuilder.call().
         """
         # Evaluate arguments (unless already evaluated for overloading)
         if evaluated_args is not None:
@@ -211,7 +213,6 @@ class CallsMixin:
                     logger.error(f"Function '{func_name_dbg}' parameter {idx} missing PC type hint; cannot convert",
                                 node=node, exc_type=TypeError)
         
-        # Make the call
         # Debug: check argument count
         func_name = getattr(func_callable, 'name', '<unknown>')
         expected_param_count = len(func_callable.function_type.args)
@@ -220,11 +221,8 @@ class CallsMixin:
             logger.error(f"Function '{func_name}' expects {expected_param_count} arguments, got {actual_arg_count}",
                         node=node, exc_type=TypeError)
         
-        call_result = self.builder.call(func_callable, converted_args)
-        
         # Try to get return type from FunctionInfo if not provided
         if return_type_hint is None:
-            # Try to get function name from func_callable
             func_name = getattr(func_callable, 'name', None)
             if func_name:
                 func_info = get_unified_registry().get_function_info(func_name)
@@ -236,6 +234,11 @@ class CallsMixin:
             func_name = getattr(func_callable, 'name', '<unknown>')
             logger.error(f"Cannot infer return type for function '{func_name}' - missing type hint",
                         node=node, exc_type=TypeError)
+        
+        # Make the call - LLVMBuilder.call() handles ABI coercion for struct returns
+        logger.debug(f"_perform_call: calling {getattr(func_callable, 'name', func_callable)}, args={len(converted_args)}, return_type_hint={return_type_hint}")
+        call_result = self.builder.call(func_callable, converted_args,
+                                        return_type_hint=return_type_hint)
         
         # Return with type hint (tracking happens in visit_expression if needed)
         return wrap_value(call_result, kind="value", type_hint=return_type_hint)

@@ -126,10 +126,13 @@ class OutputManager:
         else:
             return_type = ir.VoidType()
         
-        func_type = ir.FunctionType(return_type, param_llvm_types)
-        
-        # Declare function (no body yet)
-        ir.Function(compiler.module, func_type, func_name)
+        # Use LLVMBuilder to declare function with proper ABI handling
+        from ..builder.llvm_builder import LLVMBuilder
+        temp_builder = LLVMBuilder()
+        func_wrapper = temp_builder.declare_function(
+            compiler.module, func_name,
+            param_llvm_types, return_type
+        )
     
     def _compile_pending_for_group(self, group_key):
         """

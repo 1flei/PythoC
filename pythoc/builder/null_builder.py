@@ -121,10 +121,10 @@ class NullBuilder(AbstractBuilder):
     def alloca(self, typ: Any, size: Any = None, name: str = "") -> Any:
         self._raise_error("alloca")
     
-    def load(self, ptr: Any, name: str = "") -> Any:
+    def load(self, ptr: Any, name: str = "", align: Any = None) -> Any:
         self._raise_error("load")
     
-    def store(self, value: Any, ptr: Any) -> Any:
+    def store(self, value: Any, ptr: Any, align: Any = None) -> Any:
         self._raise_error("store")
     
     def gep(self, ptr: Any, indices: List[Any], inbounds: bool = False, name: str = "") -> Any:
@@ -176,6 +176,9 @@ class NullBuilder(AbstractBuilder):
     def cbranch(self, cond: Any, truebr: Any, falsebr: Any) -> Any:
         self._raise_error("cbranch")
     
+    def switch(self, value: Any, default: Any) -> Any:
+        self._raise_error("switch")
+    
     def ret(self, value: Any = None) -> Any:
         self._raise_error("ret")
     
@@ -195,7 +198,8 @@ class NullBuilder(AbstractBuilder):
     
     # ========== Function Calls ==========
     
-    def call(self, fn: Any, args: List[Any], name: str = "") -> Any:
+    def call(self, fn: Any, args: List[Any], name: str = "",
+             return_type_hint: Any = None) -> Any:
         self._raise_error("call")
     
     # ========== Aggregate Operations ==========
@@ -223,6 +227,10 @@ class NullBuilder(AbstractBuilder):
         pass
     
     def position_before(self, instr: Any) -> None:
+        """No-op in compile-time context."""
+        pass
+    
+    def position_after(self, instr: Any) -> None:
         """No-op in compile-time context."""
         pass
     

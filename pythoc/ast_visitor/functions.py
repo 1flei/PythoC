@@ -19,6 +19,7 @@ from ..builtin_entities import (
 )
 from ..builtin_entities import bool as pc_bool
 from ..registry import get_unified_registry, infer_struct_from_access
+from ..builder.llvm_builder import LLVMBuilder
 
 
 class FunctionsMixin:
@@ -62,14 +63,26 @@ class FunctionsMixin:
         
         # Create entry block
         entry_block = func.append_basic_block('entry')
-        self.builder = ir.IRBuilder(entry_block)
+        ir_builder = ir.IRBuilder(entry_block)
+        self.builder = LLVMBuilder(ir_builder)
+        
+        # Set ABI context for struct returns
+        sret_info = self.func_type_hints.get('_sret_info')
+        param_coercion_info = self.func_type_hints.get('_param_coercion_info', {})
+        self.builder.set_return_abi_context(func, sret_info)
+        
+        # Wrap function to hide sret offset and handle ABI coercion
+        from ..builder.llvm_builder import FunctionWrapper
+        func_wrapper = FunctionWrapper(func, sret_info, param_coercion_info)
         
         # Store parameter values in local variables
         for i, arg in enumerate(node.args.args):
-            param_val = func.args[i]
-            param_val.name = arg.arg
-            # Store parameter in a local variable for potential modification
-            alloca = self._create_alloca_in_entry(param_val.type, f"{arg.arg}_addr")
+            # Get unpacked parameter value (handles ABI coercion transparently)
+            param_val, param_type = func_wrapper.get_user_arg_unpacked(i, self.builder.ir_builder)
+            func_wrapper.get_user_arg(i).name = arg.arg
+            
+            # Allocate and store parameter
+            alloca = self._create_alloca_in_entry(param_type, f"{arg.arg}_addr")
             self.builder.store(param_val, alloca)
             
             # Register parameter in variable registry with type hint
@@ -123,15 +136,25 @@ class FunctionsMixin:
                 self.builder.ret_void()
             else:
                 # Add a default return for non-void functions
-                if isinstance(func.return_value.type, ir.PointerType):
+                ret_type = func.return_value.type
+                if isinstance(ret_type, ir.PointerType):
                     # Return null pointer for pointer types
-                    self.builder.ret(ir.Constant(func.return_value.type, None))
-                elif isinstance(func.return_value.type, ir.IntType):
+                    self.builder.ret(ir.Constant(ret_type, None))
+                elif isinstance(ret_type, ir.IntType):
                     # Return 0 for integer types
-                    self.builder.ret(ir.Constant(func.return_value.type, 0))
-                else:
+                    self.builder.ret(ir.Constant(ret_type, 0))
+                elif isinstance(ret_type, (ir.FloatType, ir.DoubleType)):
                     # Return 0.0 for float types
-                    self.builder.ret(ir.Constant(func.return_value.type, 0.0))
+                    self.builder.ret(ir.Constant(ret_type, 0.0))
+                elif isinstance(ret_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
+                    # Return undefined for struct types
+                    self.builder.ret(ir.Constant(ret_type, ir.Undefined))
+                elif isinstance(ret_type, ir.ArrayType):
+                    # Return undefined for array types
+                    self.builder.ret(ir.Constant(ret_type, ir.Undefined))
+                else:
+                    # Fallback: return undefined
+                    self.builder.ret(ir.Constant(ret_type, ir.Undefined))
         
         # Check for any unterminated blocks in the function and fix them
         for block in func.blocks:

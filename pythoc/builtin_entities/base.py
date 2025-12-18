@@ -8,6 +8,7 @@ from abc import ABC, ABCMeta, abstractmethod
 from llvmlite import ir
 from typing import Any, Optional
 import ast
+import ctypes
 from ..logger import logger
 
 
@@ -115,6 +116,60 @@ class BuiltinType(BuiltinEntity):
     _is_float: bool = False
     _is_bool: bool = False
     _is_pointer: bool = False
+    
+    @classmethod
+    def get_ctypes_type(cls) -> Any:
+        """Get the corresponding ctypes type for FFI.
+        
+        This method provides the correct ctypes type for function signatures,
+        properly handling signed/unsigned distinction that LLVM IR doesn't preserve.
+        
+        Returns:
+            ctypes type (e.g., ctypes.c_int32, ctypes.c_uint32, etc.)
+        """
+        # Bool type
+        if cls._is_bool:
+            return ctypes.c_bool
+        
+        # Integer types - use signedness info
+        if cls._is_integer:
+            size = cls._size_bytes
+            if cls._is_signed:
+                if size == 1:
+                    return ctypes.c_int8
+                elif size == 2:
+                    return ctypes.c_int16
+                elif size <= 4:
+                    return ctypes.c_int32
+                else:
+                    return ctypes.c_int64
+            else:
+                if size == 1:
+                    return ctypes.c_uint8
+                elif size == 2:
+                    return ctypes.c_uint16
+                elif size <= 4:
+                    return ctypes.c_uint32
+                else:
+                    return ctypes.c_uint64
+        
+        # Float types
+        if cls._is_float:
+            if cls._size_bytes == 4:
+                return ctypes.c_float
+            else:
+                return ctypes.c_double
+        
+        # Pointer types
+        if cls._is_pointer:
+            return ctypes.c_void_p
+        
+        # Void type
+        if isinstance(cls._llvm_type, ir.VoidType):
+            return None
+        
+        # Default fallback
+        return ctypes.c_void_p
     
     @classmethod
     def normalize_subscript_items(cls, items):
@@ -565,11 +620,24 @@ class BuiltinType(BuiltinEntity):
     
     @classmethod
     def handle_rshift(cls, visitor, left, right, node: ast.BinOp):
-        """Handle right shift for integer types"""
+        """Handle right shift for integer types.
+        
+        Uses arithmetic shift (ashr) for signed types (preserves sign bit),
+        and logical shift (lshr) for unsigned types (fills with zeros).
+        """
         from ..valueref import wrap_value, ensure_ir
         left, right, _ = visitor.type_converter.unify_binop_types(left, right)
         
-        result = visitor.builder.ashr(ensure_ir(left), ensure_ir(right))
+        # Check if the type is signed or unsigned
+        type_hint = left.type_hint
+        is_signed = True  # default to signed
+        if type_hint is not None and hasattr(type_hint, '_is_signed'):
+            is_signed = type_hint._is_signed
+        
+        if is_signed:
+            result = visitor.builder.ashr(ensure_ir(left), ensure_ir(right))
+        else:
+            result = visitor.builder.lshr(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=left.type_hint)
     
     @classmethod

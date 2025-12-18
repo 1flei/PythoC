@@ -22,10 +22,17 @@ class UnionType(CompositeType):
     
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Get LLVM type for union (array of bytes)
+        """Get LLVM type for union (array with correct alignment)
         
         All fields share the same memory, so union is represented
-        as a byte array with size equal to the largest field.
+        as an array with size equal to the largest field and alignment
+        matching the most-aligned field.
+        
+        Uses integer types to preserve alignment:
+        - alignment 1: [N x i8]
+        - alignment 2: [N/2 x i16]
+        - alignment 4: [N/4 x i32]
+        - alignment 8: [N/8 x i64]
         
         Args:
             module_context: Optional IR module context (not used)
@@ -44,7 +51,11 @@ class UnionType(CompositeType):
                 # Skip void types (size 0)
                 if field_size == 0:
                     continue
-                field_align = min(field_size, 8)
+                # Get alignment - use get_alignment if available, otherwise estimate
+                if hasattr(field_type, 'get_alignment'):
+                    field_align = field_type.get_alignment()
+                else:
+                    field_align = min(field_size, 8)
             else:
                 logger.error(f"union.get_llvm_type: unknown field type {field_type}",
                             node=None, exc_type=TypeError)
@@ -53,12 +64,39 @@ class UnionType(CompositeType):
         
         # Align size to max alignment
         if max_size == 0:
-            max_size = 0
-        elif max_size % max_align != 0:
+            return ir.ArrayType(ir.IntType(8), 0)
+        if max_size % max_align != 0:
             max_size += max_align - (max_size % max_align)
         
-        # Return array directly, not wrapped in a struct
-        return ir.ArrayType(ir.IntType(8), max_size)
+        # Choose element type based on alignment to preserve correct alignment
+        # This ensures the union has the same alignment as its most-aligned field
+        if max_align >= 8:
+            elem_type = ir.IntType(64)
+            elem_count = max_size // 8
+        elif max_align >= 4:
+            elem_type = ir.IntType(32)
+            elem_count = max_size // 4
+        elif max_align >= 2:
+            elem_type = ir.IntType(16)
+            elem_count = max_size // 2
+        else:
+            elem_type = ir.IntType(8)
+            elem_count = max_size
+        
+        return ir.ArrayType(elem_type, elem_count)
+    
+    @classmethod
+    def get_ctypes_type(cls):
+        """Get ctypes type for union (byte array).
+        
+        Union is represented as a byte array with size equal to the largest field.
+        """
+        import ctypes
+        
+        size = cls.get_size_bytes()
+        if size == 0:
+            return None
+        return ctypes.c_uint8 * size
     
     @classmethod
     def get_size_bytes(cls) -> int:
@@ -76,7 +114,11 @@ class UnionType(CompositeType):
                 field_size = field_type.get_size_bytes()
                 if field_size == 0:
                     continue
-                field_align = min(field_size, 8)
+                # Get alignment - use get_alignment if available, otherwise estimate
+                if hasattr(field_type, 'get_alignment'):
+                    field_align = field_type.get_alignment()
+                else:
+                    field_align = min(field_size, 8)
             else:
                 logger.error(f"union.get_size_bytes: unknown field type {field_type}",
                             node=None, exc_type=TypeError)
@@ -89,6 +131,28 @@ class UnionType(CompositeType):
         if max_size % max_align != 0:
             max_size += max_align - (max_size % max_align)
         return max_size
+    
+    @classmethod
+    def get_alignment(cls) -> int:
+        """Get alignment in bytes (max alignment of all fields)"""
+        if cls._field_types is None:
+            return 1
+        
+        cls._ensure_field_types_resolved()
+        
+        max_align = 1
+        for field_type in cls._field_types:
+            if hasattr(field_type, 'get_size_bytes'):
+                field_size = field_type.get_size_bytes()
+                if field_size == 0:
+                    continue
+                if hasattr(field_type, 'get_alignment'):
+                    field_align = field_type.get_alignment()
+                else:
+                    field_align = min(field_size, 8)
+                max_align = max(max_align, field_align)
+        
+        return max_align
     
     @classmethod
     def handle_call(cls, visitor, func_ref, args, node):
@@ -186,12 +250,14 @@ class UnionType(CompositeType):
         return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr)
 
 
-def create_union_type(field_types: List[Any], field_names: Optional[List[str]] = None) -> type:
+def create_union_type(field_types: List[Any], field_names: Optional[List[str]] = None,
+                      python_class: Optional[type] = None) -> type:
     """Create a union type without global caching
     
     Args:
         field_types: List of field types
         field_names: Optional list of field names
+        python_class: Optional Python class (for @union decorated classes)
     
     Returns:
         UnionType subclass
@@ -214,8 +280,10 @@ def create_union_type(field_types: List[Any], field_names: Optional[List[str]] =
         type_name,
         (UnionType,),
         {
+            '_canonical_name': type_name,
             '_field_types': field_types,
             '_field_names': field_names,
+            '_python_class': python_class,
         }
     )
     
@@ -250,6 +318,49 @@ class union(UnionType):
         """
         # Delegate to base class factory method
         return cls.create_decorator_instance(target, suffix, anonymous)
+    
+    @classmethod
+    def _apply_decorator(cls, target_cls, suffix=None, anonymous=False, **kwargs):
+        """Apply union decorator to target class
+        
+        Uses common field parsing from CompositeType base class.
+        
+        Args:
+            target_cls: The class being decorated
+            suffix: Optional suffix for compilation
+            anonymous: Whether to use anonymous naming
+            **kwargs: Additional parameters
+        
+        Returns:
+            Decorated class with union behavior
+        """
+        # Mark as union
+        target_cls._is_union = True
+        target_cls._is_struct = False
+        
+        # Use common field parsing logic
+        parsed = cls._parse_class_fields(target_cls)
+        
+        # Create union type
+        unified_type = create_union_type(
+            parsed['field_types'],
+            parsed['field_names'],
+            python_class=target_cls
+        )
+        
+        # Setup forward reference handling if needed
+        if parsed['needs_type_resolution']:
+            unified_type._needs_type_resolution = True
+            unified_type._type_namespace = parsed['type_namespace']
+            cls._setup_forward_ref_callbacks(
+                unified_type, target_cls,
+                parsed['field_types'], parsed['type_namespace']
+            )
+        
+        # Link class to type and register
+        cls._link_class_to_type(target_cls, unified_type, suffix, anonymous)
+        
+        return target_cls
     
     @classmethod
     def get_name(cls) -> str:

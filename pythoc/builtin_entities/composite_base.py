@@ -163,7 +163,42 @@ class CompositeType(BuiltinType):
         
         llvm_type = cls.get_llvm_type(visitor.module.context)
         value = ir.Constant(llvm_type, ir.Undefined)
-        return wrap_value(value, kind="value", type_hint=cls)
+        
+        # Use _python_class as type_hint if available (for @struct/@union decorated classes)
+        # This ensures IntOrFloat() returns type_hint=IntOrFloat, not union[i32, f64]
+        type_hint = getattr(cls, '_python_class', None) or cls
+        return wrap_value(value, kind="value", type_hint=type_hint)
+    
+    @classmethod
+    def get_alignment(cls) -> int:
+        """Get alignment in bytes for this composite type.
+        
+        Default implementation: max alignment of all fields, capped at 8.
+        Subclasses may override for specific alignment rules.
+        
+        Returns:
+            Alignment in bytes (1, 2, 4, or 8)
+        """
+        cls._ensure_field_types_resolved()
+        
+        if cls._field_types is None:
+            return 1
+        
+        max_align = 1
+        for field_type in cls._field_types:
+            if field_type is None:
+                continue
+            if hasattr(field_type, 'get_size_bytes'):
+                field_size = field_type.get_size_bytes()
+                if field_size == 0:
+                    continue
+                if hasattr(field_type, 'get_alignment'):
+                    field_align = field_type.get_alignment()
+                else:
+                    field_align = min(field_size, 8)
+                max_align = max(max_align, field_align)
+        
+        return max_align
     
     @classmethod
     def _ensure_field_types_resolved(cls):
@@ -311,6 +346,169 @@ class CompositeType(BuiltinType):
         """Composite types can be called to construct values"""
         # Base class cannot be called, only subclasses (created via subscript/decorator)
         return cls._field_types is not None
+    
+    @classmethod
+    def _parse_class_fields(cls, target_cls):
+        """Parse class fields from annotations - common logic for struct/union/enum
+        
+        This extracts field types and names from a decorated class, handling:
+        - Annotation extraction
+        - Type resolution (including forward references)
+        - Type namespace building
+        
+        Args:
+            target_cls: The class being decorated
+            
+        Returns:
+            dict with keys:
+                - field_types: List of resolved field types
+                - field_names: List of field names
+                - type_namespace: Dict for type resolution
+                - needs_type_resolution: bool, True if forward refs exist
+        """
+        from ..type_resolver import TypeResolver
+        from ..decorators.annotation_resolver import build_annotation_namespace, resolve_string_annotation
+        from ..utils import normalize_suffix
+        import sys
+        
+        # Extract struct fields from annotations
+        if not hasattr(target_cls, '_struct_fields'):
+            target_cls._struct_fields = []
+            if hasattr(target_cls, '__annotations__'):
+                for field_name, field_type in target_cls.__annotations__.items():
+                    target_cls._struct_fields.append((field_name, field_type))
+        
+        # Get globals from the module where the class is defined
+        user_globals = {}
+        if hasattr(target_cls, '__module__'):
+            if target_cls.__module__ in sys.modules:
+                module = sys.modules[target_cls.__module__]
+                if hasattr(module, '__dict__'):
+                    user_globals = module.__dict__
+        
+        is_dynamic = '.<locals>.' in target_cls.__qualname__
+        
+        # Build comprehensive namespace for type resolution
+        type_namespace = build_annotation_namespace(
+            user_globals,
+            is_dynamic=is_dynamic
+        )
+        
+        # Add the class itself to namespace for self-referential types
+        type_namespace[target_cls.__name__] = target_cls
+        
+        type_resolver = TypeResolver(user_globals=type_namespace)
+        
+        # Resolve field types
+        parsed_field_types = []
+        for fname, ftype in target_cls._struct_fields:
+            if isinstance(ftype, str):
+                resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
+                parsed_field_types.append(resolved_type)
+            else:
+                parsed_field_types.append(ftype)
+        
+        field_names = [fname for fname, ftype in target_cls._struct_fields]
+        needs_type_resolution = any(isinstance(ft, str) for ft in parsed_field_types)
+        
+        return {
+            'field_types': parsed_field_types,
+            'field_names': field_names,
+            'type_namespace': type_namespace,
+            'needs_type_resolution': needs_type_resolution,
+        }
+    
+    @classmethod
+    def _setup_forward_ref_callbacks(cls, unified_type, target_cls, parsed_field_types, type_namespace):
+        """Setup forward reference callbacks for unresolved types
+        
+        Args:
+            unified_type: The created type (StructType/UnionType subclass)
+            target_cls: Original decorated class
+            parsed_field_types: List of parsed field types (may contain strings)
+            type_namespace: Type resolution namespace
+        """
+        from ..forward_ref import register_forward_ref_callback, extract_type_names_from_annotation
+        from ..type_resolver import TypeResolver
+        
+        for field_index, (fname, ftype) in enumerate(target_cls._struct_fields):
+            if isinstance(parsed_field_types[field_index], str):
+                type_str = parsed_field_types[field_index]
+                referenced_types = extract_type_names_from_annotation(type_str)
+                
+                for ref_type_name in referenced_types:
+                    def make_callback(idx, type_str_copy, namespace_copy):
+                        def callback(resolved_type_obj):
+                            namespace_copy[ref_type_name] = resolved_type_obj
+                            type_resolver_cb = TypeResolver(user_globals=namespace_copy)
+                            try:
+                                new_parsed = type_resolver_cb.parse_annotation(type_str_copy)
+                                if new_parsed is not None:
+                                    unified_type._field_types[idx] = new_parsed
+                            except Exception:
+                                pass
+                        return callback
+                    
+                    register_forward_ref_callback(
+                        ref_type_name,
+                        make_callback(field_index, type_str, type_namespace.copy())
+                    )
+    
+    @classmethod
+    def _link_class_to_type(cls, target_cls, unified_type, suffix=None, anonymous=False):
+        """Link Python class to unified type and setup common attributes
+        
+        Args:
+            target_cls: Original decorated class
+            unified_type: The created type (StructType/UnionType subclass)
+            suffix: Optional suffix for naming
+            anonymous: Whether to use anonymous naming
+        """
+        from ..utils import get_anonymous_suffix
+        from ..registry import register_struct_from_class
+        from ..forward_ref import mark_type_defined
+        
+        # Link Python class to unified type
+        # Use appropriate attribute name based on type
+        if getattr(target_cls, '_is_union', False):
+            target_cls._union_type = unified_type
+        else:
+            target_cls._struct_type = unified_type
+        target_cls._field_types = unified_type._field_types
+        target_cls._field_names = unified_type._field_names
+        
+        # Copy _canonical_name if available
+        if hasattr(unified_type, '_canonical_name'):
+            target_cls._canonical_name = unified_type._canonical_name
+        
+        # Store suffix for deduplication and output file control
+        if suffix:
+            target_cls._anonymous_suffix = f'_{suffix}'
+            target_cls._compile_suffix = suffix
+        elif anonymous:
+            target_cls._anonymous_suffix = get_anonymous_suffix()
+            target_cls._compile_suffix = None
+        else:
+            target_cls._anonymous_suffix = None
+            target_cls._compile_suffix = None
+        
+        # Delegate common protocol methods to unified type
+        target_cls.handle_call = unified_type.handle_call
+        target_cls.handle_attribute = unified_type.handle_attribute
+        target_cls.get_llvm_type = unified_type.get_llvm_type
+        target_cls.get_name = unified_type.get_name
+        target_cls.get_field_index = unified_type.get_field_index
+        target_cls.has_field = unified_type.has_field
+        target_cls.get_field_count = unified_type.get_field_count
+        target_cls.get_size_bytes = unified_type.get_size_bytes
+        target_cls.get_ctypes_type = unified_type.get_ctypes_type
+        target_cls.handle_subscript = unified_type.handle_subscript
+        target_cls._ensure_field_types_resolved = unified_type._ensure_field_types_resolved
+        target_cls.get_type_id = unified_type.get_type_id
+        
+        # Register and mark as defined
+        register_struct_from_class(target_cls)
+        mark_type_defined(target_cls.__name__, target_cls)
     
     @classmethod
     def create_decorator_instance(cls, target=None, suffix=None, anonymous=False, **kwargs):

@@ -77,10 +77,14 @@ class LLVMCompiler:
             if func_info.return_type_hint:
                 return_type = self._recreate_type_in_context(func_info.return_type_hint)
             
-            # Declare function in current module
+            # Declare function with proper ABI handling
             if func_name not in self.module.globals:
-                func_type = ir.FunctionType(return_type, param_types)
-                ir.Function(self.module, func_type, func_name)
+                from .builder.llvm_builder import LLVMBuilder
+                temp_builder = LLVMBuilder()
+                func_wrapper = temp_builder.declare_function(
+                    self.module, func_name,
+                    param_types, return_type
+                )
     
     def _recreate_type_in_context(self, pc_type):
         """Recreate a PC type's LLVM representation in current module's context"""
@@ -118,6 +122,7 @@ class LLVMCompiler:
             
         # Import here to avoid circular import
         from .decorators import get_extern_function_info
+        from .builder import LLVMBuilder
         
         func_info = get_extern_function_info(func_name)
         if not func_info:
@@ -131,12 +136,10 @@ class LLVMCompiler:
                 pass
         
         # Convert PC types to LLVM types
-        # Now all PC types accept module_context parameter uniformly
         param_types = []
         for param_name, param_type in func_info['param_types']:
             if param_name == 'args':  # Handle *args (varargs)
                 continue  # Skip varargs in type list
-            # param_type should be a PC type (i32, f64, ptr[i8], etc.)
             if param_type is None:
                 raise TypeError(f"Extern function '{func_name}': parameter '{param_name}' has no type annotation")
             llvm_type = param_type.get_llvm_type(self.module.context)
@@ -151,11 +154,12 @@ class LLVMCompiler:
         # Handle varargs (printf-style functions)
         has_varargs = any(param_name == 'args' for param_name, _ in func_info['param_types'])
         
-        # Create function type
-        func_type = ir.FunctionType(return_type, param_types, var_arg=has_varargs)
-        
-        # Declare the function in the module
-        extern_func = ir.Function(self.module, func_type, name=func_name)
+        # Use builder to declare function with ABI handling
+        temp_builder = LLVMBuilder()
+        func_wrapper = temp_builder.declare_function(
+            self.module, func_name, param_types, return_type, var_arg=has_varargs
+        )
+        extern_func = func_wrapper.ir_function
         
         # Set calling convention if specified
         if func_info.get('calling_convention') == 'stdcall':
@@ -183,6 +187,7 @@ class LLVMCompiler:
         Returns:
             The compiled LLVM function
         """
+        logger.debug(f"compile_function_from_ast: {ast_node.name}")
         # Only create a fresh module if requested or if no module exists
         if reset_module or self.module is None:
             self.module = self.create_module()
@@ -271,20 +276,23 @@ class LLVMCompiler:
                 else:
                     raise TypeError(f"Invalid varargs element type: {elem_type}")
         
-        # Create function type and declaration (or reuse existing forward declaration)
-        func_type = ir.FunctionType(return_type, param_types, var_arg=has_llvm_varargs)
+        # Use builder to declare function with C ABI for interop with C code
+        # pythoc functions must use C ABI so they can be called from C via function pointers
+        from .builder.llvm_builder import LLVMBuilder, FunctionWrapper
+        temp_builder = LLVMBuilder()
+        logger.debug(f"declare_function: {ast_node.name}, param_types={param_types}, return_type={return_type}, existing_func={existing_func}")
+        func_wrapper = temp_builder.declare_function(
+            self.module, ast_node.name,
+            param_types, return_type,
+            var_arg=has_llvm_varargs,
+            existing_func=existing_func
+        )
+        logger.debug(f"After declare_function: ir_function.args types={[a.type for a in func_wrapper.ir_function.args]}")
+        logger.debug(f"param_coercion_info={func_wrapper.param_coercion_info}")
+        llvm_function = func_wrapper.ir_function
+        sret_info = func_wrapper.sret_info
         
-        if existing_func is not None and isinstance(existing_func, ir.Function):
-            # Reuse existing forward declaration
-            llvm_function = existing_func
-            # Note: We trust that forward declaration has correct type
-            # since it was generated from the same FunctionInfo
-        else:
-            # Create new function
-            llvm_function = ir.Function(self.module, func_type, ast_node.name)
-        
-        # Set parameter names
-        # For struct varargs, the expanded parameters are added to the end
+        # Set parameter names (user parameters only, sret is handled internally)
         param_names = [arg.arg for arg in ast_node.args.args]
         if varargs_kind == 'struct':
             # Add synthetic parameter names for expanded struct elements
@@ -292,11 +300,17 @@ class LLVMCompiler:
                 param_names.append(f'{varargs_name}_elem{i}')
         
         for i, param_name in enumerate(param_names):
-            llvm_function.args[i].name = param_name
+            func_wrapper.get_user_arg(i).name = param_name
         
         # Now compile the function body
         # Build func_type_hints dict for the single function
         func_type_hints = {}
+        # Store sret info for use in return statement
+        if sret_info:
+            func_type_hints['_sret_info'] = sret_info
+        # Store param coercion info for parameter unpacking
+        if func_wrapper.param_coercion_info:
+            func_type_hints['_param_coercion_info'] = func_wrapper.param_coercion_info
         # Return type
         if return_type_hint is not None:
             func_type_hints[ast_node.name] = {'return': return_type_hint}
@@ -352,7 +366,13 @@ class LLVMCompiler:
         
         # Create entry block
         entry_block = llvm_function.append_basic_block('entry')
-        visitor.builder = ir.IRBuilder(entry_block)
+        from .builder.llvm_builder import LLVMBuilder
+        ir_builder = ir.IRBuilder(entry_block)
+        visitor.builder = LLVMBuilder(ir_builder)
+        
+        # Set ABI context for struct returns
+        sret_info = func_type_hints.get('_sret_info') if func_type_hints else None
+        visitor.builder.set_return_abi_context(llvm_function, sret_info)
         
         # Initialize parameters - they will be registered in variable registry
         # For struct varargs, we also initialize the expanded parameters AND create a struct
@@ -362,14 +382,17 @@ class LLVMCompiler:
             total_params += len(element_types)
         
         # First, register all normal parameters
+        # Use func_wrapper.get_user_arg_unpacked() to handle ABI coercion transparently
         for i in range(normal_param_count):
             arg = ast_node.args.args[i]
             param_name = arg.arg
             param_annotation = arg.annotation
             
-            param_val = llvm_function.args[i]
-            # Store parameter in a local variable
-            alloca = visitor._create_alloca_in_entry(param_val.type, f"{param_name}_addr")
+            # Get unpacked parameter value (handles ABI coercion transparently)
+            param_val, param_type = func_wrapper.get_user_arg_unpacked(i, visitor.builder.ir_builder)
+            
+            # Allocate and store parameter
+            alloca = visitor._create_alloca_in_entry(param_type, f"{param_name}_addr")
             visitor.builder.store(param_val, alloca)
             
             # Register parameter in variable registry (always), with best-effort type hint
@@ -418,14 +441,17 @@ class LLVMCompiler:
         
         # For struct varargs, create a synthetic struct from the expanded parameters
         if varargs_kind == 'struct':
-            # Get all expanded parameter values
+            # Get all expanded parameter values using func_wrapper
+            # Use get_user_arg_unpacked() to handle ABI coercion transparently
             expanded_values = []
             expanded_types_llvm = []
             for elem_idx in range(len(element_types)):
                 param_idx = normal_param_count + elem_idx
-                param_val = llvm_function.args[param_idx]
+                param_val, param_type = func_wrapper.get_user_arg_unpacked(
+                    param_idx, visitor.builder.ir_builder
+                )
                 expanded_values.append(param_val)
-                expanded_types_llvm.append(param_val.type)
+                expanded_types_llvm.append(param_type)
             
             # Create an anonymous struct type
             struct_type_llvm = ir.LiteralStructType(expanded_types_llvm)
@@ -540,8 +566,14 @@ class LLVMCompiler:
                 visitor.builder.ret(ir.Constant(return_type, None))
             elif isinstance(return_type, ir.IntType):
                 visitor.builder.ret(ir.Constant(return_type, 0))
-            else:
+            elif isinstance(return_type, (ir.FloatType, ir.DoubleType)):
                 visitor.builder.ret(ir.Constant(return_type, 0.0))
+            elif isinstance(return_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
+                visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+            elif isinstance(return_type, ir.ArrayType):
+                visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+            else:
+                visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
         
         # Clean up empty basic blocks by adding unreachable instructions
         # This is needed because constant loop unrolling may create empty blocks
