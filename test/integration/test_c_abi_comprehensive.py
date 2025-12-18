@@ -761,22 +761,15 @@ class TestCCallsPythoc(unittest.TestCase):
     
     def _get_pythoc_func_ptr(self, pc_func):
         """Get ctypes function pointer for a pythoc function"""
-        # The pythoc function wrapper should have the native function address
-        # We need to get the actual function pointer from the compiled .so
+        # Use the normal execution path to ensure .so is compiled and loaded
         from pythoc.native_executor import get_multi_so_executor
-        from pythoc.build.output_manager import flush_all_pending_outputs
         executor = get_multi_so_executor()
         
-        # Trigger compilation by flushing pending outputs
-        flush_all_pending_outputs()
+        # This will compile .so if needed and load the library properly
+        executor.execute_function(pc_func)
         
-        # Load the library if not already loaded
+        # Now get the function address from the loaded library
         so_file = pc_func._so_file
-        if so_file not in executor.loaded_libs:
-            import ctypes as ct
-            lib = ct.CDLL(so_file)
-            executor.loaded_libs[so_file] = lib
-        
         lib = executor.loaded_libs[so_file]
         
         # Get function from library

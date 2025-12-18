@@ -10,7 +10,7 @@ from typing import Any, Optional
 from llvmlite import ir
 
 from .abstract import AbstractBackend
-from ..builder.llvm_builder import LLVMBuilder
+from ..builder import LLVMBuilder
 from ..builder.abstract import AbstractBuilder
 
 

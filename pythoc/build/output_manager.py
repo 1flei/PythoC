@@ -127,7 +127,7 @@ class OutputManager:
             return_type = ir.VoidType()
         
         # Use LLVMBuilder to declare function with proper ABI handling
-        from ..builder.llvm_builder import LLVMBuilder
+        from ..builder import LLVMBuilder
         temp_builder = LLVMBuilder()
         func_wrapper = temp_builder.declare_function(
             compiler.module, func_name,
