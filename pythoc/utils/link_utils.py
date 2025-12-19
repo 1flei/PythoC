@@ -2,72 +2,191 @@
 Linker utilities for PC compiler
 
 Provides unified linker functionality for both executables and shared libraries.
+Supports multiple linkers including gcc, clang, and zig for cross-platform compatibility.
 """
 
 import os
 import sys
+import shutil
 import subprocess
 import time
-import fcntl
 from typing import List, Optional
 from contextlib import contextmanager
 
-
-from contextlib import contextmanager
-
-
-@contextmanager
-def file_lock(lockfile_path: str, timeout: float = 60.0):
-    """
-    Context manager for file-based locking to prevent concurrent builds.
+# Platform-specific file locking
+if sys.platform == 'win32':
+    import msvcrt
     
-    Args:
-        lockfile_path: Path to the lock file
-        timeout: Maximum time to wait for lock (seconds)
-    
-    Yields:
-        None when lock is acquired
-    
-    Raises:
-        TimeoutError: If lock cannot be acquired within timeout
-    """
-    lockfile = None
-    start_time = time.time()
-    
-    try:
-        # Ensure lock directory exists
-        lock_dir = os.path.dirname(lockfile_path)
-        if lock_dir and not os.path.exists(lock_dir):
-            os.makedirs(lock_dir, exist_ok=True)
+    @contextmanager
+    def file_lock(lockfile_path: str, timeout: float = 60.0):
+        """Windows file locking using msvcrt."""
+        lockfile = None
+        start_time = time.time()
         
-        # Try to acquire lock with exponential backoff
-        while True:
-            try:
-                lockfile = open(lockfile_path, 'a')
-                fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break  # Lock acquired
-            except (IOError, OSError):
-                # Lock is held by another process
-                if lockfile:
+        try:
+            lock_dir = os.path.dirname(lockfile_path)
+            if lock_dir and not os.path.exists(lock_dir):
+                os.makedirs(lock_dir, exist_ok=True)
+            
+            while True:
+                try:
+                    lockfile = open(lockfile_path, 'a+')
+                    msvcrt.locking(lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except (IOError, OSError):
+                    if lockfile:
+                        lockfile.close()
+                        lockfile = None
+                    
+                    if time.time() - start_time > timeout:
+                        raise TimeoutError(
+                            f"Failed to acquire lock on {lockfile_path} within {timeout}s"
+                        )
+                    
+                    wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
+                    time.sleep(wait_time)
+            
+            yield
+            
+        finally:
+            if lockfile:
+                try:
+                    msvcrt.locking(lockfile.fileno(), msvcrt.LK_UNLCK, 1)
                     lockfile.close()
-                    lockfile = None
-                
-                if time.time() - start_time > timeout:
-                    raise TimeoutError(f"Failed to acquire lock on {lockfile_path} within {timeout}s")
-                
-                # Exponential backoff: 10ms, 20ms, 40ms, ..., max 500ms
-                wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
-                time.sleep(wait_time)
+                except Exception:
+                    pass
+else:
+    import fcntl
+    
+    @contextmanager
+    def file_lock(lockfile_path: str, timeout: float = 60.0):
+        """Unix file locking using fcntl."""
+        lockfile = None
+        start_time = time.time()
         
-        yield
+        try:
+            lock_dir = os.path.dirname(lockfile_path)
+            if lock_dir and not os.path.exists(lock_dir):
+                os.makedirs(lock_dir, exist_ok=True)
+            
+            while True:
+                try:
+                    lockfile = open(lockfile_path, 'a')
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except (IOError, OSError):
+                    if lockfile:
+                        lockfile.close()
+                        lockfile = None
+                    
+                    if time.time() - start_time > timeout:
+                        raise TimeoutError(
+                            f"Failed to acquire lock on {lockfile_path} within {timeout}s"
+                        )
+                    
+                    wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
+                    time.sleep(wait_time)
+            
+            yield
+            
+        finally:
+            if lockfile:
+                try:
+                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
+                    lockfile.close()
+                except Exception:
+                    pass
+
+
+def _find_zig_executable() -> Optional[str]:
+    """Find zig executable, including python-zig from ziglang package.
+    
+    Returns:
+        Path to zig executable or None if not found
+    """
+    # First try system zig
+    if shutil.which('zig'):
+        return 'zig'
+    
+    # Try python-zig (installed via pip install ziglang)
+    if shutil.which('python-zig'):
+        return 'python-zig'
+    
+    # Try running via python -m ziglang
+    try:
+        result = subprocess.run(
+            [sys.executable, '-m', 'ziglang', 'version'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return 'ziglang-module'  # Special marker for module invocation
+    except Exception:
+        pass
+    
+    return None
+
+
+def find_available_linker() -> str:
+    """Find an available linker on the system.
+    
+    Priority order:
+    - Unix: cc, gcc, clang, zig
+    - Windows: zig, clang-cl, clang, gcc
+    
+    Returns:
+        Name of available linker
         
-    finally:
-        if lockfile:
-            try:
-                fcntl.flock(lockfile.fileno(), fcntl.LOCK_UN)
-                lockfile.close()
-            except Exception:
-                pass
+    Raises:
+        RuntimeError: If no linker is found
+    """
+    if sys.platform == 'win32':
+        # On Windows, prefer zig as it provides a complete toolchain
+        # Check for zig first (including python-zig)
+        zig = _find_zig_executable()
+        if zig:
+            return zig
+        
+        for linker in ['clang-cl', 'clang', 'gcc']:
+            if shutil.which(linker):
+                return linker
+    else:
+        # On Unix, prefer system cc/gcc/clang, fallback to zig
+        for linker in ['cc', 'gcc', 'clang']:
+            if shutil.which(linker):
+                return linker
+        
+        zig = _find_zig_executable()
+        if zig:
+            return zig
+    
+    raise RuntimeError(
+        "No linker found. Please install one of: cc, gcc, clang, or zig.\n"
+        "Tip: Install zig via pip: pip install ziglang\n"
+        "Or download from: https://ziglang.org/download/"
+    )
+
+
+def get_default_linkers() -> List[str]:
+    """Get list of linkers to try in order of preference.
+    
+    Returns:
+        List of linker names (may include special markers like 'ziglang-module')
+    """
+    linkers = []
+    
+    if sys.platform == 'win32':
+        # On Windows, try zig variants first
+        zig = _find_zig_executable()
+        if zig:
+            linkers.append(zig)
+        linkers.extend(['clang-cl', 'clang', 'gcc'])
+    else:
+        linkers.extend(['cc', 'gcc', 'clang'])
+        zig = _find_zig_executable()
+        if zig:
+            linkers.append(zig)
+    
+    return linkers
 
 
 def get_link_flags() -> List[str]:
@@ -97,22 +216,34 @@ def get_link_flags() -> List[str]:
     return lib_flags
 
 
-def get_platform_link_flags(shared: bool = False) -> List[str]:
+def _is_zig_linker(linker: str) -> bool:
+    """Check if linker is a zig variant."""
+    return linker in ('zig', 'python-zig', 'ziglang-module')
+
+
+def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[str]:
     """Get platform-specific link flags
     
     Args:
         shared: True for shared library, False for executable
+        linker: Linker being used (affects flag format)
     
     Returns:
         List of platform-specific flags
     """
+    is_zig = _is_zig_linker(linker)
+    
     if sys.platform == 'win32':
-        return ['-shared'] if shared else []
+        if is_zig:
+            # zig cc uses gcc-compatible flags
+            return ['-shared'] if shared else []
+        else:
+            return ['-shared'] if shared else []
     elif sys.platform == 'darwin':
         # Explicitly specify architecture to avoid x86_64/arm64 mismatch issues
         import platform
         arch = platform.machine()
-        arch_flag = ['-arch', arch] if arch in ('arm64', 'x86_64') else []
+        arch_flag = ['-arch', arch] if arch in ('arm64', 'x86_64') and not is_zig else []
         if shared:
             return arch_flag + ['-shared', '-undefined', 'dynamic_lookup']
         else:
@@ -120,32 +251,43 @@ def get_platform_link_flags(shared: bool = False) -> List[str]:
     else:  # Linux
         if shared:
             # Allow undefined symbols in shared libraries (for circular dependencies)
-            # --unresolved-symbols=ignore-all: don't error on undefined symbols
-            # --allow-shlib-undefined: allow undefined symbols from other shared libs
-            # --export-dynamic: export all symbols to dynamic symbol table
-            return ['-shared', '-fPIC', '-Wl,--export-dynamic', 
-                   '-Wl,--allow-shlib-undefined', '-Wl,--unresolved-symbols=ignore-all']
+            if is_zig:
+                # zig cc supports most gcc flags
+                return ['-shared', '-fPIC']
+            else:
+                return ['-shared', '-fPIC', '-Wl,--export-dynamic', 
+                       '-Wl,--allow-shlib-undefined', '-Wl,--unresolved-symbols=ignore-all']
         else:
             return []
 
 
-def build_link_command(obj_files: List[str], output_file: str, 
+def build_link_command(obj_files: List[str], output_file: str,
                        shared: bool = False, linker: str = 'gcc') -> List[str]:
     """Build linker command
     
     Args:
         obj_files: List of object file paths
-        output_file: Output file path (.so or executable)
+        output_file: Output file path (.so/.dll or executable)
         shared: True for shared library, False for executable
-        linker: Linker to use (gcc, cc, clang, etc.)
+        linker: Linker to use (gcc, cc, clang, zig, python-zig, ziglang-module, etc.)
     
     Returns:
         Link command as list of arguments
     """
-    platform_flags = get_platform_link_flags(shared)
+    # Handle different zig invocation methods
+    if linker == 'zig':
+        linker_cmd = ['zig', 'cc']
+    elif linker == 'python-zig':
+        linker_cmd = ['python-zig', 'cc']
+    elif linker == 'ziglang-module':
+        linker_cmd = [sys.executable, '-m', 'ziglang', 'cc']
+    else:
+        linker_cmd = [linker]
+    
+    platform_flags = get_platform_link_flags(shared, linker=linker)
     lib_flags = get_link_flags()
     
-    return [linker] + platform_flags + obj_files + ['-o', output_file] + lib_flags
+    return linker_cmd + platform_flags + obj_files + ['-o', output_file] + lib_flags
 
 
 def try_link_with_linkers(obj_files: List[str], output_file: str, 
@@ -157,7 +299,7 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
         obj_files: List of object file paths
         output_file: Output file path
         shared: True for shared library, False for executable
-        linkers: List of linkers to try (defaults to ['cc', 'gcc', 'clang'])
+        linkers: List of linkers to try (defaults to platform-specific list)
     
     Returns:
         Path to linked file
@@ -166,37 +308,43 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
         RuntimeError: If all linkers fail
     """
     if linkers is None:
-        linkers = ['cc', 'gcc', 'clang']
+        linkers = get_default_linkers()
     
     errors = []
     for linker in linkers:
+        # Check if linker is available (zig variants are pre-checked in get_default_linkers)
+        if _is_zig_linker(linker):
+            # Zig variants were already validated when added to linkers list
+            pass
+        elif not shutil.which(linker):
+            errors.append(f"{linker}: not found")
+            continue
+        
         try:
             link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
             subprocess.run(link_cmd, check=True, capture_output=True, text=True)
             return output_file
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            if isinstance(e, subprocess.CalledProcessError):
-                errors.append(f"{linker}: {e.stderr}")
-            else:
-                errors.append(f"{linker}: not found")
+        except subprocess.CalledProcessError as e:
+            errors.append(f"{linker}: {e.stderr}")
     
     # All linkers failed
     file_type = "shared library" if shared else "executable"
     raise RuntimeError(
         f"Failed to link {file_type} with all linkers ({', '.join(linkers)}):\n" + 
-        "\n".join(errors)
+        "\n".join(errors) +
+        "\n\nTip: Install 'zig' for cross-platform linking: https://ziglang.org/download/"
     )
 
 
 def link_files(obj_files: List[str], output_file: str, 
-               shared: bool = False, linker: str = 'gcc') -> str:
+               shared: bool = False, linker: Optional[str] = None) -> str:
     """Link object files to executable or shared library
     
     Args:
         obj_files: List of object file paths
         output_file: Output file path
         shared: True for shared library, False for executable
-        linker: Linker to use (default: gcc)
+        linker: Linker to use (default: auto-detect, tries multiple)
     
     Returns:
         Path to linked file
@@ -232,14 +380,14 @@ def link_files(obj_files: List[str], output_file: str,
                     # Output is up-to-date, skip linking
                     return output_file
             
-            link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
+            # If specific linker requested, try it first then fallback
+            if linker:
+                linkers = [linker] + [l for l in get_default_linkers() if l != linker]
+            else:
+                linkers = get_default_linkers()
             
-            try:
-                subprocess.run(link_cmd, check=True, capture_output=True, text=True)
-                return output_file
-            except subprocess.CalledProcessError as e:
-                file_type = "shared library" if shared else "executable"
-                raise RuntimeError(f"Failed to link {file_type}: {e.stderr}")
+            return try_link_with_linkers(obj_files, output_file, shared=shared, linkers=linkers)
+            
         finally:
             # Release all .o file locks in reverse order
             for lock in reversed(obj_locks):

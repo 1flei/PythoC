@@ -35,14 +35,23 @@ def run_test_suite(name: str, command: str) -> tuple[bool, str, float]:
     """Run a test suite and return (passed, output, duration)"""
     start_time = time.time()
     
+    # Ensure PYTHONPATH is set for subprocess
+    env = os.environ.copy()
+    workspace = str(Path(__file__).parent.parent)
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = workspace + os.pathsep + env['PYTHONPATH']
+    else:
+        env['PYTHONPATH'] = workspace
+    
     try:
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             text=True,
-            cwd=".",
-            timeout=60
+            cwd=workspace,
+            timeout=120,
+            env=env
         )
         
         duration = time.time() - start_time
@@ -85,11 +94,12 @@ def main():
     """Main test runner"""
     print_header("PC Compiler - Full Test Suite (Parallel)")
     
-    # Define test suites
+    # Define test suites - use sys.executable for cross-platform compatibility
+    python_exe = sys.executable
     test_suites = [
-        ("Unit Tests", "PYTHONPATH=. python test/run_unit_tests.py"),
-        ("Integration Tests", "PYTHONPATH=. python test/run_integration_tests.py"),
-        ("Example Tests", "PYTHONPATH=. python test/run_examples.py"),
+        ("Unit Tests", f"{python_exe} test/run_unit_tests.py"),
+        ("Integration Tests", f"{python_exe} test/run_integration_tests.py"),
+        ("Example Tests", f"{python_exe} test/run_examples.py"),
     ]
     
     print(f"Running {len(test_suites)} test suites in parallel...\n")
