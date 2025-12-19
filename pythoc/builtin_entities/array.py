@@ -198,7 +198,8 @@ class array(BuiltinType):
         # array[array[i32, 5], 3] -> ptr[array[i32, 5]]
         if cls.dimensions and len(cls.dimensions) > 1:
             # Create inner array type
-            inner_array = array[cls.element_type, *cls.dimensions[1:]]
+            # Use tuple unpacking compatible with Python 3.9+
+            inner_array = array[(cls.element_type,) + tuple(cls.dimensions[1:])]
             return ptr_class[inner_array]
         
         # For single-dimensional arrays, decay to pointer to element

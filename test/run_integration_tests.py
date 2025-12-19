@@ -28,16 +28,23 @@ def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
     test_name = test_file.stem
     start_time = time.time()
     
-    cmd = f"PYTHONPATH=. python {test_file}"
+    # Use sys.executable for cross-platform compatibility
+    # Set PYTHONPATH via env dict instead of shell syntax
+    env = os.environ.copy()
+    workspace = str(Path(__file__).parent.parent)
+    if 'PYTHONPATH' in env:
+        env['PYTHONPATH'] = workspace + os.pathsep + env['PYTHONPATH']
+    else:
+        env['PYTHONPATH'] = workspace
     
     try:
         result = subprocess.run(
-            cmd,
-            shell=True,
+            [sys.executable, str(test_file)],
             capture_output=True,
             text=True,
             timeout=50,
-            cwd="."
+            cwd=workspace,
+            env=env
         )
         duration = time.time() - start_time
         success = result.returncode == 0
@@ -99,7 +106,8 @@ def main():
     print_header("PC Compiler - Integration Test Suite (Parallel)")
     
     # Find all test files in integration directory
-    integration_dir = Path("./test/integration")
+    workspace = Path(__file__).parent.parent
+    integration_dir = workspace / "test" / "integration"
     test_files = sorted(integration_dir.glob("test_*.py"))
     
     if not test_files:

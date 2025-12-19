@@ -40,29 +40,35 @@ def run_command(cmd, capture=True, cwd=None):
 def compile_c_program(c_file, output_exe):
     """Compile C program with gcc -O3"""
     print(f"  Compiling C: {c_file.name}...")
+    
+    if not c_file.exists():
+        print(f"    ERROR: C file not found: {c_file}")
+        return False
+    
     result = run_command(["gcc", "-O3", "-o", str(output_exe), str(c_file), "-lm"])
     if result.returncode != 0:
-        print(f"    ERROR: {result.stderr}")
+        print(f"    ERROR (returncode={result.returncode}):")
+        print(f"    stdout: {result.stdout}")
+        print(f"    stderr: {result.stderr}")
         return False
     print(f"    -> {output_exe.name}")
     return True
 
 
 def compile_pc_program(pc_file, output_exe):
-    """Compile PC program: run Python to generate .o, then link with clang"""
+    """Compile PC program: run Python to generate executable"""
     print(f"  Compiling PC: {pc_file.name}...")
     
     workspace = Path(__file__).parent.parent  # Go up from test/ to workspace root
-    obj_file = workspace / "build" / pc_file.relative_to(workspace).with_suffix(".o")
     
-    # Step 1: Run Python script to compile to .o
+    # Step 1: Run Python script to compile to executable
     env = os.environ.copy()
     env['PYTHONPATH'] = str(workspace)
     env['PC_OPT_LEVEL'] = '3'  # Enable maximum optimization
     
-    print(f"    Step 1: Generating {obj_file.relative_to(workspace)} (PC_OPT_LEVEL=3)...")
+    print(f"    Compiling with PC_OPT_LEVEL=3...")
     result = subprocess.run(
-        ["python", str(pc_file)],
+        [sys.executable, str(pc_file)],
         capture_output=True,
         text=True,
         cwd=str(workspace),
@@ -70,12 +76,18 @@ def compile_pc_program(pc_file, output_exe):
     )
     
     if result.returncode != 0:
-        print(f"    ERROR: {result.stderr}")
+        print(f"    ERROR (returncode={result.returncode}):")
+        print(f"    stdout: {result.stdout}")
+        print(f"    stderr: {result.stderr}")
         return False
     
-    if not obj_file.exists():
-        print(f"    ERROR: Object file not generated at {obj_file}")
+    # Check if executable was created
+    if not output_exe.exists():
+        print(f"    ERROR: Executable not generated at {output_exe}")
+        print(f"    stdout: {result.stdout}")
         return False
+    
+    print(f"    -> {output_exe.name}")
     return True
 
 

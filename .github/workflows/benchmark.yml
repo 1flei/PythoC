@@ -28,12 +28,21 @@ jobs:
           pip install -e .
 
       - name: Run benchmark
+        env:
+          PYTHONPATH: .
         run: |
-          python test/run_benchmark.py | tee benchmark_output.txt
+          set -e
+          python test/run_benchmark.py 2>&1 | tee benchmark_output.txt
+          echo "Benchmark output:"
+          cat benchmark_output.txt
 
       - name: Parse benchmark results
         id: parse
         run: |
+          echo "Content of benchmark_output.txt:"
+          cat benchmark_output.txt
+          echo ""
+          echo "Parsing results..."
           python << 'EOF'
           import json
           import re
@@ -42,9 +51,12 @@ jobs:
           with open("benchmark_output.txt") as f:
               content = f.read()
 
+          print(f"Read {len(content)} bytes from benchmark_output.txt")
+
           # Parse binary_tree results
           bt_match = re.search(r"binary_tree\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s", content)
           if bt_match:
+              print(f"Found binary_tree: C={bt_match.group(1)}s, PC={bt_match.group(2)}s")
               results.append({
                   "name": "binary_tree_c",
                   "unit": "seconds",
@@ -55,10 +67,13 @@ jobs:
                   "unit": "seconds",
                   "value": float(bt_match.group(2))
               })
+          else:
+              print("WARNING: binary_tree results not found in output")
 
           # Parse nsieve results
           ns_match = re.search(r"nsieve\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s", content)
           if ns_match:
+              print(f"Found nsieve: C={ns_match.group(1)}s, PC={ns_match.group(2)}s")
               results.append({
                   "name": "nsieve_c",
                   "unit": "seconds",
@@ -69,11 +84,19 @@ jobs:
                   "unit": "seconds",
                   "value": float(ns_match.group(2))
               })
+          else:
+              print("WARNING: nsieve results not found in output")
 
           with open("benchmark_results.json", "w") as f:
               json.dump(results, f, indent=2)
 
           print(f"Parsed {len(results)} benchmark results")
+          
+          if len(results) == 0:
+              print("ERROR: No benchmark results parsed!")
+              print("First 1000 chars of output:")
+              print(content[:1000])
+              exit(1)
           EOF
 
       - name: Store benchmark result

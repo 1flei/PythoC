@@ -339,9 +339,15 @@ class RefinedType(CompositeType):
         # Create name
         base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
         pred_names = [p.__name__ for p in predicates]
-        tag_names = [f'"{t}"' for t in tags]
+        tag_names = ['tag_' + t for t in tags]
         all_names = [base_name] + pred_names + tag_names
-        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('"', '') for n in all_names)}"
+        # Build class name by sanitizing all special characters
+        sanitized_names = []
+        for n in all_names:
+            s = str(n).replace('[', '_').replace(']', '_').replace(',', '_')
+            s = s.replace(' ', '').replace('"', '').replace("'", '')
+            sanitized_names.append(s)
+        class_name = "RefinedType_" + '_'.join(sanitized_names)
         
         new_refined_type = type(class_name, (RefinedType,), {
             '_base_type': base_type,
@@ -558,9 +564,15 @@ class refined(metaclass=type):
         # Create class name
         base_name = base_type.get_name() if hasattr(base_type, 'get_name') else str(base_type)
         pred_names = [p.__name__ for p in predicates]
-        tag_names = [f'"{t}"' for t in tags]
+        tag_names = ['tag_' + t for t in tags]
         all_names = [base_name] + pred_names + tag_names
-        class_name = f"RefinedType_{'_'.join(str(n).replace('[', '_').replace(']', '_').replace(',', '_').replace(' ', '').replace('"', '') for n in all_names)}"
+        # Build class name by sanitizing all special characters
+        sanitized_names = []
+        for n in all_names:
+            s = str(n).replace('[', '_').replace(']', '_').replace(',', '_')
+            s = s.replace(' ', '').replace('"', '').replace("'", '')
+            sanitized_names.append(s)
+        class_name = "RefinedType_" + '_'.join(sanitized_names)
         
         new_refined_type = type(class_name, (RefinedType,), {
             '_base_type': base_type,
