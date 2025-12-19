@@ -121,8 +121,12 @@ def main():
     failed = 0
     results = []
     
+    # Use fewer workers on Windows due to slower process creation and zig linker
+    import platform
+    max_workers = 32
+    
     # Run tests in parallel
-    with ProcessPoolExecutor(max_workers=8) as executor:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tests
         future_to_test = {
             executor.submit(run_single_test, test_file): test_file.stem
