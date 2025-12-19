@@ -325,8 +325,8 @@ class VariableRegistry:
         current_scope[var_info.name] = var_info
         
         # Sync with type inference context if available
-        if self.type_inference_ctx and var_info.inferred_type:
-            self.type_inference_ctx.set_var_type(var_info.name, var_info.inferred_type)
+        if self.type_inference_ctx and var_info.type_hint:
+            self.type_inference_ctx.set_var_type(var_info.name, var_info.type_hint)
     
     def lookup(self, name: str) -> Optional[VariableInfo]:
         """Look up a variable in the scope chain

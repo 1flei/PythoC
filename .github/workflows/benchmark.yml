@@ -1,0 +1,101 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: write
+  deployments: write
+
+jobs:
+  benchmark:
+    name: Performance Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run benchmark
+        run: |
+          python test/run_benchmark.py | tee benchmark_output.txt
+
+      - name: Parse benchmark results
+        id: parse
+        run: |
+          python << 'EOF'
+          import json
+          import re
+
+          results = []
+          with open("benchmark_output.txt") as f:
+              content = f.read()
+
+          # Parse binary_tree results
+          bt_match = re.search(r"binary_tree\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s", content)
+          if bt_match:
+              results.append({
+                  "name": "binary_tree_c",
+                  "unit": "seconds",
+                  "value": float(bt_match.group(1))
+              })
+              results.append({
+                  "name": "binary_tree_pc",
+                  "unit": "seconds",
+                  "value": float(bt_match.group(2))
+              })
+
+          # Parse nsieve results
+          ns_match = re.search(r"nsieve\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s", content)
+          if ns_match:
+              results.append({
+                  "name": "nsieve_c",
+                  "unit": "seconds",
+                  "value": float(ns_match.group(1))
+              })
+              results.append({
+                  "name": "nsieve_pc",
+                  "unit": "seconds",
+                  "value": float(ns_match.group(2))
+              })
+
+          with open("benchmark_results.json", "w") as f:
+              json.dump(results, f, indent=2)
+
+          print(f"Parsed {len(results)} benchmark results")
+          EOF
+
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: PythoC Performance
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark_results.json
+          # Store results in gh-pages branch
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
+          # Alert if performance regresses by more than 20%
+          alert-threshold: '120%'
+          comment-on-alert: true
+          fail-on-alert: false
+          # Compare against previous results
+          comment-always: ${{ github.event_name == 'pull_request' }}
+
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark_output.txt
+            benchmark_results.json

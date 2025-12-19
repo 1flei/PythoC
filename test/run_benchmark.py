@@ -58,13 +58,9 @@ def compile_pc_program(pc_file, output_exe):
     # Step 1: Run Python script to compile to .o
     env = os.environ.copy()
     env['PYTHONPATH'] = str(workspace)
+    env['PC_OPT_LEVEL'] = '3'  # Enable maximum optimization
     
-    print(f"    Step 1: Generating {obj_file.relative_to(workspace)}...")
-    result = run_command(
-        ["python", str(pc_file)],
-        cwd=str(workspace)
-    )
-    result.env = env
+    print(f"    Step 1: Generating {obj_file.relative_to(workspace)} (PC_OPT_LEVEL=3)...")
     result = subprocess.run(
         ["python", str(pc_file)],
         capture_output=True,
