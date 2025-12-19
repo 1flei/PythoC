@@ -285,12 +285,15 @@ class LLVMCBuilder(LLVMBuilder):
             ir_function.args[0].add_attribute('sret')
             ir_function.args[0].add_attribute('noalias')
         
-        # Add byval attribute to indirect struct parameters
+        # Add byval attribute to indirect struct parameters (x86-64 only)
+        # ARM64 does NOT use byval - it just passes a plain pointer
         # Account for sret offset if present
-        sret_offset = 1 if uses_sret else 0
-        for orig_idx, byval_type in byval_params:
-            arg_idx = orig_idx + sret_offset
-            ir_function.args[arg_idx].add_attribute('byval')
+        if apply_c_abi and byval_params:
+            if abi.uses_byval_for_indirect_args():
+                sret_offset = 1 if uses_sret else 0
+                for orig_idx, byval_type in byval_params:
+                    arg_idx = orig_idx + sret_offset
+                    ir_function.args[arg_idx].add_attribute('byval')
         
         # Build sret_info
         sret_info = None

@@ -157,3 +157,14 @@ class ABIInfo(ABC):
         Aggregate types may need ABI coercion for passing/returning.
         """
         return isinstance(llvm_type, (ir.LiteralStructType, ir.IdentifiedStructType, ir.ArrayType))
+    
+    def uses_byval_for_indirect_args(self) -> bool:
+        """Check if this ABI uses byval attribute for indirect aggregate arguments.
+        
+        x86-64: Uses byval attribute on pointer parameters
+        ARM64: Does NOT use byval - just passes pointer directly
+        
+        Returns:
+            True if byval attribute should be added to indirect arg pointers
+        """
+        return True  # Default for x86-64
