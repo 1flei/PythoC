@@ -9,3 +9,4 @@ backup
 .vscode
 pythoc.egg-info
 dist/
+test_report/

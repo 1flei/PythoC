@@ -152,7 +152,6 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
     # Default to struct type factory
     if type_factory is None:
         type_factory = create_struct_type
-    from ..meta import extract_type_parameters_from_closure, create_generic_instantiation
     from ..utils import normalize_suffix
     
     # Normalize suffix (handle tuple/list of type parameters)
@@ -162,36 +161,12 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
     original_cls_name = cls.__name__
     cls_name = cls.__name__
     
-    # Extract type parameters for generic instantiation (AST rewriting)
-    type_params = {}
+    # Set source context for error messages
     try:
-        type_params = extract_type_parameters_from_closure(cls)
-    except (ValueError, AttributeError):
-        pass
-    
-    # Try to parse source for AST rewriting (for generic instantiation)
-    # This is ONLY for renaming the class if type_params exist
-    try:
-        cls_source = inspect.getsource(cls)
-        cls_source = textwrap.dedent(cls_source)
-        # Get class start line for accurate error messages
-        try:
-            _, start_line = inspect.getsourcelines(cls)
-            source_file = inspect.getfile(cls)
-            set_source_context(source_file, start_line - 1)
-        except (OSError, TypeError):
-            pass
-        tree = ast.parse(cls_source)
-        if tree.body and isinstance(tree.body[0], ast.ClassDef):
-            cls_ast = tree.body[0]
-            if type_params:
-                _, specialized_ast = create_generic_instantiation(cls, type_params, cls_name)
-                if specialized_ast:
-                    cls_name = specialized_ast.name
-                    cls.__name__ = cls_name
-                    cls.__qualname__ = cls_name
+        _, start_line = inspect.getsourcelines(cls)
+        source_file = inspect.getfile(cls)
+        set_source_context(source_file, start_line - 1)
     except (OSError, TypeError):
-        # Can't get source - that's fine, we'll use annotations directly
         pass
     
     # === UNIFIED STRUCT COMPILATION PATH ===
@@ -215,10 +190,6 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
         return f'{len(cls_name)}{cls_name}'
     cls.get_type_id = _temp_get_type_id
     
-    # Preserve element_type for debugging/introspection
-    if 'element_type' in type_params:
-        cls._element_type = type_params['element_type']
-    
     # === BUILD TYPE RESOLUTION NAMESPACE ===
     from ..type_resolver import TypeResolver
     from .annotation_resolver import build_annotation_namespace, resolve_string_annotation
@@ -237,8 +208,7 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
     # Build comprehensive namespace for type resolution
     type_namespace = build_annotation_namespace(
         user_globals,
-        is_dynamic=is_dynamic,
-        additional_types=type_params
+        is_dynamic=is_dynamic
     )
     
     # Add the class itself to namespace for self-referential types

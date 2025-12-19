@@ -569,7 +569,7 @@ class BuiltinType(BuiltinEntity):
         return wrap_value(result, kind="value", type_hint=left.type_hint)
     
     @classmethod
-    def handle_floordiv(cls, visitor, node: ast.BinOp):
+    def handle_floordiv(cls, visitor, left, right, node: ast.BinOp):
         """Handle floor division for numeric types"""
         from ..valueref import wrap_value, ensure_ir, get_type
         from llvmlite import ir
