@@ -594,7 +594,8 @@ class TypeConverter:
             from .builtin_entities import array
             
             # Create inner array type: array[i32, 3, 4] for original array[i32, 2, 3, 4]
-            inner_array_type = array[pc_elem_type, *inner_dims]
+            # Use tuple unpacking compatible with Python 3.9+
+            inner_array_type = array[(pc_elem_type,) + tuple(inner_dims)]
             
             # Convert each sub-list
             elem_constants = []

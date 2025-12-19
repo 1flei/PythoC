@@ -43,11 +43,12 @@ def generate_multidim_array_initializer(shape):
     # for comb in iter_range_comb(shape):
     #     print(comb)
     shape_tuple = tuple(shape)
-    ArrayType = array[i32, *shape_tuple]
+    # Use tuple unpacking compatible with Python 3.10+
+    ArrayType = array[(i32,) + shape_tuple]
     if len(shape_tuple) == 1:
         DecayPtrType = ptr[i32]
     else:
-        DecayPtrType = ptr[array[i32, *shape_tuple[1:]]]
+        DecayPtrType = ptr[array[(i32,) + shape_tuple[1:]]]
     
     @compile(suffix=shape_tuple)
     def init_multidim_array() -> DecayPtrType:

@@ -440,7 +440,8 @@ class ptr(BuiltinType):
                 inner_type = base_type
             else:
                 # Create array type with remaining dimensions
-                inner_type = array[base_type, *remaining_dims]
+                # Use tuple unpacking compatible with Python 3.9+
+                inner_type = array[(base_type,) + tuple(remaining_dims)]
         
         # Create a specialized ptr[T] type
         class SpecializedPtr(ptr):

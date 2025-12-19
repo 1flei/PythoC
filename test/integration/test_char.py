@@ -82,12 +82,14 @@ if __name__ == "__main__":
     print(f"char(-1) = {result} (expected -1)")
     
     result_newline = char_newline()
-    assert result_newline == ord('\n'), f"Expected {ord('\n')}, got {result_newline}"
-    print(f"char('\\n') = {result_newline} (expected {ord('\n')})")
+    expected_newline = ord('\n')
+    assert result_newline == expected_newline, f"Expected {expected_newline}, got {result_newline}"
+    print(f"char('\\n') = {result_newline} (expected {expected_newline})")
     
     result_tab = char_tab()
-    assert result_tab == ord('\t'), f"Expected {ord('\t')}, got {result_tab}"
-    print(f"char('\\t') = {result_tab} (expected {ord('\t')})")
+    expected_tab = ord('\t')
+    assert result_tab == expected_tab, f"Expected {expected_tab}, got {result_tab}"
+    print(f"char('\\t') = {result_tab} (expected {expected_tab})")
     
     star = char_star()
     assert star == 42, f"Expected 42 (ord('*')), got {star}"

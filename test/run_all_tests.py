@@ -31,8 +31,13 @@ def print_header(text: str):
     print(f"{BOLD}{BLUE}{text:^70}{RESET}")
     print(f"{BOLD}{BLUE}{'='*70}{RESET}\n")
 
-def run_test_suite(name: str, command: str) -> tuple[bool, str, float]:
-    """Run a test suite and return (passed, output, duration)"""
+def run_test_suite(name: str, command: list) -> tuple[bool, str, float]:
+    """Run a test suite and return (passed, output, duration)
+    
+    Args:
+        name: Name of the test suite
+        command: List of command arguments (e.g., [sys.executable, 'script.py'])
+    """
     start_time = time.time()
     
     # Ensure PYTHONPATH is set for subprocess
@@ -46,7 +51,6 @@ def run_test_suite(name: str, command: str) -> tuple[bool, str, float]:
     try:
         result = subprocess.run(
             command,
-            shell=True,
             capture_output=True,
             text=True,
             cwd=workspace,
@@ -97,9 +101,9 @@ def main():
     # Define test suites - use sys.executable for cross-platform compatibility
     python_exe = sys.executable
     test_suites = [
-        ("Unit Tests", f"{python_exe} test/run_unit_tests.py"),
-        ("Integration Tests", f"{python_exe} test/run_integration_tests.py"),
-        ("Example Tests", f"{python_exe} test/run_examples.py"),
+        ("Unit Tests", [python_exe, "test/run_unit_tests.py"]),
+        ("Integration Tests", [python_exe, "test/run_integration_tests.py"]),
+        ("Example Tests", [python_exe, "test/run_examples.py"]),
     ]
     
     print(f"Running {len(test_suites)} test suites in parallel...\n")
