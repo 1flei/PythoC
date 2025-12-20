@@ -55,7 +55,8 @@ def run_test_suite(name: str, command: list) -> tuple[bool, str, float]:
             text=True,
             cwd=workspace,
             timeout=120,
-            env=env
+            env=env,
+            stdin=subprocess.DEVNULL
         )
         
         duration = time.time() - start_time

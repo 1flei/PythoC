@@ -11,7 +11,10 @@ from .inspect_utils import (
 )
 from .id_generator import get_next_id, reset_id_generator, peek_next_id
 from .build_utils import compile_to_executable, link_executable
-from .link_utils import link_files, build_link_command, try_link_with_linkers
+from .link_utils import (
+    link_files, build_link_command, try_link_with_linkers,
+    get_shared_lib_extension, get_executable_extension
+)
 
 __all__ = [
     # Frame utilities
@@ -34,6 +37,8 @@ __all__ = [
     'link_files',
     'build_link_command',
     'try_link_with_linkers',
+    'get_shared_lib_extension',
+    'get_executable_extension',
     # Test/analysis utilities
     'analyze_function',
     'get_llvm_version',

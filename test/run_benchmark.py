@@ -16,6 +16,12 @@ import sys
 import os
 from pathlib import Path
 
+
+def get_exe_suffix():
+    """Get platform-specific executable suffix."""
+    return '.exe' if sys.platform == 'win32' else ''
+
+
 # Configuration
 WARMUP_RUNS = 1
 BENCHMARK_RUNS = 5
@@ -32,7 +38,8 @@ def run_command(cmd, capture=True, cwd=None):
         shell=not isinstance(cmd, list),
         capture_output=capture,
         text=True,
-        cwd=cwd
+        cwd=cwd,
+        stdin=subprocess.DEVNULL
     )
     return result
 
@@ -72,7 +79,8 @@ def compile_pc_program(pc_file, output_exe):
         capture_output=True,
         text=True,
         cwd=str(workspace),
-        env=env
+        env=env,
+        stdin=subprocess.DEVNULL
     )
     
     if result.returncode != 0:
@@ -100,7 +108,8 @@ def run_benchmark(exe_path, args, runs=1):
         result = subprocess.run(
             [str(exe_path)] + [str(a) for a in args],
             capture_output=True,
-            text=True
+            text=True,
+            stdin=subprocess.DEVNULL
         )
         end = time.perf_counter()
         
@@ -126,10 +135,11 @@ def benchmark_binary_tree():
     build_dir = workspace / "build" / "test" / "example"
     build_dir.mkdir(parents=True, exist_ok=True)
     
+    exe_suffix = get_exe_suffix()
     c_file = example_dir / "base_binary_tree_test.c"
     pc_file = example_dir / "pc_binary_tree_test.py"
-    c_exe = build_dir / "binary_tree_c_bench"
-    pc_exe = build_dir / "pc_binary_tree_test"
+    c_exe = build_dir / f"binary_tree_c_bench{exe_suffix}"
+    pc_exe = build_dir / f"pc_binary_tree_test{exe_suffix}"
     
     print(f"\n[1/2] Compilation (not timed)")
     if not compile_c_program(c_file, c_exe):
@@ -181,10 +191,11 @@ def benchmark_nsieve():
     build_dir = workspace / "build" / "test" / "example"
     build_dir.mkdir(parents=True, exist_ok=True)
     
+    exe_suffix = get_exe_suffix()
     c_file = example_dir / "nsieve.c"
     pc_file = example_dir / "nsieve_pc.py"
-    c_exe = build_dir / "nsieve_c_bench"
-    pc_exe = build_dir / "nsieve_pc"
+    c_exe = build_dir / f"nsieve_c_bench{exe_suffix}"
+    pc_exe = build_dir / f"nsieve_pc{exe_suffix}"
     
     print(f"\n[1/2] Compilation (not timed)")
     if not compile_c_program(c_file, c_exe):

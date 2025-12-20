@@ -1,5 +1,7 @@
 import os
 
+from .link_utils import get_shared_lib_extension
+
 
 def sanitize_filename(name):
     """
@@ -67,15 +69,16 @@ def get_build_paths(source_file, suffix=None, scope=None):
         os.makedirs(build_dir, exist_ok=True)
     
     # Calculate output file paths
+    lib_ext = get_shared_lib_extension()
     if build_dir:
         ir_file = os.path.join(build_dir, file_base + '.ll')
         obj_file = os.path.join(build_dir, file_base + '.o')
-        so_file = os.path.join(build_dir, file_base + '.so')
+        so_file = os.path.join(build_dir, file_base + lib_ext)
     else:
         # Fallback to build/ root
         ir_file = os.path.join('build', file_base + '.ll')
         obj_file = os.path.join('build', file_base + '.o')
-        so_file = os.path.join('build', file_base + '.so')
+        so_file = os.path.join('build', file_base + lib_ext)
         if not os.path.exists('build'):
             os.makedirs('build', exist_ok=True)
     

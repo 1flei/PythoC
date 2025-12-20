@@ -37,7 +37,7 @@ jobs:
   test-windows:
     name: Test Python ${{ matrix.python-version }} on Windows
     runs-on: windows-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
@@ -46,18 +46,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
         with:
           python-version: ${{ matrix.python-version }}
+          activate-environment: pythoc
+          auto-activate-base: false
 
-      - name: Install dependencies
+      - name: Install MinGW toolchain and dependencies
+        shell: bash -el {0}
         run: |
-          python -m pip install --upgrade pip
-          pip install ziglang
+          conda install -c conda-forge m2w64-toolchain -y
           pip install -e .
 
       - name: Run tests
+        shell: bash -el {0}
         env:
           PYTHONPATH: .
         run: python test/run_all_tests.py
