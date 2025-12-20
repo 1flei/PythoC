@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1766201466079,
+  "lastUpdate": 1766212032011,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -87,6 +87,50 @@ window.BENCHMARK_DATA = {
           {
             "name": "nsieve_pc",
             "value": 4.7797,
+            "unit": "seconds"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "2340ec8ae511419d66eb0a23d5e70f553cfca8f3",
+          "message": "Give up windows CI now",
+          "timestamp": "2025-12-20T14:24:42+08:00",
+          "tree_id": "e244e13e2754c44d5fef59a4cf0ca39857619891",
+          "url": "https://github.com/1flei/PythoC/commit/2340ec8ae511419d66eb0a23d5e70f553cfca8f3"
+        },
+        "date": 1766212031769,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree_c",
+            "value": 6.6429,
+            "unit": "seconds"
+          },
+          {
+            "name": "binary_tree_pc",
+            "value": 5.362,
+            "unit": "seconds"
+          },
+          {
+            "name": "nsieve_c",
+            "value": 4.5801,
+            "unit": "seconds"
+          },
+          {
+            "name": "nsieve_pc",
+            "value": 4.7835,
             "unit": "seconds"
           }
         ]
