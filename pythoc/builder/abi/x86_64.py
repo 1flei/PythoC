@@ -1,13 +1,16 @@
 """
-x86-64 System V ABI implementation.
+x86-64 ABI implementation.
 
-This implements the struct passing/returning conventions for x86-64 Linux/macOS.
-Based on the System V AMD64 ABI specification and clang's implementation.
+This implements the struct passing/returning conventions for x86-64.
 
-Key rules for struct returns:
+System V ABI (Linux/macOS):
 - <= 8 bytes: coerce to single integer (i8/i16/i32/i64)
 - 9-16 bytes: coerce to {i64, iN} or similar two-element struct
 - > 16 bytes: use sret (indirect return via pointer)
+
+Windows x64 ABI:
+- <= 8 bytes: coerce to single integer
+- > 8 bytes: use sret (indirect return via pointer)
 
 For floating-point structs, SSE registers are used, but for simplicity
 we focus on integer-class structs first.
@@ -32,7 +35,27 @@ class FieldClass:
 
 
 class X86_64ABI(ABIInfo):
-    """x86-64 System V ABI implementation."""
+    """x86-64 ABI implementation.
+    
+    Supports both System V (Linux/macOS) and Windows x64 calling conventions.
+    The key difference is the threshold for indirect passing:
+    - System V: > 16 bytes
+    - Windows x64: > 8 bytes
+    """
+    
+    # Default to System V ABI (16 bytes threshold)
+    # Windows x64 uses 8 bytes threshold
+    MAX_REGISTER_SIZE = 16
+    
+    def __init__(self, max_register_size: int = 16):
+        """Initialize x86-64 ABI.
+        
+        Args:
+            max_register_size: Maximum struct size that can be passed in registers.
+                              16 for System V (Linux/macOS), 8 for Windows x64.
+        """
+        super().__init__()
+        self.max_register_size = max_register_size
     
     def classify_return_type(self, llvm_type: ir.Type) -> CoercedType:
         """Classify return type for x86-64 ABI.
@@ -62,8 +85,9 @@ class X86_64ABI(ABIInfo):
                 is_return=True
             )
         
-        # > 16 bytes: use sret (indirect)
-        if size > 16:
+        # Use sret (indirect) for structs larger than max_register_size
+        # System V: > 16 bytes, Windows x64: > 8 bytes
+        if size > self.max_register_size:
             return CoercedType(
                 kind=PassingKind.INDIRECT,
                 original_type=llvm_type,
@@ -125,8 +149,8 @@ class X86_64ABI(ABIInfo):
         lo_class = FieldClass.NO_CLASS
         hi_class = FieldClass.NO_CLASS
         
-        # > 16 bytes always goes to memory
-        if size > 16:
+        # Use sret for structs larger than max_register_size
+        if size > self.max_register_size:
             return FieldClass.MEMORY, FieldClass.MEMORY
         
         # Handle array type - expand as repeated elements

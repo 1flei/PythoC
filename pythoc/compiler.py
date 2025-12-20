@@ -36,7 +36,7 @@ class LLVMCompiler:
         self.module = ir.Module(name=name)
         self.module.triple = binding.get_default_triple()
         # Set data layout for correct struct size calculation
-        target = binding.Target.from_default_triple()
+        target = binding.Target.from_triple(self.module.triple)
         target_machine = target.create_target_machine()
         self.module.data_layout = target_machine.target_data
         self.extern_functions = {}  # Reset extern functions for new module
@@ -773,7 +773,7 @@ class LLVMCompiler:
         # Create a target machine with PIC relocation model
         # This is critical for shared libraries to support lazy symbol resolution
         # and circular dependencies between .so files
-        target = binding.Target.from_default_triple()
+        target = binding.Target.from_triple(self.module.triple)
         target_machine = target.create_target_machine(reloc='pic', codemodel='default')
         
         # Compile to object code
