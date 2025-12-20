@@ -47,7 +47,8 @@ def run_python_script(script_path: str, timeout: int = 30) -> Tuple[int, str, st
             text=True,
             timeout=timeout,
             cwd=str(workspace),
-            env=get_env()
+            env=get_env(),
+            stdin=subprocess.DEVNULL
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
@@ -66,7 +67,8 @@ def run_python_module(module_name: str, timeout: int = 30) -> Tuple[int, str, st
             text=True,
             timeout=timeout,
             cwd=str(workspace),
-            env=get_env()
+            env=get_env(),
+            stdin=subprocess.DEVNULL
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
@@ -96,7 +98,8 @@ def run_executable(exe_path: str, args: List[str] = None,
             text=True,
             timeout=timeout,
             cwd=str(workspace),
-            env=get_env()
+            env=get_env(),
+            stdin=subprocess.DEVNULL
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:

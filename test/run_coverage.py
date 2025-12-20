@@ -65,7 +65,8 @@ def run_test_with_coverage(test_file: Path, index: int) -> tuple[str, bool, floa
             text=True,
             timeout=60,
             cwd=str(PROJECT_ROOT),
-            env={**os.environ, 'PYTHONPATH': str(PROJECT_ROOT)}
+            env={**os.environ, 'PYTHONPATH': str(PROJECT_ROOT)},
+            stdin=subprocess.DEVNULL
         )
         duration = time.time() - start_time
         success = result.returncode == 0
@@ -106,7 +107,8 @@ def merge_coverage_data():
     result = subprocess.run(
         cmd,
         capture_output=True,
-        cwd=str(PROJECT_ROOT)
+        cwd=str(PROJECT_ROOT),
+        stdin=subprocess.DEVNULL
     )
     return result.returncode == 0
 
@@ -123,7 +125,8 @@ def generate_reports(report_file):
         f'--data-file={cov_data}',
         '--show-missing'
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT))
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(PROJECT_ROOT),
+                            stdin=subprocess.DEVNULL)
     print(result.stdout)
     report_file.write(result.stdout + '\n')
     
@@ -134,7 +137,7 @@ def generate_reports(report_file):
         f'--data-file={cov_data}',
         '-o', str(json_file)
     ]
-    subprocess.run(cmd, capture_output=True, cwd=str(PROJECT_ROOT))
+    subprocess.run(cmd, capture_output=True, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL)
     
     # HTML report
     cmd = [
@@ -142,7 +145,7 @@ def generate_reports(report_file):
         f'--data-file={cov_data}',
         '-d', str(HTML_DIR)
     ]
-    subprocess.run(cmd, capture_output=True, cwd=str(PROJECT_ROOT))
+    subprocess.run(cmd, capture_output=True, cwd=str(PROJECT_ROOT), stdin=subprocess.DEVNULL)
     
     # Analyze JSON data
     if json_file.exists():

@@ -161,7 +161,8 @@ def run_invalid_code(source_code: str) -> tuple:
             [sys.executable, temp_file],
             capture_output=True,
             text=True,
-            env={**os.environ, 'PYTHONPATH': os.path.dirname(os.path.dirname(os.path.dirname(__file__)))}
+            env={**os.environ, 'PYTHONPATH': os.path.dirname(os.path.dirname(os.path.dirname(__file__)))},
+            stdin=subprocess.DEVNULL
         )
         return result.returncode, result.stderr
     finally:

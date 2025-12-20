@@ -44,7 +44,8 @@ def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
             text=True,
             timeout=50,
             cwd=workspace,
-            env=env
+            env=env,
+            stdin=subprocess.DEVNULL
         )
         duration = time.time() - start_time
         success = result.returncode == 0

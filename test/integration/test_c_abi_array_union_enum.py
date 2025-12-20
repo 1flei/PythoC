@@ -475,7 +475,7 @@ def _compile_c_library():
     
     result = subprocess.run(
         ['gcc', '-shared', '-fPIC', '-O2', '-o', so_file, c_file],
-        capture_output=True, text=True
+        capture_output=True, text=True, stdin=subprocess.DEVNULL
     )
     if result.returncode != 0:
         raise RuntimeError(f"C compilation failed: {result.stderr}")

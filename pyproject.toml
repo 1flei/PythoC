@@ -34,9 +34,6 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
 ]
-windows = [
-    "ziglang>=0.11.0",
-]
 
 [project.urls]
 Homepage = "https://github.com/1flei/PythoC"

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Native Executor V2 - Load multiple .so files for multi-file scenarios
+Native Executor V2 - Load multiple shared libraries for multi-file scenarios
 
-This version creates one .so per source file and loads them all with proper dependency order.
+This version creates one shared library per source file and loads them all with proper dependency order.
 """
 
 import os
@@ -12,9 +12,11 @@ import subprocess
 from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from llvmlite import ir
 
+from .utils.link_utils import get_shared_lib_extension
+
 
 class MultiSOExecutor:
-    """Execute compiled LLVM functions by loading multiple .so files"""
+    """Execute compiled LLVM functions by loading multiple shared libraries"""
     
     def __init__(self):
         self.loaded_libs = {}  # source_file -> ctypes.CDLL
@@ -458,14 +460,15 @@ class MultiSOExecutor:
     def has_loaded_library(self, source_file: str) -> bool:
         """Check if a library for the given source file is already loaded"""
         # Check if any loaded library corresponds to this source file
-        # Build the expected .so path from source file
+        # Build the expected shared library path from source file
         cwd = os.getcwd()
         if source_file.startswith(cwd):
             rel_path = os.path.relpath(source_file, cwd)
         else:
             rel_path = source_file
+        lib_ext = get_shared_lib_extension()
         so_file = os.path.join('build', os.path.dirname(rel_path), 
-                              os.path.splitext(os.path.basename(source_file))[0] + '.so')
+                              os.path.splitext(os.path.basename(source_file))[0] + lib_ext)
         return so_file in self.loaded_libs
     
     def execute_function(self, wrapper) -> Callable:
@@ -507,18 +510,19 @@ class MultiSOExecutor:
         from .build import flush_all_pending_outputs
         flush_all_pending_outputs()
         
-        # Check if we need to compile .so from .o
+        # Check if we need to compile shared library from .o
         need_compile = False
-        obj_file = so_file.replace('.so', '.o')
+        lib_ext = get_shared_lib_extension()
+        obj_file = so_file.replace(lib_ext, '.o')
         
         if not os.path.exists(so_file):
             need_compile = True
         elif not os.path.exists(obj_file):
-            # If .so exists but .o doesn't, something is wrong
+            # If shared library exists but .o doesn't, something is wrong
             need_compile = False
         else:
             # Check both .ll and .o timestamps
-            ll_file = so_file.replace('.so', '.ll')
+            ll_file = so_file.replace(lib_ext, '.ll')
             so_mtime = os.path.getmtime(so_file)
             
             # If .ll is newer than .so, need to recompile
@@ -561,12 +565,13 @@ class MultiSOExecutor:
         """
         Recursively compile all dependencies before loading
         
-        This ensures all .so files exist before we try to load them.
+        This ensures all shared library files exist before we try to load them.
         
         Args:
             dependencies: List of (dep_source_file, dep_so_file) tuples
             visited: Set of already processed so_files to avoid infinite loops
         """
+        lib_ext = get_shared_lib_extension()
         for dep_source_file, dep_so_file in dependencies:
             if dep_so_file in visited:
                 continue
@@ -578,17 +583,17 @@ class MultiSOExecutor:
                 self._compile_dependencies_recursive(dep_deps, visited)
             
             # Now compile this dependency if needed
-            dep_obj_file = dep_so_file.replace('.so', '.o')
+            dep_obj_file = dep_so_file.replace(lib_ext, '.o')
             if os.path.exists(dep_obj_file):
                 need_compile = False
                 if not os.path.exists(dep_so_file):
                     need_compile = True
                 else:
-                    # Check if .o is newer than .so
+                    # Check if .o is newer than shared library
                     if os.path.getmtime(dep_obj_file) > os.path.getmtime(dep_so_file):
                         need_compile = True
                     # Also check .ll timestamp
-                    dep_ll_file = dep_so_file.replace('.so', '.ll')
+                    dep_ll_file = dep_so_file.replace(lib_ext, '.ll')
                     if os.path.exists(dep_ll_file):
                         if os.path.getmtime(dep_ll_file) > os.path.getmtime(dep_so_file):
                             need_compile = True
@@ -628,7 +633,8 @@ class MultiSOExecutor:
                     # Fallback to old behavior for functions without so_file
                     cwd = os.getcwd()
                     rel_path = os.path.relpath(dep_source_file, cwd) if dep_source_file.startswith(cwd) else dep_source_file
-                    dep_so_file = os.path.join('build', os.path.dirname(rel_path), os.path.splitext(os.path.basename(dep_source_file))[0] + '.so')
+                    lib_ext = get_shared_lib_extension()
+                    dep_so_file = os.path.join('build', os.path.dirname(rel_path), os.path.splitext(os.path.basename(dep_source_file))[0] + lib_ext)
                 
                 # Always add dependency, will be compiled if needed
                 dependencies.append((dep_source_file, dep_so_file))

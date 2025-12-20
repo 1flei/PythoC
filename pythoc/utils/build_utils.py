@@ -45,9 +45,14 @@ def determine_output_path(source_file: str, output_path: Optional[str] = None) -
         output_path: Optional custom output path
     
     Returns:
-        Absolute path for the output executable
+        Absolute path for the output executable (with .exe on Windows)
     """
+    import sys
+    
     if output_path is not None:
+        # Add .exe extension on Windows if not already present
+        if sys.platform == 'win32' and not output_path.endswith('.exe'):
+            return output_path + '.exe'
         return output_path
     
     cwd = os.getcwd()
@@ -58,7 +63,13 @@ def determine_output_path(source_file: str, output_path: Optional[str] = None) -
     
     base_name = os.path.splitext(os.path.basename(source_file))[0]
     output_dir = os.path.join('build', os.path.dirname(rel_path))
-    return os.path.join(output_dir, base_name)
+    exe_path = os.path.join(output_dir, base_name)
+    
+    # Add .exe extension on Windows
+    if sys.platform == 'win32':
+        exe_path += '.exe'
+    
+    return exe_path
 
 
 def get_object_file_path(source_file: str) -> str:

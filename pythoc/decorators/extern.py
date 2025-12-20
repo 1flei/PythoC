@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import sys
 from typing import Any, List
 from ..valueref import ValueRef
 
@@ -134,7 +135,13 @@ class ExternFunctionWrapper:
                 'c': None,
             }
         
-        lib_path = lib_map.get(self.lib, f'lib{self.lib}.so')
+        lib_path = lib_map.get(self.lib)
+        if lib_path is None and self.lib not in lib_map:
+            # Not in map, build default library name based on platform
+            if sys.platform == 'win32':
+                lib_path = f'{self.lib}.dll'
+            else:
+                lib_path = f'lib{self.lib}.so'
         
         try:
             lib_handle = ctypes.CDLL(lib_path)
