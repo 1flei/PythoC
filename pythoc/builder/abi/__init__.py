@@ -30,11 +30,19 @@ def get_target_abi(triple: str = None) -> ABIInfo:
         from llvmlite import binding
         triple = binding.get_default_triple()
     
+    triple_lower = triple.lower()
+    
     # Parse architecture from triple
     arch = triple.split('-')[0] if triple else 'x86_64'
     
+    # Check if Windows target
+    is_windows = 'windows' in triple_lower or 'win32' in triple_lower or 'mingw' in triple_lower
+    
     if arch in ('x86_64', 'x86-64', 'amd64'):
-        return X86_64ABI()
+        # Windows x64 ABI: max 8 bytes in registers
+        # System V ABI (Linux/macOS): max 16 bytes in registers
+        max_reg_size = 8 if is_windows else 16
+        return X86_64ABI(max_register_size=max_reg_size)
     elif arch in ('aarch64', 'arm64'):
         # TODO: Implement AArch64 ABI
         from .aarch64 import AArch64ABI

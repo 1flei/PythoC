@@ -122,78 +122,55 @@ def get_executable_extension() -> str:
         return ''
 
 
-def _find_zig_executable() -> Optional[str]:
-    """Find zig executable, including python-zig from ziglang package.
+def _get_linker_candidates() -> List[str]:
+    """Get linker candidates based on availability.
     
-    Returns:
-        Path to zig executable or None if not found
+    Returns list of linker commands. For zig, returns 'python-zig cc' if available.
     """
-    # First try system zig
-    if shutil.which('zig'):
-        return 'zig'
+    candidates = []
     
-    # Try python-zig (installed via pip install ziglang)
+    for linker in ['cc', 'clang', 'gcc']:
+        if shutil.which(linker):
+            candidates.append(linker)
+    
+    # zig via pip install ziglang (provides python-zig command)
     if shutil.which('python-zig'):
-        return 'python-zig'
+        candidates.append('python-zig cc')
     
-    # Try running via python -m ziglang
-    try:
-        result = subprocess.run(
-            [sys.executable, '-m', 'ziglang', 'version'],
-            capture_output=True, text=True, timeout=30,
-            stdin=subprocess.DEVNULL
-        )
-        if result.returncode == 0:
-            return 'ziglang-module'  # Special marker for module invocation
-    except (subprocess.TimeoutExpired, Exception):
-        pass
-    
-    return None
+    return candidates
 
 
 def find_available_linker() -> str:
     """Find an available linker on the system.
     
-    Priority order (all platforms): cc, clang, gcc, zig
+    Priority order (all platforms): cc, clang, gcc, python-zig cc
     
     Returns:
-        Name of available linker
+        Linker command string
         
     Raises:
         RuntimeError: If no linker is found
     """
-    # Unified priority order for all platforms: cc, clang, gcc, zig
-    for linker in ['cc', 'clang', 'gcc']:
-        if shutil.which(linker):
-            return linker
-    
-    zig = _find_zig_executable()
-    if zig:
-        return zig
+    candidates = _get_linker_candidates()
+    if candidates:
+        return candidates[0]
     
     raise RuntimeError(
         "No linker found. Please install one of: cc, gcc, clang, or zig.\n"
-        "Tip: Install zig via pip: pip install ziglang\n"
-        "Or download from: https://ziglang.org/download/"
+        "Tip: Install zig via pip: pip install ziglang"
     )
 
 
 def get_default_linkers() -> List[str]:
     """Get list of linkers to try in order of preference.
     
-    Priority order (all platforms): cc, clang, gcc, zig
+    Priority order (all platforms): cc, clang, gcc, python-zig cc
     
     Returns:
-        List of linker names (may include special markers like 'ziglang-module')
+        List of available linker command strings
     """
-    # Unified priority order for all platforms
-    linkers = ['cc', 'clang', 'gcc']
-    
-    zig = _find_zig_executable()
-    if zig:
-        linkers.append(zig)
-    
-    return linkers
+    candidates = _get_linker_candidates()
+    return candidates if candidates else ['cc', 'clang', 'gcc']
 
 
 def get_link_flags() -> List[str]:
@@ -225,11 +202,6 @@ def get_link_flags() -> List[str]:
     return lib_flags
 
 
-def _is_zig_linker(linker: str) -> bool:
-    """Check if linker is a zig variant."""
-    return linker in ('zig', 'python-zig', 'ziglang-module')
-
-
 def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[str]:
     """Get platform-specific link flags
     
@@ -240,17 +212,17 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
     Returns:
         List of platform-specific flags
     """
-    is_zig = _is_zig_linker(linker)
+    is_zig = 'zig' in linker
     
     if sys.platform == 'win32':
         if is_zig:
-            # Use GNU target to avoid lld-link issues on Windows
-            # lld-link has problems with some paths/configurations
+            # Use GNU target for zig on Windows
             flags = ['-target', 'x86_64-windows-gnu']
             if shared:
                 flags.append('-shared')
             return flags
         else:
+            # mingw gcc/clang
             return ['-shared'] if shared else []
     elif sys.platform == 'darwin':
         # Explicitly specify architecture to avoid x86_64/arm64 mismatch issues
@@ -263,9 +235,7 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
             return arch_flag
     else:  # Linux
         if shared:
-            # Allow undefined symbols in shared libraries (for circular dependencies)
             if is_zig:
-                # zig cc supports most gcc flags
                 return ['-shared', '-fPIC']
             else:
                 return ['-shared', '-fPIC', '-Wl,--export-dynamic', 
@@ -282,20 +252,13 @@ def build_link_command(obj_files: List[str], output_file: str,
         obj_files: List of object file paths
         output_file: Output file path (.so/.dll or executable)
         shared: True for shared library, False for executable
-        linker: Linker to use (gcc, cc, clang, zig, python-zig, ziglang-module, etc.)
+        linker: Linker command (e.g., 'gcc', 'clang', 'python-zig cc')
     
     Returns:
         Link command as list of arguments
     """
-    # Handle different zig invocation methods
-    if linker == 'zig':
-        linker_cmd = ['zig', 'cc']
-    elif linker == 'python-zig':
-        linker_cmd = ['python-zig', 'cc']
-    elif linker == 'ziglang-module':
-        linker_cmd = [sys.executable, '-m', 'ziglang', 'cc']
-    else:
-        linker_cmd = [linker]
+    # Split linker command (handles 'python-zig cc' etc.)
+    linker_cmd = linker.split()
     
     platform_flags = get_platform_link_flags(shared, linker=linker)
     lib_flags = get_link_flags()
@@ -325,11 +288,10 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
     
     errors = []
     for linker in linkers:
-        # Check if linker is available (zig variants are pre-checked in get_default_linkers)
-        if _is_zig_linker(linker):
-            # Zig variants were already validated when added to linkers list
-            pass
-        elif not shutil.which(linker):
+        # Check if linker executable is available
+        # For 'python-zig cc', check 'python-zig'; for 'gcc', check 'gcc'
+        linker_exe = linker.split()[0]
+        if not shutil.which(linker_exe):
             errors.append(f"{linker}: not found")
             continue
         
@@ -339,11 +301,11 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
             # This is critical on Windows, especially in ProcessPoolExecutor workers
             subprocess.run(
                 link_cmd, check=True, capture_output=True, text=True,
-                timeout=10, stdin=subprocess.DEVNULL
+                timeout=120, stdin=subprocess.DEVNULL
             )
             return output_file
         except subprocess.TimeoutExpired:
-            errors.append(f"{linker}: timed out after 10s")
+            errors.append(f"{linker}: timed out after 120s")
         except subprocess.CalledProcessError as e:
             errors.append(f"{linker}: {e.stderr}")
     
@@ -351,8 +313,7 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
     file_type = "shared library" if shared else "executable"
     raise RuntimeError(
         f"Failed to link {file_type} with all linkers ({', '.join(linkers)}):\n" + 
-        "\n".join(errors) +
-        "\n\nTip: Install 'zig' for cross-platform linking: https://ziglang.org/download/"
+        "\n".join(errors)
     )
 
 
