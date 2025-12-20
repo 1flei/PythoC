@@ -53,36 +53,28 @@ jobs:
 
           print(f"Read {len(content)} bytes from benchmark_output.txt")
 
-          # Parse binary_tree results
-          bt_match = re.search(r"binary_tree\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s", content)
+          # Parse binary_tree ratio (PC/C, smaller is better)
+          bt_match = re.search(r"binary_tree\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s\s+\|\s+Ratio:\s+([\d.]+)x", content)
           if bt_match:
-              print(f"Found binary_tree: C={bt_match.group(1)}s, PC={bt_match.group(2)}s")
+              ratio = float(bt_match.group(3))
+              print(f"Found binary_tree: C={bt_match.group(1)}s, PC={bt_match.group(2)}s, Ratio={ratio}x")
               results.append({
-                  "name": "binary_tree_c",
-                  "unit": "seconds",
-                  "value": float(bt_match.group(1))
-              })
-              results.append({
-                  "name": "binary_tree_pc",
-                  "unit": "seconds",
-                  "value": float(bt_match.group(2))
+                  "name": "binary_tree",
+                  "unit": "PC/C ratio",
+                  "value": ratio
               })
           else:
               print("WARNING: binary_tree results not found in output")
 
-          # Parse nsieve results
-          ns_match = re.search(r"nsieve\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s", content)
+          # Parse nsieve ratio (PC/C, smaller is better)
+          ns_match = re.search(r"nsieve\s+\|\s+C:\s+([\d.]+)s\s+\|\s+PC:\s+([\d.]+)s\s+\|\s+Ratio:\s+([\d.]+)x", content)
           if ns_match:
-              print(f"Found nsieve: C={ns_match.group(1)}s, PC={ns_match.group(2)}s")
+              ratio = float(ns_match.group(3))
+              print(f"Found nsieve: C={ns_match.group(1)}s, PC={ns_match.group(2)}s, Ratio={ratio}x")
               results.append({
-                  "name": "nsieve_c",
-                  "unit": "seconds",
-                  "value": float(ns_match.group(1))
-              })
-              results.append({
-                  "name": "nsieve_pc",
-                  "unit": "seconds",
-                  "value": float(ns_match.group(2))
+                  "name": "nsieve",
+                  "unit": "PC/C ratio",
+                  "value": ratio
               })
           else:
               print("WARNING: nsieve results not found in output")
