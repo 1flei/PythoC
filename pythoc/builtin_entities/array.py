@@ -259,6 +259,42 @@ class array(BuiltinType):
         
         ptr_base = visitor.type_converter.convert(base, ptr_type)
         return ptr_type.handle_subscript(visitor, ptr_base, index, node)
+
+    @classmethod
+    def handle_add(cls, visitor, left, right, node):
+        """Handle array + int: decay to pointer and delegate to ptr.handle_add"""
+        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
+        
+        base_array_type = strip_qualifiers(left.type_hint)
+        ptr_type = base_array_type.get_decay_pointer_type()
+        ptr_type = propagate_qualifiers(left.type_hint, ptr_type)
+        
+        ptr_left = visitor.type_converter.convert(left, ptr_type)
+        return ptr_type.handle_add(visitor, ptr_left, right, node)
+
+    @classmethod
+    def handle_radd(cls, visitor, left, right, node):
+        """Handle int + array: decay to pointer and delegate to ptr.handle_radd"""
+        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
+        
+        base_array_type = strip_qualifiers(right.type_hint)
+        ptr_type = base_array_type.get_decay_pointer_type()
+        ptr_type = propagate_qualifiers(right.type_hint, ptr_type)
+        
+        ptr_right = visitor.type_converter.convert(right, ptr_type)
+        return ptr_type.handle_radd(visitor, left, ptr_right, node)
+
+    @classmethod
+    def handle_sub(cls, visitor, left, right, node):
+        """Handle array - int: decay to pointer and delegate to ptr.handle_sub"""
+        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
+        
+        base_array_type = strip_qualifiers(left.type_hint)
+        ptr_type = base_array_type.get_decay_pointer_type()
+        ptr_type = propagate_qualifiers(left.type_hint, ptr_type)
+        
+        ptr_left = visitor.type_converter.convert(left, ptr_type)
+        return ptr_type.handle_sub(visitor, ptr_left, right, node)
     
     @classmethod
     def handle_type_subscript(cls, items):

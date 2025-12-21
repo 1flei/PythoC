@@ -296,23 +296,43 @@ class AssignmentsMixin:
                 self._assign_to_target(target, rvalue, node)
     
     def _handle_tuple_unpacking(self, target: ast.Tuple, value_node: ast.AST, rvalue: ValueRef, node: ast.AST):
-        """Handle tuple unpacking assignment"""
+        """Handle tuple unpacking assignment
+        
+        Supports:
+        - Python tuple/list unpacking: a, b = (1, 2)
+        - Struct type with _elements (compile-time): a, b = struct_from_tuple
+        - Runtime struct unpacking: a, b = func() where func returns struct
+        """
+        from ..valueref import wrap_value, ValueRef
+        from ..builtin_entities.python_type import PythonType
+        
+        # Case 1: Python value (compile-time)
         if rvalue.is_python_value():
-            # Python tuple unpacking: a, b = (1, 2) where (1, 2) is Python value
-            tuple_value = rvalue.get_python_value()
-            if len(tuple_value) != len(target.elts):
-                logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(tuple_value)} values",
+            py_val = rvalue.get_python_value()
+            
+            # Get elements from either _elements attribute or tuple/list directly
+            if hasattr(py_val, '_elements') and py_val._elements is not None:
+                elements = py_val._elements
+            elif isinstance(py_val, (tuple, list)):
+                elements = py_val
+            else:
+                logger.error(f"Cannot unpack Python value of type {type(py_val)}", node=value_node, exc_type=TypeError)
+            
+            if len(elements) != len(target.elts):
+                logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(elements)} values",
                             node=target, exc_type=TypeError)
             
-            for py_val, elt in zip(tuple_value, target.elts):
-                # Convert Python value to ValueRef
-                from ..valueref import wrap_value
-                from ..builtin_entities.python_type import PythonType
-                val_ref = wrap_value(py_val, kind='python',
-                                 type_hint=PythonType.wrap(py_val, is_constant=True))
-                self._assign_to_target(elt, val_ref, target)
-        elif hasattr(rvalue, 'type_hint') and hasattr(rvalue.type_hint, '_field_types'):
-            # Struct unpacking: a, b = func() where func() returns struct
+            for elem, elt in zip(elements, target.elts):
+                if isinstance(elem, ValueRef):
+                    self._assign_to_target(elt, elem, target)
+                else:
+                    val_ref = wrap_value(elem, kind='python',
+                                       type_hint=PythonType.wrap(elem, is_constant=True))
+                    self._assign_to_target(elt, val_ref, target)
+            return
+        
+        # Case 2: Runtime struct unpacking
+        if hasattr(rvalue, 'type_hint') and hasattr(rvalue.type_hint, '_field_types'):
             struct_type = rvalue.type_hint
             field_types = struct_type._field_types
             
@@ -320,30 +340,25 @@ class AssignmentsMixin:
                 logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(field_types)} fields",
                             node=target, exc_type=TypeError)
             
-            from ..valueref import wrap_value
-            from ..builtin_entities.python_type import PythonType
-            
             for i, elt in enumerate(target.elts):
                 field_pc_type = field_types[i]
                 
                 # Special handling for pyconst fields (zero-sized, value is in type)
                 if isinstance(field_pc_type, PythonType) and field_pc_type.is_constant():
-                    # pyconst field: value is stored in the type itself, no LLVM extraction
                     const_value = field_pc_type.get_constant_value()
                     field_val_ref = wrap_value(const_value, kind='python', type_hint=field_pc_type)
                 else:
                     # Regular field: extract from LLVM struct
-                    # Use _get_llvm_field_index to handle pyconst fields (zero-sized)
                     llvm_index = struct_type._get_llvm_field_index(i)
                     if llvm_index == -1:
-                        # This shouldn't happen since we already handled pyconst above
                         logger.error(f"Zero-sized field [{i}] has no LLVM representation", node=node, exc_type=RuntimeError)
                     field_value = self.builder.extract_value(ensure_ir(rvalue), llvm_index)
                     field_val_ref = wrap_value(field_value, type_hint=field_pc_type, node=node)
                 
                 self._assign_to_target(elt, field_val_ref, target, pc_type=field_pc_type)
-        else:
-            logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", node=value_node, exc_type=TypeError)
+            return
+        
+        logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", node=value_node, exc_type=TypeError)
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         """Handle annotated assignment statements (variable declarations with types)

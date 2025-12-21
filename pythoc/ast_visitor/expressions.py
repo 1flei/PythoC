@@ -180,14 +180,22 @@ class ExpressionsMixin:
             left_val = left.value
             right_val = right.value
             
+            # C-style integer division (truncates toward zero)
+            def c_style_floordiv(a, b):
+                return int(a / b)  # truncate toward zero, like C
+            
+            # C-style modulo (sign follows dividend)
+            def c_style_mod(a, b):
+                return a - int(a / b) * b
+            
             # Map AST binary op to Python operator function
             python_binary_ops = {
                 ast.Add: operator.add,
                 ast.Sub: operator.sub,
                 ast.Mult: operator.mul,
                 ast.Div: operator.truediv,
-                ast.FloorDiv: operator.floordiv,
-                ast.Mod: operator.mod,
+                ast.FloorDiv: c_style_floordiv,
+                ast.Mod: c_style_mod,
                 ast.Pow: operator.pow,
                 ast.LShift: operator.lshift,
                 ast.RShift: operator.rshift,
@@ -621,18 +629,50 @@ class ExpressionsMixin:
     def visit_List(self, node: ast.List):
         """Handle list expressions
         
-        If all elements are Python values, return as Python list
-        Otherwise, return as list of ValueRefs
+        Returns:
+        - In constexpr mode: Python list (for type subscripts like func[[i32, i32], i32])
+        - All elements are PC type objects (not pc_list): Python list (for type annotations)
+        - Otherwise: pc_list type (for runtime array initialization)
+        
+        This distinction is important because:
+        - Type annotations need Python lists for func parameter types
+        - Runtime code needs pc_list to track ValueRefs for array conversion
         """
-        from ..builtin_entities.python_type import PythonType
+        from ..builtin_entities.pc_list import pc_list, PCListType
+        from ..builtin_entities.base import BuiltinEntity
     
         elements = [self.visit_expression(elt) for elt in node.elts]
 
-        if all(elem.is_python_value() for elem in elements):
-            python_list = [elem.get_python_value() for elem in elements]
-            python_type_inst = PythonType.wrap(python_list, is_constant=True)
-            return wrap_value(python_list, kind="python", type_hint=python_type_inst)
-        return elements
+        # In constexpr mode, return Python list directly (for type subscripts)
+        if self.is_constexpr():
+            values = [elem.value if isinstance(elem, ValueRef) else elem for elem in elements]
+            return wrap_value(values, kind="python", type_hint=list)
+
+        # Check if all elements are PC type objects (for type annotations like func[[i32, i32], i32])
+        # Type objects are: BuiltinEntity subclasses (but NOT pc_list which is a value container)
+        def is_pc_type_object(elem):
+            if not elem.is_python_value():
+                return False
+            val = elem.get_python_value()
+            # Check if it's a type/class that is a BuiltinEntity but NOT pc_list
+            # pc_list is a value container, not a type annotation
+            if isinstance(val, type):
+                if issubclass(val, PCListType):
+                    return False  # pc_list is not a type annotation
+                if issubclass(val, BuiltinEntity):
+                    return True  # Other BuiltinEntity types are type annotations
+            return False
+        
+        if all(is_pc_type_object(elem) for elem in elements):
+            # Type list - return Python list for type annotations
+            values = [elem.get_python_value() for elem in elements]
+            from ..builtin_entities.python_type import PythonType
+            python_type_inst = PythonType.wrap(values, is_constant=True)
+            return wrap_value(values, kind="python", type_hint=python_type_inst)
+
+        # Value list (Python values, IR values, or nested pc_lists) - create pc_list
+        list_type = pc_list.from_elements(elements)
+        return wrap_value(list_type, kind="python", type_hint=list_type)
     
 
     def visit_Slice(self, node: ast.Slice):

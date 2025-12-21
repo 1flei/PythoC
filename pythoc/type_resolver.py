@@ -124,8 +124,8 @@ class TypeResolver:
         """
         Evaluate type annotation AST, returning ValueRef(kind='python').
 
-        Uses visitor.visit_expression() for evaluation. If no visitor was
-        provided, uses a constexpr visitor with ConstexprBackend.
+        Uses provided visitor if available (to access local type variables),
+        otherwise uses constexpr visitor.
 
         Args:
             node: AST node, string, or Python value
@@ -147,7 +147,9 @@ class TypeResolver:
             parsed = ast.parse(node.value, mode="eval")
             return self._evaluate_type_expression(parsed.body)
 
-        # Use provided visitor or constexpr visitor
+        # Use provided visitor (for local type variable access) or constexpr visitor
+        # The visitor's visit_List will check is_constexpr() or element types
+        # to decide whether to return Python list or pc_list
         visitor = self.visitor if self.visitor is not None else self._get_constexpr_visitor()
         return visitor.visit_expression(node)
 

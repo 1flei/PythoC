@@ -123,7 +123,7 @@ class CallsMixin:
         
         # Get struct type information
         struct_type_hint = struct_val.type_hint
-        if not struct_type_hint:
+        if struct_type_hint is None:
             logger.error(f"Cannot unpack value without type information", node=struct_expr, exc_type=TypeError)
         
         # Check if it's a struct type by checking for _field_types attribute

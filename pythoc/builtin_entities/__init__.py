@@ -57,6 +57,9 @@ from .intrinsics import sizeof, nullptr, seq, consume, assume, refine, typeof, c
 # Python type wrapper
 from .python_type import PythonType, is_python_type, pyconst
 
+# PC list type (for list literals with IR values)
+from .pc_list import pc_list, PCListType
+
 # Registry and query functions
 from .utility import (
     get_builtin_entity,
@@ -148,6 +151,10 @@ __all__ = [
     'PythonType',
     'is_python_type',
     'pyconst',
+    
+    # PC list type
+    'pc_list',
+    'PCListType',
     
     # Registry and query functions
     'get_builtin_entity',
