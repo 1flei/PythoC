@@ -235,7 +235,7 @@ class VarargsSubscriptTransformer(ast.NodeTransformer):
         return self.generic_visit(node)
     
     def visit_Call(self, node: ast.Call):
-        """Transform len(args) -> constant"""
+        """Transform len(args) -> constant and *args -> arg0, arg1, ..."""
         if isinstance(node.func, ast.Name) and node.func.id == 'len':
             if len(node.args) == 1:
                 arg = node.args[0]
@@ -243,8 +243,25 @@ class VarargsSubscriptTransformer(ast.NodeTransformer):
                     # Replace len(args) with constant
                     return ast.Constant(value=self.num_args)
         
-        # Not len(args), continue traversal
-        return self.generic_visit(node)
+        # Transform *args in function calls to individual arguments
+        new_args = []
+        for arg in node.args:
+            if isinstance(arg, ast.Starred):
+                if isinstance(arg.value, ast.Name) and arg.value.id == self.varargs_name:
+                    # Replace *args with arg0, arg1, ...
+                    for i in range(self.num_args):
+                        new_args.append(ast.Name(id=f'arg{i}', ctx=ast.Load()))
+                    continue
+            new_args.append(self.visit(arg))
+        
+        # Update node.args with transformed arguments
+        node.args = new_args
+        
+        # Continue traversal for other parts of the call
+        node.func = self.visit(node.func)
+        node.keywords = [self.visit(kw) for kw in node.keywords]
+        
+        return node
 
 
 def detect_starred_args(call_node: ast.Call) -> List[Tuple[int, ast.expr]]:

@@ -16,10 +16,50 @@ from llvmlite import ir
 from ..logger import logger
 from typing import List, Tuple, Optional, Any, Dict
 from .composite_base import CompositeType
+from .base import BuiltinEntityMeta
 from ..valueref import extract_constant_index
 
 
-class StructType(CompositeType):
+class StructTypeMeta(BuiltinEntityMeta):
+    """Metaclass for StructType that enables Python-compatible interfaces.
+    
+    This allows struct types to support:
+    - len(struct_type) -> number of fields
+    - for x in struct_type -> iterate over stored elements (if available)
+    - iter(struct_type) -> iterator over elements
+    
+    These work at compile-time for type-level operations.
+    """
+    
+    def __len__(cls):
+        """Return number of fields in the struct.
+        
+        Enables len(struct_type) at compile-time.
+        """
+        cls._ensure_field_types_resolved()
+        return len(cls._field_types) if cls._field_types else 0
+    
+    def __iter__(cls):
+        """Iterate over stored elements if available.
+        
+        For struct types created from tuple conversion (with _elements),
+        this iterates over the actual ValueRef elements.
+        For plain struct types, this iterates over field types.
+        
+        This enables:
+        - for x in struct_from_tuple: ... (iterate over values)
+        - for t in struct_type: ... (iterate over field types)
+        """
+        # If struct has stored elements (from tuple conversion), iterate over them
+        if hasattr(cls, '_elements') and cls._elements is not None:
+            return iter(cls._elements)
+        
+        # Otherwise iterate over field types
+        cls._ensure_field_types_resolved()
+        return iter(cls._field_types) if cls._field_types else iter([])
+
+
+class StructType(CompositeType, metaclass=StructTypeMeta):
     """Unified struct type with structural typing semantics
     
     This class represents both anonymous structs and @compile class structs.
@@ -619,13 +659,15 @@ class StructType(CompositeType):
 
 
 def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] = None, 
-                       python_class: Optional[type] = None) -> type:
+                       python_class: Optional[type] = None,
+                       elements: Optional[List[Any]] = None) -> type:
     """Create a struct type without global caching
     
     Args:
         field_types: List of field types
         field_names: Optional list of field names
         python_class: Optional Python class (for @compile decorated classes)
+        elements: Optional list of ValueRef elements (for tuple conversion)
     
     Returns:
         StructType subclass
@@ -644,8 +686,8 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
                 parts.append(field_names[i])
         canonical_name = "_".join(parts)
     
-    # Create new struct type (no caching)
-    new_type = type(
+    # Create new struct type using StructTypeMeta (no caching)
+    new_type = StructTypeMeta(
         canonical_name,
         (StructType,),
         {
@@ -655,6 +697,7 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
             '_python_class': python_class,
             '_struct_info': None,
             '_structure_hash': None,
+            '_elements': elements,  # Store original ValueRef elements for iteration
         }
     )
     

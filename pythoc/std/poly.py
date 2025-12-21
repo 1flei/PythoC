@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Tuple
 from ..registry import get_unified_registry
 from ..logger import logger
 from ..decorators import compile
-from ..builtin_entities import struct, enum
+from ..builtin_entities import struct, enum, i32, i64, f64, ptr, i8, bool as pc_bool
 
 class Poly:
     """Polymorphism dispatcher for @compile functions.
@@ -66,8 +66,6 @@ class Poly:
         return True
 
     def _infer_default_pc_type(self, python_val):
-        from ..builtin_entities import i32, i64, f64, ptr, i8, bool as pc_bool
-        
         if isinstance(python_val, str):
             return ptr[i8]
         elif isinstance(python_val, bool):

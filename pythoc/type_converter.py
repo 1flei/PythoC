@@ -268,6 +268,18 @@ class TypeConverter:
             python_val: Python value to promote
             target_type: Optional target PC type (for context-aware promotion)
         """
+        # Handle pc_list type - convert to array
+        # pc_list is a type (class) that stores ValueRef elements
+        from .builtin_entities.pc_list import PCListType
+        if isinstance(python_val, type) and issubclass(python_val, PCListType):
+            # Convert pc_list to target array type
+            if hasattr(target_type, "is_array") and target_type.is_array():
+                return self._convert_pc_list_to_array(python_val, target_type)
+            raise TypeError(
+                f"Cannot convert pc_list to {target_type}. "
+                f"pc_list can only be converted to array types."
+            )
+        
         # Handle refined tuple types - extract the actual tuple values
         # This happens when visit_Tuple returns refined[struct[...], "tuple"]
         from .builtin_entities.refined import RefinedType
@@ -533,6 +545,7 @@ class TypeConverter:
         Returns:
             ValueRef with pointer to array
         """        
+        return
         array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
         
         # Build the array constant recursively
@@ -618,6 +631,148 @@ class TypeConverter:
             
             # Create and return outer array constant (IR value, not ValueRef)
             return ir.Constant(array_llvm_type, elem_constants)
+
+    def _convert_pc_list_to_array(self, pc_list_type, target_array_type):
+        """Convert pc_list type to array.
+        
+        pc_list contains ValueRefs (both pyconst and IR values), so we need to
+        convert each element to the target array element type.
+        
+        Args:
+            pc_list_type: PCListType with stored elements
+            target_array_type: Target array type (array[T, N])
+        
+        Returns:
+            ValueRef with array value
+        """
+        from .builtin_entities.pc_list import PCListType
+        
+        # Get elements from pc_list
+        elements = pc_list_type.get_elements()
+        
+        # Get target array info
+        pc_elem_type = target_array_type.element_type
+        dimensions = target_array_type.dimensions
+        if not isinstance(dimensions, (list, tuple)):
+            dimensions = [dimensions]
+        
+        # Get LLVM types
+        elem_llvm_type = pc_elem_type.get_llvm_type(self._visitor.module.context)
+        array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
+        
+        # Handle 1D array
+        if len(dimensions) == 1:
+            size = dimensions[0]
+            
+            # Check if all elements are constants (can use ir.Constant)
+            all_constants = True
+            elem_ir_values = []
+            
+            for i, elem in enumerate(elements):
+                if i >= size:
+                    break
+                
+                # Convert element to target element type
+                converted = self.convert(elem, pc_elem_type)
+                ir_val = ensure_ir(converted)
+                elem_ir_values.append(ir_val)
+                
+                # Check if it's a constant
+                if not isinstance(ir_val, ir.Constant):
+                    all_constants = False
+            
+            # Zero-fill remaining elements
+            if len(elem_ir_values) < size:
+                zero_val = self.create_zero_constant(elem_llvm_type)
+                elem_ir_values.extend([zero_val] * (size - len(elem_ir_values)))
+            
+            if all_constants:
+                # All constants - create array constant
+                array_const = ir.Constant(array_llvm_type, elem_ir_values)
+                
+                # Materialize to memory (C semantics)
+                tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array")
+                self.builder.store(array_const, tmp_alloca)
+                
+                return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
+            else:
+                # Has runtime values - need to store element by element
+                tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array")
+                
+                for i, ir_val in enumerate(elem_ir_values):
+                    elem_ptr = self.builder.gep(
+                        tmp_alloca,
+                        [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+                        inbounds=True
+                    )
+                    self.builder.store(ir_val, elem_ptr)
+                
+                return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
+        
+        # Handle multi-dimensional array
+        else:
+            # For multi-dim array, each element should be a pc_list or nested list
+            outer_size = dimensions[0]
+            inner_dims = dimensions[1:]
+            from .builtin_entities import array
+            inner_array_type = array[(pc_elem_type,) + tuple(inner_dims)]
+            
+            # Allocate outer array
+            tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array_nd")
+            
+            for i, elem in enumerate(elements):
+                if i >= outer_size:
+                    break
+                
+                # Check if element is a pc_list (nested list with ValueRefs)
+                # elem.type_hint is the pc_list type class, elem.value is also the type class
+                elem_type = elem.type_hint if hasattr(elem, 'type_hint') else None
+                
+                # Check if elem_type is a pc_list type (class with is_pc_list method)
+                is_pc_list_elem = (
+                    elem_type is not None and 
+                    isinstance(elem_type, type) and 
+                    hasattr(elem_type, 'is_pc_list') and 
+                    elem_type.is_pc_list()
+                )
+                
+                if is_pc_list_elem:
+                    # Recursively convert nested pc_list
+                    inner_val = self._convert_pc_list_to_array(elem_type, inner_array_type)
+                elif elem.is_python_value():
+                    py_val = elem.get_python_value()
+                    # Check if py_val is a pc_list type (from nested list)
+                    if isinstance(py_val, type) and hasattr(py_val, 'is_pc_list') and py_val.is_pc_list():
+                        inner_val = self._convert_pc_list_to_array(py_val, inner_array_type)
+                    elif isinstance(py_val, list):
+                        # Python list - use existing conversion
+                        inner_val = self._convert_list_to_array(py_val, inner_array_type)
+                    else:
+                        raise TypeError(
+                            f"Expected list or pc_list for multi-dimensional array element, "
+                            f"got {type(py_val)}"
+                        )
+                else:
+                    raise TypeError(
+                        f"Expected pc_list or Python list for multi-dimensional array element, "
+                        f"got {elem_type}"
+                    )
+                
+                # Store inner array to outer array element
+                elem_ptr = self.builder.gep(
+                    tmp_alloca,
+                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
+                    inbounds=True
+                )
+                inner_ir = ensure_ir(inner_val)
+                # Load from inner_val's address if it's a pointer
+                if hasattr(inner_val, 'kind') and inner_val.kind == 'value':
+                    inner_loaded = self.builder.load(inner_ir)
+                    self.builder.store(inner_loaded, elem_ptr)
+                else:
+                    self.builder.store(inner_ir, elem_ptr)
+            
+            return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
 
     def _convert_tuple_to_struct(self, python_tuple, target_struct_type):
         """Convert Python tuple to struct value.

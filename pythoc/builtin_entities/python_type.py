@@ -461,8 +461,9 @@ class PythonType(_PythonTypeBase):
     def _wrap_constant_result(self, visitor, result):
         """Wrap a compile-time evaluation result.
         
-        Keep Python values as PythonType until conversion is needed.
+        Converts Python tuple/list to struct/pc_list for unified representation.
         If result is a ValueRef, return it directly.
+        Other Python values remain as pyconst.
         """
         from ..valueref import wrap_value, ValueRef
         
@@ -470,10 +471,63 @@ class PythonType(_PythonTypeBase):
         if isinstance(result, ValueRef):
             return result
         
-        # Keep all Python values as PythonType (lazy conversion)
-        # Conversion to LLVM will happen when needed (assignment, return, etc.)
+        # Convert tuple to struct
+        if isinstance(result, tuple):
+            return self._convert_tuple_to_struct(visitor, result)
+        
+        # Convert list to pc_list
+        if isinstance(result, list):
+            return self._convert_list_to_pc_list(visitor, result)
+        
+        # Other Python values remain as pyconst
         python_type = PythonType.wrap(result, is_constant=True)
         return wrap_value(result, kind="python", type_hint=python_type)
+    
+    def _convert_tuple_to_struct(self, visitor, tup):
+        """Convert Python tuple to struct type.
+        
+        Recursively converts nested tuples/lists.
+        Returns a struct type with stored elements for compile-time use.
+        The struct type supports:
+        - len(struct_type) -> number of elements
+        - iter(struct_type) -> iterate over elements
+        - struct_type[i] -> access element by index
+        """
+        from ..valueref import wrap_value
+        from .struct import create_struct_type
+        
+        # Recursively convert elements
+        elements = []
+        for elem in tup:
+            elem_ref = self._wrap_constant_result(visitor, elem)
+            elements.append(elem_ref)
+        
+        # Build struct type from element types, with stored elements
+        field_types = [elem.get_pc_type() for elem in elements]
+        struct_type = create_struct_type(field_types, field_names=None, elements=elements)
+        
+        # Return as python value (compile-time struct type with elements)
+        return wrap_value(struct_type, kind="python", type_hint=struct_type)
+    
+    def _convert_list_to_pc_list(self, visitor, lst):
+        """Convert Python list to pc_list type.
+        
+        Recursively converts nested tuples/lists.
+        Returns a pc_list type for compile-time use.
+        """
+        from ..valueref import wrap_value
+        from .pc_list import pc_list
+        
+        # Recursively convert elements
+        elements = []
+        for elem in lst:
+            elem_ref = self._wrap_constant_result(visitor, elem)
+            elements.append(elem_ref)
+        
+        # Create pc_list from elements
+        list_type = pc_list.from_elements(elements)
+        
+        return wrap_value(list_type, kind="python", type_hint=list_type)
     
     def promote_to_pc_type(self, target_pc_type):
         """Promote this Python value to a specific PC type.

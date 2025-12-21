@@ -10,3 +10,5 @@ backup
 pythoc.egg-info
 dist/
 test_report/
+.coverage
+htmlcov/

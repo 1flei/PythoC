@@ -72,6 +72,12 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
             When set, the compiled function is added to this specific group
             (same .so file as the caller). Takes precedence over _effect_caller_module.
     """
+    # Capture all visible symbols (globals + locals) at decoration time
+    # This is critical for resolving type annotation names that may not be
+    # in the function's __globals__ or closures
+    from .visible import capture_caller_symbols
+    captured_symbols = capture_caller_symbols(depth=1)
+    
     # Normalize suffix early
     suffix = normalize_suffix(suffix)
     
@@ -84,10 +90,21 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
     
     if func_or_class is None:
         def decorator(f):
-            return compile(f, anonymous=anonymous, suffix=suffix, 
-                          _effect_caller_module=_effect_caller_module)
+            return _compile_impl(f, anonymous=anonymous, suffix=suffix, 
+                                captured_symbols=captured_symbols,
+                                _effect_caller_module=_effect_caller_module,
+                                _effect_group_key=_effect_group_key)
         return decorator
 
+    return _compile_impl(func_or_class, anonymous=anonymous, suffix=suffix,
+                        captured_symbols=captured_symbols,
+                        _effect_caller_module=_effect_caller_module,
+                        _effect_group_key=_effect_group_key)
+
+
+def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=None,
+                  _effect_caller_module=None, _effect_group_key=None):
+    """Internal implementation of compile decorator."""
     if inspect.isclass(func_or_class):
         return _compile_dynamic_class(func_or_class, anonymous=anonymous, suffix=suffix)
 
@@ -112,12 +129,13 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
 
     registry = _get_registry()
     # Use get_all_accessible_symbols to extract ALL accessible symbols
-    # This includes: closure variables, enclosing scopes, caller frame locals, and globals
+    # This includes: closure variables and captured symbols from decorator call time
     from .visible import get_all_accessible_symbols
     user_globals = get_all_accessible_symbols(
         func, 
         include_closure=True, 
-        include_builtins=True
+        include_builtins=True,
+        captured_symbols=captured_symbols
     )
 
     compiler = get_compiler(source_file=source_file, user_globals=user_globals, suffix=suffix)
@@ -147,7 +165,8 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_mod
         transform_globals = get_all_accessible_symbols(
             func, 
             include_closure=True, 
-            include_builtins=True
+            include_builtins=True,
+            captured_symbols=captured_symbols
         )
         
         # Transform yield function into inline continuation placeholder

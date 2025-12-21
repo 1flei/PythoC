@@ -315,11 +315,15 @@ class LoopsMixin:
                             node=node, exc_type=TypeError
                         )
                     for var_name, elem_val in zip(loop_var_names, element):
-                        elem_value_ref = wrap_value(
-                            elem_val,
-                            kind="python",
-                            type_hint=PythonType.wrap(elem_val, is_constant=True)
-                        )
+                        # Check if element is already a ValueRef (from pc_list iteration)
+                        if isinstance(elem_val, ValueRef):
+                            elem_value_ref = elem_val
+                        else:
+                            elem_value_ref = wrap_value(
+                                elem_val,
+                                kind="python",
+                                type_hint=PythonType.wrap(elem_val, is_constant=True)
+                            )
                         loop_var_info = VariableInfo(
                             name=var_name,
                             value_ref=elem_value_ref,
@@ -329,11 +333,15 @@ class LoopsMixin:
                         self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
                 else:
                     # Single variable
-                    elem_value_ref = wrap_value(
-                        element,
-                        kind="python", 
-                        type_hint=PythonType.wrap(element, is_constant=True)
-                    )
+                    # Check if element is already a ValueRef (from pc_list iteration)
+                    if isinstance(element, ValueRef):
+                        elem_value_ref = element
+                    else:
+                        elem_value_ref = wrap_value(
+                            element,
+                            kind="python", 
+                            type_hint=PythonType.wrap(element, is_constant=True)
+                        )
                     loop_var_info = VariableInfo(
                         name=loop_var_names[0],
                         value_ref=elem_value_ref,

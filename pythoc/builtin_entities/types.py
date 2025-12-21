@@ -295,15 +295,60 @@ class ptr(BuiltinType):
         # Decide by ValueRef.kind and PC type hints only
         gep_result = visitor.builder.gep(ensure_ir(left), [ensure_ir(right)])
         return wrap_value(gep_result, kind="value", type_hint=left.type_hint)
+
+    @classmethod
+    def handle_radd(cls, visitor, left, right, node: ast.BinOp):
+        """Handle reverse pointer addition: offset + ptr"""
+        from ..valueref import wrap_value, ensure_ir
+        
+        # cast to pc type for python value
+        if left.is_python_value():
+            left = visitor.type_converter.convert(left, i64)
+        
+        # offset + ptr is the same as ptr + offset
+        gep_result = visitor.builder.gep(ensure_ir(right), [ensure_ir(left)])
+        return wrap_value(gep_result, kind="value", type_hint=right.type_hint)
     
     @classmethod
     def handle_sub(cls, visitor, left, right, node: ast.BinOp):
-        """Handle pointer addition: ptr - offset """
-        # cast to pc type for python value
+        """Handle pointer subtraction: ptr - offset or ptr - ptr or ptr - array"""
+        from ..valueref import wrap_value, ensure_ir
+        
+        right_type = right.type_hint
+        
+        # Check if right is an array - decay to pointer first
+        if right_type and hasattr(right_type, 'is_array') and right_type.is_array():
+            from ..ir_helpers import propagate_qualifiers, strip_qualifiers
+            base_array_type = strip_qualifiers(right_type)
+            ptr_type = base_array_type.get_decay_pointer_type()
+            ptr_type = propagate_qualifiers(right_type, ptr_type)
+            right = visitor.type_converter.convert(right, ptr_type)
+            right_type = ptr_type
+        
+        # Check if right is a pointer (ptr - ptr case)
+        if right_type and hasattr(right_type, '_is_pointer') and right_type._is_pointer:
+            # ptr - ptr: compute element difference
+            # Result is (ptr1 - ptr2) / sizeof(element)
+            left_int = visitor.builder.ptrtoint(ensure_ir(left), i64.get_llvm_type())
+            right_int = visitor.builder.ptrtoint(ensure_ir(right), i64.get_llvm_type())
+            byte_diff = visitor.builder.sub(left_int, right_int)
+            
+            # Get element size
+            pointee_type = cls.pointee_type
+            if pointee_type and hasattr(pointee_type, 'get_size_bytes'):
+                elem_size = pointee_type.get_size_bytes()
+            else:
+                elem_size = 1  # Default to byte pointer
+            
+            # Divide by element size to get element count
+            elem_size_ir = ir.Constant(i64.get_llvm_type(), elem_size)
+            elem_diff = visitor.builder.sdiv(byte_diff, elem_size_ir)
+            return wrap_value(elem_diff, kind="value", type_hint=i64)
+        
+        # ptr - int case
         if right.is_python_value():
             right = visitor.type_converter.convert(right, i64)
         
-        # Decide by ValueRef.kind and PC type hints only
         neg_right = visitor.builder.neg(ensure_ir(right))
         gep_result = visitor.builder.gep(ensure_ir(left), [ensure_ir(neg_right)])
         return wrap_value(gep_result, kind="value", type_hint=left.type_hint)
