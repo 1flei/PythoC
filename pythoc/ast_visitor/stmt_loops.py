@@ -12,7 +12,13 @@ class LoopsMixin:
     """Mixin for loop statements: for, while"""
     
     def visit_While(self, node: ast.While):
-        """Handle while loops"""
+        """Handle while loops
+        
+        Linear type rule for loops:
+            Loop body is a branch that may execute multiple times.
+            Linear state at end of body must match state at start of body
+            (loop invariant) - otherwise second iteration would see wrong state.
+        """
         # Don't process if current block is already terminated
         if self.builder.block.is_terminated:
             return
@@ -36,6 +42,12 @@ class LoopsMixin:
         # Loop body - increment scope depth for linear token restrictions
         self.builder.position_at_end(loop_body)
         
+        # Capture ALL linear states before loop body (for consistency check)
+        linear_states_before = {}
+        for var_name, var_info in self.ctx.var_registry.list_all_visible().items():
+            if var_info.linear_states:
+                linear_states_before[var_name] = dict(var_info.linear_states)
+        
         # Enter new scope for loop body and increment scope depth
         self.ctx.var_registry.enter_scope()
         self.scope_depth += 1
@@ -55,6 +67,25 @@ class LoopsMixin:
                         )
                     # Clean up consumed token
                     var_info.linear_state = None
+            
+            # Check loop invariant: linear states must be consistent
+            # (same as before loop body, so loop can iterate multiple times)
+            for var_name, states_before in linear_states_before.items():
+                var_info = self.ctx.var_registry.lookup(var_name)
+                if var_info is None:
+                    continue
+                states_after = var_info.linear_states or {}
+                
+                for path, state_before in states_before.items():
+                    state_after = states_after.get(path, None)
+                    if state_before != state_after:
+                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                        logger.error(
+                            f"Linear state inconsistent in while loop: '{path_str}' "
+                            f"was '{state_before}' before loop body, now '{state_after}'. "
+                            f"Loop body must preserve linear state (consume and reassign, or don't touch).",
+                            node
+                        )
         finally:
             # Decrement scope depth and exit scope
             self.scope_depth -= 1
@@ -240,23 +271,22 @@ class LoopsMixin:
                         self.visit(stmt)
             return
         
-        # Get loop variable name or names (for tuple unpacking)
-        if isinstance(node.target, ast.Name):
-            loop_var_names = [node.target.id]
-            is_tuple_unpack = False
-        elif isinstance(node.target, ast.Tuple):
-            # Support tuple unpacking: for i, j in [(1,2), (3,4)]
-            loop_var_names = []
-            for elt in node.target.elts:
-                if isinstance(elt, ast.Name):
-                    loop_var_names.append(elt.id)
-                else:
-                    logger.error("Nested tuple unpacking not supported in constant unroll",
-                                node=node, exc_type=NotImplementedError)
-            is_tuple_unpack = True
-        else:
-            logger.error("Complex loop targets not supported in constant unroll",
-                        node=node, exc_type=NotImplementedError)
+        # Get loop variable pattern (supports nested tuple unpacking)
+        # Returns a structure that mirrors the target pattern:
+        # - str for ast.Name
+        # - list for ast.Tuple (can contain str or nested list)
+        def parse_target_pattern(target):
+            """Parse target pattern recursively, returns str or list"""
+            if isinstance(target, ast.Name):
+                return target.id
+            elif isinstance(target, ast.Tuple):
+                return [parse_target_pattern(elt) for elt in target.elts]
+            else:
+                logger.error("Unsupported loop target type in constant unroll",
+                            node=node, exc_type=NotImplementedError)
+        
+        loop_var_pattern = parse_target_pattern(node.target)
+        is_tuple_unpack = isinstance(loop_var_pattern, list)
         
         # Create loop exit block
         loop_exit = self.current_function.append_basic_block(
@@ -306,49 +336,44 @@ class LoopsMixin:
                 # break -> jump to loop_exit (exit the entire loop)
                 self.loop_stack.append((continue_target, loop_exit))
                 
-                # Set loop variable(s)
-                if is_tuple_unpack:
-                    # Unpack tuple element
-                    if not isinstance(element, (tuple, list)) or len(element) != len(loop_var_names):
-                        logger.error(
-                            f"Cannot unpack {element} into {len(loop_var_names)} variables",
-                            node=node, exc_type=TypeError
-                        )
-                    for var_name, elem_val in zip(loop_var_names, element):
-                        # Check if element is already a ValueRef (from pc_list iteration)
-                        if isinstance(elem_val, ValueRef):
-                            elem_value_ref = elem_val
+                # Helper function to bind variables recursively
+                def bind_vars_recursive(pattern, value):
+                    """Recursively bind variables according to pattern.
+                    pattern: str (variable name) or list (nested pattern)
+                    value: Python value to bind
+                    """
+                    if isinstance(pattern, str):
+                        # Simple variable binding
+                        if isinstance(value, ValueRef):
+                            elem_value_ref = value
                         else:
                             elem_value_ref = wrap_value(
-                                elem_val,
+                                value,
                                 kind="python",
-                                type_hint=PythonType.wrap(elem_val, is_constant=True)
+                                type_hint=PythonType.wrap(value, is_constant=True)
                             )
                         loop_var_info = VariableInfo(
-                            name=var_name,
+                            name=pattern,
                             value_ref=elem_value_ref,
                             alloca=None,
                             source="for_loop_unrolled"
                         )
                         self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
-                else:
-                    # Single variable
-                    # Check if element is already a ValueRef (from pc_list iteration)
-                    if isinstance(element, ValueRef):
-                        elem_value_ref = element
+                    elif isinstance(pattern, list):
+                        # Nested tuple unpacking
+                        if not isinstance(value, (tuple, list)) or len(value) != len(pattern):
+                            logger.error(
+                                f"Cannot unpack {value} into {len(pattern)} variables",
+                                node=node, exc_type=TypeError
+                            )
+                        for sub_pattern, sub_value in zip(pattern, value):
+                            bind_vars_recursive(sub_pattern, sub_value)
                     else:
-                        elem_value_ref = wrap_value(
-                            element,
-                            kind="python", 
-                            type_hint=PythonType.wrap(element, is_constant=True)
-                        )
-                    loop_var_info = VariableInfo(
-                        name=loop_var_names[0],
-                        value_ref=elem_value_ref,
-                        alloca=None,
-                        source="for_loop_unrolled"
-                    )
-                    self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
+                        logger.error(f"Invalid pattern type: {type(pattern)}", 
+                                    node=node, exc_type=TypeError)
+                
+                # Bind loop variables using the pattern
+                bind_vars_recursive(loop_var_pattern, element)
                 
                 try:
                     # Execute loop body (break/continue will use loop_stack)

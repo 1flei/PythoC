@@ -2,11 +2,11 @@
 Tests for linear token handling in loop statements
 
 Key rules for linear tokens in loops:
-1. for loop body: cannot consume token (would consume multiple times)
-2. for-else: else branch runs when loop completes normally (no break)
-3. while loop body: cannot consume token (would consume multiple times)
-4. Loop with break+return: can consume token if all exit paths consume exactly once
-5. Token created inside loop: must be consumed within same iteration
+1. Loop body is treated as a branch - linear state at end must match state at start
+2. Token created inside loop: must be consumed within same iteration
+3. Token reassigned in loop: allowed if state is consistent (consume + create new)
+4. for-else: else branch runs when loop completes normally (no break)
+5. External token consumed without reassignment: ERROR (state changes across iterations)
 """
 
 import sys
@@ -16,14 +16,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 import unittest
 
 from pythoc.decorators.compile import compile
-from pythoc.builtin_entities import linear, consume, void, i32, i8
+from pythoc.builtin_entities import linear, consume, void, i32, i8, struct
 from pythoc.std.utility import move
 from pythoc.logger import set_raise_on_error
 
 # Enable exception raising for tests that expect to catch exceptions
 set_raise_on_error(True)
 from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
-from pythoc import seq
+from pythoc import seq, assume, refined
+from pythoc.libc.stdio import printf
+
+
+# =============================================================================
+# Helper types and functions for linear reassignment tests
+# =============================================================================
+
+TestProof = refined[linear, "TestProof"]
+
+
+@compile
+def make_value() -> struct[TestProof, i32]:
+    """Create a test value with proof"""
+    prf: TestProof = assume(linear(), "TestProof")
+    return prf, 42
+
+
+@compile
+def transform(prf: TestProof, val: i32) -> struct[TestProof, i32]:
+    """Transform value, consuming and producing proof"""
+    consume(prf)
+    new_prf: TestProof = assume(linear(), "TestProof")
+    return new_prf, val + 1
 
 
 # =============================================================================
@@ -234,7 +257,11 @@ def test_for_token_not_consumed_error():
 
 
 def test_for_else_inconsistent_error():
-    """Test error when for-else branches handle token inconsistently"""
+    """Test error when for-else branches handle token inconsistently
+    
+    This tests the case where a token is consumed in the loop body
+    WITHOUT a break, causing state inconsistency across iterations.
+    """
     source_file = os.path.abspath(__file__)
     group_key = (source_file, 'module', 'bad_for_else')
     try:
@@ -243,8 +270,7 @@ def test_for_else_inconsistent_error():
             t = linear()
             for i in seq(n):
                 if i == 5:
-                    consume(t)  # ERROR: consumed in loop body
-                    break
+                    consume(t)  # ERROR: consumed without break, next iteration sees consumed state
             else:
                 consume(t)
 
@@ -392,6 +418,98 @@ class TestLinearLoop(unittest.TestCase):
         """Test error: token not consumed after loop"""
         passed, msg = test_token_after_loop_not_consumed_error()
         self.assertTrue(passed, msg)
+
+
+# =============================================================================
+# Linear reassignment in loop tests (merged from test_linear_in_loop.py)
+# =============================================================================
+
+@compile
+def test_linear_inside_while_loop(iterations: i32) -> i32:
+    """Linear token created and consumed inside while loop body"""
+    result: i32 = 0
+    i: i32 = 0
+    while i < iterations:
+        prf, val = make_value()
+        result = result + val
+        consume(prf)
+        i = i + 1
+    return result
+
+
+@compile
+def test_linear_reassign_in_while_loop(iterations: i32) -> i32:
+    """Linear token reassigned in each while iteration - key feature!"""
+    prf, val = make_value()
+    
+    i: i32 = 0
+    while i < iterations:
+        prf, val = transform(prf, val)
+        i = i + 1
+    
+    consume(prf)
+    return val
+
+
+@compile
+def test_linear_unrolled_workaround(iterations: i32) -> i32:
+    """Workaround: manually unroll the loop (no longer needed!)"""
+    prf, val = make_value()
+    
+    if iterations >= 1:
+        prf, val = transform(prf, val)
+    if iterations >= 2:
+        prf, val = transform(prf, val)
+    if iterations >= 3:
+        prf, val = transform(prf, val)
+    if iterations >= 4:
+        prf, val = transform(prf, val)
+    if iterations >= 5:
+        prf, val = transform(prf, val)
+    
+    consume(prf)
+    return val
+
+
+@compile
+def test_multiple_linear_reassign_in_loop(iterations: i32) -> i32:
+    """Multiple linear tokens reassigned in loop"""
+    prf1, val1 = make_value()
+    prf2, val2 = make_value()
+    
+    i: i32 = 0
+    while i < iterations:
+        prf1, val1 = transform(prf1, val1)
+        prf2, val2 = transform(prf2, val2)
+        i = i + 1
+    
+    consume(prf1)
+    consume(prf2)
+    return val1 + val2
+
+
+class TestLinearReassignInLoop(unittest.TestCase):
+    """Test linear token reassignment in loops"""
+
+    def test_linear_inside_while(self):
+        """Test linear created and consumed inside while"""
+        result = test_linear_inside_while_loop(3)
+        self.assertEqual(result, 126)  # 42 * 3
+
+    def test_linear_reassign_in_while(self):
+        """Test linear reassigned in while - key feature"""
+        result = test_linear_reassign_in_while_loop(5)
+        self.assertEqual(result, 47)  # 42 + 5
+
+    def test_linear_unrolled(self):
+        """Test unrolled workaround still works"""
+        result = test_linear_unrolled_workaround(3)
+        self.assertEqual(result, 45)  # 42 + 3
+
+    def test_multiple_linear_reassign(self):
+        """Test multiple linear tokens reassigned in loop"""
+        result = test_multiple_linear_reassign_in_loop(3)
+        self.assertEqual(result, 90)  # (42+3) + (42+3)
 
 
 if __name__ == "__main__":
