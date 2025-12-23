@@ -2,17 +2,22 @@
 C Header Parser (pythoc compiled)
 
 Parses C header files using the compiled lexer.
-Builds AST nodes for: functions, structs, unions, enums, typedefs.
+Builds AST nodes using the type-centric c_ast module.
 
 Design:
 - All parsing functions are @compile decorated
 - Uses Token stream from lexer (zero-copy)
-- Builds CType, CFunc, CStruct, etc. AST nodes
+- Builds CType (tagged union), QualType, StructType, etc.
+- Uses Span for zero-copy string references
+- Uses linear types for memory ownership tracking
 - Uses Python metaprogramming for token matching
 """
 
-from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refine, assume, struct
-from pythoc.libc.stdlib import malloc, realloc, free
+from pythoc import (
+    compile, inline, i32, i64, i8, bool, ptr, array, nullptr, sizeof, void,
+    char, refine, assume, struct, consume, linear
+)
+from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import memcpy
 from pythoc.std.refine_wrapper import nonnull_wrap
 
@@ -22,15 +27,30 @@ from pythoc.bindings.lexer import (
     lexer_next_token_impl
 )
 from pythoc.bindings.c_ast import (
-    BaseType, Signedness, DeclKind,
-    CType, CTypeRef, ctype_nonnull, ctype_init,
-    CParam, CParamRef, cparam_nonnull,
-    CFunc, CFuncRef, cfunc_nonnull,
-    CField, CFieldRef, cfield_nonnull,
-    CStruct, CStructRef, cstruct_nonnull,
-    CEnum, CEnumRef, cenum_nonnull,
-    CEnumVal, CEnumValRef, cenumval_nonnull,
-    CTypedef, CTypedefRef, ctypedef_nonnull,
+    # Core types
+    Span, span_empty, span_is_empty,
+    CType, QualType, PtrType, ArrayType, FuncType,
+    StructType, EnumType, EnumValue, FieldInfo, ParamInfo,
+    Decl, DeclKind,
+    # Refined types
+    CTypeRef, QualTypeRef, StructTypeRef, EnumTypeRef,
+    ParamInfoRef, FieldInfoRef, EnumValueRef,
+    ctype_nonnull, qualtype_nonnull, structtype_nonnull, enumtype_nonnull,
+    paraminfo_nonnull, fieldinfo_nonnull, enumvalue_nonnull,
+    # Proof types
+    CTypeProof, QualTypeProof, StructTypeProof, EnumTypeProof, DeclProof,
+    # Allocation
+    ctype_alloc, qualtype_alloc, structtype_alloc, enumtype_alloc, decl_alloc,
+    paraminfo_alloc, fieldinfo_alloc, enumvalue_alloc,
+    # Type constructors
+    prim, make_qualtype, make_ptr_type, make_array_type,
+    make_func_type, make_struct_type, make_union_type, make_enum_type,
+    make_typedef_type,
+    # Free functions
+    ctype_free, qualtype_free, decl_free,
+    # Constants
+    QUAL_NONE, QUAL_CONST, QUAL_VOLATILE,
+    STORAGE_NONE, STORAGE_EXTERN, STORAGE_STATIC,
 )
 
 
@@ -49,12 +69,25 @@ class Parser:
     lex: ptr[Lexer]
     current: Token              # Current token
     # Scratch buffers for building AST
-    params: array[CParam, MAX_PARAMS]
-    fields: array[CField, MAX_FIELDS]
-    enum_vals: array[CEnumVal, MAX_ENUM_VALUES]
+    params: array[ParamInfo, MAX_PARAMS]
+    fields: array[FieldInfo, MAX_FIELDS]
+    enum_vals: array[EnumValue, MAX_ENUM_VALUES]
 
 
 parser_nonnull, ParserRef = nonnull_wrap(ptr[Parser])
+
+
+# =============================================================================
+# Span helper - create from token
+# =============================================================================
+
+@compile
+def span_from_token(tok: Token) -> Span:
+    """Create a Span from current token (zero-copy)"""
+    s: Span
+    s.start = tok.start
+    s.len = tok.length
+    return s
 
 
 # =============================================================================
@@ -128,114 +161,143 @@ def is_type_specifier(tok_type: i32) -> bool:
     return False
 
 
+
 # =============================================================================
-# Type parsing
+# Type parsing state
 # =============================================================================
 
 @compile
-def parse_type_spec(p: ParserRef, t: CTypeRef) -> void:
+class TypeParseState:
+    """Intermediate state during type parsing"""
+    base_token: i32         # TokenType of base type (INT, CHAR, etc.)
+    is_signed: i8           # 1 = signed, 0 = default, -1 = unsigned
+    is_const: i8            # 1 if const
+    is_volatile: i8         # 1 if volatile
+    long_count: i8          # Number of 'long' keywords (0, 1, or 2)
+    ptr_depth: i8           # Number of pointer indirections
+    name: Span              # For struct/union/enum/typedef names
+
+
+typeparse_nonnull, TypeParseStateRef = nonnull_wrap(ptr[TypeParseState])
+
+
+@compile
+def typeparse_init(ts: TypeParseStateRef) -> void:
+    """Initialize type parse state"""
+    ts.base_token = 0
+    ts.is_signed = 0
+    ts.is_const = 0
+    ts.is_volatile = 0
+    ts.long_count = 0
+    ts.ptr_depth = 0
+    ts.name = span_empty()
+
+
+# =============================================================================
+# Type parsing - build CType from tokens
+# =============================================================================
+
+@compile
+def parse_type_specifiers(p: ParserRef, ts: TypeParseStateRef) -> void:
     """
-    Parse C type specifiers into CType.
-    Handles: const, signed/unsigned, base types, struct/union/enum names
+    Parse C type specifiers into TypeParseState.
+    Handles: const, volatile, signed/unsigned, base types, struct/union/enum names
     """
-    ctype_init(t)
-    has_long: i32 = 0
+    typeparse_init(ts)
     
     while True:
         tok_type: i32 = p.current.type
         
         # const
         if tok_type == TokenType.CONST:
-            t.is_const = 1
+            ts.is_const = 1
             parser_advance(p)
-        # volatile (skip)
+        # volatile
         elif tok_type == TokenType.VOLATILE:
+            ts.is_volatile = 1
             parser_advance(p)
         # signed
         elif tok_type == TokenType.SIGNED:
-            t.sign = Signedness.SIGNED
+            ts.is_signed = 1
             parser_advance(p)
         # unsigned
         elif tok_type == TokenType.UNSIGNED:
-            t.sign = Signedness.UNSIGNED
+            ts.is_signed = -1
             parser_advance(p)
         # void
         elif tok_type == TokenType.VOID:
-            t.base = BaseType.VOID
+            ts.base_token = TokenType.VOID
             parser_advance(p)
         # char
         elif tok_type == TokenType.CHAR:
-            t.base = BaseType.CHAR
+            ts.base_token = TokenType.CHAR
             parser_advance(p)
         # short
         elif tok_type == TokenType.SHORT:
-            t.base = BaseType.SHORT
+            ts.base_token = TokenType.SHORT
             parser_advance(p)
         # int
         elif tok_type == TokenType.INT:
-            t.base = BaseType.INT
+            ts.base_token = TokenType.INT
             parser_advance(p)
         # long
         elif tok_type == TokenType.LONG:
+            ts.long_count = ts.long_count + 1
+            if ts.base_token == 0:
+                ts.base_token = TokenType.LONG
             parser_advance(p)
-            if has_long:
-                t.base = BaseType.LONG_LONG
-            else:
-                has_long = 1
-                t.base = BaseType.LONG
         # float
         elif tok_type == TokenType.FLOAT:
-            t.base = BaseType.FLOAT
+            ts.base_token = TokenType.FLOAT
             parser_advance(p)
         # double
         elif tok_type == TokenType.DOUBLE:
-            t.base = BaseType.DOUBLE
+            ts.base_token = TokenType.DOUBLE
             parser_advance(p)
         # struct
         elif tok_type == TokenType.STRUCT:
-            t.base = BaseType.STRUCT
+            ts.base_token = TokenType.STRUCT
             parser_advance(p)
             if parser_match(p, TokenType.IDENTIFIER):
-                t.name_ptr = p.current.start
-                t.name_len = p.current.length
+                ts.name = span_from_token(p.current)
                 parser_advance(p)
             # Skip struct body if present
             if parser_match(p, TokenType.LBRACE):
                 parser_skip_balanced(p, TokenType.LBRACE, TokenType.RBRACE)
+            break
         # union
         elif tok_type == TokenType.UNION:
-            t.base = BaseType.UNION
+            ts.base_token = TokenType.UNION
             parser_advance(p)
             if parser_match(p, TokenType.IDENTIFIER):
-                t.name_ptr = p.current.start
-                t.name_len = p.current.length
+                ts.name = span_from_token(p.current)
                 parser_advance(p)
             if parser_match(p, TokenType.LBRACE):
                 parser_skip_balanced(p, TokenType.LBRACE, TokenType.RBRACE)
+            break
         # enum
         elif tok_type == TokenType.ENUM:
-            t.base = BaseType.ENUM
+            ts.base_token = TokenType.ENUM
             parser_advance(p)
             if parser_match(p, TokenType.IDENTIFIER):
-                t.name_ptr = p.current.start
-                t.name_len = p.current.length
+                ts.name = span_from_token(p.current)
                 parser_advance(p)
             if parser_match(p, TokenType.LBRACE):
                 parser_skip_balanced(p, TokenType.LBRACE, TokenType.RBRACE)
-        # identifier (could be typedef name)
+            break
+        # identifier (typedef name) - only if no base type yet
         elif tok_type == TokenType.IDENTIFIER:
-            # Treat as typedef name
-            t.base = BaseType.TYPEDEF_NAME
-            t.name_ptr = p.current.start
-            t.name_len = p.current.length
-            parser_advance(p)
+            if ts.base_token == 0:
+                ts.base_token = TokenType.IDENTIFIER
+                ts.name = span_from_token(p.current)
+                parser_advance(p)
             break
         else:
             break
     
     # Parse pointer indirections
     while parser_match(p, TokenType.STAR):
-        t.ptr_depth = t.ptr_depth + 1
+        ts.ptr_depth = ts.ptr_depth + 1
         parser_advance(p)
         # Skip pointer qualifiers
         while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE):
@@ -243,15 +305,143 @@ def parse_type_spec(p: ParserRef, t: CTypeRef) -> void:
 
 
 @compile
-def parse_declarator_name(p: ParserRef) -> struct[ptr[i8], i32]:
+def build_base_ctype(ts: TypeParseStateRef) -> struct[CTypeProof, ptr[CType]]:
     """
-    Parse declarator and return name pointer and length.
-    Handles additional pointer stars and array brackets.
-    Returns (nullptr, 0) if no name found.
+    Build base CType from TypeParseState.
+    Returns (proof, ptr) for linear ownership tracking.
     """
-    name_ptr: ptr[i8] = ptr[i8](0)
-    name_len: i32 = 0
+    # Default to int if no base type specified but signed/unsigned present
+    base: i32 = ts.base_token
+    if base == 0:
+        if ts.is_signed != 0 or ts.long_count > 0:
+            base = TokenType.INT
+        else:
+            # No type at all - default to int
+            base = TokenType.INT
     
+    # Handle long long
+    is_longlong: bool = ts.long_count >= 2
+    is_unsigned: bool = ts.is_signed == -1
+    
+    # void
+    if base == TokenType.VOID:
+        return prim.void()
+    
+    # char
+    if base == TokenType.CHAR:
+        if is_unsigned:
+            return prim.uchar()
+        elif ts.is_signed == 1:
+            return prim.schar()
+        return prim.char()
+    
+    # short
+    if base == TokenType.SHORT:
+        if is_unsigned:
+            return prim.ushort()
+        return prim.short()
+    
+    # int
+    if base == TokenType.INT:
+        if is_longlong:
+            if is_unsigned:
+                return prim.ulonglong()
+            return prim.longlong()
+        if is_unsigned:
+            return prim.uint()
+        return prim.int()
+    
+    # long
+    if base == TokenType.LONG:
+        if is_longlong:
+            if is_unsigned:
+                return prim.ulonglong()
+            return prim.longlong()
+        if is_unsigned:
+            return prim.ulong()
+        return prim.long()
+    
+    # float
+    if base == TokenType.FLOAT:
+        return prim.float()
+    
+    # double
+    if base == TokenType.DOUBLE:
+        if ts.long_count > 0:
+            return prim.longdouble()
+        return prim.double()
+    
+    # struct/union/enum/typedef - create appropriate type
+    if base == TokenType.STRUCT:
+        return make_struct_type(ts.name, nullptr, 0, 0)
+    if base == TokenType.UNION:
+        return make_union_type(ts.name, nullptr, 0, 0)
+    if base == TokenType.ENUM:
+        return make_enum_type(ts.name, nullptr, 0, 0)
+    if base == TokenType.IDENTIFIER:
+        return make_typedef_type(ts.name)
+    
+    # Fallback to int
+    return prim.int()
+
+
+@compile
+def wrap_in_pointer(qt_prf: QualTypeProof, qt: ptr[QualType]) -> struct[QualTypeProof, ptr[QualType]]:
+    """Wrap a QualType in a pointer type. Consumes input proof."""
+    ptr_prf, ptr_ty = make_ptr_type(qt_prf, qt, QUAL_NONE)
+    return make_qualtype(ptr_prf, ptr_ty, QUAL_NONE)
+
+
+@compile
+def build_qualtype_from_state(ts: TypeParseStateRef) -> struct[QualTypeProof, ptr[QualType]]:
+    """
+    Build complete QualType from TypeParseState, including pointers.
+    """
+    # Build base type
+    ty_prf, ty = build_base_ctype(ts)
+    
+    # Compute qualifiers
+    quals: i8 = QUAL_NONE
+    if ts.is_const != 0:
+        quals = quals | QUAL_CONST
+    if ts.is_volatile != 0:
+        quals = quals | QUAL_VOLATILE
+    
+    # Wrap in QualType
+    qt_prf, qt = make_qualtype(ty_prf, ty, quals)
+    
+    # Add pointer indirections (unroll up to 8 levels)
+    if ts.ptr_depth >= 1:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 2:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 3:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 4:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 5:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 6:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 7:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    if ts.ptr_depth >= 8:
+        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    
+    return qt_prf, qt
+
+
+# =============================================================================
+# Declarator parsing
+# =============================================================================
+
+@compile
+def parse_declarator_name(p: ParserRef) -> Span:
+    """
+    Parse declarator and return name as Span.
+    Handles additional pointer stars and array brackets.
+    Returns empty span if no name found.
+    """
     # Handle additional pointer stars in declarator
     while parser_match(p, TokenType.STAR):
         parser_advance(p)
@@ -259,9 +449,9 @@ def parse_declarator_name(p: ParserRef) -> struct[ptr[i8], i32]:
             parser_advance(p)
     
     # Get name
+    name: Span = span_empty()
     if parser_match(p, TokenType.IDENTIFIER):
-        name_ptr = p.current.start
-        name_len = p.current.length
+        name = span_from_token(p.current)
         parser_advance(p)
     elif parser_match(p, TokenType.LPAREN):
         # Function pointer or grouped declarator - skip for now
@@ -271,7 +461,7 @@ def parse_declarator_name(p: ParserRef) -> struct[ptr[i8], i32]:
     while parser_match(p, TokenType.LBRACKET):
         parser_skip_balanced(p, TokenType.LBRACKET, TokenType.RBRACKET)
     
-    return name_ptr, name_len
+    return name
 
 
 # =============================================================================
@@ -279,48 +469,57 @@ def parse_declarator_name(p: ParserRef) -> struct[ptr[i8], i32]:
 # =============================================================================
 
 @compile
-def parse_func_params(p: ParserRef, func: CFuncRef) -> void:
-    """Parse function parameters into func.params"""
+def parse_func_params(p: ParserRef, param_count: ptr[i32], is_variadic: ptr[i8]) -> ptr[ParamInfo]:
+    """
+    Parse function parameters.
+    Returns heap-allocated ParamInfo array, sets param_count and is_variadic.
+    Caller takes ownership of returned array.
+    """
     if not parser_expect(p, TokenType.LPAREN):
-        return
+        param_count[0] = 0
+        is_variadic[0] = 0
+        return nullptr
     
-    func.param_count = 0
-    func.is_variadic = 0
+    param_count[0] = 0
+    is_variadic[0] = 0
     
     # Empty params or (void)
     if parser_match(p, TokenType.RPAREN):
         parser_advance(p)
-        return
+        return nullptr
     
     if parser_match(p, TokenType.VOID):
         parser_advance(p)
         if parser_match(p, TokenType.RPAREN):
             parser_advance(p)
-            return
+            return nullptr
     
+    # Parse parameters into scratch buffer
     while True:
         # Check for ...
         if parser_match(p, TokenType.ELLIPSIS):
-            func.is_variadic = 1
+            is_variadic[0] = 1
             parser_advance(p)
             break
         
-        if func.param_count >= MAX_PARAMS:
+        if param_count[0] >= MAX_PARAMS:
             break
         
         # Parse parameter type
-        param_ref: CParamRef = assume(ptr(p.params[func.param_count]), cparam_nonnull)
-        type_ref: CTypeRef = assume(ptr(param_ref.type), ctype_nonnull)
-        parse_type_spec(p, type_ref)
+        ts: TypeParseState
+        ts_ref: TypeParseStateRef = assume(ptr(ts), typeparse_nonnull)
+        parse_type_specifiers(p, ts_ref)
+        qt_prf, qt = build_qualtype_from_state(ts_ref)
         
         # Parse parameter name
-        name_ptr: ptr[i8]
-        name_len: i32
-        name_ptr, name_len = parse_declarator_name(p)
-        param_ref.name_ptr = name_ptr
-        param_ref.name_len = name_len
+        name: Span = parse_declarator_name(p)
         
-        func.param_count = func.param_count + 1
+        # Store in scratch buffer
+        p.params[param_count[0]].name = name
+        p.params[param_count[0]].type = qt
+        consume(qt_prf)  # Transfer ownership to params array
+        
+        param_count[0] = param_count[0] + 1
         
         if parser_match(p, TokenType.COMMA):
             parser_advance(p)
@@ -330,10 +529,25 @@ def parse_func_params(p: ParserRef, func: CFuncRef) -> void:
     parser_expect(p, TokenType.RPAREN)
     
     # Copy params to heap
-    if func.param_count > 0:
-        size: i32 = func.param_count * sizeof(CParam)
-        func.params = ptr[CParam](malloc(size))
-        memcpy(func.params, ptr(p.params[0]), size)
+    if param_count[0] > 0:
+        params: ptr[ParamInfo] = paraminfo_alloc(param_count[0])
+        memcpy(params, ptr(p.params[0]), param_count[0] * sizeof(ParamInfo))
+        return params
+    
+    return nullptr
+
+
+@compile
+def parse_function_type(p: ParserRef, ret_qt_prf: QualTypeProof, ret_qt: ptr[QualType]) -> struct[CTypeProof, ptr[CType]]:
+    """
+    Parse function type given return type.
+    Takes ownership of ret_qt.
+    """
+    param_count: i32 = 0
+    is_variadic: i8 = 0
+    params: ptr[ParamInfo] = parse_func_params(p, ptr(param_count), ptr(is_variadic))
+    
+    return make_func_type(ret_qt_prf, ret_qt, params, param_count, is_variadic)
 
 
 # =============================================================================
@@ -341,92 +555,105 @@ def parse_func_params(p: ParserRef, func: CFuncRef) -> void:
 # =============================================================================
 
 @compile
-def parse_struct_fields(p: ParserRef, s: CStructRef) -> void:
-    """Parse struct/union fields"""
+def parse_struct_fields(p: ParserRef, field_count: ptr[i32]) -> ptr[FieldInfo]:
+    """
+    Parse struct/union fields.
+    Returns heap-allocated FieldInfo array, sets field_count.
+    Caller takes ownership of returned array.
+    """
     if not parser_expect(p, TokenType.LBRACE):
-        return
+        field_count[0] = 0
+        return nullptr
     
-    s.field_count = 0
+    field_count[0] = 0
     
     while not parser_match(p, TokenType.RBRACE) and not parser_match(p, TokenType.EOF):
-        if s.field_count >= MAX_FIELDS:
+        if field_count[0] >= MAX_FIELDS:
             parser_skip_until_semicolon(p)
             parser_advance(p)
             continue
         
         # Parse field type
-        field_ref: CFieldRef = assume(ptr(p.fields[s.field_count]), cfield_nonnull)
-        type_ref: CTypeRef = assume(ptr(field_ref.type), ctype_nonnull)
-        parse_type_spec(p, type_ref)
+        ts: TypeParseState
+        ts_ref: TypeParseStateRef = assume(ptr(ts), typeparse_nonnull)
+        parse_type_specifiers(p, ts_ref)
+        qt_prf, qt = build_qualtype_from_state(ts_ref)
         
         # Parse field name
-        name_ptr: ptr[i8]
-        name_len: i32
-        name_ptr, name_len = parse_declarator_name(p)
-        field_ref.name_ptr = name_ptr
-        field_ref.name_len = name_len
-        field_ref.bit_width = -1
+        name: Span = parse_declarator_name(p)
         
         # Check for bitfield
+        bit_width: i32 = -1
         if parser_match(p, TokenType.COLON):
             parser_advance(p)
             if parser_match(p, TokenType.NUMBER):
-                # TODO: parse number value
-                field_ref.bit_width = 0
+                # TODO: parse actual number value
+                bit_width = 0
                 parser_advance(p)
         
-        s.field_count = s.field_count + 1
+        # Store in scratch buffer
+        p.fields[field_count[0]].name = name
+        p.fields[field_count[0]].type = qt
+        p.fields[field_count[0]].bit_width = bit_width
+        consume(qt_prf)  # Transfer ownership
+        
+        field_count[0] = field_count[0] + 1
         
         # Handle multiple declarators: int a, b, c;
         while parser_match(p, TokenType.COMMA):
             parser_advance(p)
-            if s.field_count >= MAX_FIELDS:
+            if field_count[0] >= MAX_FIELDS:
                 break
-            # Copy type from previous field
-            prev_field: CFieldRef = assume(ptr(p.fields[s.field_count - 1]), cfield_nonnull)
-            field_ref = assume(ptr(p.fields[s.field_count]), cfield_nonnull)
-            field_ref.type = prev_field.type
             
-            name_ptr, name_len = parse_declarator_name(p)
-            field_ref.name_ptr = name_ptr
-            field_ref.name_len = name_len
-            field_ref.bit_width = -1
-            s.field_count = s.field_count + 1
+            # Copy type from previous field (need to allocate new QualType)
+            prev_qt: ptr[QualType] = p.fields[field_count[0] - 1].type
+            new_qt_prf, new_qt = qualtype_alloc()
+            new_qt.type = prev_qt.type  # Share CType (shallow copy)
+            new_qt.quals = prev_qt.quals
+            
+            name = parse_declarator_name(p)
+            p.fields[field_count[0]].name = name
+            p.fields[field_count[0]].type = new_qt
+            p.fields[field_count[0]].bit_width = -1
+            consume(new_qt_prf)
+            
+            field_count[0] = field_count[0] + 1
         
         parser_expect(p, TokenType.SEMICOLON)
     
     parser_expect(p, TokenType.RBRACE)
     
     # Copy fields to heap
-    if s.field_count > 0:
-        size: i32 = s.field_count * sizeof(CField)
-        s.fields = ptr[CField](malloc(size))
-        memcpy(s.fields, ptr(p.fields[0]), size)
+    if field_count[0] > 0:
+        fields: ptr[FieldInfo] = fieldinfo_alloc(field_count[0])
+        memcpy(fields, ptr(p.fields[0]), field_count[0] * sizeof(FieldInfo))
+        return fields
+    
+    return nullptr
 
 
 @compile
-def parse_struct_or_union(p: ParserRef, is_union: i32) -> ptr[CStruct]:
-    """Parse struct or union definition, return heap-allocated CStruct"""
-    # Allocate struct
-    s: ptr[CStruct] = ptr[CStruct](malloc(sizeof(CStruct)))
-    s.is_union = is_union
-    s.name_ptr = ptr[i8](0)
-    s.name_len = 0
-    s.fields = ptr[CField](0)
-    s.field_count = 0
-    
+def parse_struct_or_union(p: ParserRef, is_union: i8) -> struct[CTypeProof, ptr[CType]]:
+    """Parse struct or union definition, return CType with ownership proof"""
     # Get name if present
+    name: Span = span_empty()
     if parser_match(p, TokenType.IDENTIFIER):
-        s.name_ptr = p.current.start
-        s.name_len = p.current.length
+        name = span_from_token(p.current)
         parser_advance(p)
     
     # Parse fields if body present
-    if parser_match(p, TokenType.LBRACE):
-        s_ref: CStructRef = assume(s, cstruct_nonnull)
-        parse_struct_fields(p, s_ref)
+    fields: ptr[FieldInfo] = nullptr
+    field_count: i32 = 0
+    is_complete: i8 = 0
     
-    return s
+    if parser_match(p, TokenType.LBRACE):
+        fields = parse_struct_fields(p, ptr(field_count))
+        is_complete = 1
+    
+    if is_union != 0:
+        return make_union_type(name, fields, field_count, is_complete)
+    else:
+        return make_struct_type(name, fields, field_count, is_complete)
 
 
 # =============================================================================
@@ -434,34 +661,38 @@ def parse_struct_or_union(p: ParserRef, is_union: i32) -> ptr[CStruct]:
 # =============================================================================
 
 @compile
-def parse_enum_values(p: ParserRef, e: CEnumRef) -> void:
-    """Parse enum values"""
+def parse_enum_values(p: ParserRef, value_count: ptr[i32]) -> ptr[EnumValue]:
+    """
+    Parse enum values.
+    Returns heap-allocated EnumValue array, sets value_count.
+    """
     if not parser_expect(p, TokenType.LBRACE):
-        return
+        value_count[0] = 0
+        return nullptr
     
-    e.value_count = 0
+    value_count[0] = 0
+    current_value: i64 = 0
     
     while not parser_match(p, TokenType.RBRACE) and not parser_match(p, TokenType.EOF):
-        if e.value_count >= MAX_ENUM_VALUES:
+        if value_count[0] >= MAX_ENUM_VALUES:
             break
         
         if parser_match(p, TokenType.IDENTIFIER):
-            val_ref: CEnumValRef = assume(ptr(p.enum_vals[e.value_count]), cenumval_nonnull)
-            val_ref.name_ptr = p.current.start
-            val_ref.name_len = p.current.length
-            val_ref.has_value = 0
-            val_ref.value = 0
+            p.enum_vals[value_count[0]].name = span_from_token(p.current)
+            p.enum_vals[value_count[0]].value = current_value
+            p.enum_vals[value_count[0]].has_explicit_value = 0
             parser_advance(p)
             
             # Check for explicit value
             if parser_match(p, TokenType.ASSIGN):
                 parser_advance(p)
-                val_ref.has_value = 1
-                # Skip value expression (simplified)
+                p.enum_vals[value_count[0]].has_explicit_value = 1
+                # Skip value expression (simplified - just skip tokens)
                 while not parser_match(p, TokenType.COMMA) and not parser_match(p, TokenType.RBRACE) and not parser_match(p, TokenType.EOF):
                     parser_advance(p)
             
-            e.value_count = e.value_count + 1
+            value_count[0] = value_count[0] + 1
+            current_value = current_value + 1
             
             if parser_match(p, TokenType.COMMA):
                 parser_advance(p)
@@ -471,31 +702,33 @@ def parse_enum_values(p: ParserRef, e: CEnumRef) -> void:
     parser_expect(p, TokenType.RBRACE)
     
     # Copy values to heap
-    if e.value_count > 0:
-        size: i32 = e.value_count * sizeof(CEnumVal)
-        e.values = ptr[CEnumVal](malloc(size))
-        memcpy(e.values, ptr(p.enum_vals[0]), size)
+    if value_count[0] > 0:
+        values: ptr[EnumValue] = enumvalue_alloc(value_count[0])
+        memcpy(values, ptr(p.enum_vals[0]), value_count[0] * sizeof(EnumValue))
+        return values
+    
+    return nullptr
 
 
 @compile
-def parse_enum(p: ParserRef) -> ptr[CEnum]:
-    """Parse enum definition"""
-    e: ptr[CEnum] = ptr[CEnum](malloc(sizeof(CEnum)))
-    e.name_ptr = ptr[i8](0)
-    e.name_len = 0
-    e.values = ptr[CEnumVal](0)
-    e.value_count = 0
-    
+def parse_enum(p: ParserRef) -> struct[CTypeProof, ptr[CType]]:
+    """Parse enum definition, return CType with ownership proof"""
+    # Get name if present
+    name: Span = span_empty()
     if parser_match(p, TokenType.IDENTIFIER):
-        e.name_ptr = p.current.start
-        e.name_len = p.current.length
+        name = span_from_token(p.current)
         parser_advance(p)
     
-    if parser_match(p, TokenType.LBRACE):
-        e_ref: CEnumRef = assume(e, cenum_nonnull)
-        parse_enum_values(p, e_ref)
+    # Parse values if body present
+    values: ptr[EnumValue] = nullptr
+    value_count: i32 = 0
+    is_complete: i8 = 0
     
-    return e
+    if parser_match(p, TokenType.LBRACE):
+        values = parse_enum_values(p, ptr(value_count))
+        is_complete = 1
+    
+    return make_enum_type(name, values, value_count, is_complete)
 
 
 # =============================================================================
@@ -503,18 +736,21 @@ def parse_enum(p: ParserRef) -> ptr[CEnum]:
 # =============================================================================
 
 @compile
-def parse_function(p: ParserRef, ret_type: CTypeRef, name_ptr: ptr[i8], name_len: i32) -> ptr[CFunc]:
+def parse_function_decl(p: ParserRef, ret_qt_prf: QualTypeProof, ret_qt: ptr[QualType], name: Span) -> struct[DeclProof, ptr[Decl]]:
     """Parse function declaration given return type and name"""
-    func: ptr[CFunc] = ptr[CFunc](malloc(sizeof(CFunc)))
-    func.name_ptr = name_ptr
-    func.name_len = name_len
-    func.ret_type = ret_type[0]  # Copy type
-    func.params = ptr[CParam](0)
-    func.param_count = 0
-    func.is_variadic = 0
+    # Parse function type (takes ownership of ret_qt)
+    func_ty_prf, func_ty = parse_function_type(p, ret_qt_prf, ret_qt)
     
-    func_ref: CFuncRef = assume(func, cfunc_nonnull)
-    parse_func_params(p, func_ref)
+    # Wrap in QualType (no qualifiers for function type)
+    func_qt_prf, func_qt = make_qualtype(func_ty_prf, func_ty, QUAL_NONE)
+    
+    # Create declaration
+    decl_prf, decl = decl_alloc()
+    decl.kind = DeclKind(DeclKind.Func)
+    decl.name = name
+    decl.type = func_qt
+    decl.storage = STORAGE_NONE
+    consume(func_qt_prf)  # Transfer ownership to Decl
     
     # Skip function body if present
     if parser_match(p, TokenType.LBRACE):
@@ -522,7 +758,102 @@ def parse_function(p: ParserRef, ret_type: CTypeRef, name_ptr: ptr[i8], name_len
     elif parser_match(p, TokenType.SEMICOLON):
         parser_advance(p)
     
-    return func
+    return decl_prf, decl
+
+
+@compile
+def try_make_struct_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struct[i8, DeclProof, ptr[Decl]]:
+    """
+    Try to create a struct declaration from CType.
+    Returns (success, decl_prf, decl).
+    If success=0, ty_prf is consumed, and caller must free returned decl.
+    """
+    name: Span = span_empty()
+    has_name: i8 = 0
+    
+    match ty[0]:
+        case (CType.Struct, st):
+            if not span_is_empty(st.name):
+                name = st.name
+                has_name = 1
+        case _:
+            pass
+    
+    if has_name != 0:
+        qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
+        decl_prf, decl = decl_alloc()
+        decl.kind = DeclKind(DeclKind.Struct)
+        decl.name = name
+        decl.type = qt
+        decl.storage = storage
+        consume(qt_prf)
+        return 1, decl_prf, decl
+    else:
+        ctype_free(ty_prf, ty)
+        # Return dummy decl - caller must free it
+        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl.type = nullptr
+        return 0, dummy_prf, dummy_decl
+
+
+@compile
+def try_make_union_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struct[i8, DeclProof, ptr[Decl]]:
+    """Try to create a union declaration from CType."""
+    name: Span = span_empty()
+    has_name: i8 = 0
+    
+    match ty[0]:
+        case (CType.Union, st):
+            if not span_is_empty(st.name):
+                name = st.name
+                has_name = 1
+        case _:
+            pass
+    
+    if has_name != 0:
+        qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
+        decl_prf, decl = decl_alloc()
+        decl.kind = DeclKind(DeclKind.Union)
+        decl.name = name
+        decl.type = qt
+        decl.storage = storage
+        consume(qt_prf)
+        return 1, decl_prf, decl
+    else:
+        ctype_free(ty_prf, ty)
+        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl.type = nullptr
+        return 0, dummy_prf, dummy_decl
+
+
+@compile
+def try_make_enum_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struct[i8, DeclProof, ptr[Decl]]:
+    """Try to create an enum declaration from CType."""
+    name: Span = span_empty()
+    has_name: i8 = 0
+    
+    match ty[0]:
+        case (CType.Enum, et):
+            if not span_is_empty(et.name):
+                name = et.name
+                has_name = 1
+        case _:
+            pass
+    
+    if has_name != 0:
+        qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
+        decl_prf, decl = decl_alloc()
+        decl.kind = DeclKind(DeclKind.Enum)
+        decl.name = name
+        decl.type = qt
+        decl.storage = storage
+        consume(qt_prf)
+        return 1, decl_prf, decl
+    else:
+        ctype_free(ty_prf, ty)
+        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl.type = nullptr
+        return 0, dummy_prf, dummy_decl
 
 
 # =============================================================================
@@ -530,16 +861,19 @@ def parse_function(p: ParserRef, ret_type: CTypeRef, name_ptr: ptr[i8], name_len
 # =============================================================================
 
 @compile
-def parse_declarations(source: ptr[i8]) -> struct[i32, ptr[void]]:
+def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
     """
     Yield declarations from source.
-    Returns (DeclKind, ptr to declaration struct)
+    Returns (DeclProof, ptr[Decl]) for each declaration.
+    Caller takes ownership of each yielded Decl.
     
     Usage:
-        for kind, decl_ptr in parse_declarations(source):
-            if kind == DeclKind.FUNC:
-                func = ptr[CFunc](decl_ptr)
-                ...
+        for decl_prf, decl in parse_declarations(source):
+            match decl.kind:
+                case (DeclKind.Func):
+                    # handle function
+                    pass
+            decl_free(decl_prf, decl)
     """
     prf, lex_raw = lexer_create(source)
     
@@ -552,7 +886,12 @@ def parse_declarations(source: ptr[i8]) -> struct[i32, ptr[void]]:
         
         while p.current.type != TokenType.EOF:
             # Skip storage class specifiers
+            storage: i8 = STORAGE_NONE
             while parser_match(p, TokenType.EXTERN) or parser_match(p, TokenType.STATIC):
+                if parser_match(p, TokenType.EXTERN):
+                    storage = STORAGE_EXTERN
+                else:
+                    storage = STORAGE_STATIC
                 parser_advance(p)
             
             # typedef
@@ -567,9 +906,12 @@ def parse_declarations(source: ptr[i8]) -> struct[i32, ptr[void]]:
             # struct
             if parser_match(p, TokenType.STRUCT):
                 parser_advance(p)
-                s: ptr[CStruct] = parse_struct_or_union(p, 0)
-                if s.name_len > 0:
-                    yield DeclKind.STRUCT, ptr[void](s)
+                ty_prf, ty = parse_struct_or_union(p, 0)
+                success, decl_prf, decl = try_make_struct_decl(ty_prf, ty, storage)
+                if success != 0:
+                    yield decl_prf, decl
+                else:
+                    decl_free(decl_prf, decl)
                 parser_skip_until_semicolon(p)
                 if parser_match(p, TokenType.SEMICOLON):
                     parser_advance(p)
@@ -578,9 +920,12 @@ def parse_declarations(source: ptr[i8]) -> struct[i32, ptr[void]]:
             # union
             if parser_match(p, TokenType.UNION):
                 parser_advance(p)
-                u: ptr[CStruct] = parse_struct_or_union(p, 1)
-                if u.name_len > 0:
-                    yield DeclKind.UNION, ptr[void](u)
+                ty_prf, ty = parse_struct_or_union(p, 1)
+                success, decl_prf, decl = try_make_union_decl(ty_prf, ty, storage)
+                if success != 0:
+                    yield decl_prf, decl
+                else:
+                    decl_free(decl_prf, decl)
                 parser_skip_until_semicolon(p)
                 if parser_match(p, TokenType.SEMICOLON):
                     parser_advance(p)
@@ -589,24 +934,27 @@ def parse_declarations(source: ptr[i8]) -> struct[i32, ptr[void]]:
             # enum
             if parser_match(p, TokenType.ENUM):
                 parser_advance(p)
-                e: ptr[CEnum] = parse_enum(p)
-                if e.name_len > 0:
-                    yield DeclKind.ENUM, ptr[void](e)
+                ty_prf, ty = parse_enum(p)
+                success, decl_prf, decl = try_make_enum_decl(ty_prf, ty, storage)
+                if success != 0:
+                    yield decl_prf, decl
+                else:
+                    decl_free(decl_prf, decl)
                 parser_skip_until_semicolon(p)
                 if parser_match(p, TokenType.SEMICOLON):
                     parser_advance(p)
                 continue
             
             # Parse type and declarator
-            t: CType = CType()
-            t_ref: CTypeRef = assume(ptr(t), ctype_nonnull)
-            parse_type_spec(p, t_ref)
+            ts: TypeParseState
+            ts_ref: TypeParseStateRef = assume(ptr(ts), typeparse_nonnull)
+            parse_type_specifiers(p, ts_ref)
+            qt_prf, qt = build_qualtype_from_state(ts_ref)
             
-            name_ptr: ptr[i8]
-            name_len: i32
-            name_ptr, name_len = parse_declarator_name(p)
+            name: Span = parse_declarator_name(p)
             
-            if name_len == 0:
+            if span_is_empty(name):
+                qualtype_free(qt_prf, qt)
                 parser_skip_until_semicolon(p)
                 if parser_match(p, TokenType.SEMICOLON):
                     parser_advance(p)
@@ -614,12 +962,15 @@ def parse_declarations(source: ptr[i8]) -> struct[i32, ptr[void]]:
             
             # Function declaration
             if parser_match(p, TokenType.LPAREN):
-                func: ptr[CFunc] = parse_function(p, t_ref, name_ptr, name_len)
-                yield DeclKind.FUNC, ptr[void](func)
+                decl_prf, decl = parse_function_decl(p, qt_prf, qt, name)
+                decl.storage = storage
+                yield decl_prf, decl
             else:
-                # Variable declaration - skip
+                # Variable declaration - skip for now
+                qualtype_free(qt_prf, qt)
                 parser_skip_until_semicolon(p)
                 if parser_match(p, TokenType.SEMICOLON):
                     parser_advance(p)
         
         lexer_destroy(prf, lex_raw)
+

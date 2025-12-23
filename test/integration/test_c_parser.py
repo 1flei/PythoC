@@ -1,133 +1,71 @@
 """
-Test C parser AST types
+Test C parser module - basic type parsing
+
+Tests the c_parser module's type parsing functionality.
 """
 from __future__ import annotations
 import unittest
 
-from pythoc import compile, enum, i32, i8, ptr, void, struct
+from pythoc import compile, i32, i8, ptr, void, struct, consume, assume, nullptr
 from pythoc.libc.stdio import printf
 
+from pythoc.bindings.c_ast import (
+    Span, CType, QualType, span_is_empty, span_empty,
+    qualtype_free, ctype_free,
+    QUAL_NONE, QUAL_CONST, QUAL_VOLATILE,
+)
+from pythoc.bindings.c_parser import (
+    TypeParseState, TypeParseStateRef, typeparse_nonnull, typeparse_init,
+    parse_type_specifiers, build_qualtype_from_state, build_base_ctype,
+    Parser, ParserRef, parser_nonnull, parser_advance,
+)
+from pythoc.bindings.lexer import lexer_create, lexer_destroy, lexer_nonnull, LexerRef
+from pythoc.bindings.c_token import TokenType
+
 
 # =============================================================================
-# C AST Types using enum with payload
+# Helper to parse a type from source string
 # =============================================================================
 
-# Base type specifiers
-@enum(i8)
-class BaseType:
-    VOID: None
-    CHAR: None
-    SHORT: None
-    INT: None
-    LONG: None
-    LONG_LONG: None
-    FLOAT: None
-    DOUBLE: None
-
-
-# Signedness
-@enum(i8)
-class Signedness:
-    DEFAULT: None
-    SIGNED: None
-    UNSIGNED: None
-
-
-# C Type representation using enum with payload
-# This allows representing different type categories with their associated data
 @compile
-class CType:
-    """C type specification (zero-copy)"""
-    base: i8               # BaseType enum
-    sign: i8               # Signedness enum
-    is_const: i8           # 1 if const, 0 otherwise
-    ptr_depth: i8          # Number of * indirections
-    # For struct/union/enum/typedef: name pointer and length
-    name_ptr: ptr[i8]
-    name_len: i32
-
-
-# Function parameter
-@compile
-class CParam:
-    """Function parameter"""
-    type: CType
-    name_ptr: ptr[i8]
-    name_len: i32
-
-
-# Function declaration
-@compile
-class CFunc:
-    """Function declaration"""
-    name_ptr: ptr[i8]
-    name_len: i32
-    ret_type: CType
-    params: ptr[CParam]
-    param_count: i32
-    is_variadic: i8
-
-
-# Struct/union field
-@compile
-class CField:
-    """Struct/union field"""
-    type: CType
-    name_ptr: ptr[i8]
-    name_len: i32
-    bit_width: i32  # -1 if not bitfield
-
-
-# Struct declaration
-@compile
-class CStruct:
-    """Struct or union declaration"""
-    name_ptr: ptr[i8]
-    name_len: i32
-    fields: ptr[CField]
-    field_count: i32
-    is_union: i8
-
-
-# Enum value
-@compile
-class CEnumVal:
-    """Enum value"""
-    name_ptr: ptr[i8]
-    name_len: i32
-    has_value: i8
-    value: i32
-
-
-# Enum declaration
-@compile
-class CEnum:
-    """Enum declaration"""
-    name_ptr: ptr[i8]
-    name_len: i32
-    values: ptr[CEnumVal]
-    value_count: i32
-
-
-# Typedef declaration
-@compile
-class CTypedef:
-    """Typedef declaration"""
-    type: CType
-    name_ptr: ptr[i8]
-    name_len: i32
-
-
-# Declaration kind enum with payload - the key design!
-# Each variant carries its specific declaration type
-@enum(i8)
-class CDecl:
-    """C declaration with payload"""
-    FUNC: ptr[CFunc]
-    STRUCT: ptr[CStruct]
-    UNION: ptr[CStruct]  # Reuse CStruct for unions
-    ENUM: ptr[CEnum]
-    TYPEDEF: ptr[CTypedef]
+def parse_type_from_source(source: ptr[i8]) -> struct[i8, i8, i8]:
+    """
+    Parse type from source and return (ctype_tag, quals, ptr_depth).
+    Returns (0, 0, 0) on failure.
+    """
+    lex_prf, lex = lexer_create(source)
+    
+    # Check if lexer creation succeeded
+    if lex == nullptr:
+        return 0, 0, 0
+    
+    lex_ref: LexerRef = assume(lex, lexer_nonnull)
+    
+    # Create parser
+    parser: Parser = Parser()
+    parser.lex = lex
+    parser_advance(assume(ptr(parser), parser_nonnull))
+    p: ParserRef = assume(ptr(parser), parser_nonnull)
+    
+    # Parse type specifiers
+    ts: TypeParseState
+    ts_ref: TypeParseStateRef = assume(ptr(ts), typeparse_nonnull)
+    parse_type_specifiers(p, ts_ref)
+    
+    # Build QualType
+    qt_prf, qt = build_qualtype_from_state(ts_ref)
+    
+    # Extract info - qt.type is ptr[CType], qt.type[0] is CType enum
+    # For enum, [0] gets the tag
+    ctype_tag: i8 = qt.type[0][0]  # Get tag from CType enum
+    quals: i8 = qt.quals
+    ptr_depth: i8 = ts.ptr_depth
+    
+    # Cleanup
+    qualtype_free(qt_prf, qt)
+    lexer_destroy(lex_prf, lex)
+    
+    return ctype_tag, quals, ptr_depth
 
 
 # =============================================================================
@@ -135,88 +73,143 @@ class CDecl:
 # =============================================================================
 
 @compile
-def test_base_types() -> i32:
-    """Test BaseType enum"""
-    printf("Testing BaseType enum...\n")
+def test_parse_int() -> i32:
+    """Test parsing 'int' type"""
+    tag, quals, ptr_depth = parse_type_from_source("int x")
     
-    if BaseType.VOID != 0:
-        printf("ERROR: VOID should be 0\n")
+    # CType.Int tag value
+    if tag == CType.Int and quals == QUAL_NONE and ptr_depth == 0:
         return 1
-    # INT is at index 3 (VOID=0, CHAR=1, SHORT=2, INT=3)
-    if BaseType.INT != 3:
-        printf("ERROR: INT should be 3\n")
-        return 1
-    
-    printf("PASS: BaseType enum\n")
     return 0
 
 
 @compile
-def test_ctype_struct() -> i32:
-    """Test CType struct"""
-    printf("Testing CType struct...\n")
+def test_parse_const_int() -> i32:
+    """Test parsing 'const int' type"""
+    tag, quals, ptr_depth = parse_type_from_source("const int x")
     
-    t: CType = CType()
-    t.base = BaseType.INT
-    t.sign = Signedness.SIGNED
-    t.is_const = 0
-    t.ptr_depth = 0
-    t.name_ptr = ptr[i8](0)
-    t.name_len = 0
-    
-    if t.base != BaseType.INT:
-        printf("ERROR: base should be INT\n")
+    if tag == CType.Int and quals == QUAL_CONST and ptr_depth == 0:
         return 1
-    
-    printf("PASS: CType struct\n")
     return 0
 
 
 @compile
-def test_cdecl_enum() -> i32:
-    """Test CDecl enum with payload"""
-    printf("Testing CDecl enum with payload...\n")
+def test_parse_int_ptr() -> i32:
+    """Test parsing 'int *' type"""
+    tag, quals, ptr_depth = parse_type_from_source("int * x")
     
-    # Create a function declaration
-    func: CFunc = CFunc()
-    func.name_ptr = "test_func"
-    func.name_len = 9
-    func.param_count = 0
-    func.is_variadic = 0
-    
-    # Wrap in CDecl enum
-    decl: CDecl = CDecl(CDecl.FUNC, ptr(func))
-    
-    # Check tag - for enum value, [0] gets the tag
-    if decl[0] != CDecl.FUNC:
-        printf("ERROR: tag should be FUNC\n")
+    # After pointer wrapping, the outer type is Ptr
+    if tag == CType.Ptr and ptr_depth == 1:
         return 1
-    
-    printf("PASS: CDecl enum with payload\n")
     return 0
 
+
+@compile
+def test_parse_void() -> i32:
+    """Test parsing 'void' type"""
+    tag, quals, ptr_depth = parse_type_from_source("void")
+    
+    if tag == CType.Void:
+        return 1
+    return 0
+
+
+@compile
+def test_parse_unsigned_int() -> i32:
+    """Test parsing 'unsigned int' type"""
+    tag, quals, ptr_depth = parse_type_from_source("unsigned int x")
+    
+    if tag == CType.UInt:
+        return 1
+    return 0
+
+
+@compile
+def test_parse_long_long() -> i32:
+    """Test parsing 'long long' type"""
+    tag, quals, ptr_depth = parse_type_from_source("long long x")
+    
+    if tag == CType.LongLong:
+        return 1
+    return 0
+
+
+@compile
+def test_parse_double() -> i32:
+    """Test parsing 'double' type"""
+    tag, quals, ptr_depth = parse_type_from_source("double x")
+    
+    if tag == CType.Double:
+        return 1
+    return 0
+
+
+@compile
+def test_parse_char() -> i32:
+    """Test parsing 'char' type"""
+    tag, quals, ptr_depth = parse_type_from_source("char x")
+    
+    if tag == CType.Char:
+        return 1
+    return 0
+
+
+# =============================================================================
+# Main test runner
+# =============================================================================
 
 @compile
 def main() -> i32:
-    printf("=== C Parser AST Tests ===\n\n")
+    printf("=== C Parser Type Tests ===\n\n")
     
-    if test_base_types() != 0:
+    result: i32 = test_parse_int()
+    printf("parse_int: %d (expected 1)\n", result)
+    if result != 1:
         return 1
     
-    if test_ctype_struct() != 0:
+    result = test_parse_const_int()
+    printf("parse_const_int: %d (expected 1)\n", result)
+    if result != 1:
         return 1
     
-    if test_cdecl_enum() != 0:
+    result = test_parse_int_ptr()
+    printf("parse_int_ptr: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+    
+    result = test_parse_void()
+    printf("parse_void: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+    
+    result = test_parse_unsigned_int()
+    printf("parse_unsigned_int: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+    
+    result = test_parse_long_long()
+    printf("parse_long_long: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+    
+    result = test_parse_double()
+    printf("parse_double: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+    
+    result = test_parse_char()
+    printf("parse_char: %d (expected 1)\n", result)
+    if result != 1:
         return 1
     
     printf("\n=== All Tests Passed ===\n")
     return 0
 
 
-class TestCParserAST(unittest.TestCase):
-    """Test C parser AST types"""
+class TestCParser(unittest.TestCase):
+    """Test C parser module"""
     
-    def test_ast_types(self):
+    def test_type_parsing(self):
         """Run main test"""
         result = main()
         self.assertEqual(result, 0)

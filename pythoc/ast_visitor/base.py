@@ -613,13 +613,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 )
             
             if state == 'active':
-                # Check loop scope restriction: cannot consume external token inside loop
-                if self.scope_depth > var_info.linear_scope_depth:
-                    logger.error(
-                        f"Cannot {reason} external linear token '{path_str}' inside loop "
-                        f"(token declared at scope depth {var_info.linear_scope_depth}, "
-                        f"attempting to use at depth {self.scope_depth})"
-                    )
+                # Note: We no longer block consuming external tokens inside loops.
+                # Instead, we check at loop exit that external tokens are reassigned.
+                # This allows patterns like: prf, val = transform(prf, val)
                 
                 # Mark as consumed (ownership transferred)
                 self._set_linear_state(var_info, path, 'consumed')
