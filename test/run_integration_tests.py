@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Run all integration tests in parallel
+Run all integration tests
 
 This script runs all integration tests in test/integration/ directory.
 Integration tests are Python scripts that compile and execute PC code.
-Tests are run in parallel for faster execution.
+
+Usage:
+    python run_integration_tests.py           # Run in parallel (default)
+    python run_integration_tests.py --serial  # Run serially (for benchmarking)
+    python run_integration_tests.py --json    # Output JSON (for CI)
 """
 
 import subprocess
 import sys
 import os
+import argparse
+import json
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 
@@ -57,8 +63,10 @@ def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
         duration = time.time() - start_time
         return test_name, False, "", str(e), duration
 
-def print_header(text: str):
+def print_header(text: str, quiet: bool = False):
     """Print a formatted header"""
+    if quiet:
+        return
     print(f"\n{BOLD}{BLUE}{'='*70}{RESET}")
     print(f"{BOLD}{BLUE}{text:^70}{RESET}")
     print(f"{BOLD}{BLUE}{'='*70}{RESET}\n")
@@ -102,9 +110,55 @@ def extract_error_info(stdout: str, stderr: str) -> list:
     
     return errors[:12]
 
+def run_tests_serial(test_files: List[Path], quiet: bool = False) -> List[Tuple[str, bool, str, str, float]]:
+    """Run tests serially (for accurate timing benchmarks)"""
+    results = []
+    for i, test_file in enumerate(test_files):
+        test_name, success, stdout, stderr, duration = run_single_test(test_file)
+        if not quiet:
+            status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
+            print(f"[{i+1}/{len(test_files)}] {status} {test_name} ({duration:.2f}s)")
+        results.append((test_name, success, stdout, stderr, duration))
+    return results
+
+
+def run_tests_parallel(test_files: List[Path], max_workers: int = 32) -> List[Tuple[str, bool, str, str, float]]:
+    """Run tests in parallel (for faster execution)"""
+    results = []
+    
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_test = {
+            executor.submit(run_single_test, test_file): test_file.stem
+            for test_file in test_files
+        }
+        
+        for future in as_completed(future_to_test):
+            test_name = future_to_test[future]
+            try:
+                name, success, stdout, stderr, duration = future.result()
+                status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
+                print(f"{status} {name} ({duration:.2f}s)")
+                results.append((name, success, stdout, stderr, duration))
+            except Exception as e:
+                print(f"{RED}FAIL{RESET} {test_name} (exception: {e})")
+                results.append((test_name, False, "", str(e), 0))
+    
+    return results
+
+
 def main():
     """Main test runner"""
-    print_header("PC Compiler - Integration Test Suite (Parallel)")
+    parser = argparse.ArgumentParser(description='Run PC integration tests')
+    parser.add_argument('--serial', action='store_true',
+                        help='Run tests serially (for benchmarking)')
+    parser.add_argument('--json', action='store_true',
+                        help='Output results as JSON (for CI)')
+    parser.add_argument('--quiet', action='store_true',
+                        help='Minimal output (for benchmarking)')
+    args = parser.parse_args()
+    
+    mode = "Serial" if args.serial else "Parallel"
+    print_header(f"PC Compiler - Integration Test Suite ({mode})", args.quiet)
     
     # Find all test files in integration directory
     workspace = Path(__file__).parent.parent
@@ -112,73 +166,78 @@ def main():
     test_files = sorted(integration_dir.glob("test_*.py"))
     
     if not test_files:
-        print(f"{YELLOW}No integration test files found{RESET}")
+        if not args.quiet:
+            print(f"{YELLOW}No integration test files found{RESET}")
         return 0
     
-    print(f"Found {len(test_files)} integration test files")
-    print(f"Running tests in parallel with 8 workers...\n")
+    if not args.quiet:
+        print(f"Found {len(test_files)} integration test files")
+        if args.serial:
+            print(f"Running tests serially...\n")
+        else:
+            print(f"Running tests in parallel with 32 workers...\n")
     
-    passed = 0
-    failed = 0
-    results = []
+    # Record wall-clock time for the entire test run
+    wall_start = time.time()
     
-    # Use fewer workers on Windows due to slower process creation and zig linker
-    import platform
-    max_workers = 32
+    # Run tests
+    if args.serial:
+        results = run_tests_serial(test_files, args.quiet)
+    else:
+        results = run_tests_parallel(test_files)
     
-    # Run tests in parallel
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tests
-        future_to_test = {
-            executor.submit(run_single_test, test_file): test_file.stem
-            for test_file in test_files
-        }
-        
-        # Collect results as they complete
-        for future in as_completed(future_to_test):
-            test_name = future_to_test[future]
-            try:
-                name, success, stdout, stderr, duration = future.result()
-                
-                # Print immediate feedback
-                if success:
-                    print(f"{GREEN}OK{RESET} {name} ({duration:.2f}s)")
-                    passed += 1
-                else:
-                    print(f"{RED}FAIL{RESET} {name} ({duration:.2f}s)")
-                    failed += 1
-                
-                results.append((name, success, stdout, stderr, duration))
-                
-            except Exception as e:
-                print(f"{RED}FAIL{RESET} {test_name} (exception: {e})")
-                failed += 1
-                results.append((test_name, False, "", str(e), 0))
+    wall_time = time.time() - wall_start
     
-    # Sort results by test name for consistent output
+    # Sort results by test name
     results.sort(key=lambda x: x[0])
     
-    # Print detailed summary
-    print_header("Test Summary")
+    # Count results
+    passed = sum(1 for r in results if r[1])
+    failed = len(results) - passed
+    total_cpu_time = sum(r[4] for r in results)
     
-    for test_name, success, stdout, stderr, duration in results:
-        status = f"{GREEN}PASS{RESET}" if success else f"{RED}FAIL{RESET}"
-        print(f"{status} {test_name}")
-        
-        # Show error details for failed tests
-        if not success:
-            errors = extract_error_info(stdout, stderr)
-            if errors:
-                print(f"{YELLOW}  Error details:{RESET}")
-                for error in errors:
-                    print(f"    {error}")
+    # Output JSON if requested
+    if args.json:
+        json_result = {
+            'total': len(test_files),
+            'passed': passed,
+            'failed': failed,
+            'wall_time_seconds': round(wall_time, 2),
+            'total_cpu_time_seconds': round(total_cpu_time, 2),
+            'tests': [
+                {
+                    'name': name,
+                    'passed': success,
+                    'duration_seconds': round(duration, 3)
+                }
+                for name, success, _, _, duration in results
+            ]
+        }
+        print(json.dumps(json_result, indent=2))
+        return 0 if failed == 0 else 1
+    
+    # Print detailed summary
+    print_header("Test Summary", args.quiet)
+    
+    if not args.quiet:
+        for test_name, success, stdout, stderr, duration in results:
+            status = f"{GREEN}PASS{RESET}" if success else f"{RED}FAIL{RESET}"
+            print(f"{status} {test_name}")
+            
+            # Show error details for failed tests
+            if not success:
+                errors = extract_error_info(stdout, stderr)
+                if errors:
+                    print(f"{YELLOW}  Error details:{RESET}")
+                    for error in errors:
+                        print(f"    {error}")
     
     total = len(test_files)
-    total_time = sum(r[4] for r in results)
     print(f"\n{BOLD}Total: {total}{RESET}")
     print(f"{GREEN}Passed: {passed}{RESET}")
     print(f"{RED}Failed: {failed}{RESET}")
-    print(f"{BLUE}Total time: {total_time:.2f}s{RESET}\n")
+    print(f"{BLUE}Total CPU time: {total_cpu_time:.2f}s{RESET}")
+    print(f"{BLUE}Wall time: {wall_time:.2f}s{RESET}\n")
     
     if failed == 0:
         print(f"{GREEN}{BOLD} All integration tests passed!{RESET}\n")

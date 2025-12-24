@@ -32,7 +32,7 @@ jobs:
           PYTHONPATH: .
         run: |
           set -e
-          python test/run_benchmark.py 2>&1 | tee benchmark_output.txt
+          python test/run_benchmark.py --compile-speed 2>&1 | tee benchmark_output.txt
           echo "Benchmark output:"
           cat benchmark_output.txt
 
@@ -78,6 +78,19 @@ jobs:
               })
           else:
               print("WARNING: nsieve results not found in output")
+
+          # Parse compile speed (average time per test, smaller is better)
+          cs_match = re.search(r"Average:\s+([\d.]+)s per test", content)
+          if cs_match:
+              avg_time = float(cs_match.group(1))
+              print(f"Found compile_speed: {avg_time}s per test")
+              results.append({
+                  "name": "compile_speed",
+                  "unit": "seconds/test",
+                  "value": avg_time
+              })
+          else:
+              print("WARNING: compile_speed results not found in output")
 
           with open("benchmark_results.json", "w") as f:
               json.dump(results, f, indent=2)
