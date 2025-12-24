@@ -6,10 +6,60 @@ import ast
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..registry import VariableInfo
 from ..logger import logger
+from .control_flow_builder import ControlFlowBuilder
+
+
+def _has_break_in_body(body: list) -> bool:
+    """Check if body contains any break statement (at any nesting level)
+    
+    This is used to optimize for-else: if there's no break in the loop body,
+    the else clause is guaranteed to execute, so we don't need break_flag check.
+    
+    Note: We only check for break at the top level of the for loop. Break inside
+    nested loops doesn't affect the outer for-else.
+    
+    Args:
+        body: List of AST statements (loop body)
+        
+    Returns:
+        True if body contains a break that would exit the current loop
+    """
+    for stmt in body:
+        if isinstance(stmt, ast.Break):
+            return True
+        # Recursively check control flow statements, but NOT nested loops
+        # (break in nested loop doesn't affect outer loop)
+        if isinstance(stmt, ast.If):
+            if _has_break_in_body(stmt.body) or _has_break_in_body(stmt.orelse):
+                return True
+        elif isinstance(stmt, ast.With):
+            if _has_break_in_body(stmt.body):
+                return True
+        elif isinstance(stmt, ast.Try):
+            if (_has_break_in_body(stmt.body) or 
+                _has_break_in_body(stmt.orelse) or
+                _has_break_in_body(stmt.finalbody)):
+                return True
+            for handler in stmt.handlers:
+                if _has_break_in_body(handler.body):
+                    return True
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                if _has_break_in_body(case.body):
+                    return True
+        # Note: We do NOT recurse into For/While - break inside nested loop
+        # doesn't break the outer loop
+    return False
 
 
 class LoopsMixin:
     """Mixin for loop statements: for, while"""
+    
+    def _get_cf_builder(self) -> ControlFlowBuilder:
+        """Get or create the ControlFlowBuilder for this visitor"""
+        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
+            self._cf_builder = ControlFlowBuilder(self)
+        return self._cf_builder
     
     def visit_While(self, node: ast.While):
         """Handle while loops
@@ -18,35 +68,139 @@ class LoopsMixin:
             Loop body is a branch that may execute multiple times.
             Linear state at end of body must match state at start of body
             (loop invariant) - otherwise second iteration would see wrong state.
+            
+        Special cases:
+            - while True: Infinite loop, exit only via break/return
+              * With break: executes once (like a block), no loop invariant needed
+              * Without break: infinite loop, code after while is unreachable
+            - while False: Never executes, skip entirely
+            
+        Uses CFG-based linear state tracking via ControlFlowBuilder.
         """
+        cf = self._get_cf_builder()
+        
         # Don't process if current block is already terminated
-        if self.builder.block.is_terminated:
+        if cf.is_terminated():
             return
         
+        # Check for compile-time constant condition
+        condition_val = self.visit_expression(node.test)
+        is_constant_condition = condition_val.is_python_value()
+        constant_value = condition_val.get_python_value() if is_constant_condition else None
+        
+        # while False - never executes
+        if is_constant_condition and not constant_value:
+            logger.debug("while False - skipping loop body entirely")
+            return
+        
+        # while True - special handling for infinite loop
+        if is_constant_condition and constant_value:
+            self._visit_while_true(node, cf)
+            return
+        
+        # Normal while loop with runtime condition
+        self._visit_while_normal(node, cf, condition_val)
+    
+    def _visit_while_true(self, node: ast.While, cf: ControlFlowBuilder):
+        """Handle while True - infinite loop or single execution with break
+        
+        CFG structure for while True:
+        - No loop header with condition check (condition is always true)
+        - Body executes directly
+        - break jumps to exit block
+        - If body can fall through (no break/return), it loops back (infinite loop)
+        - Code after while is only reachable via break
+        
+        Linear type handling:
+        - Since it's either infinite loop or single execution (with break),
+          NO loop invariant check is needed
+        - Linear tokens created before while True can be consumed in the body
+        - This is the key difference from normal while loops
+        """
+        # Create exit block for break targets
+        loop_exit = cf.create_block("while_true_exit")
+        
+        # For while True, we don't need a separate header block
+        # The body IS the loop - it either breaks out or loops back
+        loop_body_start = cf.create_block("while_true_body")
+        
+        # Jump to body
+        cf.branch(loop_body_start)
+        cf.position_at_end(loop_body_start)
+        
+        # Push loop context: continue -> loop back to body start, break -> exit
+        self.loop_stack.append((loop_body_start, loop_exit))
+        
+        # Enter scope for loop body
+        self.ctx.var_registry.enter_scope()
+        self.scope_depth += 1
+        
+        try:
+            # Execute loop body
+            for stmt in node.body:
+                if not cf.is_terminated():
+                    self.visit(stmt)
+            
+            # Check linear tokens in current scope
+            for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
+                    if var_info.linear_state != 'consumed':
+                        logger.error(
+                            f"Linear token '{var_info.name}' not consumed in while True body "
+                            f"(declared at line {var_info.line_number})", node
+                        )
+                    var_info.linear_state = None
+            
+            # If body can fall through, it's an infinite loop - loop back
+            if not cf.is_terminated():
+                cf.branch(loop_body_start)
+                cf.mark_loop_back(loop_body_start)
+        finally:
+            self.scope_depth -= 1
+            self.ctx.var_registry.exit_scope()
+        
+        # Pop loop context
+        self.loop_stack.pop()
+        
+        # Position at exit block
+        cf.position_at_end(loop_exit)
+        
+        # Check if exit is reachable (only via break)
+        # If no edges lead to exit, mark as unreachable
+        if not cf.cfg.get_predecessors(cf._get_cfg_block_id(loop_exit)):
+            # No break in the loop - infinite loop, code after is unreachable
+            cf.unreachable()
+    
+    def _visit_while_normal(self, node: ast.While, cf: ControlFlowBuilder, condition_val):
+        """Handle normal while loop with runtime condition
+        
+        CFG structure:
+        - Header block: evaluate condition
+        - Body block: loop body
+        - Exit block: code after loop
+        
+        Linear type handling:
+        - Loop invariant is checked by CFG linear checker at function end
+        - This ensures multiple iterations see consistent linear state
+        """
         # Create loop blocks
-        loop_header = self.current_function.append_basic_block(self.get_next_label("while_header"))
-        loop_body = self.current_function.append_basic_block(self.get_next_label("while_body"))
-        loop_exit = self.current_function.append_basic_block(self.get_next_label("while_exit"))
+        loop_header = cf.create_block("while_header")
+        loop_body = cf.create_block("while_body")
+        loop_exit = cf.create_block("while_exit")
         
         # Push loop context for break/continue
         self.loop_stack.append((loop_header, loop_exit))
         
         # Jump to loop header
-        self.builder.branch(loop_header)
+        cf.branch(loop_header)
         
         # Loop header: check condition
-        self.builder.position_at_end(loop_header)
+        cf.position_at_end(loop_header)
         condition = self._to_boolean(self.visit_expression(node.test))
-        self.builder.cbranch(condition, loop_body, loop_exit)
+        cf.cbranch(condition, loop_body, loop_exit)
         
         # Loop body - increment scope depth for linear token restrictions
-        self.builder.position_at_end(loop_body)
-        
-        # Capture ALL linear states before loop body (for consistency check)
-        linear_states_before = {}
-        for var_name, var_info in self.ctx.var_registry.list_all_visible().items():
-            if var_info.linear_states:
-                linear_states_before[var_name] = dict(var_info.linear_states)
+        cf.position_at_end(loop_body)
         
         # Enter new scope for loop body and increment scope depth
         self.ctx.var_registry.enter_scope()
@@ -54,7 +208,7 @@ class LoopsMixin:
         try:
             # Execute loop body statements
             for stmt in node.body:
-                if not self.builder.block.is_terminated:
+                if not cf.is_terminated():
                     self.visit(stmt)
             
             # Check that all linear tokens created in loop are consumed
@@ -68,38 +222,22 @@ class LoopsMixin:
                     # Clean up consumed token
                     var_info.linear_state = None
             
-            # Check loop invariant: linear states must be consistent
-            # (same as before loop body, so loop can iterate multiple times)
-            for var_name, states_before in linear_states_before.items():
-                var_info = self.ctx.var_registry.lookup(var_name)
-                if var_info is None:
-                    continue
-                states_after = var_info.linear_states or {}
-                
-                for path, state_before in states_before.items():
-                    state_after = states_after.get(path, None)
-                    if state_before != state_after:
-                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                        logger.error(
-                            f"Linear state inconsistent in while loop: '{path_str}' "
-                            f"was '{state_before}' before loop body, now '{state_after}'. "
-                            f"Loop body must preserve linear state (consume and reassign, or don't touch).",
-                            node
-                        )
+            # Loop invariant is checked by CFG linear checker at function end
         finally:
             # Decrement scope depth and exit scope
             self.scope_depth -= 1
             self.ctx.var_registry.exit_scope()
         
         # Jump back to header (if not terminated by return/break)
-        if not self.builder.block.is_terminated:
-            self.builder.branch(loop_header)
+        if not cf.is_terminated():
+            cf.branch(loop_header)
+            cf.mark_loop_back(loop_header)
         
         # Pop loop context
         self.loop_stack.pop()
         
         # Continue after loop
-        self.builder.position_at_end(loop_exit)
+        cf.position_at_end(loop_exit)
 
     def visit_For(self, node: ast.For):
         """Handle for loops using iterator protocol
@@ -148,6 +286,7 @@ class LoopsMixin:
         from ..inline.yield_adapter import YieldInlineAdapter
         from llvmlite import ir
         
+        cf = self._get_cf_builder()
         adapter = YieldInlineAdapter(self)
         inline_info = iter_val._yield_inline_info
         
@@ -170,48 +309,73 @@ class LoopsMixin:
             )
         
         try:
-            # If there's an else clause, we need to track if break occurred
+            # If there's an else clause, we need to handle it carefully for CFG correctness
             if node.orelse:
-                # Create blocks for else handling
-                else_block = self.current_function.append_basic_block(self.get_next_label("for_else"))
-                after_else = self.current_function.append_basic_block(self.get_next_label("after_for_else"))
+                # Check if loop body contains any break statement
+                # If no break, else is guaranteed to execute - no need for break_flag check
+                body_has_break = _has_break_in_body(node.body)
                 
-                # Allocate a flag to track if break occurred
-                break_flag = self._create_alloca_in_entry(ir.IntType(1), "for_break_flag")
-                self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
-                
-                # Store break flag in loop context for break statement to set
-                old_break_flag = getattr(self, '_current_break_flag', None)
-                self._current_break_flag = break_flag
-                
-                try:
+                if body_has_break:
+                    # Has break: need break_flag to track if break occurred
+                    # CFG will have two paths to after_else (break path + else path)
+                    # Linear checker will verify both paths have consistent state
+                    else_block = cf.create_block("for_else")
+                    after_else = cf.create_block("after_for_else")
+                    
+                    # Allocate a flag to track if break occurred
+                    break_flag = self._create_alloca_in_entry(ir.IntType(1), "for_break_flag")
+                    self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
+                    
+                    # Store break flag in loop context for break statement to set
+                    old_break_flag = getattr(self, '_current_break_flag', None)
+                    self._current_break_flag = break_flag
+                    
+                    try:
+                        # Fix all missing locations in inlined statements
+                        for stmt in inlined_stmts:
+                            ast.fix_missing_locations(stmt)
+                        
+                        # Visit each inlined statement
+                        for stmt in inlined_stmts:
+                            if not cf.is_terminated():
+                                self.visit(stmt)
+                        
+                        # After loop completes, check break flag
+                        if not cf.is_terminated():
+                            broke = self.builder.load(break_flag, "broke")
+                            cf.cbranch(broke, after_else, else_block)
+                        
+                        # Else block: execute if no break
+                        cf.position_at_end(else_block)
+                        for stmt in node.orelse:
+                            if not cf.is_terminated():
+                                self.visit(stmt)
+                        
+                        if not cf.is_terminated():
+                            cf.branch(after_else)
+                        
+                        # Continue after for-else
+                        cf.position_at_end(after_else)
+                    finally:
+                        self._current_break_flag = old_break_flag
+                else:
+                    # No break in body: else is guaranteed to execute
+                    # CFG has only one path: loop body -> else -> after
+                    # No break_flag needed, no merge point with inconsistent states
+                    
                     # Fix all missing locations in inlined statements
                     for stmt in inlined_stmts:
                         ast.fix_missing_locations(stmt)
                     
-                    # Visit each inlined statement
+                    # Visit each inlined statement (loop body)
                     for stmt in inlined_stmts:
-                        if not self.builder.block.is_terminated:
+                        if not cf.is_terminated():
                             self.visit(stmt)
                     
-                    # After loop completes, check break flag
-                    if not self.builder.block.is_terminated:
-                        broke = self.builder.load(break_flag, "broke")
-                        self.builder.cbranch(broke, after_else, else_block)
-                    
-                    # Else block: execute if no break
-                    self.builder.position_at_end(else_block)
+                    # Directly execute else clause (no break_flag check)
                     for stmt in node.orelse:
-                        if not self.builder.block.is_terminated:
+                        if not cf.is_terminated():
                             self.visit(stmt)
-                    
-                    if not self.builder.block.is_terminated:
-                        self.builder.branch(after_else)
-                    
-                    # Continue after for-else
-                    self.builder.position_at_end(after_else)
-                finally:
-                    self._current_break_flag = old_break_flag
             else:
                 # No else clause, process normally
                 # Fix all missing locations in inlined statements
@@ -220,7 +384,7 @@ class LoopsMixin:
                 
                 # Visit each inlined statement
                 for stmt in inlined_stmts:
-                    if not self.builder.block.is_terminated:
+                    if not cf.is_terminated():
                         self.visit(stmt)
         finally:
             # CRITICAL: Restore globals after visiting all inlined statements
@@ -260,6 +424,7 @@ class LoopsMixin:
         from ..builtin_entities.python_type import PythonType
         from llvmlite import ir
 
+        cf = self._get_cf_builder()
         py_iterable = list(py_iterable)
         
         # Handle empty iterator
@@ -267,7 +432,7 @@ class LoopsMixin:
             # Empty iterator: execute else clause if present
             if node.orelse:
                 for stmt in node.orelse:
-                    if not self.builder.block.is_terminated:
+                    if not cf.is_terminated():
                         self.visit(stmt)
             return
         
@@ -288,19 +453,16 @@ class LoopsMixin:
         loop_var_pattern = parse_target_pattern(node.target)
         is_tuple_unpack = isinstance(loop_var_pattern, list)
         
-        # Create loop exit block
-        loop_exit = self.current_function.append_basic_block(
-            self.get_next_label("const_loop_exit")
-        )
+        # Check if loop body contains any break statement
+        body_has_break = _has_break_in_body(node.body)
         
-        # If there's an else clause, need to track breaks
-        if node.orelse:
-            else_block = self.current_function.append_basic_block(
-                self.get_next_label("const_loop_else")
-            )
-            after_else = self.current_function.append_basic_block(
-                self.get_next_label("after_const_loop_else")
-            )
+        # Create loop exit block
+        loop_exit = cf.create_block("const_loop_exit")
+        
+        # If there's an else clause and body has break, need to track breaks
+        if node.orelse and body_has_break:
+            else_block = cf.create_block("const_loop_else")
+            after_else = cf.create_block("after_const_loop_else")
             # Allocate break flag
             break_flag = self._create_alloca_in_entry(ir.IntType(1), "const_for_break_flag")
             self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
@@ -314,7 +476,7 @@ class LoopsMixin:
         try:
             # Unroll with basic blocks
             for i, element in enumerate(py_iterable):
-                if self.builder.block.is_terminated:
+                if cf.is_terminated():
                     break
                 
                 # Enter new scope for this iteration
@@ -327,9 +489,7 @@ class LoopsMixin:
                 if is_last:
                     continue_target = loop_exit
                 else:
-                    continue_target = self.current_function.append_basic_block(
-                        self.get_next_label(f"const_loop_iter_{i+1}")
-                    )
+                    continue_target = cf.create_block(f"const_loop_iter_{i+1}")
                 
                 # Push loop context for this iteration (for break/continue support)
                 # continue -> jump to continue_target (next iteration or loop_exit if last)
@@ -378,16 +538,14 @@ class LoopsMixin:
                 try:
                     # Execute loop body (break/continue will use loop_stack)
                     for stmt in node.body:
-                        if not self.builder.block.is_terminated:
+                        if not cf.is_terminated():
                             self.visit(stmt)
                         else:
                             # Block is terminated, but we still need to process remaining statements
                             # to generate their basic blocks (they might be reachable from other paths)
                             # Create a new unreachable block to continue codegen
-                            unreachable_block = self.current_function.append_basic_block(
-                                self.get_next_label("unreachable_cont")
-                            )
-                            self.builder.position_at_end(unreachable_block)
+                            unreachable_block = cf.create_block("unreachable_cont")
+                            cf.position_at_end(unreachable_block)
                             self.visit(stmt)
                     
                     # Check that all linear tokens created in this iteration are consumed
@@ -401,42 +559,48 @@ class LoopsMixin:
                 finally:
                     # Pop loop context
                     self.loop_stack.pop()
-                    # Check linear tokens before exiting scope
-                    self._check_linear_tokens_consumed()
+                    # Linear tokens check is done by CFG checker at function end
                     # Decrement scope depth and exit scope
                     self.scope_depth -= 1
                     self.ctx.var_registry.exit_scope()
                 
                 # Branch to next iteration
-                if not self.builder.block.is_terminated:
-                    self.builder.branch(continue_target)
+                if not cf.is_terminated():
+                    cf.branch(continue_target)
                 
                 # Position at next block for next iteration (if not last)
                 # Note: Even if current block is terminated, we still need to process
                 # remaining iterations, as the terminator might be in a conditional branch
                 if not is_last:
-                    self.builder.position_at_end(continue_target)
+                    cf.position_at_end(continue_target)
             
             # Position at exit
-            self.builder.position_at_end(loop_exit)
+            cf.position_at_end(loop_exit)
             
             # Handle else clause if present
             if node.orelse:
-                # Check break flag
-                broke = self.builder.load(break_flag, "const_broke")
-                self.builder.cbranch(broke, after_else, else_block)
-                
-                # Else block
-                self.builder.position_at_end(else_block)
-                for stmt in node.orelse:
-                    if not self.builder.block.is_terminated:
-                        self.visit(stmt)
-                
-                if not self.builder.block.is_terminated:
-                    self.builder.branch(after_else)
-                
-                # Continue after else
-                self.builder.position_at_end(after_else)
+                if body_has_break:
+                    # Has break: check break flag to decide if else executes
+                    broke = self.builder.load(break_flag, "const_broke")
+                    cf.cbranch(broke, after_else, else_block)
+                    
+                    # Else block
+                    cf.position_at_end(else_block)
+                    for stmt in node.orelse:
+                        if not cf.is_terminated():
+                            self.visit(stmt)
+                    
+                    if not cf.is_terminated():
+                        cf.branch(after_else)
+                    
+                    # Continue after else
+                    cf.position_at_end(after_else)
+                else:
+                    # No break in body: else is guaranteed to execute
+                    # Directly execute else clause (no break_flag check, no merge point)
+                    for stmt in node.orelse:
+                        if not cf.is_terminated():
+                            self.visit(stmt)
         finally:
             if break_flag is not None:
                 self._current_break_flag = old_break_flag

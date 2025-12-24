@@ -10,6 +10,7 @@ from pythoc.decorators.compile import compile
 from pythoc.builtin_entities import linear, consume, void, i32
 from pythoc.std.utility import move
 from pythoc.logger import set_raise_on_error
+from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
 
 # Enable exception raising for tests that expect to catch exceptions
 set_raise_on_error(True)
@@ -30,26 +31,38 @@ def test_if_else_both_consume():
 
 def test_if_without_else_error():
     """Test that if without else cannot consume token"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_no_else')
     try:
-        @compile
+        @compile(suffix="bad_no_else")
         def bad_no_else(cond: i32) -> void:
             t = linear()
             if cond:
                 consume(t)
             # ERROR: else branch doesn't consume
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_if_without_else_error failed - should have raised RuntimeError")
     except RuntimeError as e:
-        if "modified in if without else" in str(e).lower() or "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept both old AST-based and new CFG-based error messages
+        if ("modified in if without else" in err_str or 
+            "consistently" in err_str or
+            "not consumed at function exit" in err_str or
+            "inconsistent linear states" in err_str):
             print(f"OK test_if_without_else_error passed: {e}")
         else:
             print(f"FAIL test_if_without_else_error failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_if_else_inconsistent_error():
     """Test error when if/else branches handle token inconsistently"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_inconsistent')
     try:
-        @compile
+        @compile(suffix="bad_inconsistent")
         def bad_inconsistent(cond: i32) -> void:
             t = linear()
             if cond:
@@ -57,12 +70,19 @@ def test_if_else_inconsistent_error():
             else:
                 pass  # ERROR: doesn't consume
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_if_else_inconsistent_error failed - should have raised RuntimeError")
     except RuntimeError as e:
-        if "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept both old AST-based and new CFG-based error messages
+        if ("consistently" in err_str or 
+            "not consumed at function exit" in err_str or
+            "inconsistent linear states" in err_str):
             print(f"OK test_if_else_inconsistent_error passed: {e}")
         else:
             print(f"FAIL test_if_else_inconsistent_error failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_loop_consume_internal_token():
@@ -80,8 +100,10 @@ def test_loop_consume_internal_token():
 
 def test_loop_cannot_consume_external_token():
     """Test that loop cannot consume token created outside loop"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_loop_external')
     try:
-        @compile
+        @compile(suffix="bad_loop_external")
         def bad_loop_external() -> void:
             t = linear()
             i: i32 = 0
@@ -89,12 +111,21 @@ def test_loop_cannot_consume_external_token():
                 consume(t)  # ERROR: external token
                 i = i + 1
         
+        flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_loop_cannot_consume_external_token failed - should have raised RuntimeError")
     except RuntimeError as e:
-        if "external" in str(e).lower() or "scope" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept both old AST-based and new CFG-based error messages
+        if ("external" in err_str or 
+            "scope" in err_str or 
+            "consistently" in err_str or
+            "loop body changes linear state" in err_str or
+            "loop invariant" in err_str):
             print(f"OK test_loop_cannot_consume_external_token passed: {e}")
         else:
             print(f"FAIL test_loop_cannot_consume_external_token failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_for_loop_consume_internal():

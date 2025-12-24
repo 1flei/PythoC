@@ -111,30 +111,31 @@ def test_operators() -> i32:
             token_idx = token_idx + 1
     
     # Verify token sequence
+    result: i32 = 0
     expected_idx: i32 = 0
     
     # i
     if token_types[expected_idx] != TokenType.IDENTIFIER:
         printf("FAIL: Token %d should be IDENTIFIER\n", expected_idx)
-        return 1
+        result = 1
     expected_idx = expected_idx + 1
     
     # <<
     if token_types[expected_idx] != TokenType.LSHIFT:
         printf("FAIL: Token %d should be LSHIFT\n", expected_idx)
-        return 1
+        result = 1
     expected_idx = expected_idx + 1
     
     # 1
     if token_types[expected_idx] != TokenType.NUMBER:
         printf("FAIL: Token %d should be NUMBER\n", expected_idx)
-        return 1
+        result = 1
     expected_idx = expected_idx + 1
     
     # ;
     if token_types[expected_idx] != TokenType.SEMICOLON:
         printf("FAIL: Token %d should be SEMICOLON\n", expected_idx)
-        return 1
+        result = 1
     expected_idx = expected_idx + 1
     
     # j
@@ -143,11 +144,12 @@ def test_operators() -> i32:
     # +=
     if token_types[expected_idx] != TokenType.PLUS_ASSIGN:
         printf("FAIL: Token %d should be PLUS_ASSIGN\n", expected_idx)
-        return 1
+        result = 1
     expected_idx = expected_idx + 1
     
-    printf("OK: test_operators passed\n")
-    return 0
+    if result == 0:
+        printf("OK: test_operators passed\n")
+    return result
 
 
 @compile
@@ -162,21 +164,23 @@ def test_simple_code() -> i32:
     expected_types[3] = TokenType.IDENTIFIER
     expected_types[4] = TokenType.SEMICOLON
     
+    result: i32 = 0
     token_idx: i32 = 0
     for token in tokens_from_source(source):
         if token_idx < 5:
             if token.type != expected_types[token_idx]:
                 printf("FAIL: Token %d expected %d, got %d\n", 
                        token_idx, expected_types[token_idx], token.type)
-                return 1
+                result = 1
         token_idx = token_idx + 1
     
     if token_idx != 5:
         printf("FAIL: Expected 5 tokens, got %d\n", token_idx)
-        return 1
+        result = 1
     
-    printf("OK: test_simple_code passed\n")
-    return 0
+    if result == 0:
+        printf("OK: test_simple_code passed\n")
+    return result
 
 
 def main():

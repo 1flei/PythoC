@@ -168,7 +168,11 @@ def test_if_without_else_no_return_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "without else" in str(e).lower() or "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept both old AST-based and new CFG-based error messages
+        if ("without else" in err_str or 
+            "consistently" in err_str or
+            "inconsistent linear states" in err_str):
             return True, str(e)
         return False, f"wrong error: {e}"
     finally:
@@ -192,7 +196,11 @@ def test_if_elif_missing_else_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "without else" in str(e).lower() or "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept both old AST-based and new CFG-based error messages
+        if ("without else" in err_str or 
+            "consistently" in err_str or
+            "inconsistent linear states" in err_str):
             return True, str(e)
         return False, f"wrong error: {e}"
     finally:
@@ -217,7 +225,10 @@ def test_if_elif_inconsistent_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept both old AST-based and new CFG-based error messages
+        if ("consistently" in err_str or
+            "inconsistent linear states" in err_str):
             return True, str(e)
         return False, f"wrong error: {e}"
     finally:

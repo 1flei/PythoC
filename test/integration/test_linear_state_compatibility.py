@@ -351,37 +351,61 @@ class TestLinearStateCompatibility(unittest.TestCase):
         """active vs consumed should fail"""
         returncode, stderr = run_invalid_code(INVALID_ACTIVE_CONSUMED)
         self.assertNotEqual(returncode, 0, "Expected compilation to fail")
-        self.assertIn("handled consistently", stderr)
+        # Accept either old-style "handled consistently" or CFG-based "Inconsistent linear states"
+        self.assertTrue(
+            "handled consistently" in stderr or "inconsistent linear states" in stderr.lower(),
+            f"Expected consistency error, got: {stderr}"
+        )
     
     def test_consumed_active_fails(self):
         """consumed vs active should fail"""
         returncode, stderr = run_invalid_code(INVALID_CONSUMED_ACTIVE)
         self.assertNotEqual(returncode, 0, "Expected compilation to fail")
-        self.assertIn("handled consistently", stderr)
+        # Accept either old-style "handled consistently" or CFG-based "Inconsistent linear states"
+        self.assertTrue(
+            "handled consistently" in stderr or "inconsistent linear states" in stderr.lower(),
+            f"Expected consistency error, got: {stderr}"
+        )
     
     def test_match_inconsistent_fails(self):
         """Match with inconsistent handling should fail"""
         returncode, stderr = run_invalid_code(INVALID_MATCH_INCONSISTENT)
         self.assertNotEqual(returncode, 0, "Expected compilation to fail")
-        self.assertIn("handled consistently", stderr)
+        # Accept either old-style "handled consistently" or CFG-based "Inconsistent linear states"
+        self.assertTrue(
+            "handled consistently" in stderr or "inconsistent linear states" in stderr.lower(),
+            f"Expected consistency error, got: {stderr}"
+        )
     
     def test_simple_if_consumes_fails(self):
         """Simple if without else that consumes should fail"""
         returncode, stderr = run_invalid_code(INVALID_SIMPLE_IF_CONSUMES)
         self.assertNotEqual(returncode, 0, "Expected compilation to fail")
-        self.assertIn("if without else", stderr)
+        # Accept either old-style "if without else" or CFG-based "Inconsistent linear states"
+        self.assertTrue(
+            "if without else" in stderr or "inconsistent linear states" in stderr.lower(),
+            f"Expected if-without-else or consistency error, got: {stderr}"
+        )
     
     def test_nested_if_inconsistent_fails(self):
         """Nested if with inconsistent handling should fail"""
         returncode, stderr = run_invalid_code(INVALID_NESTED_IF_INCONSISTENT)
         self.assertNotEqual(returncode, 0, "Expected compilation to fail")
-        self.assertIn("handled consistently", stderr)
+        # Accept either old-style "handled consistently" or CFG-based "Inconsistent linear states"
+        self.assertTrue(
+            "handled consistently" in stderr or "inconsistent linear states" in stderr.lower(),
+            f"Expected consistency error, got: {stderr}"
+        )
     
     def test_partial_consume_inconsistent_fails(self):
         """Partial consume inconsistent should fail"""
         returncode, stderr = run_invalid_code(INVALID_PARTIAL_CONSUME)
         self.assertNotEqual(returncode, 0, "Expected compilation to fail")
-        self.assertIn("handled consistently", stderr)
+        # Accept either old-style "handled consistently" or CFG-based "Inconsistent linear states"
+        self.assertTrue(
+            "handled consistently" in stderr or "inconsistent linear states" in stderr.lower(),
+            f"Expected consistency error, got: {stderr}"
+        )
 
 
 if __name__ == '__main__':

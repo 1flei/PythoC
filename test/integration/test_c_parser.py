@@ -37,6 +37,7 @@ def parse_type_from_source(source: ptr[i8]) -> struct[i8, i8, i8]:
     
     # Check if lexer creation succeeded
     if lex == nullptr:
+        consume(lex_prf)
         return 0, 0, 0
     
     lex_ref: LexerRef = assume(lex, lexer_nonnull)
