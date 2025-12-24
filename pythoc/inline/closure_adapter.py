@@ -224,7 +224,15 @@ class ClosureAdapter:
         return False
     
     def _lookup_result_var(self, var_name: str) -> Optional[ValueRef]:
-        """Look up result variable and load its value"""
+        """Look up result variable and load its value
+        
+        CRITICAL for linear types: 
+        1. The closure result variable is a temporary that holds the return value
+        2. When we read it, we transfer ownership OUT of the temporary
+        3. We must mark the temporary as consumed here
+        4. The returned ValueRef should NOT have var_name (like move() returns)
+           so that the caller treats it as a fresh value, not a variable reference
+        """
         var_info = self.visitor.ctx.var_registry.lookup(var_name)
         if not var_info:
             logger.warning(f"Result variable {var_name} not found")
@@ -233,5 +241,26 @@ class ClosureAdapter:
         # Load the value from the alloca
         alloca = var_info.alloca
         loaded_value = self.visitor.builder.load(alloca)
-        return wrap_value(loaded_value, kind='value', type_hint=var_info.type_hint)
+        
+        # CRITICAL: Transfer ownership OUT of the closure result variable
+        # This marks the temporary as consumed, similar to what move() does
+        if self.visitor._is_linear_type(var_info.type_hint):
+            # Create a temporary ValueRef with tracking info for ownership transfer
+            temp_ref = wrap_value(
+                loaded_value,
+                kind='value',
+                type_hint=var_info.type_hint,
+                var_name=var_name,
+                linear_path=()
+            )
+            # Transfer ownership - marks _closure_result_N as consumed
+            self.visitor._transfer_linear_ownership(temp_ref, reason="closure return")
+        
+        # Return a NEW ValueRef WITHOUT var_name tracking (like move() does)
+        # This ensures the caller treats it as a fresh value, not a variable reference
+        return wrap_value(
+            loaded_value, 
+            kind='value', 
+            type_hint=var_info.type_hint
+        )
 

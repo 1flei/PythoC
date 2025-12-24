@@ -210,10 +210,13 @@ class OutputManager:
         executor = get_multi_so_executor()
         
         for group_key, group in self._pending_groups.items():
-            source_file = group.get('source_file')
-            if source_file and executor.has_loaded_library(source_file):
+            so_file = group.get('so_file')
+            # Check if THIS SPECIFIC so_file is already loaded
+            # (not just any library from the same source file)
+            if so_file and so_file in executor.loaded_libs:
                 # Check if this group has new pending compilations
                 if group_key in self._pending_compilations and self._pending_compilations[group_key]:
+                    source_file = group.get('source_file', so_file)
                     raise RuntimeError(
                         f"Cannot compile new functions in '{source_file}' after native execution has started. "
                         f"All @compile decorators must be executed before calling any compiled functions."

@@ -216,7 +216,9 @@ def test_match_inconsistent_cases_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept either old-style "consistently" or CFG-based "inconsistent"
+        if "consistent" in err_str or "inconsistent" in err_str:
             return True, str(e)
         return False, f"wrong error: {e}"
     finally:
@@ -242,7 +244,9 @@ def test_match_wildcard_inconsistent_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept either old-style "consistently" or CFG-based "inconsistent"
+        if "consistent" in err_str or "inconsistent" in err_str:
             return True, str(e)
         return False, f"wrong error: {e}"
     finally:
@@ -270,7 +274,9 @@ def test_match_nested_inconsistent_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "consistently" in str(e).lower():
+        err_str = str(e).lower()
+        # Accept either old-style "consistently" or CFG-based "inconsistent"
+        if "consistent" in err_str or "inconsistent" in err_str:
             return True, str(e)
         return False, f"wrong error: {e}"
     finally:

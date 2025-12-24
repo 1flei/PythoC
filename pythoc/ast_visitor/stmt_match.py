@@ -6,10 +6,17 @@ import ast
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type
 from ..logger import logger
+from .control_flow_builder import ControlFlowBuilder
 
 
 class MatchStatementMixin:
     """Mixin for match/case statement handling"""
+    
+    def _get_cf_builder(self) -> ControlFlowBuilder:
+        """Get or create the ControlFlowBuilder for this visitor"""
+        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
+            self._cf_builder = ControlFlowBuilder(self)
+        return self._cf_builder
     
     def visit_Match(self, node: ast.Match):
         """Handle match/case statements (Python 3.10+)
@@ -32,7 +39,8 @@ class MatchStatementMixin:
                 case _:
                     return 0
         """
-        if self.builder.block.is_terminated:
+        cf = self._get_cf_builder()
+        if cf.is_terminated():
             return
         
         # Handle multiple subjects: match x, y, z:
@@ -90,20 +98,16 @@ class MatchStatementMixin:
     def _visit_match_as_switch(self, node: ast.Match, subject_ir):
         """Compile match to LLVM switch instruction (optimized path)
         
-        For linear token handling, this works like if-elif-else:
-        - All cases must handle linear tokens consistently
-        - If there's no wildcard case, linear tokens cannot be consumed in any case
+        Linear state tracking is done by the AST visitor during execution.
+        CFG-based linear checking is done at function end via CFG linear checker.
         """
-        # Save linear token states before match
-        linear_states_before = {}
-        for name, var_info in self.ctx.var_registry.list_all_visible().items():
-            if var_info.linear_states:
-                linear_states_before[name] = dict(var_info.linear_states)
+        cf = self._get_cf_builder()
+        
+        # Capture linear states before match for branch restoration
+        linear_states_before = cf.capture_linear_snapshot()
         
         # Create merge block
-        merge_block = self.current_function.append_basic_block(
-            self.get_next_label("match_merge")
-        )
+        merge_block = cf.create_block("match_merge")
         
         # Find default case (wildcard pattern)
         default_case_idx = None
@@ -116,9 +120,7 @@ class MatchStatementMixin:
         
         # Create default block
         if has_wildcard:
-            default_block = self.current_function.append_basic_block(
-                self.get_next_label(f"case_default")
-            )
+            default_block = cf.create_block("case_default")
         else:
             # No default case - just jump to merge
             default_block = merge_block
@@ -132,9 +134,7 @@ class MatchStatementMixin:
                 case_blocks.append(default_block)
                 continue
             
-            case_block = self.current_function.append_basic_block(
-                self.get_next_label(f"case_{idx}")
-            )
+            case_block = cf.create_block(f"case_{idx}")
             case_blocks.append(case_block)
             
             # Collect integer values for this case
@@ -148,108 +148,36 @@ class MatchStatementMixin:
                     switch_cases.append((value, case_block))
         
         # Build switch instruction
-        switch = self.builder.switch(subject_ir, default_block)
+        switch = cf.switch(subject_ir, default_block)
         for value, block in switch_cases:
             const_val = ir.Constant(subject_ir.type, value)
-            switch.add_case(const_val, block)
-        
-        # Track linear states for each case
-        all_case_linear_states = []
+            cf.add_switch_case(switch, const_val, block)
         
         # Generate code for each case
         for idx, case in enumerate(node.cases):
-            self.builder.position_at_end(case_blocks[idx])
+            cf.position_at_end(case_blocks[idx])
             
             # Reset linear states to before match for this case
-            for name, var_info in self.ctx.var_registry.list_all_visible().items():
-                if var_info.linear_states:
-                    var_info.linear_states.clear()
-            for name, states_dict in linear_states_before.items():
-                var_info = self.lookup_variable(name)
-                if var_info:
-                    var_info.linear_states = dict(states_dict)
+            cf.restore_linear_snapshot(linear_states_before)
             
             # Enter scope for case body
             self.ctx.var_registry.enter_scope()
             try:
                 # Execute case body
                 for stmt in case.body:
-                    if not self.builder.block.is_terminated:
+                    if not cf.is_terminated():
                         self.visit(stmt)
             finally:
                 self.ctx.var_registry.exit_scope()
             
-            # Capture linear states after this case
-            case_linear_states = {}
-            for name, var_info in self.ctx.var_registry.list_all_visible().items():
-                if var_info.linear_states:
-                    case_linear_states[name] = dict(var_info.linear_states)
-            all_case_linear_states.append(case_linear_states)
-            
             # Branch to merge if not terminated
-            if not self.builder.block.is_terminated:
-                self.builder.branch(merge_block)
+            if not cf.is_terminated():
+                cf.branch(merge_block)
         
-        # Verify all cases handle linear tokens consistently
-        if len(all_case_linear_states) > 1:
-            first_states = all_case_linear_states[0]
-            for case_idx, case_states in enumerate(all_case_linear_states[1:], 1):
-                all_vars = set(first_states.keys()) | set(case_states.keys())
-                for var_name in all_vars:
-                    first_var_states = first_states.get(var_name, {})
-                    case_var_states = case_states.get(var_name, {})
-                    
-                    all_paths = set(first_var_states.keys()) | set(case_var_states.keys())
-                    for path in all_paths:
-                        first_state = first_var_states.get(path)
-                        case_state = case_var_states.get(path)
-                        
-                        # Both cases must have the path tracked
-                        if first_state is None or case_state is None:
-                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            missing_in = "case 0" if first_state is None else f"case {case_idx}"
-                            logger.error(
-                                f"Linear token '{path_str}' not tracked in {missing_in}", node
-                            )
-                        
-                        # States must match: active==active or consumed==consumed
-                        if first_state != case_state:
-                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            logger.error(
-                                f"Linear token '{path_str}' must be handled consistently in all match cases: "
-                                f"case 0={first_state}, case {case_idx}={case_state}", node
-                            )
-        
-        # If no wildcard, check that linear tokens weren't modified
-        if not has_wildcard and linear_states_before:
-            # Without wildcard, there's an implicit "no match" path that goes to merge
-            # Linear tokens must not be consumed in any case
-            if all_case_linear_states:
-                for var_name, states_before in linear_states_before.items():
-                    case_states = all_case_linear_states[0].get(var_name, {})
-                    for path, state_before in states_before.items():
-                        state_after = case_states.get(path)
-                        if state_after is None:
-                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            logger.error(
-                                f"Linear token '{path_str}' not tracked in match case", node
-                            )
-                        if state_before == 'active' and state_after != 'active':
-                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            logger.error(
-                                f"Linear token '{path_str}' modified in match without wildcard case. "
-                                f"All cases must handle tokens consistently", node
-                            )
-        
-        # Set final linear states (use first case's states if all are consistent)
-        if all_case_linear_states:
-            for name, states_dict in all_case_linear_states[0].items():
-                var_info = self.lookup_variable(name)
-                if var_info:
-                    var_info.linear_states = dict(states_dict)
+        # Linear state validation is done by CFG checker at function end
         
         # Continue at merge block
-        self.builder.position_at_end(merge_block)
+        cf.position_at_end(merge_block)
     
     def _visit_match_as_if_chain(self, node: ast.Match, subjects):
         """Compile match to if-chain (general path)
@@ -260,10 +188,10 @@ class MatchStatementMixin:
         Uses process_condition to reuse if statement logic for each case.
         All control flow is delegated to process_condition - no direct builder calls.
         """
+        cf = self._get_cf_builder()
+        
         # Create merge block for all cases to converge
-        merge_block = self.current_function.append_basic_block(
-            self.get_next_label("match_merge")
-        )
+        merge_block = cf.create_block("match_merge")
 
         # Process each case as an if-elif branch
         for idx, case in enumerate(node.cases):
@@ -273,10 +201,10 @@ class MatchStatementMixin:
             if isinstance(pattern, ast.MatchAs) and pattern.pattern is None and case.guard is None:
                 # Wildcard always matches - execute body directly
                 for stmt in case.body:
-                    if not self.builder.block.is_terminated:
+                    if not cf.is_terminated():
                         self.visit(stmt)
-                if not self.builder.block.is_terminated:
-                    self.builder.branch(merge_block)
+                if not cf.is_terminated():
+                    cf.branch(merge_block)
                 break
             
             # Generate condition and bindings for this pattern
@@ -292,9 +220,7 @@ class MatchStatementMixin:
             condition_ref = pattern_cond
             
             # Create next case block (where else branch jumps to)
-            next_case_block = self.current_function.append_basic_block(
-                self.get_next_label(f"case_{idx}_next")
-            )
+            next_case_block = cf.create_block(f"case_{idx}_next")
             
             if case.guard is not None:
                 # Guarded case: nested process_condition
@@ -313,23 +239,23 @@ class MatchStatementMixin:
                     def guard_then():
                         # Execute case body
                         for stmt in case.body:
-                            if not self.builder.block.is_terminated:
+                            if not cf.is_terminated():
                                 self.visit(stmt)
                         # Branch to merge
-                        if not self.builder.block.is_terminated:
-                            self.builder.branch(merge_block)
+                        if not cf.is_terminated():
+                            cf.branch(merge_block)
                     
                     def guard_else():
                         # Guard failed - go to next case
-                        if not self.builder.block.is_terminated:
-                            self.builder.branch(next_case_block)
+                        if not cf.is_terminated():
+                            cf.branch(next_case_block)
                     
                     self.process_condition(guard_result, guard_then, guard_else)
                 
                 def pattern_else():
                     # Pattern failed - go to next case
-                    if not self.builder.block.is_terminated:
-                        self.builder.branch(next_case_block)
+                    if not cf.is_terminated():
+                        cf.branch(next_case_block)
                 
                 # Use process_condition for pattern check
                 self.process_condition(condition_ref, pattern_then_with_guard, pattern_else)
@@ -343,29 +269,29 @@ class MatchStatementMixin:
                         self._bind_match_variable(var_name, var_value)
                     # Execute case body
                     for stmt in case.body:
-                        if not self.builder.block.is_terminated:
+                        if not cf.is_terminated():
                             self.visit(stmt)
                     # Branch to merge
-                    if not self.builder.block.is_terminated:
-                        self.builder.branch(merge_block)
+                    if not cf.is_terminated():
+                        cf.branch(merge_block)
                 
                 def pattern_else():
                     # Pattern failed - go to next case
-                    if not self.builder.block.is_terminated:
-                        self.builder.branch(next_case_block)
+                    if not cf.is_terminated():
+                        cf.branch(next_case_block)
                 
                 # Use process_condition for pattern check
                 self.process_condition(condition_ref, pattern_then, pattern_else)
             
             # Position at next case block for the next iteration
-            self.builder.position_at_end(next_case_block)
+            cf.position_at_end(next_case_block)
         
         # If we reach here, no case matched (and no wildcard)
-        if not self.builder.block.is_terminated:
-            self.builder.branch(merge_block)
+        if not cf.is_terminated():
+            cf.branch(merge_block)
         
         # Continue at merge block
-        self.builder.position_at_end(merge_block)
+        cf.position_at_end(merge_block)
     
     def _generate_match_pattern(self, pattern, subject):
         """Generate condition and bindings for a match pattern

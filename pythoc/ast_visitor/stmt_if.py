@@ -6,10 +6,24 @@ import ast
 from llvmlite import ir
 from ..valueref import ensure_ir, ValueRef
 from ..logger import logger
+from .control_flow_builder import ControlFlowBuilder
 
 
 class IfStatementMixin:
     """Mixin for if statement handling"""
+
+    def _get_cf_builder(self) -> ControlFlowBuilder:
+        """Get or create the ControlFlowBuilder for this visitor"""
+        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
+            func_name = ""
+            if hasattr(self, 'current_function') and self.current_function:
+                func_name = self.current_function.name
+            self._cf_builder = ControlFlowBuilder(self, func_name)
+        return self._cf_builder
+    
+    def _reset_cf_builder(self):
+        """Reset the ControlFlowBuilder (call at start of new function)"""
+        self._cf_builder = None
 
     def process_condition(self, condition: ValueRef, then_fn, else_fn=None):
         """Handle condition with proper control flow
@@ -38,61 +52,67 @@ class IfStatementMixin:
 
         condition = self._to_boolean(condition)
         
+        # Use ControlFlowBuilder for block operations
+        cf = self._get_cf_builder()
+        
         # Create basic blocks
-        then_block = self.current_function.append_basic_block(self.get_next_label("then"))
+        then_block = cf.create_block("then")
         
         # For if-else, we need an else block. For simple if, merge handles the "else" case
         if else_fn:
-            else_block = self.current_function.append_basic_block(self.get_next_label("else"))
-            merge_block = self.current_function.append_basic_block(self.get_next_label("merge"))
-            self.builder.cbranch(condition, then_block, else_block)
+            else_block = cf.create_block("else")
+            merge_block = cf.create_block("merge")
+            cf.cbranch(condition, then_block, else_block)
         else:
-            merge_block = self.current_function.append_basic_block(self.get_next_label("merge"))
-            self.builder.cbranch(condition, then_block, merge_block)
+            merge_block = cf.create_block("merge")
+            cf.cbranch(condition, then_block, merge_block)
         
         # Generate then block
-        self.builder.position_at_end(then_block)
+        cf.position_at_end(then_block)
         then_terminated = False
         then_fn()
-        if not self.builder.block.is_terminated:
-            self.builder.branch(merge_block)
+        if not cf.is_terminated():
+            cf.branch(merge_block)
         else:
             then_terminated = True
         
         # Generate else block if present
         else_terminated = False
         if else_fn:
-            self.builder.position_at_end(else_block)
+            cf.position_at_end(else_block)
             else_fn()
-            if not self.builder.block.is_terminated:
-                self.builder.branch(merge_block)
+            if not cf.is_terminated():
+                cf.branch(merge_block)
             else:
                 else_terminated = True
         
         # Handle merge block - continue execution here
-        self.builder.position_at_end(merge_block)
+        cf.position_at_end(merge_block)
         
         # Only add unreachable if ALL paths to merge are terminated
         # For simple if (no else), merge is reachable from the condition branch
         # For if-else, merge is unreachable only if both branches terminate
         if else_fn and then_terminated and else_terminated:
-            self.builder.unreachable()
+            cf.unreachable()
         
         return (then_terminated, else_terminated)
     
     def visit_If(self, node: ast.If):
-        """Handle if statements with proper control flow"""
+        """Handle if statements with proper control flow
+        
+        Linear state tracking is done by the AST visitor during execution.
+        CFG-based linear checking is done at function end via CFG linear checker.
+        
+        For compile-time constant conditions (if True/False), only one branch
+        executes.
+        """
         # Don't process if current block is already terminated
-        if self.builder.block.is_terminated:
+        cf = self._get_cf_builder()
+        if cf.is_terminated():
             return
 
-        # Save linear token states (path-based) before if statement
-        # Use list_all_visible() to include variables from outer scopes
-        linear_states_before = {}
-        for name, var_info in self.ctx.var_registry.list_all_visible().items():
-            if var_info.linear_states:
-                # Deep copy the states dict
-                linear_states_before[name] = dict(var_info.linear_states)
+        # Capture linear state before if statement for branch restoration
+        linear_states_before = cf.capture_linear_snapshot()
         
         # Normalize to callables
         def make_branch_fn(branch):
@@ -103,7 +123,7 @@ class IfStatementMixin:
                 self.ctx.var_registry.enter_scope()
                 try:
                     for stmt in branch:
-                        if not self.builder.block.is_terminated:
+                        if not cf.is_terminated():
                             self.visit(stmt)
                 finally:
                     # Exit scope even if there's an error
@@ -114,104 +134,30 @@ class IfStatementMixin:
         then_fn = make_branch_fn(node.body)
         else_fn = make_branch_fn(node.orelse) if node.orelse else None
         
-        # Track linear token states (path-based) in both branches
-        then_linear_states = {}
-        else_linear_states = {}
-        
-        # Execute branches and capture linear token states
+        # Execute branches - linear states are tracked by AST visitor
+        # CFG checker will validate at function end
         def then_fn_tracked():
             then_fn()
-            # Capture states after then branch (from all visible scopes)
-            nonlocal then_linear_states
-            for name, var_info in self.ctx.var_registry.list_all_visible().items():
-                if var_info.linear_states:
-                    then_linear_states[name] = dict(var_info.linear_states)
         
         def else_fn_tracked():
             if else_fn:
                 # Reset to state before if for else branch
-                # Clear linear states for all visible variables
-                for name, var_info in self.ctx.var_registry.list_all_visible().items():
-                    if var_info.linear_states:
-                        var_info.linear_states.clear()
-                
-                # Then restore states that existed before if
-                for name, states_dict in linear_states_before.items():
-                    var_info = self.lookup_variable(name)
-                    if var_info:
-                        var_info.linear_states = dict(states_dict)
-                
+                # This ensures else branch starts with same state as then branch
+                cf.restore_linear_snapshot(linear_states_before)
                 else_fn()
-                # Capture states after else branch (from all visible scopes)
-                nonlocal else_linear_states
-                for name, var_info in self.ctx.var_registry.list_all_visible().items():
-                    if var_info.linear_states:
-                        else_linear_states[name] = dict(var_info.linear_states)
         
-        # Execute condition processing with tracked branches
+        # Execute condition processing
         if else_fn:
             self.process_condition(condition, then_fn_tracked, else_fn_tracked)
-            
-            # Check that both branches handled linear tokens consistently
-            # All tokens (with all paths) must end in the same state in both branches
-            all_vars = set(then_linear_states.keys()) | set(else_linear_states.keys())
-            for var_name in all_vars:
-                then_states = then_linear_states.get(var_name, {})
-                else_states = else_linear_states.get(var_name, {})
-                
-                # Get all paths for this variable
-                all_paths = set(then_states.keys()) | set(else_states.keys())
-                for path in all_paths:
-                    then_state = then_states.get(path)
-                    else_state = else_states.get(path)
-                    
-                    # Both branches must have the path tracked
-                    if then_state is None or else_state is None:
-                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                        missing_in = "then" if then_state is None else "else"
-                        logger.error(
-                            f"Linear token '{path_str}' not tracked in {missing_in} branch", node
-                        )
-                    
-                    # States must match: active==active or consumed==consumed
-                    # 'active' cannot be mixed with 'consumed'
-                    if then_state != else_state:
-                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                        logger.error(
-                            f"Linear token '{path_str}' must be handled consistently in all branches: "
-                            f"then={then_state}, else={else_state}", node
-                        )
+            # Linear state validation is done by CFG checker at function end
         else:
-            # Simple if without else - check linear token handling
+            # Simple if without else
             then_terminated, _ = self.process_condition(condition, then_fn_tracked, None)
             
             # If then branch terminates (return/break/continue), the code after the if
             # only executes when the condition is false. In this case, linear tokens
             # should be restored to their state before the if.
-            if then_terminated:
-                # Restore linear states to before if (for code after if)
-                for name, states_dict in linear_states_before.items():
-                    var_info = self.lookup_variable(name)
-                    if var_info:
-                        var_info.linear_states = dict(states_dict)
-            else:
-                # Then branch doesn't terminate - check that linear tokens weren't modified
-                # Because the code after if could execute after either branch
-                for var_name, states_before in linear_states_before.items():
-                    var_info = self.lookup_variable(var_name)
-                    states_after = var_info.linear_states if var_info else {}
-                    
-                    for path, state_before in states_before.items():
-                        state_after = states_after.get(path)
-                        if state_after is None:
-                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            logger.error(
-                                f"Linear token '{path_str}' not tracked after if branch", node
-                            )
-                        if state_before == 'active' and state_after != 'active':
-                            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                            logger.error(
-                                f"Linear token '{path_str}' modified in if without else branch. "
-                                f"All branches must handle tokens consistently", node
-                            )
+            if then_terminated and not condition.is_python_value():
+                cf.restore_linear_snapshot(linear_states_before)
+            # Linear state validation is done by CFG checker at function end
 
