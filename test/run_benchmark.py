@@ -3,11 +3,14 @@
 Performance comparison script for PC vs C implementations
 Compares binary tree and nsieve benchmarks with proper warmup and averaging
 
+Also includes compile-time benchmarking via integration tests.
+
 Flow:
 1. Compile C with gcc -O3
 2. Run PC python script to generate .o file (not timed)
 3. Link PC .o with cc to create executable (not timed)
 4. Benchmark both executables (timed)
+5. Run integration tests serially to measure compile speed
 """
 
 import subprocess
@@ -180,6 +183,72 @@ def benchmark_binary_tree():
     return {"name": "binary_tree", "c_avg": c_avg, "pc_avg": pc_avg, "ratio": ratio}
 
 
+def benchmark_compile_speed():
+    """Benchmark compile speed by running integration tests serially"""
+    print("\n" + "="*70)
+    print("COMPILE SPEED BENCHMARK")
+    print("="*70)
+    
+    workspace = Path(__file__).parent.parent
+    run_tests_script = workspace / "test" / "run_integration_tests.py"
+    
+    # Clean build directory to ensure fresh compilation
+    build_dir = workspace / "build"
+    if build_dir.exists():
+        print(f"\n  Cleaning build directory...")
+        import shutil
+        # Only clean test-related builds, not everything
+        test_build = build_dir / "test"
+        if test_build.exists():
+            shutil.rmtree(test_build)
+    
+    print(f"\n  Running integration tests serially (fresh compile)...")
+    
+    env = os.environ.copy()
+    env['PYTHONPATH'] = str(workspace)
+    
+    start = time.perf_counter()
+    result = subprocess.run(
+        [sys.executable, str(run_tests_script), '--serial', '--quiet'],
+        capture_output=True,
+        text=True,
+        cwd=str(workspace),
+        env=env,
+        stdin=subprocess.DEVNULL
+    )
+    elapsed = time.perf_counter() - start
+    
+    # Parse output to get test count
+    lines = result.stdout.strip().split('\n')
+    total_tests = 0
+    passed_tests = 0
+    for line in lines:
+        if line.startswith('Total:'):
+            total_tests = int(line.split(':')[1].strip())
+        elif line.startswith('Passed:'):
+            passed_tests = int(line.split(':')[1].strip())
+    
+    if result.returncode != 0:
+        print(f"    ERROR: Some tests failed")
+        print(f"    stdout: {result.stdout[-500:]}")
+        print(f"    stderr: {result.stderr[-500:]}")
+        return None
+    
+    print(f"\n{'='*70}")
+    print(f"RESULTS:")
+    print(f"  Tests: {passed_tests}/{total_tests}")
+    print(f"  Total compile time: {elapsed:.2f}s")
+    print(f"  Average per test: {elapsed/total_tests:.3f}s")
+    print(f"{'='*70}")
+    
+    return {
+        "name": "compile_speed",
+        "total_tests": total_tests,
+        "total_time": elapsed,
+        "avg_per_test": elapsed / total_tests if total_tests > 0 else 0
+    }
+
+
 def benchmark_nsieve():
     """Benchmark nsieve (C vs PC)"""
     print("\n" + "="*70)
@@ -238,13 +307,21 @@ def benchmark_nsieve():
 
 def main():
     """Run all benchmarks"""
+    import argparse
+    parser = argparse.ArgumentParser(description='PC vs C performance benchmarks')
+    parser.add_argument('--compile-speed', action='store_true',
+                        help='Also run compile speed benchmark (for CI)')
+    args = parser.parse_args()
+    
     print("\n" + "="*70)
     print("PC vs C PERFORMANCE COMPARISON")
     print(f"Warmup: {WARMUP_RUNS} run(s), Benchmark: {BENCHMARK_RUNS} runs")
     print("="*70)
     
     results = []
+    compile_result = None
     
+    # Runtime benchmarks
     result = benchmark_binary_tree()
     if result:
         results.append(result)
@@ -253,15 +330,30 @@ def main():
     if result:
         results.append(result)
     
-    if results:
+    # Compile speed benchmark (only with --compile-speed flag)
+    if args.compile_speed:
+        compile_result = benchmark_compile_speed()
+    
+    if results or compile_result:
         print("\n" + "="*70)
         print("SUMMARY")
         print("="*70)
-        for r in results:
-            print(f"{r['name']:15s} | C: {r['c_avg']:.4f}s | PC: {r['pc_avg']:.4f}s | Ratio: {r['ratio']:.2f}x")
         
-        avg_ratio = sum(r['ratio'] for r in results) / len(results)
-        print(f"\nAverage PC/C ratio: {avg_ratio:.2f}x")
+        # Runtime results
+        if results:
+            print("\nRuntime Performance:")
+            for r in results:
+                print(f"  {r['name']:15s} | C: {r['c_avg']:.4f}s | PC: {r['pc_avg']:.4f}s | Ratio: {r['ratio']:.2f}x")
+            
+            avg_ratio = sum(r['ratio'] for r in results) / len(results)
+            print(f"\n  Average PC/C ratio: {avg_ratio:.2f}x")
+        
+        # Compile speed results
+        if compile_result:
+            print("\nCompile Speed:")
+            print(f"  Total: {compile_result['total_time']:.2f}s for {compile_result['total_tests']} tests")
+            print(f"  Average: {compile_result['avg_per_test']:.3f}s per test")
+        
         print("="*70)
     else:
         print("\nNo benchmarks completed.")
