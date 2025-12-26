@@ -115,8 +115,27 @@ def test_4d() -> i32:
 
 
 if __name__ == "__main__":
-    print("test_1d", test_1d())
-    print("test_2d", test_2d())
-    print("test_3d", test_3d())
-    print("test_4d", test_4d())
-    print("\n=== All tests completed ===")
+    # test_1d: sum of 0+1+2+3+4 = 10
+    result_1d = test_1d()
+    print("test_1d", result_1d)
+    assert result_1d == 10, f"Expected 10, got {result_1d}"
+    
+    # test_2d: sum of (i+j) for i in 0..2, j in 0..3
+    # = sum(0,1,2,3, 1,2,3,4, 2,3,4,5) = 30
+    result_2d = test_2d()
+    print("test_2d", result_2d)
+    assert result_2d == 30, f"Expected 30, got {result_2d}"
+    
+    # test_3d: sum of (i+j+k) for i in 0..1, j in 0..2, k in 0..3
+    result_3d = test_3d()
+    print("test_3d", result_3d)
+    expected_3d = sum(i+j+k for i in range(2) for j in range(3) for k in range(4))
+    assert result_3d == expected_3d, f"Expected {expected_3d}, got {result_3d}"
+    
+    # test_4d: sum of (i+j+k+l) for i in 0..1, j in 0..2, k in 0..3, l in 0..4
+    result_4d = test_4d()
+    print("test_4d", result_4d)
+    expected_4d = sum(i+j+k+l for i in range(2) for j in range(3) for k in range(4) for l in range(5))
+    assert result_4d == expected_4d, f"Expected {expected_4d}, got {result_4d}"
+    
+    print("\n=== All tests passed ===")

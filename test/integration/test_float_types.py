@@ -52,4 +52,6 @@ def main() -> i32:
     printf("=== All Tests Complete ===\n")
     return 0
 
-main()
+if __name__ == "__main__":
+    main()
+    print("Float types test passed!")

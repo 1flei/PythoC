@@ -187,6 +187,11 @@ class MatchStatementMixin:
         
         Uses process_condition to reuse if statement logic for each case.
         All control flow is delegated to process_condition - no direct builder calls.
+        
+        Linear state handling:
+        - Capture linear state before each case
+        - Restore linear state when pattern fails (else branch)
+        - This ensures each case starts with the same linear state
         """
         cf = self._get_cf_builder()
         
@@ -196,6 +201,10 @@ class MatchStatementMixin:
         # Process each case as an if-elif branch
         for idx, case in enumerate(node.cases):
             pattern = case.pattern
+            
+            # Capture linear state before this case
+            # Each case should start with the same linear state
+            linear_states_before_case = cf.capture_linear_snapshot()
             
             # Check if this is a wildcard (default case) without guard
             if isinstance(pattern, ast.MatchAs) and pattern.pattern is None and case.guard is None:
@@ -222,12 +231,15 @@ class MatchStatementMixin:
             # Create next case block (where else branch jumps to)
             next_case_block = cf.create_block(f"case_{idx}_next")
             
+            # Capture for closure - need to copy to avoid late binding issues
+            captured_linear_states = linear_states_before_case
+            
             if case.guard is not None:
                 # Guarded case: nested process_condition
                 # 1. Check pattern: if matches -> check guard, else -> next case
                 # 2. Check guard: if passes -> execute body, else -> next case
                 
-                def pattern_then_with_guard():
+                def pattern_then_with_guard(bindings=bindings, case=case):
                     # Bind pattern variables (needed for guard evaluation)
                     for var_name, var_value in bindings:
                         self._bind_match_variable(var_name, var_value)
@@ -245,15 +257,17 @@ class MatchStatementMixin:
                         if not cf.is_terminated():
                             cf.branch(merge_block)
                     
-                    def guard_else():
-                        # Guard failed - go to next case
+                    def guard_else(states=captured_linear_states):
+                        # Guard failed - restore linear state and go to next case
+                        cf.restore_linear_snapshot(states)
                         if not cf.is_terminated():
                             cf.branch(next_case_block)
                     
                     self.process_condition(guard_result, guard_then, guard_else)
                 
-                def pattern_else():
-                    # Pattern failed - go to next case
+                def pattern_else(states=captured_linear_states):
+                    # Pattern failed - restore linear state and go to next case
+                    cf.restore_linear_snapshot(states)
                     if not cf.is_terminated():
                         cf.branch(next_case_block)
                 
@@ -263,7 +277,7 @@ class MatchStatementMixin:
             else:
                 # No guard - simple pattern match using process_condition
                 
-                def pattern_then():
+                def pattern_then(bindings=bindings, case=case):
                     # Bind pattern variables
                     for var_name, var_value in bindings:
                         self._bind_match_variable(var_name, var_value)
@@ -275,8 +289,9 @@ class MatchStatementMixin:
                     if not cf.is_terminated():
                         cf.branch(merge_block)
                 
-                def pattern_else():
-                    # Pattern failed - go to next case
+                def pattern_else(states=captured_linear_states):
+                    # Pattern failed - restore linear state and go to next case
+                    cf.restore_linear_snapshot(states)
                     if not cf.is_terminated():
                         cf.branch(next_case_block)
                 

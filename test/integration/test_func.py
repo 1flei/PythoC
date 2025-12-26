@@ -105,5 +105,18 @@ def main() -> i32:
     return total  # 15 + 12 + 16 + 10 + 30 + 20 + 15 + 10 = 128
 
 
+import unittest
+
+
+class TestFunc(unittest.TestCase):
+    """Test function pointer operations"""
+
+    def test_main(self):
+        """Test all function pointer operations"""
+        # Expected: 15 + 12 + 16 + 10 + 30 + 20 + 15 + 10 = 128
+        result = main()
+        self.assertEqual(result, 128)
+
+
 if __name__ == '__main__':
-    main()
+    unittest.main()

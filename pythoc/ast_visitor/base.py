@@ -523,6 +523,56 @@ class LLVMIRVisitor(ast.NodeVisitor):
             var_info.linear_scope_depth = self.scope_depth
             logger.debug(f"Initialized linear states for '{var_info.name}': {paths} -> {initial_state}")
     
+    def _format_linear_path(self, var_name: str, path: Tuple[int, ...], type_hint) -> str:
+        """Format a linear path as a human-readable string with field names
+        
+        Args:
+            var_name: Variable name
+            path: Index path tuple (e.g., (1,) or (0, 2))
+            type_hint: Type hint of the variable (to get field names)
+            
+        Returns:
+            Human-readable path string like 'var.field' or 'var.field.subfield'
+        """
+        if not path:
+            return var_name
+        
+        parts = [var_name]
+        current_type = type_hint
+        
+        for idx in path:
+            # Try to get field name from current type
+            field_name = None
+            if hasattr(current_type, '_struct_fields') and current_type._struct_fields:
+                # Named struct with _struct_fields
+                if idx < len(current_type._struct_fields):
+                    field_name, field_type = current_type._struct_fields[idx]
+                    current_type = field_type
+            elif hasattr(current_type, '_field_types') and current_type._field_types:
+                # Anonymous struct with _field_types only
+                if idx < len(current_type._field_types):
+                    current_type = current_type._field_types[idx]
+            
+            if field_name:
+                parts.append(f".{field_name}")
+            else:
+                parts.append(f"[{idx}]")
+        
+        return ''.join(parts)
+    
+    def _get_actual_line_number(self, line_number: Optional[int]) -> Optional[int]:
+        """Get actual line number by adding logger's line offset
+        
+        Args:
+            line_number: AST relative line number
+            
+        Returns:
+            Actual line number in source file
+        """
+        if line_number is None:
+            return None
+        return line_number + logger.current_line_offset
+    
     def _register_linear_token(self, var_name: str, type_hint, node: ast.AST, path: Tuple[int, ...] = ()):
         """Register/update linear token states when value is assigned
         
@@ -545,7 +595,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 var_info.linear_scope_depth = self.scope_depth
                 logger.debug(f"Linear token '{var_name}' paths {linear_paths} transitioned to active")
     
-    def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer"):
+    def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer", node=None):
         """Transfer ownership of linear tokens from a ValueRef
         
         This is the unified method for transferring linear ownership in:
@@ -556,6 +606,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         Args:
             value_ref: ValueRef carrying linear tracking info (via var_name)
             reason: Description of why ownership is being transferred
+            node: AST node for error reporting
         """
         logger.debug(f"_transfer_linear_ownership: value_ref={value_ref}, reason={reason}")
         
@@ -568,7 +619,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 # Transfer ownership for each element in the tuple
                 for elem in py_val:
                     if isinstance(elem, ValueRef):
-                        self._transfer_linear_ownership(elem, reason)
+                        self._transfer_linear_ownership(elem, reason, node)
                 return
         
         # Skip if not a linear type
@@ -593,23 +644,30 @@ class LLVMIRVisitor(ast.NodeVisitor):
         linear_paths = self._get_linear_paths(value_ref.type_hint, base_path)
         logger.debug(f"_transfer_linear_ownership: {var_name} has {len(linear_paths)} linear paths: {linear_paths}")
         
+        # Get the variable's type for formatting path with field names
+        var_type_hint = var_info.type_hint
+        
         # Transfer each linear path
         for path in linear_paths:
             state = self._get_linear_state(var_info, path)
             logger.debug(f"_transfer_linear_ownership: {var_name}{path} state={state}")
             
-            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+            # Format path with field names for better error messages
+            path_str = self._format_linear_path(var_name, path, var_type_hint)
+            actual_line = self._get_actual_line_number(var_info.line_number)
             
             if state == 'undefined':
                 logger.error(
-                    f"Cannot {reason} undefined linear token '{path_str}' "
-                    f"(declared at line {var_info.line_number})"
+                    f"'{path_str}' undefined. reason: {reason} "
+                    f"(declared at line {actual_line})",
+                    node=node
                 )
             
             if state == 'consumed':
                 logger.error(
-                    f"Cannot {reason} already consumed linear token '{path_str}' "
-                    f"(declared at line {var_info.line_number})"
+                    f"'{path_str}' consumed. reason: {reason} "
+                    f"(declared at line {actual_line})",
+                    node=node
                 )
             
             if state == 'active':
@@ -633,8 +691,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 logger.debug(f"Checking variable {var_info}")
                 for path, state in var_info.linear_states.items():
                     if state == 'active':
-                        path_str = f"{var_info.name}[{']['.join(map(str, path))}]" if path else var_info.name
-                        unconsumed.append(f"'{path_str}' (declared at line {var_info.line_number})")
+                        path_str = self._format_linear_path(var_info.name, path, var_info.type_hint)
+                        actual_line = self._get_actual_line_number(var_info.line_number)
+                        unconsumed.append(f"'{path_str}' (declared at line {actual_line})")
         
         if unconsumed:
             logger.error(

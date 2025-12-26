@@ -2,6 +2,7 @@ from llvmlite import ir
 from typing import List, Optional, Any
 from .composite_base import CompositeType
 from ..valueref import extract_constant_index
+from ..logger import logger
 
 
 class UnionType(CompositeType):

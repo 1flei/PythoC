@@ -32,4 +32,6 @@ def testprint() -> i32:
     myprint(ps10)
     return 0
 
-testprint()
+if __name__ == "__main__":
+    testprint()
+    print("test_print passed!")

@@ -30,6 +30,8 @@ def test_static_subscript():
         type_to_stfunc[T] = test_st
     return type_to_stfunc
 
-type_to_stfunc = test_static_subscript()
-for T in [i16, i32, f32]:
-    type_to_stfunc[T]()
+if __name__ == "__main__":
+    type_to_stfunc = test_static_subscript()
+    for T in [i16, i32, f32]:
+        type_to_stfunc[T]()
+    print("test_static_subscript passed!")

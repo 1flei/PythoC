@@ -9,6 +9,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
+import unittest
 from pythoc import compile, i32
 
 
@@ -75,42 +76,29 @@ def test_multi_range() -> i32:
     return sum
 
 
-def main():
-    """Run all tests"""
-    print("Testing yield with multiple yield points...")
-    print()
+class TestYieldMulti(unittest.TestCase):
+    def test_three_values(self):
+        result = test_three_values()
+        expected = 1 + 2 + 3  # 6
+        self.assertEqual(result, expected)
     
-    # Test three_values
-    result = test_three_values()
-    expected = 1 + 2 + 3
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_three_values: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
+    def test_conditional_gen(self):
+        # 0, 2, 4, 6, 8
+        result = test_conditional_gen()
+        expected = 0 + 2 + 4 + 6 + 8  # 20
+        self.assertEqual(result, expected)
     
-    # Test conditional_gen (0, 2, 4, 6, 8)
-    result = test_conditional_gen()
-    expected = 0 + 2 + 4 + 6 + 8
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_conditional_gen: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
+    def test_range_with_steps(self):
+        # 0, 3, 6, 9, 12, 15, 18
+        result = test_range_with_steps()
+        expected = 0 + 3 + 6 + 9 + 12 + 15 + 18  # 63
+        self.assertEqual(result, expected)
     
-    # Test range_with_steps (0, 3, 6, 9, 12, 15, 18)
-    result = test_range_with_steps()
-    expected = 0 + 3 + 6 + 9 + 12 + 15 + 18
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_range_with_steps: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
-
-    result = test_multi_range()
-    expected = 2016
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_multi_range: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
-    
-    print()
-    print("All multi-yield tests passed!")
-    return 0
+    def test_multi_range(self):
+        result = test_multi_range()
+        expected = 2016
+        self.assertEqual(result, expected)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()

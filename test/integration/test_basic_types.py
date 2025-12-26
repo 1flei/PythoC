@@ -98,11 +98,40 @@ def test_ptr_int_conversion() -> i32:
     
     return p2[0]
 
+import unittest
+
+
+class TestBasicTypes(unittest.TestCase):
+    """Test basic types and type conversions"""
+
+    def test_basic_integers(self):
+        """Test basic integer types: 127+255+4 = 386"""
+        self.assertEqual(test_basic_integers(), 386)
+
+    def test_basic_floats(self):
+        """Test floating point types: 3+2 = 5"""
+        self.assertEqual(test_basic_floats(), 5)
+
+    def test_bool_type(self):
+        """Test boolean type: 1+1 = 2"""
+        self.assertEqual(test_bool_type(), 2)
+
+    def test_int_to_int_conversion(self):
+        """Test integer to integer conversions"""
+        self.assertEqual(test_int_to_int_conversion(), 100)
+
+    def test_int_to_float_conversion(self):
+        """Test integer to float conversions"""
+        self.assertEqual(test_int_to_float_conversion(), 42)
+
+    def test_float_to_int_conversion(self):
+        """Test float to integer conversions: int(3.14) = 3"""
+        self.assertEqual(test_float_to_int_conversion(), 3)
+
+    def test_ptr_int_conversion(self):
+        """Test pointer to integer and back conversions"""
+        self.assertEqual(test_ptr_int_conversion(), 42)
+
+
 if __name__ == "__main__":
-    print(f"test_basic_integers: {test_basic_integers()}")
-    print(f"test_basic_floats: {test_basic_floats()}")
-    print(f"test_bool_type: {test_bool_type()}")
-    print(f"test_int_to_int_conversion: {test_int_to_int_conversion()}")
-    print(f"test_int_to_float_conversion: {test_int_to_float_conversion()}")
-    print(f"test_float_to_int_conversion: {test_float_to_int_conversion()}")
-    print(f"test_ptr_int_conversion: {test_ptr_int_conversion()}")
+    unittest.main()

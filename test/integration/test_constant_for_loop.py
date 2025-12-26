@@ -97,38 +97,55 @@ def test_constant_loop_with_continue() -> i32:
             sum = sum + i * 10 + j
     return sum
 
-if __name__ == '__main__':
-    print("\n=== Testing Constant Loop Unrolling ===\n")
-    
-    print("test_constant_list():", test_constant_list())
-    print("Expected: 15 (1+2+3+4+5)")
-    
-    print("\ntest_constant_empty():", test_constant_empty())
-    print("Expected: 0 (no iterations)")
-    
-    print("\ntest_constant_single():", test_constant_single())
-    print("Expected: 42")
-    
-    print("\ntest_constant_nested():", test_constant_nested())
-    print("Expected: 99 (i=1: 11+21=32; i=2: 12+22=34; i=3: 13+23=36; total=102)")
-    print("Actual calculation: i=1,j=10: 11, i=1,j=20: 21, i=2,j=10: 12, i=2,j=20: 22, i=3,j=10: 13, i=3,j=20: 23")
-    print("Sum: 11+21+12+22+13+23 = 102")
-    
-    print("\ntest_constant_with_computation():", test_constant_with_computation())
-    print("Expected: 30 (1*1 + 2*2 + 3*3 + 4*4 = 1+4+9+16)")
-    
-    print("\ntest_constant_overwrite():", test_constant_overwrite())
-    print("Expected: 20 (last value in list)")
-    
-    print("\ntest_constant_mixed_with_range():", test_constant_mixed_with_range())
-    print("Expected: 66")
-    print("Calculation: i=1: (10+11+12)=33; i=2: (20+21+22)=63; but wait...")
-    print("i=1,j=0: 10, i=1,j=1: 11, i=1,j=2: 12")
-    print("i=2,j=0: 20, i=2,j=1: 21, i=2,j=2: 22")
-    print("Sum: 10+11+12+20+21+22 = 96")
+import unittest
 
-    print(test_constant_loop_with_break())
-    print(test_constant_loop_with_continue())
-    print(test_constant_loop_with_return())
-    
-    print("\n=== All constant loop tests completed ===\n")
+
+class TestConstantForLoop(unittest.TestCase):
+    """Test constant for loop unrolling"""
+
+    def test_constant_list(self):
+        """Test for loop with constant list: 1+2+3+4+5 = 15"""
+        self.assertEqual(test_constant_list(), 15)
+
+    def test_constant_empty(self):
+        """Test for loop with empty constant list"""
+        self.assertEqual(test_constant_empty(), 0)
+
+    def test_constant_single(self):
+        """Test for loop with single element"""
+        self.assertEqual(test_constant_single(), 42)
+
+    def test_constant_nested(self):
+        """Test nested constant for loops: 11+21+12+22+13+23 = 102"""
+        self.assertEqual(test_constant_nested(), 102)
+
+    def test_constant_with_computation(self):
+        """Test constant loop with computation: 1+4+9+16 = 30"""
+        self.assertEqual(test_constant_with_computation(), 30)
+
+    def test_constant_overwrite(self):
+        """Test that loop variable is properly overwritten"""
+        self.assertEqual(test_constant_overwrite(), 20)
+
+    def test_constant_mixed_with_range(self):
+        """Test mixing constant loop with range loop"""
+        self.assertEqual(test_constant_mixed_with_range(), 96)
+
+    def test_constant_loop_with_break(self):
+        """Test constant loop with break"""
+        result = test_constant_loop_with_break()
+        self.assertIsInstance(result, int)
+
+    def test_constant_loop_with_continue(self):
+        """Test constant loop with continue"""
+        result = test_constant_loop_with_continue()
+        self.assertIsInstance(result, int)
+
+    def test_constant_loop_with_return(self):
+        """Test constant loop with return"""
+        result = test_constant_loop_with_return()
+        self.assertIsInstance(result, int)
+
+
+if __name__ == '__main__':
+    unittest.main()

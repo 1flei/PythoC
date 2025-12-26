@@ -238,4 +238,7 @@ def main() -> i32:
     test_enum_layout()
     return 0
 
-main()
+if __name__ == "__main__":
+    result = main()
+    assert result == 0, f"Enum tests failed with code {result}"
+    print("All enum tests passed!")

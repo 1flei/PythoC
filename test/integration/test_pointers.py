@@ -3,7 +3,9 @@
 Pointer operation tests
 """
 
+import unittest
 from pythoc import i32, i64, ptr, compile, nullptr, array
+
 
 @compile
 def test_ptr_basic() -> i32:
@@ -12,6 +14,7 @@ def test_ptr_basic() -> i32:
     p: ptr[i32] = ptr(x)
     
     return p[0]
+
 
 @compile
 def test_ptr_arithmetic() -> i32:
@@ -24,6 +27,7 @@ def test_ptr_arithmetic() -> i32:
     
     return i32(diff / 4)
 
+
 @compile
 def test_ptr_deref_assign() -> i32:
     """Test pointer dereference and assignment"""
@@ -34,6 +38,7 @@ def test_ptr_deref_assign() -> i32:
     
     return x
 
+
 @compile
 def test_ptr_to_ptr() -> i32:
     """Test pointer to pointer"""
@@ -42,6 +47,7 @@ def test_ptr_to_ptr() -> i32:
     pp: ptr[ptr[i32]] = ptr(p)
     
     return pp[0][0]
+
 
 @compile
 def test_nullptr_check() -> i32:
@@ -53,12 +59,14 @@ def test_nullptr_check() -> i32:
     else:
         return 0
 
+
 @compile
 def test_ptr_int() -> i32:
     arr: array[i32, 10] = [1, 2, 3, 4]
     p: ptr[i32] = ptr[i32](arr)
     x: i32 = p[3]
     return x
+
 
 @compile
 def test_ptr_int_decay() -> i32:
@@ -67,12 +75,14 @@ def test_ptr_int_decay() -> i32:
     x: i32 = p[3]
     return x
 
+
 @compile
 def test_ptr_array() -> i32:
     arr: array[i32, 10] = [1, 2, 3, 4]
     p: ptr[array[i32, 10]] = ptr(arr)
     x: i32 = p[0][3]
     return x
+
 
 @compile
 def test_ptr_array_arithmetic() -> i32:
@@ -136,14 +146,38 @@ def test_multidim_array_ptr() -> i32:
     # 3 + 8 + 10 + 48 = 69
     return val_0_2 + val_1_3 + val_whole + diff
 
+
+class TestPointers(unittest.TestCase):
+    def test_basic(self):
+        self.assertEqual(test_ptr_basic(), 42)
+    
+    def test_arithmetic(self):
+        self.assertEqual(test_ptr_arithmetic(), 3)
+    
+    def test_deref_assign(self):
+        self.assertEqual(test_ptr_deref_assign(), 20)
+    
+    def test_to_ptr(self):
+        self.assertEqual(test_ptr_to_ptr(), 42)
+    
+    def test_nullptr(self):
+        self.assertEqual(test_nullptr_check(), 1)
+    
+    def test_int(self):
+        self.assertEqual(test_ptr_int(), 4)
+    
+    def test_int_decay(self):
+        self.assertEqual(test_ptr_int_decay(), 4)
+    
+    def test_array(self):
+        self.assertEqual(test_ptr_array(), 4)
+    
+    def test_array_arithmetic(self):
+        self.assertEqual(test_ptr_array_arithmetic(), 60)
+    
+    def test_multidim(self):
+        self.assertEqual(test_multidim_array_ptr(), 69)
+
+
 if __name__ == "__main__":
-    print(f"test_ptr_basic: {test_ptr_basic()}")
-    print(f"test_ptr_arithmetic: {test_ptr_arithmetic()}")
-    print(f"test_ptr_deref_assign: {test_ptr_deref_assign()}")
-    print(f"test_ptr_to_ptr: {test_ptr_to_ptr()}")
-    print(f"test_nullptr_check: {test_nullptr_check()}")
-    print(f"test_ptr_int: {test_ptr_int()}")
-    print(f"test_ptr_int_decay: {test_ptr_int_decay()}")
-    print(f"test_ptr_array: {test_ptr_array()}")
-    print(f"test_ptr_array_arithmetic: {test_ptr_array_arithmetic()}")
-    print(f"test_multidim_array_ptr: {test_multidim_array_ptr()}")
+    unittest.main()

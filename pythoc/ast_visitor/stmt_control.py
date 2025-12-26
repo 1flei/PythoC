@@ -39,7 +39,7 @@ class ControlFlowMixin:
                 
                 # Transfer linear ownership using ValueRef tracking info
                 # This consumes all active linear paths in the returned value
-                self._transfer_linear_ownership(value, reason="return")
+                self._transfer_linear_ownership(value, reason="return", node=node)
                 
                 # convert to expected_pc_type is specified
                 if expected_pc_type is not None:

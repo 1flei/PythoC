@@ -96,6 +96,24 @@ class RefinedType(CompositeType):
         return None
     
     @classmethod
+    def get_size_bytes(cls) -> int:
+        """Get size in bytes for refined type.
+        
+        Delegates to the base type or struct type.
+        """
+        # If we have a base type, use it
+        if cls._base_type is not None:
+            if hasattr(cls._base_type, 'get_size_bytes'):
+                return cls._base_type.get_size_bytes()
+        
+        # Multi-parameter predicate: use struct type
+        if cls._struct_type is not None:
+            if hasattr(cls._struct_type, 'get_size_bytes'):
+                return cls._struct_type.get_size_bytes()
+        
+        return 0
+    
+    @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Returns underlying LLVM type
         

@@ -106,4 +106,13 @@ def main() -> i32:
     
     return 0
 
-main()
+if __name__ == "__main__":
+    main()
+    
+    # Verify results
+    assert test_ptr_basic() == 142, f"test_ptr_basic expected 142, got {test_ptr_basic()}"
+    assert test_ptr_struct() == 77, f"test_ptr_struct expected 77, got {test_ptr_struct()}"
+    assert test_ptr_array() == 60, f"test_ptr_array expected 60, got {test_ptr_array()}"
+    assert test_ptr_pointer_arithmetic() == 1455, f"test_ptr_pointer_arithmetic expected 1455, got {test_ptr_pointer_arithmetic()}"
+    
+    print("All getptr tests passed!")

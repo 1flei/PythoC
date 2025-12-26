@@ -108,11 +108,40 @@ def test_nested_break() -> i32:
     
     return sum
 
+import unittest
+
+
+class TestControlFlow(unittest.TestCase):
+    """Test control flow statements"""
+
+    def test_if_else(self):
+        """Test if-else statements"""
+        self.assertEqual(test_if_else(), 1)
+
+    def test_nested_if(self):
+        """Test nested if statements"""
+        self.assertEqual(test_nested_if(), 1)
+
+    def test_while_loop(self):
+        """Test while loop: sum of 0..9 = 45"""
+        self.assertEqual(test_while_loop(), 45)
+
+    def test_break_statement(self):
+        """Test break statement: sum of 0..9 = 45"""
+        self.assertEqual(test_break_statement(), 45)
+
+    def test_continue_statement(self):
+        """Test continue statement: sum of odd 1..9 = 25"""
+        self.assertEqual(test_continue_statement(), 25)
+
+    def test_nested_loops(self):
+        """Test nested loops"""
+        self.assertEqual(test_nested_loops(), 100)
+
+    def test_nested_break(self):
+        """Test break in nested loops: 10 * 5 = 50"""
+        self.assertEqual(test_nested_break(), 50)
+
+
 if __name__ == "__main__":
-    print(f"test_if_else: {test_if_else()}")
-    print(f"test_nested_if: {test_nested_if()}")
-    print(f"test_while_loop: {test_while_loop()}")
-    print(f"test_break_statement: {test_break_statement()}")
-    print(f"test_continue_statement: {test_continue_statement()}")
-    print(f"test_nested_loops: {test_nested_loops()}")
-    print(f"test_nested_break: {test_nested_break()}")
+    unittest.main()

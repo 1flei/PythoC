@@ -22,6 +22,7 @@ class TestInlineBodyTransformer(unittest.TestCase):
         """
         Rename local variables:
         x = 1  -->  x_inline_1 = 1
+        return x  -->  result = move(x_inline_1)
         """
         code = """
 def f():
@@ -40,16 +41,19 @@ def f():
         self.assertIsInstance(assign, ast.Assign)
         self.assertEqual(assign.targets[0].id, 'x_inline_1')
         
-        # Second statement: result = x_inline_1 (return transformed)
+        # Second statement: result = move(x_inline_1) (return transformed with move wrapper)
         result_assign = new_body[1]
         self.assertIsInstance(result_assign, ast.Assign)
         self.assertEqual(result_assign.targets[0].id, 'result')
-        self.assertEqual(result_assign.value.id, 'x_inline_1')
+        # Value is wrapped in move() for linear type support
+        self.assertIsInstance(result_assign.value, ast.Call)
+        self.assertEqual(result_assign.value.func.id, 'move')
+        self.assertEqual(result_assign.value.args[0].id, 'x_inline_1')
     
     def test_no_renaming_for_params(self):
         """
         Parameters not in rename_map stay unchanged:
-        return a + b  -->  result = a + b
+        return a + b  -->  result = move(a + b)
         """
         code = """
 def f():
@@ -62,11 +66,16 @@ def f():
         transformer = InlineBodyTransformer(rule, rename_map)
         new_body = transformer.transform(body)
         
-        # result = a + b
+        # result = move(a + b)
         assign = new_body[0]
-        self.assertIsInstance(assign.value, ast.BinOp)
-        self.assertEqual(assign.value.left.id, 'a')
-        self.assertEqual(assign.value.right.id, 'b')
+        # Value is wrapped in move() for linear type support
+        self.assertIsInstance(assign.value, ast.Call)
+        self.assertEqual(assign.value.func.id, 'move')
+        # The argument to move() is the BinOp
+        binop = assign.value.args[0]
+        self.assertIsInstance(binop, ast.BinOp)
+        self.assertEqual(binop.left.id, 'a')
+        self.assertEqual(binop.right.id, 'b')
     
     def test_partial_renaming(self):
         """
@@ -74,7 +83,7 @@ def f():
         return a + local_var
         
         With rename_map = {'local_var': 'local_var_inline_1'}
-        -->  result = a + local_var_inline_1
+        -->  result = move(a + local_var_inline_1)
         """
         code = """
 def f():
@@ -87,10 +96,15 @@ def f():
         transformer = InlineBodyTransformer(rule, rename_map)
         new_body = transformer.transform(body)
         
-        # result = a + local_var_inline_1
+        # result = move(a + local_var_inline_1)
         assign = new_body[0]
-        self.assertEqual(assign.value.left.id, 'a')  # Not renamed
-        self.assertEqual(assign.value.right.id, 'local_var_inline_1')  # Renamed
+        # Value is wrapped in move() for linear type support
+        self.assertIsInstance(assign.value, ast.Call)
+        self.assertEqual(assign.value.func.id, 'move')
+        # The argument to move() is the BinOp
+        binop = assign.value.args[0]
+        self.assertEqual(binop.left.id, 'a')  # Not renamed
+        self.assertEqual(binop.right.id, 'local_var_inline_1')  # Renamed
     
     def test_while_loop_transformation(self):
         """
@@ -258,7 +272,7 @@ def f():
         else:
             return b
             
-        Both returns should be transformed
+        Both returns should be transformed with move() wrapper
         """
         code = """
 def f():
@@ -277,15 +291,21 @@ def f():
         # if cond:
         if_stmt = new_body[0]
         
-        # Then: result = a
+        # Then: result = move(a)
         then_assign = if_stmt.body[0]
         self.assertEqual(then_assign.targets[0].id, 'result')
-        self.assertEqual(then_assign.value.id, 'a')
+        # Value is wrapped in move() for linear type support
+        self.assertIsInstance(then_assign.value, ast.Call)
+        self.assertEqual(then_assign.value.func.id, 'move')
+        self.assertEqual(then_assign.value.args[0].id, 'a')
         
-        # Else: result = b
+        # Else: result = move(b)
         else_assign = if_stmt.orelse[0]
         self.assertEqual(else_assign.targets[0].id, 'result')
-        self.assertEqual(else_assign.value.id, 'b')
+        # Value is wrapped in move() for linear type support
+        self.assertIsInstance(else_assign.value, ast.Call)
+        self.assertEqual(else_assign.value.func.id, 'move')
+        self.assertEqual(else_assign.value.args[0].id, 'b')
     
     def test_nested_structures(self):
         """

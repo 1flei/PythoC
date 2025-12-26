@@ -365,6 +365,15 @@ class MultiSOExecutor:
         
         return_type, param_types = signature
         
+        # Filter out None types (linear/zero-size types) from param_types
+        # Keep track of which indices have real types
+        real_param_indices = []
+        real_param_types = []
+        for i, pt in enumerate(param_types):
+            if pt is not None:
+                real_param_indices.append(i)
+                real_param_types.append(pt)
+        
         # Get function from library
         try:
             native_func = getattr(lib, func_name)
@@ -379,14 +388,17 @@ class MultiSOExecutor:
             else:
                 raise RuntimeError(f"Function {func_name} not found in any loaded library")
         
-        # Set function signature
+        # Set function signature (only real types)
         native_func.restype = return_type
-        native_func.argtypes = param_types
+        native_func.argtypes = real_param_types
         
-        # Create wrapper
+        # Create wrapper that filters out linear args
         def wrapper(*args):
+            # Filter args to only include those at real_param_indices
+            filtered_args = [args[i] for i in real_param_indices if i < len(args)]
+            
             c_args = []
-            for arg, param_type in zip(args, param_types):
+            for arg, param_type in zip(filtered_args, real_param_types):
                 if param_type == ctypes.c_void_p:
                     if isinstance(arg, int):
                         c_args.append(arg)

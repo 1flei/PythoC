@@ -86,6 +86,8 @@ def test_runtime_poly():
     add(c, b)  # Will dispatch to add_fi(f64, i32)
     pass
 
-test_static_poly()
-test_static_poly2()
-test_runtime_poly()
+if __name__ == "__main__":
+    test_static_poly()
+    test_static_poly2()
+    test_runtime_poly()
+    print("All poly tests passed!")

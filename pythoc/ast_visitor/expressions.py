@@ -784,7 +784,7 @@ class ExpressionsMixin:
             self.builder.store(ensure_ir(elem), field_ptr)
             
             # Transfer ownership of linear elements (they're being moved into the tuple)
-            self._transfer_linear_ownership(elem, reason="tuple construction")
+            self._transfer_linear_ownership(elem, reason="tuple construction", node=node)
         
         # Load the struct value
         struct_val = self.builder.load(struct_alloca, name="tuple_val")

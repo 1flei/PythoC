@@ -1,6 +1,7 @@
 """IR generation helpers for type qualifiers (const, volatile)"""
 from llvmlite import ir
 from typing import Any
+from .logger import logger
 
 
 def strip_qualifiers(pc_type: Any) -> Any:
@@ -223,7 +224,7 @@ def safe_load(builder: ir.IRBuilder, ptr: ir.Value, pc_type: Any = None,
 
 
 def safe_store(builder: ir.IRBuilder, value: ir.Value, ptr: ir.Value, 
-               pc_type: Any = None, align: Any = None) -> ir.StoreInstr:
+               pc_type: Any = None, align: Any = None, node: Any = None) -> ir.StoreInstr:
     """Store with automatic volatile handling and const checking
     
     Args:
@@ -232,17 +233,18 @@ def safe_store(builder: ir.IRBuilder, value: ir.Value, ptr: ir.Value,
         ptr: Pointer to store to
         pc_type: PC type hint (will check for const/volatile qualifiers)
         align: Optional alignment
+        node: AST node for error reporting
     
     Returns:
         Store instruction (volatile if type is volatile-qualified)
     
     Raises:
-        TypeError: If attempting to modify const-qualified type
+        RuntimeError: If attempting to modify const-qualified type
     """
     # Check if trying to modify const
     if is_const(pc_type):
         type_name = pc_type.get_name() if hasattr(pc_type, 'get_name') else str(pc_type)
-        raise TypeError(f"Cannot modify const-qualified type: {type_name}")
+        logger.error(f"Cannot reassign to const variable of type {type_name}", node=node)
     
     store_inst = builder.store(value, ptr, align=align)
     

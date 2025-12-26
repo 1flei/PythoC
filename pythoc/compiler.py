@@ -540,14 +540,18 @@ class LLVMCompiler:
         # Initialize list to accumulate all inlined statements
         visitor._all_inlined_stmts = []
         
+        # Always initialize CFG builder for linear type checking
+        # This ensures linear leak detection works even for simple functions without control flow
+        from .ast_visitor.control_flow_builder import ControlFlowBuilder
+        visitor._cf_builder = ControlFlowBuilder(visitor, ast_node.name)
+        
         # Visit function body
         # Skip statements after control flow termination (e.g., after infinite loops)
         for stmt in ast_node.body:
             # Check if current block is terminated (unreachable code)
-            if hasattr(visitor, '_cf_builder') and visitor._cf_builder is not None:
-                if visitor._cf_builder.is_terminated():
-                    logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
-                    continue
+            if visitor._cf_builder.is_terminated():
+                logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
+                continue
             visitor.visit(stmt)
         
         # Debug hook - capture all inlined statements accumulated during compilation
@@ -562,12 +566,10 @@ class LLVMCompiler:
             )
         
         # Finalize CFG and run CFG-based linear type checking
-        # This replaces the old AST-based _check_linear_tokens_consumed()
         # CFG checker correctly handles unreachable code (e.g., after infinite loops)
-        if hasattr(visitor, '_cf_builder') and visitor._cf_builder is not None:
-            visitor._cf_builder.finalize()
-            visitor._cf_builder.dump_cfg()  # Uses logger.debug by default
-            visitor._cf_builder.run_cfg_linear_check()
+        visitor._cf_builder.finalize()
+        visitor._cf_builder.dump_cfg()  # Uses logger.debug by default
+        visitor._cf_builder.run_cfg_linear_check()
         
         # Ensure function has a return
         if not visitor.builder.block.is_terminated:
@@ -635,12 +637,18 @@ class LLVMCompiler:
             llvm_module = binding.parse_assembly(module_str)
             llvm_module.verify()
         except Exception as e:
-            # Try to get module string for error reporting, but handle failures
+            # Write IR to temp file for debugging
+            import tempfile
+            import os
             try:
                 ir_str = str(self.module)
-            except Exception:
-                ir_str = "<failed to serialize module>"
-            logger.error(f"Verification failed: {e}\nModule IR:\n{ir_str}")
+                # Create temp file in system temp directory
+                fd, ir_path = tempfile.mkstemp(suffix='.ll', prefix='pythoc_error_')
+                with os.fdopen(fd, 'w') as f:
+                    f.write(ir_str)
+                logger.error(f"Verification failed: {e}\nModule IR written to: {ir_path}")
+            except Exception as write_err:
+                logger.error(f"Verification failed: {e}\n(Failed to write IR: {write_err})")
             raise e
         return True
     
