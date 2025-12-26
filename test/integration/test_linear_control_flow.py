@@ -151,27 +151,36 @@ def test_move_identity():
 
 
 if __name__ == "__main__":
+    import sys
+    
+    failed = False
     print("Running linear token control flow tests...")
     print()
     
-    print("Testing loops...")
-    test_loop_consume_internal_token()
-    test_for_loop_consume_internal()
-    print()
+    try:
+        print("Testing loops...")
+        test_loop_consume_internal_token()
+        test_for_loop_consume_internal()
+        print()
+        
+        print("Testing if/else...")
+        test_if_else_both_consume()
+        print()
+        
+        print("Testing move()...")
+        test_move_identity()
+        print()
+        
+        # Run error tests separately to avoid polluting the module
+        print("Testing error cases...")
+        test_loop_cannot_consume_external_token()
+        test_if_without_else_error()
+        test_if_else_inconsistent_error()
+        print()
+        
+        print("All linear token control flow tests completed!")
+    except Exception as e:
+        print(f"FAIL: {e}")
+        failed = True
     
-    print("Testing if/else...")
-    test_if_else_both_consume()
-    print()
-    
-    print("Testing move()...")
-    test_move_identity()
-    print()
-    
-    # Run error tests separately to avoid polluting the module
-    print("Testing error cases...")
-    test_loop_cannot_consume_external_token()
-    test_if_without_else_error()
-    test_if_else_inconsistent_error()
-    print()
-    
-    print("All linear token control flow tests completed!")
+    sys.exit(1 if failed else 0)

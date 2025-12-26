@@ -144,39 +144,37 @@ print("\nRunning tests...")
 print("-" * 60)
 
 result = test_nested_loops(5)
-# assert result == 5 or result == 104 or result == 203 or result == 302 or result == 401 or result == 500, f"Expected valid sum pair, got {result}"
-# print(f"OK test_nested_loops passed (result: {result})")
+assert result == 5 or result == 104 or result == 203 or result == 302 or result == 401 or result == 500, f"Expected valid sum pair, got {result}"
+print(f"OK test_nested_loops passed (result: {result})")
 
-# result = test_closure_with_loop(3)
-# assert result == 103, f"Expected 103, got {result}"
-# print(f"OK test_closure_with_loop passed (result: {result})")
+result = test_closure_with_loop(3)
+assert result == 103, f"Expected 103, got {result}"
+print(f"OK test_closure_with_loop passed (result: {result})")
 
-# result = test_triple_nested(6)
-# expected = [6, 15, 24, 33, 42, 51, 105, 114, 123, 132, 141, 204, 213, 222, 231, 303, 312, 321, 402, 411, 420]
-# assert result in expected, f"Expected one of {expected}, got {result}"
-# print(f"OK test_triple_nested passed (result: {result})")
+result = test_triple_nested(6)
+expected = [6, 15, 24, 33, 42, 51, 105, 114, 123, 132, 141, 204, 213, 222, 231, 303, 312, 321, 402, 411, 420]
+assert result in expected, f"Expected one of {expected}, got {result}"
+print(f"OK test_triple_nested passed (result: {result})")
 
-# result = test_closure_in_loop(13)
-# assert result == 13, f"Expected 13, got {result}"
-# print(f"OK test_closure_in_loop passed (result: {result})")
+result = test_closure_in_loop(13)
+assert result == 13, f"Expected 13, got {result}"
+print(f"OK test_closure_in_loop passed (result: {result})")
 
-# result = test_multiple_closures(5)
-# assert result == 120, f"Expected 120, got {result}"
-# print(f"OK test_multiple_closures passed (result: {result})")
+result = test_multiple_closures(5)
+assert result == 120, f"Expected 120, got {result}"
+print(f"OK test_multiple_closures passed (result: {result})")
 
-# result = test_closure_nested_loop(25)
-# assert result == 25, f"Expected 25, got {result}"
-# print(f"OK test_closure_nested_loop passed (result: {result})")
+result = test_closure_nested_loop(25)
+assert result == 25, f"Expected 25, got {result}"
+print(f"OK test_closure_nested_loop passed (result: {result})")
 
-# result = test_complex_returns(3)
-# assert result == 3, f"Expected 3, got {result}"
-# result2 = test_complex_returns(7)
-# assert result2 == 107, f"Expected 107, got {result2}"
-# print(f"OK test_complex_returns passed")
+result = test_complex_returns(3)
+assert result == 3, f"Expected 3, got {result}"
+result2 = test_complex_returns(7)
+assert result2 == 107, f"Expected 107, got {result2}"
+print(f"OK test_complex_returns passed")
 
-# print("-" * 60)
-# print("\n" + "=" * 60)
-# print("All nested loops and closures tests passed! OK")
-# print("=" * 60)
-
-
+print("-" * 60)
+print("\n" + "=" * 60)
+print("All nested loops and closures tests passed! OK")
+print("=" * 60)

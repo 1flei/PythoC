@@ -62,10 +62,10 @@ class CallsMixin:
             else:
                 arg_value = self.visit_expression(arg)
                 args.append(arg_value)
-            
+        
         for arg in args:
             # Transfer linear ownership for function arguments
-            self._transfer_linear_ownership(arg, reason="function argument")
+            self._transfer_linear_ownership(arg, reason="function argument", node=node)
         
         return callable_obj.handle_call(self, func_ref, args, node)
     

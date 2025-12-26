@@ -25,7 +25,7 @@ from pythoc.bindings.c_ast import (
     # Proof types
     CTypeProof, QualTypeProof,
     # Allocation
-    alloc, ctype_alloc, qualtype_alloc, ptrtype_alloc,
+    ctype_alloc, qualtype_alloc, ptrtype_alloc,
     paraminfo_alloc, fieldinfo_alloc, enumvalue_alloc,
     # Type constructors
     prim, make_qualtype, make_ptr_type, make_array_type,

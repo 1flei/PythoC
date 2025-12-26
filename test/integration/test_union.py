@@ -116,4 +116,6 @@ def main() -> i32:
     
     return 0
 
-main()
+if __name__ == "__main__":
+    main()
+    print("All union tests passed!")

@@ -96,16 +96,27 @@ class ReturnExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        return expr  -->  result_var = expr; is_return_flag = True; break
+        return expr  -->  result_var = move(expr); is_return_flag = True; break
+        
+        Note: We wrap the return value in move() to properly transfer
+        ownership of linear types. This is necessary because the generated
+        assignment `result_var = prf` would otherwise be rejected by the
+        linear type checker as an implicit copy.
         """
         stmts = []
         
         if exit_node.value and self.result_var:
-            # Assignment: result_var = return_value
+            # Assignment: result_var = move(return_value)
             renamed_value = self._rename(exit_node.value, context)
+            # Wrap in move() for linear type ownership transfer
+            moved_value = ast.Call(
+                func=ast.Name(id='move', ctx=ast.Load()),
+                args=[renamed_value],
+                keywords=[]
+            )
             assign = ast.Assign(
                 targets=[ast.Name(id=self.result_var, ctx=ast.Store())],
-                value=renamed_value
+                value=moved_value
             )
             stmts.append(assign)
         

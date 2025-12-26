@@ -8,4 +8,8 @@ def test_empty_ann_assign() -> i32:
     printf("undefined %d\n", a)
     return a
 
-test_empty_ann_assign()
+if __name__ == "__main__":
+    # This test just verifies that undefined variables compile correctly
+    # The value is undefined, so we just check it runs without error
+    test_empty_ann_assign()
+    print("test_undefined passed!")

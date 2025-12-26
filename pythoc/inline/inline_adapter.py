@@ -135,6 +135,7 @@ class InlineAdapter:
         import ast as ast_module
         for i, stmt in enumerate(inlined_stmts):
             stmt_str = ast_module.unparse(stmt) if hasattr(ast_module, 'unparse') else str(stmt)
+            logger.debug(f"InlineAdapter: visiting stmt[{i}]: {stmt_str}")
             self.visitor.visit(stmt)
         
         # Restore user_globals
@@ -263,7 +264,8 @@ class InlineAdapter:
                 linear_path=()
             )
             # Transfer ownership - marks _inline_result_N as consumed
-            self.visitor._transfer_linear_ownership(temp_ref, reason="inline return")
+            # node=None is acceptable, it's only used for error reporting
+            self.visitor._transfer_linear_ownership(temp_ref, reason="inline return", node=None)
         
         # Return a NEW ValueRef WITHOUT var_name tracking (like move() does)
         # This ensures the caller treats it as a fresh value, not a variable reference

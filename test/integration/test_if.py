@@ -25,26 +25,33 @@ def test_if_else_func(x: i32) -> i32:
     else:
         return x * 100
 
-xs = [-5, 1, 10, 20, 100]
-fs = []
-for x in xs:
-    @compile(anonymous=True)
-    def const_folding() -> i32:
-        if x < 0:
-            return 0
-        elif x < 10:
-            return x
-        elif 10 <= x < 100:
-            return x * 10
-        else:
-            return x * 100
-    fs.append(const_folding)
+if __name__ == "__main__":
+    xs = [-5, 1, 10, 20, 100]
+    expected = [0, 1, 100, 200, 10000]
+    fs = []
+    for x in xs:
+        @compile(anonymous=True)
+        def const_folding() -> i32:
+            if x < 0:
+                return 0
+            elif x < 10:
+                return x
+            elif 10 <= x < 100:
+                return x * 10
+            else:
+                return x * 100
+        fs.append(const_folding)
 
-print(test_if_else(-5))
-print(test_if_else(1))
-print(test_if_else(10))
-print(test_if_else(20))
-print(test_if_else(100))
+    # Test inline function
+    for x, exp in zip(xs, expected):
+        result = test_if_else(x)
+        assert result == exp, f"test_if_else({x}) expected {exp}, got {result}"
+        print(f"test_if_else({x}) = {result}")
 
-for f, x in zip(fs, xs):
-    print(f(x))
+    # Test compiled anonymous functions
+    for f, x, exp in zip(fs, xs, expected):
+        result = f(x)
+        assert result == exp, f"const_folding({x}) expected {exp}, got {result}"
+        print(f"const_folding({x}) = {result}")
+    
+    print("All if tests passed!")

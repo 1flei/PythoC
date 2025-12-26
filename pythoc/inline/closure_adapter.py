@@ -254,7 +254,8 @@ class ClosureAdapter:
                 linear_path=()
             )
             # Transfer ownership - marks _closure_result_N as consumed
-            self.visitor._transfer_linear_ownership(temp_ref, reason="closure return")
+            # node=None is acceptable, it's only used for error reporting
+            self.visitor._transfer_linear_ownership(temp_ref, reason="closure return", node=None)
         
         # Return a NEW ValueRef WITHOUT var_name tracking (like move() does)
         # This ensures the caller treats it as a fresh value, not a variable reference

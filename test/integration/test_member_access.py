@@ -98,4 +98,6 @@ def main() -> i32:
     return 0
 
 # run via native executor
-main()
+if __name__ == "__main__":
+    main()
+    print("All member access tests passed!")

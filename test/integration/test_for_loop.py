@@ -146,54 +146,72 @@ def test_while_with_continue() -> i32:
         sum = sum + i
     return sum
 
+import unittest
+
+
+class TestForLoop(unittest.TestCase):
+    """Test for-in loop with range iterator"""
+
+    def test_range_basic(self):
+        """Test basic range iteration: sum of 0..9 = 45"""
+        self.assertEqual(test_range_basic(), 45)
+
+    def test_range_with_start(self):
+        """Test range with start and stop: sum of 5..14 = 95"""
+        self.assertEqual(test_range_with_start(), 95)
+
+    def test_range_with_step(self):
+        """Test range with step: sum of 0,2,4,6,8,10,12,14,16,18 = 90"""
+        self.assertEqual(test_range_with_step(), 90)
+
+    def test_range_negative_step(self):
+        """Test range with negative step: sum of 10..1 = 55"""
+        self.assertEqual(test_range_negative_step(), 55)
+
+    def test_range_nested(self):
+        """Test nested range loops"""
+        self.assertEqual(test_range_nested(), 315)
+
+    def test_range_with_break(self):
+        """Test range with early exit"""
+        self.assertEqual(test_range_with_break(), 55)
+
+    def test_range_empty(self):
+        """Test empty range"""
+        self.assertEqual(test_range_empty(), 0)
+
+    def test_range_single(self):
+        """Test single iteration range"""
+        self.assertEqual(test_range_single(), 0)
+
+    def test_lowercase_range(self):
+        """Test lowercase range: sum of 0..4 = 10"""
+        self.assertEqual(test_lowercase_range(), 10)
+
+    def test_mixed_case(self):
+        """Test mixing range loops"""
+        self.assertEqual(test_mixed_case(), 9)
+
+    def test_continue(self):
+        """Test continue statement: sum of odd numbers 1+3+5+7+9 = 25"""
+        self.assertEqual(test_continue(), 25)
+
+    def test_break_in_nested(self):
+        """Test break in nested loop"""
+        self.assertEqual(test_break_in_nested(), 315)
+
+    def test_continue_in_nested(self):
+        """Test continue in nested loop"""
+        self.assertEqual(test_continue_in_nested(), 440)
+
+    def test_while_with_break(self):
+        """Test while loop with break"""
+        self.assertEqual(test_while_with_break(), 55)
+
+    def test_while_with_continue(self):
+        """Test while loop with continue: sum of odd numbers = 25"""
+        self.assertEqual(test_while_with_continue(), 25)
+
+
 if __name__ == '__main__':
-    print("\n=== Testing Range Iterator ===\n")
-    
-    print("test_range_basic():", test_range_basic())
-    print("Expected: 45 (sum of 0..9)")
-    
-    print("\ntest_range_with_start():", test_range_with_start())
-    print("Expected: 95 (sum of 5..14)")
-    
-    print("\ntest_range_with_step():", test_range_with_step())
-    print("Expected: 90 (sum of 0,2,4,6,8,10,12,14,16,18)")
-    
-    print("\ntest_range_negative_step():", test_range_negative_step())
-    print("Expected: 55 (sum of 10,9,8,7,6,5,4,3,2,1)")
-    
-    print("\ntest_range_nested():", test_range_nested())
-    print("Expected: 315 (nested sum: 0+1+2 + 10+11+12 + 20+21+22 + 30+31+32 + 40+41+42)")
-    
-    print("\ntest_range_with_break():", test_range_with_break())
-    print("Expected: 55 (0+1+...+10 = 55, stops when sum > 50)")
-    
-    print("\ntest_range_empty():", test_range_empty())
-    print("Expected: 0 (no iterations)")
-    
-    print("\ntest_range_single():", test_range_single())
-    print("Expected: 0 (single iteration with i=0)")
-    
-    print("\ntest_lowercase_range():", test_lowercase_range())
-    print("Expected: 10 (sum of 0+1+2+3+4)")
-    
-    print("\ntest_mixed_case():", test_mixed_case())
-    print("Expected: 9 (i=0: j=0,1 -> 0+1=1; i=1: j=0,1 -> 1+2=3; i=2: j=0,1 -> 2+3=5; total=9)")
-    
-    print("\n=== Testing Break and Continue ===\n")
-    
-    print("test_continue():", test_continue())
-    print("Expected: 25 (sum of odd numbers: 1+3+5+7+9)")
-    
-    print("\ntest_break_in_nested():", test_break_in_nested())
-    print("Expected: 315 (break only exits inner loop; each i: j=0,1,2)")
-    
-    print("\ntest_continue_in_nested():", test_continue_in_nested())
-    print("Expected: 440 (each i: j=0,1,3,4; skip j=2)")
-    
-    print("\ntest_while_with_break():", test_while_with_break())
-    print("Expected: 55 (0+1+...+10, stops when sum > 50)")
-    
-    print("\ntest_while_with_continue():", test_while_with_continue())
-    print("Expected: 25 (sum of odd numbers: 1+3+5+7+9)")
-    
-    print("\n=== All tests completed ===\n")
+    unittest.main()

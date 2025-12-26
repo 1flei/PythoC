@@ -216,99 +216,84 @@ def test_valid_index_negative() -> i32:
     return get_element_at(-1, 10)  # -1
 
 
-def main():
-    """Run all tests"""
-    print("Testing refined types...")
-    print()
-    
-    # Test assume
-    result = test_assume_positive()
-    print(f"test_assume_positive: {'PASS' if result == 5 else 'FAIL'} (result={result}, expected=5)")
-    assert result == 5
-    
-    # Test refine success
-    result = test_refine_success()
-    print(f"test_refine_success: {'PASS' if result == 10 else 'FAIL'} (result={result}, expected=10)")
-    assert result == 10
-    
-    # Test refine failure
-    result = test_refine_failure()
-    print(f"test_refine_failure: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Test multi-parameter assume
-    result = test_range_assume()
-    print(f"test_range_assume: {'PASS' if result == 30 else 'FAIL'} (result={result}, expected=30)")
-    assert result == 30
-    
-    # Test multi-parameter refine valid
-    result = test_range_refine_valid()
-    print(f"test_range_refine_valid: {'PASS' if result == 20 else 'FAIL'} (result={result}, expected=20)")
-    assert result == 20
-    
-    # Test multi-parameter refine invalid (order)
-    result = test_range_refine_invalid_order()
-    print(f"test_range_refine_invalid_order: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Test multi-parameter refine invalid (negative)
-    result = test_range_refine_invalid_negative()
-    print(f"test_range_refine_invalid_negative: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Test index access
-    result = test_range_index_access()
-    print(f"test_range_index_access: {'PASS' if result == 10 else 'FAIL'} (result={result}, expected=10)")
-    assert result == 10
-    
-    # Test safe divide
-    result = test_safe_divide_valid()
-    print(f"test_safe_divide_valid: {'PASS' if result == 20 else 'FAIL'} (result={result}, expected=20)")
-    assert result == 20
-    
-    result = test_safe_divide_zero()
-    print(f"test_safe_divide_zero: {'PASS' if result == 0 else 'FAIL'} (result={result}, expected=0)")
-    assert result == 0
-    
-    # Test positive even
-    result = test_positive_even()
-    print(f"test_positive_even: {'PASS' if result == 8 else 'FAIL'} (result={result}, expected=8)")
-    assert result == 8
-    
-    result = test_positive_even_fail_negative()
-    print(f"test_positive_even_fail_negative: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    result = test_positive_even_fail_odd()
-    print(f"test_positive_even_fail_odd: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Test constructor syntax
-    result = test_constructor_syntax()
-    print(f"test_constructor_syntax: {'PASS' if result == 42 else 'FAIL'} (result={result}, expected=42)")
-    assert result == 42
-    
-    result = test_range_constructor()
-    print(f"test_range_constructor: {'PASS' if result == 101 else 'FAIL'} (result={result}, expected=101)")
-    assert result == 101
-    
-    # Test valid index
-    result = test_valid_index_in_bounds()
-    print(f"test_valid_index_in_bounds: {'PASS' if result == 30 else 'FAIL'} (result={result}, expected=30)")
-    assert result == 30
-    
-    result = test_valid_index_out_of_bounds()
-    print(f"test_valid_index_out_of_bounds: {'PASS' if result == -1 else 'FAIL'} (result={result}, expected=-1)")
-    assert result == -1
-    
-    result = test_valid_index_negative()
-    print(f"test_valid_index_negative: {'PASS' if result == -1 else 'FAIL'} (result={result}, expected=-1)")
-    assert result == -1
-    
-    print()
-    print("All refined type tests passed!")
-    return 0
+import unittest
+
+
+class TestRefined(unittest.TestCase):
+    """Test refined types with predicate validation"""
+
+    def test_assume_positive(self):
+        """Test assume: create refined type without checking"""
+        self.assertEqual(test_assume_positive(), 5)
+
+    def test_refine_success(self):
+        """Test refine with valid value (for-else takes for branch)"""
+        self.assertEqual(test_refine_success(), 10)
+
+    def test_refine_failure(self):
+        """Test refine with invalid value (for-else takes else branch)"""
+        self.assertEqual(test_refine_failure(), -999)
+
+    def test_range_assume(self):
+        """Test assume with multi-parameter refined type"""
+        self.assertEqual(test_range_assume(), 30)
+
+    def test_range_refine_valid(self):
+        """Test refine with valid range"""
+        self.assertEqual(test_range_refine_valid(), 20)
+
+    def test_range_refine_invalid_order(self):
+        """Test refine with invalid range (start > end)"""
+        self.assertEqual(test_range_refine_invalid_order(), -999)
+
+    def test_range_refine_invalid_negative(self):
+        """Test refine with negative start"""
+        self.assertEqual(test_range_refine_invalid_negative(), -999)
+
+    def test_range_index_access(self):
+        """Test accessing refined type fields by index"""
+        self.assertEqual(test_range_index_access(), 10)
+
+    def test_safe_divide_valid(self):
+        """Test safe division with non-zero divisor"""
+        self.assertEqual(test_safe_divide_valid(), 20)
+
+    def test_safe_divide_zero(self):
+        """Test safe division with zero divisor"""
+        self.assertEqual(test_safe_divide_zero(), 0)
+
+    def test_positive_even(self):
+        """Test refined type with combined predicates"""
+        self.assertEqual(test_positive_even(), 8)
+
+    def test_positive_even_fail_negative(self):
+        """Test that negative even number fails positive_even"""
+        self.assertEqual(test_positive_even_fail_negative(), -999)
+
+    def test_positive_even_fail_odd(self):
+        """Test that odd number fails positive_even"""
+        self.assertEqual(test_positive_even_fail_odd(), -999)
+
+    def test_constructor_syntax(self):
+        """Test using refined[Pred](...) as constructor"""
+        self.assertEqual(test_constructor_syntax(), 42)
+
+    def test_range_constructor(self):
+        """Test multi-param constructor syntax"""
+        self.assertEqual(test_range_constructor(), 101)
+
+    def test_valid_index_in_bounds(self):
+        """Test valid array index"""
+        self.assertEqual(test_valid_index_in_bounds(), 30)
+
+    def test_valid_index_out_of_bounds(self):
+        """Test invalid array index (>= length)"""
+        self.assertEqual(test_valid_index_out_of_bounds(), -1)
+
+    def test_valid_index_negative(self):
+        """Test negative array index"""
+        self.assertEqual(test_valid_index_negative(), -1)
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

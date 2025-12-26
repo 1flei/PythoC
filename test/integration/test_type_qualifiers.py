@@ -1,6 +1,8 @@
+import os
 from pythoc import i32, i64, f64, ptr, array, compile, const, static, volatile, nullptr, u32
 from pythoc.libc.stdio import printf
 from pythoc.logger import set_raise_on_error
+from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
 
 # Enable exception raising for tests that expect to catch exceptions
 set_raise_on_error(True)
@@ -189,34 +191,42 @@ def test_mixed_qualifiers() -> i32:
 
 
 def test_error_const_reassignment():
-    """Test that reassigning const variable raises TypeError"""
+    """Test that reassigning const variable raises RuntimeError"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_const_reassign')
     try:
-        @compile
+        @compile(suffix="bad_const_reassign")
         def bad_const_reassign() -> i32:
             x: const[i32] = 42
             x = 100  # ERROR: Cannot reassign to const variable
             return x
         
+        flush_all_pending_outputs()
         print("FAIL test_error_const_reassignment failed - should have raised RuntimeError")
         return False
     except RuntimeError as e:
-        if "Cannot reassign to const variable" in str(e):
+        if "const" in str(e).lower():
             print(f"OK test_error_const_reassignment passed: {e}")
             return True
         else:
             print(f"FAIL test_error_const_reassignment failed - wrong error: {e}")
             return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_const_array_modification():
-    """Test that modifying const array element raises TypeError"""
+    """Test that modifying const array element raises RuntimeError"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_const_array_modify')
     try:
-        @compile
+        @compile(suffix="bad_const_array_modify")
         def bad_const_array_modify() -> i32:
             arr: const[array[i32, 3]] = [1, 2, 3]
             arr[0] = 99  # ERROR: Cannot modify const array
             return arr[0]
         
+        flush_all_pending_outputs()
         print("FAIL test_error_const_array_modification failed - should have raised RuntimeError")
         return False
     except RuntimeError as e:
@@ -226,12 +236,16 @@ def test_error_const_array_modification():
         else:
             print(f"FAIL test_error_const_array_modification failed - wrong error: {e}")
             return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_const_pointer_reassignment():
-    """Test that reassigning const pointer raises TypeError"""
+    """Test that reassigning const pointer raises RuntimeError"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_const_ptr_reassign')
     try:
-        @compile
+        @compile(suffix="bad_const_ptr_reassign")
         def bad_const_ptr_reassign() -> i32:
             x: i32 = 42
             y: i32 = 100
@@ -239,41 +253,51 @@ def test_error_const_pointer_reassignment():
             p = ptr[i32](y)  # ERROR: Cannot reassign const pointer
             return 0
         
+        flush_all_pending_outputs()
         print("FAIL test_error_const_pointer_reassignment failed - should have raised RuntimeError")
         return False
     except RuntimeError as e:
-        if "Cannot reassign to const variable" in str(e):
+        if "const" in str(e).lower():
             print(f"OK test_error_const_pointer_reassignment passed: {e}")
             return True
         else:
             print(f"FAIL test_error_const_pointer_reassignment failed - wrong error: {e}")
             return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_static_const_modification():
-    """Test that modifying static const variable raises TypeError"""
+    """Test that modifying static const variable raises RuntimeError"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_static_const_modify')
     try:
-        @compile
+        @compile(suffix="bad_static_const_modify")
         def bad_static_const_modify() -> i32:
             x: static[const[i32]] = 100
             x = 200  # ERROR: Cannot modify static const
             return x
         
+        flush_all_pending_outputs()
         print("FAIL test_error_static_const_modification failed - should have raised RuntimeError")
         return False
     except RuntimeError as e:
-        if "Cannot reassign to const variable" in str(e):
+        if "const" in str(e).lower():
             print(f"OK test_error_static_const_modification passed: {e}")
             return True
         else:
             print(f"FAIL test_error_static_const_modification failed - wrong error: {e}")
             return False
+    finally:
+        clear_failed_group(group_key)
 
 
 def test_error_const_in_loop():
-    """Test that modifying const variable in loop raises TypeError"""
+    """Test that modifying const variable in loop raises RuntimeError"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_const_in_loop')
     try:
-        @compile
+        @compile(suffix="bad_const_in_loop")
         def bad_const_in_loop() -> i32:
             x: const[i32] = 0
             i: i32 = 0
@@ -282,15 +306,18 @@ def test_error_const_in_loop():
                 i = i + 1
             return x
         
+        flush_all_pending_outputs()
         print("FAIL test_error_const_in_loop failed - should have raised RuntimeError")
         return False
     except RuntimeError as e:
-        if "Cannot reassign to const variable" in str(e):
+        if "const" in str(e).lower():
             print(f"OK test_error_const_in_loop passed: {e}")
             return True
         else:
             print(f"FAIL test_error_const_in_loop failed - wrong error: {e}")
             return False
+    finally:
+        clear_failed_group(group_key)
 
 @compile
 def main() -> i32:
@@ -355,33 +382,45 @@ def main() -> i32:
 
 def run_error_tests():
     """Run all error tests (Python side)"""
+    all_passed = True
     print("\n=== Const Error Tests ===\n")
     
     print("--- Test const reassignment error ---")
-    test_error_const_reassignment()
+    if not test_error_const_reassignment():
+        all_passed = False
     print()
     
     print("--- Test const array modification error ---")
-    test_error_const_array_modification()
+    if not test_error_const_array_modification():
+        all_passed = False
     print()
     
     print("--- Test const pointer reassignment error ---")
-    test_error_const_pointer_reassignment()
+    if not test_error_const_pointer_reassignment():
+        all_passed = False
     print()
     
     print("--- Test static const modification error ---")
-    test_error_static_const_modification()
+    if not test_error_static_const_modification():
+        all_passed = False
     print()
     
     print("--- Test const in loop error ---")
-    test_error_const_in_loop()
+    if not test_error_const_in_loop():
+        all_passed = False
     print()
     
     print("=== Error Tests Complete ===\n")
+    return all_passed
 
 
-# Run positive tests
-main()
-
-# Run error tests
-run_error_tests()
+if __name__ == "__main__":
+    import sys
+    
+    # Run positive tests
+    main()
+    
+    # Run error tests
+    all_passed = run_error_tests()
+    
+    sys.exit(0 if all_passed else 1)

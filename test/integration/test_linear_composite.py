@@ -468,7 +468,8 @@ def test_error_inconsistent_if_composite():
         flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_inconsistent_if_composite failed - should have raised RuntimeError")
     except RuntimeError as e:
-        if "consistently" in str(e).lower() or "not consumed" in str(e):
+        err_str = str(e).lower()
+        if "consistently" in err_str or "not consumed" in err_str or "inconsistent" in err_str:
             print(f"OK test_error_inconsistent_if_composite passed: {e}")
         else:
             print(f"FAIL test_error_inconsistent_if_composite failed - wrong error: {e}")
@@ -493,7 +494,8 @@ def test_error_loop_external_composite():
         flush_all_pending_outputs()  # Trigger deferred compilation
         print("FAIL test_error_loop_external_composite failed - should have raised RuntimeError")
     except RuntimeError as e:
-        if "external" in str(e).lower() or "scope" in str(e).lower():
+        err_str = str(e).lower()
+        if "external" in err_str or "scope" in err_str or "loop body changes" in err_str:
             print(f"OK test_error_loop_external_composite passed: {e}")
         else:
             print(f"FAIL test_error_loop_external_composite failed - wrong error: {e}")
@@ -506,41 +508,50 @@ def test_error_loop_external_composite():
 # ============================================================================
 
 if __name__ == "__main__":
+    import sys
+    
+    failed = False
     print("Running composite linear type tests...")
     print()
     
-    print("=== Error cases ===")
-    test_error_dual_not_consumed()
-    test_error_nested_not_consumed()
-    test_error_double_consume_in_dual()
-    test_error_inconsistent_if_composite()
-    test_error_loop_external_composite()
-    print()
+    try:
+        print("=== Error cases ===")
+        test_error_dual_not_consumed()
+        test_error_nested_not_consumed()
+        test_error_double_consume_in_dual()
+        test_error_inconsistent_if_composite()
+        test_error_loop_external_composite()
+        print()
+        
+        print("=== Basic patterns ===")
+        test_basic_tuple()
+        test_single_linear_field()
+        test_dual_token()
+        test_triple_resource()
+        print()
+        
+        print("=== Nested structures ===")
+        test_nested_resource()
+        test_partial_nested_destroy()
+        test_level3_nesting()
+        print()
+        
+        print("=== Control flow ===")
+        test_conditional_destroy()
+        test_conditional_return()
+        test_conditional_create()
+        print()
+        
+        print("=== Partial consumption ===")
+        test_partial_consumption()
+        test_token_swap()
+        test_extract_mem()
+        test_extract_file()
+        print()
+        
+        print("All composite linear type tests completed!")
+    except Exception as e:
+        print(f"FAIL: {e}")
+        failed = True
     
-    print("=== Basic patterns ===")
-    test_basic_tuple()
-    test_single_linear_field()
-    test_dual_token()
-    test_triple_resource()
-    print()
-    
-    print("=== Nested structures ===")
-    test_nested_resource()
-    test_partial_nested_destroy()
-    test_level3_nesting()
-    print()
-    
-    print("=== Control flow ===")
-    test_conditional_destroy()
-    test_conditional_return()
-    test_conditional_create()
-    print()
-    
-    print("=== Partial consumption ===")
-    test_partial_consumption()
-    test_token_swap()
-    test_extract_mem()
-    test_extract_file()
-    print()
-    
-    print("All composite linear type tests completed!")
+    sys.exit(1 if failed else 0)

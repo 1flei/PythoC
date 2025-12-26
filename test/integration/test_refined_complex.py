@@ -277,117 +277,104 @@ def test_tag_accumulation() -> i32:
     return z
 
 
-def main():
-    """Run all complex refined type tests"""
-    print("Testing complex refined type scenarios...")
-    print()
-    
-    # Multiple predicates
-    result = test_multiple_predicates()
-    print(f"test_multiple_predicates: {'PASS' if result == 42 else 'FAIL'} (result={result}, expected=42)")
-    assert result == 42
-    
-    result = test_refine_multiple_predicates_success()
-    print(f"test_refine_multiple_predicates_success: {'PASS' if result == 50 else 'FAIL'} (result={result}, expected=50)")
-    assert result == 50
-    
-    result = test_refine_multiple_predicates_fail()
-    print(f"test_refine_multiple_predicates_fail: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Predicates + tags
-    result = test_predicates_with_tags()
-    print(f"test_predicates_with_tags: {'PASS' if result == 10 else 'FAIL'} (result={result}, expected=10)")
-    assert result == 10
-    
-    result = test_refine_predicates_with_tags()
-    print(f"test_refine_predicates_with_tags: {'PASS' if result == 20 else 'FAIL'} (result={result}, expected=20)")
-    assert result == 20
-    
-    # Multiple tags only
-    result = test_multiple_tags_only()
-    print(f"test_multiple_tags_only: {'PASS' if result == 100 else 'FAIL'} (result={result}, expected=100)")
-    assert result == 100
-    
-    result = test_refine_tags_only()
-    print(f"test_refine_tags_only: {'PASS' if result == 200 else 'FAIL'} (result={result}, expected=200)")
-    assert result == 200
-    
-    # Complex combinations
-    result = test_complex_combination()
-    print(f"test_complex_combination: {'PASS' if result == 42 else 'FAIL'} (result={result}, expected=42)")
-    assert result == 42
-    
-    result = test_refine_complex_success()
-    print(f"test_refine_complex_success: {'PASS' if result == 48 else 'FAIL'} (result={result}, expected=48)")
-    assert result == 48
-    
-    result = test_refine_complex_fail()
-    print(f"test_refine_complex_fail: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Type conversions
-    result = test_implicit_cast_to_base()
-    print(f"test_implicit_cast_to_base: {'PASS' if result == 11 else 'FAIL'} (result={result}, expected=11)")
-    assert result == 11
-    
-    result = test_explicit_cast_add_constraints()
-    print(f"test_explicit_cast_add_constraints: {'PASS' if result == 50 else 'FAIL'} (result={result}, expected=50)")
-    assert result == 50
-    
-    result = test_explicit_cast_change_tags()
-    print(f"test_explicit_cast_change_tags: {'PASS' if result == 30 else 'FAIL'} (result={result}, expected=30)")
-    assert result == 30
-    
-    # Refine as refinement
-    result = test_refine_as_refinement()
-    print(f"test_refine_as_refinement: {'PASS' if result == 75 else 'FAIL'} (result={result}, expected=75)")
-    assert result == 75
-    
-    result = test_refine_refinement_fail()
-    print(f"test_refine_refinement_fail: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Multi-param
-    result = test_multiarg_basic()
-    print(f"test_multiarg_basic: {'PASS' if result == 30 else 'FAIL'} (result={result}, expected=30)")
-    assert result == 30
-    
-    result = test_multiarg_refine_pass()
-    print(f"test_multiarg_refine_pass: {'PASS' if result == 20 else 'FAIL'} (result={result}, expected=20)")
-    assert result == 20
-    
-    result = test_multiarg_refine_fail()
-    print(f"test_multiarg_refine_fail: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Nested refine
-    result = test_nested_refine()
-    print(f"test_nested_refine: {'PASS' if result == 48 else 'FAIL'} (result={result}, expected=48)")
-    assert result == 48
-    
-    result = test_nested_refine_early_fail()
-    print(f"test_nested_refine_early_fail: {'PASS' if result == -999 else 'FAIL'} (result={result}, expected=-999)")
-    assert result == -999
-    
-    # Safe divide
-    result = test_safe_divide_refined_valid()
-    print(f"test_safe_divide_refined_valid: {'PASS' if result == 25 else 'FAIL'} (result={result}, expected=25)")
-    assert result == 25
-    
-    result = test_safe_divide_refined_zero()
-    print(f"test_safe_divide_refined_zero: {'PASS' if result == 0 else 'FAIL'} (result={result}, expected=0)")
-    assert result == 0
-    
-    # Tag accumulation
-    result = test_tag_accumulation()
-    print(f"test_tag_accumulation: {'PASS' if result == 50 else 'FAIL'} (result={result}, expected=50)")
-    assert result == 50
-    
-    print()
-    print(f"All {22} complex refined type tests passed!")
-    return 0
+import unittest
+
+
+class TestRefinedComplex(unittest.TestCase):
+    """Test complex refined type scenarios"""
+
+    def test_multiple_predicates(self):
+        """Test value with multiple predicate constraints"""
+        self.assertEqual(test_multiple_predicates(), 42)
+
+    def test_refine_multiple_predicates_success(self):
+        """Test refine with multiple predicates - all pass"""
+        self.assertEqual(test_refine_multiple_predicates_success(), 50)
+
+    def test_refine_multiple_predicates_fail(self):
+        """Test refine with multiple predicates - one fails"""
+        self.assertEqual(test_refine_multiple_predicates_fail(), -999)
+
+    def test_predicates_with_tags(self):
+        """Test combining predicates and tags"""
+        self.assertEqual(test_predicates_with_tags(), 10)
+
+    def test_refine_predicates_with_tags(self):
+        """Test refine with predicates and tags"""
+        self.assertEqual(test_refine_predicates_with_tags(), 20)
+
+    def test_multiple_tags_only(self):
+        """Test refined type with only tags"""
+        self.assertEqual(test_multiple_tags_only(), 100)
+
+    def test_refine_tags_only(self):
+        """Test refine with only tags - always succeeds"""
+        self.assertEqual(test_refine_tags_only(), 200)
+
+    def test_complex_combination(self):
+        """Test complex combination: multiple predicates + multiple tags"""
+        self.assertEqual(test_complex_combination(), 42)
+
+    def test_refine_complex_success(self):
+        """Test complex refine - all predicates pass"""
+        self.assertEqual(test_refine_complex_success(), 48)
+
+    def test_refine_complex_fail(self):
+        """Test complex refine - one predicate fails"""
+        self.assertEqual(test_refine_complex_fail(), -999)
+
+    def test_implicit_cast_to_base(self):
+        """Test implicit cast from refined type to base type"""
+        self.assertEqual(test_implicit_cast_to_base(), 11)
+
+    def test_explicit_cast_add_constraints(self):
+        """Test explicit cast to add more constraints"""
+        self.assertEqual(test_explicit_cast_add_constraints(), 50)
+
+    def test_explicit_cast_change_tags(self):
+        """Test explicit cast to change tags"""
+        self.assertEqual(test_explicit_cast_change_tags(), 30)
+
+    def test_refine_as_refinement(self):
+        """Test using refine to add runtime-checked constraints"""
+        self.assertEqual(test_refine_as_refinement(), 75)
+
+    def test_refine_refinement_fail(self):
+        """Test refine fails when constraints not met"""
+        self.assertEqual(test_refine_refinement_fail(), -999)
+
+    def test_multiarg_basic(self):
+        """Test multi-arg refined type creation"""
+        self.assertEqual(test_multiarg_basic(), 30)
+
+    def test_multiarg_refine_pass(self):
+        """Test multi-arg refine success"""
+        self.assertEqual(test_multiarg_refine_pass(), 20)
+
+    def test_multiarg_refine_fail(self):
+        """Test multi-arg refine failure"""
+        self.assertEqual(test_multiarg_refine_fail(), -999)
+
+    def test_nested_refine(self):
+        """Test nested refine - checking multiple constraints in sequence"""
+        self.assertEqual(test_nested_refine(), 48)
+
+    def test_nested_refine_early_fail(self):
+        """Test nested refine with early failure"""
+        self.assertEqual(test_nested_refine_early_fail(), -999)
+
+    def test_safe_divide_refined_valid(self):
+        """Test safe division with refined type"""
+        self.assertEqual(test_safe_divide_refined_valid(), 25)
+
+    def test_safe_divide_refined_zero(self):
+        """Test safe division with zero"""
+        self.assertEqual(test_safe_divide_refined_zero(), 0)
+
+    def test_tag_accumulation(self):
+        """Test that tags can be added through multiple assume calls"""
+        self.assertEqual(test_tag_accumulation(), 50)
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()

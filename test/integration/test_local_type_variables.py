@@ -45,40 +45,24 @@ def test_nested_scopes() -> i32:
     return x
 
 
+import unittest
+
+
+class TestLocalTypeVariables(unittest.TestCase):
+    """Test local Python type variables in type annotations"""
+
+    def test_local_type_alias(self):
+        """Test local type alias: MyType = i32"""
+        self.assertEqual(test_local_type_alias(), 42)
+
+    def test_ptr_subscript(self):
+        """Test ptr subscript with local type variable"""
+        self.assertEqual(test_ptr_subscript(), 99)
+
+    def test_nested_scopes(self):
+        """Test type variables in nested scopes"""
+        self.assertEqual(test_nested_scopes(), 20)
+
+
 if __name__ == '__main__':
-    print("=" * 70)
-    print("Test local Python type variables in type annotations")
-    print("=" * 70)
-    print()
-    
-    print("Test 1: Local type alias")
-    result = test_local_type_alias()
-    print(f"  Result: {result}")
-    assert result == 42, f"Expected 42, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 2: ptr subscript with local type variable")
-    result = test_ptr_subscript()
-    print(f"  Result: {result}")
-    assert result == 99, f"Expected 99, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 3: Nested scopes")
-    result = test_nested_scopes()
-    print(f"  Result: {result}")
-    assert result == 20, f"Expected 20, got {result}"
-    print("  Passed")
-    print()
-    
-    print("=" * 70)
-    print("All tests passed!")
-    print("=" * 70)
-    print()
-    print("Summary:")
-    print("  - Local Python type variables (MyType = i32) work")
-    print("  - Type annotations can reference local variables (x: MyType)")
-    print("  - Type subscripts work with local variables (ptr[T])")
-    print("  - TypeResolver can access visitor's symbol table")
-    print()
+    unittest.main()

@@ -316,153 +316,143 @@ class Decl:
 
 
 # =============================================================================
-# Metaprogramming: Generate refined types, linear alloc/free, and API
+# Refined types (nonnull predicates and refined pointer types)
 # =============================================================================
 
-def _make_ast_memory_api():
-    """Generate all memory management infrastructure via metaprogramming.
-    
-    For each AST type, generates:
-    - nonnull predicate and refined type (e.g., ctype_nonnull, CTypeRef)
-    - raw alloc/free functions
-    - linear-wrapped alloc/free with proof types
-    
-    Returns dict with all generated items to be exported to module namespace.
-    """
-    # Types that need single-element allocation with linear tracking
-    _linear_types = [
-        ('ctype', CType),
-        ('qualtype', QualType),
-        ('ptrtype', PtrType),
-        ('arraytype', ArrayType),
-        ('functype', FuncType),
-        ('structtype', StructType),
-        ('enumtype', EnumType),
-        ('decl', Decl),
-    ]
-    
-    # Types that need array allocation (no linear tracking for now)
-    _array_types = [
-        ('paraminfo', ParamInfo),
-        ('fieldinfo', FieldInfo),
-        ('enumvalue', EnumValue),
-    ]
-    
-    # All types that need nonnull refined types
-    _all_types = _linear_types + _array_types
-    
-    exports = {}
-    
-    # Generate nonnull predicates and refined types
-    for name, typ in _all_types:
-        pred, ref_type = nonnull_wrap(ptr[typ])
-        exports[f'{name}_nonnull'] = pred
-        exports[f'{typ.__name__}Ref'] = ref_type
-    
-    # Generate raw alloc/free and linear-wrapped versions for linear types
-    for name, typ in _linear_types:
-        # Use unique function names to avoid symbol conflicts in linear_wrap
-        type_name = typ.__name__
-        
-        # Generate raw alloc with unique name
-        @compile(suffix=typ)
-        def _alloc_raw() -> ptr[typ]:
-            return ptr[typ](malloc(sizeof(typ)))
-        _alloc_raw.__name__ = f'{name}_alloc_raw'
-        
-        # Generate raw free with unique name
-        @compile(suffix=typ)
-        def _free_raw(p: ptr[typ]) -> void:
-            free(p)
-        _free_raw.__name__ = f'{name}_free_raw'
-        
-        # Wrap with linear_wrap
-        proof_type, alloc_fn, free_fn = linear_wrap(
-            _alloc_raw, _free_raw, struct_name=f'{type_name}Proof')
-        
-        exports[f'{type_name}Proof'] = proof_type
-        exports[f'{name}_alloc'] = alloc_fn
-        exports[f'{name}_free_linear'] = free_fn
-    
-    # Generate array allocation functions
-    for name, typ in _array_types:
-        @compile(suffix=typ)
-        def _array_alloc(count: i32) -> ptr[typ]:
-            return ptr[typ](malloc(sizeof(typ) * count))
-        exports[f'{name}_alloc'] = _array_alloc
-    
-    # Build alloc API class
-    class AllocApi:
-        """Allocation functions for C AST types
-        
-        Linear allocation (returns proof + ptr):
-            prf, ty = alloc.ctype()
-            # ... use ty ...
-            ctype_free_linear(prf, ty)
-        
-        Array allocation:
-            params = alloc.paraminfo(count)
-        """
-        pass
-    
-    for name, _ in _linear_types + _array_types:
-        setattr(AllocApi, name, staticmethod(exports[f'{name}_alloc']))
-    
-    exports['alloc'] = AllocApi
-    
-    return exports
-
-
-# Force resolve forward references before metaprogramming
-# This ensures all types are fully resolved when linear_wrap calls get_type_id
+# Force resolve forward references first
 _all_struct_types = [PtrType, ArrayType, ParamInfo, FuncType, FieldInfo, 
                      StructType, EnumValue, EnumType, QualType, Decl]
 for _t in _all_struct_types:
     if hasattr(_t, '_ensure_field_types_resolved'):
         _t._ensure_field_types_resolved()
 
-# Execute metaprogramming and export to module namespace
-_ast_api = _make_ast_memory_api()
-globals().update(_ast_api)
+# Nonnull predicates and refined types for all AST types
+ctype_nonnull, CTypeRef = nonnull_wrap(ptr[CType])
+qualtype_nonnull, QualTypeRef = nonnull_wrap(ptr[QualType])
+ptrtype_nonnull, PtrTypeRef = nonnull_wrap(ptr[PtrType])
+arraytype_nonnull, ArrayTypeRef = nonnull_wrap(ptr[ArrayType])
+functype_nonnull, FuncTypeRef = nonnull_wrap(ptr[FuncType])
+structtype_nonnull, StructTypeRef = nonnull_wrap(ptr[StructType])
+enumtype_nonnull, EnumTypeRef = nonnull_wrap(ptr[EnumType])
+paraminfo_nonnull, ParamInfoRef = nonnull_wrap(ptr[ParamInfo])
+fieldinfo_nonnull, FieldInfoRef = nonnull_wrap(ptr[FieldInfo])
+enumvalue_nonnull, EnumValueRef = nonnull_wrap(ptr[EnumValue])
+decl_nonnull, DeclRef = nonnull_wrap(ptr[Decl])
 
-# Re-export commonly used items for IDE autocomplete
-CTypeRef = _ast_api['CTypeRef']
-QualTypeRef = _ast_api['QualTypeRef']
-PtrTypeRef = _ast_api['PtrTypeRef']
-ArrayTypeRef = _ast_api['ArrayTypeRef']
-FuncTypeRef = _ast_api['FuncTypeRef']
-StructTypeRef = _ast_api['StructTypeRef']
-EnumTypeRef = _ast_api['EnumTypeRef']
-ParamInfoRef = _ast_api['ParamInfoRef']
-FieldInfoRef = _ast_api['FieldInfoRef']
-EnumValueRef = _ast_api['EnumValueRef']
-DeclRef = _ast_api['DeclRef']
 
-CTypeProof = _ast_api['CTypeProof']
-QualTypeProof = _ast_api['QualTypeProof']
-PtrTypeProof = _ast_api['PtrTypeProof']
-ArrayTypeProof = _ast_api['ArrayTypeProof']
-FuncTypeProof = _ast_api['FuncTypeProof']
-StructTypeProof = _ast_api['StructTypeProof']
-EnumTypeProof = _ast_api['EnumTypeProof']
-DeclProof = _ast_api['DeclProof']
+# =============================================================================
+# Raw alloc/free functions for linear types
+# =============================================================================
 
-ctype_alloc = _ast_api['ctype_alloc']
-qualtype_alloc = _ast_api['qualtype_alloc']
-ptrtype_alloc = _ast_api['ptrtype_alloc']
-arraytype_alloc = _ast_api['arraytype_alloc']
-functype_alloc = _ast_api['functype_alloc']
-structtype_alloc = _ast_api['structtype_alloc']
-enumtype_alloc = _ast_api['enumtype_alloc']
-decl_alloc = _ast_api['decl_alloc']
-paraminfo_alloc = _ast_api['paraminfo_alloc']
-fieldinfo_alloc = _ast_api['fieldinfo_alloc']
-enumvalue_alloc = _ast_api['enumvalue_alloc']
+@compile
+def _ctype_alloc_raw() -> ptr[CType]:
+    return ptr[CType](malloc(sizeof(CType)))
 
-ctype_free_linear = _ast_api['ctype_free_linear']
-qualtype_free_linear = _ast_api['qualtype_free_linear']
+@compile
+def _ctype_free_raw(p: ptr[CType]) -> void:
+    free(p)
 
-alloc = _ast_api['alloc']
+@compile
+def _qualtype_alloc_raw() -> ptr[QualType]:
+    return ptr[QualType](malloc(sizeof(QualType)))
+
+@compile
+def _qualtype_free_raw(p: ptr[QualType]) -> void:
+    free(p)
+
+@compile
+def _ptrtype_alloc_raw() -> ptr[PtrType]:
+    return ptr[PtrType](malloc(sizeof(PtrType)))
+
+@compile
+def _ptrtype_free_raw(p: ptr[PtrType]) -> void:
+    free(p)
+
+@compile
+def _arraytype_alloc_raw() -> ptr[ArrayType]:
+    return ptr[ArrayType](malloc(sizeof(ArrayType)))
+
+@compile
+def _arraytype_free_raw(p: ptr[ArrayType]) -> void:
+    free(p)
+
+@compile
+def _functype_alloc_raw() -> ptr[FuncType]:
+    return ptr[FuncType](malloc(sizeof(FuncType)))
+
+@compile
+def _functype_free_raw(p: ptr[FuncType]) -> void:
+    free(p)
+
+@compile
+def _structtype_alloc_raw() -> ptr[StructType]:
+    return ptr[StructType](malloc(sizeof(StructType)))
+
+@compile
+def _structtype_free_raw(p: ptr[StructType]) -> void:
+    free(p)
+
+@compile
+def _enumtype_alloc_raw() -> ptr[EnumType]:
+    return ptr[EnumType](malloc(sizeof(EnumType)))
+
+@compile
+def _enumtype_free_raw(p: ptr[EnumType]) -> void:
+    free(p)
+
+@compile
+def _decl_alloc_raw() -> ptr[Decl]:
+    return ptr[Decl](malloc(sizeof(Decl)))
+
+@compile
+def _decl_free_raw(p: ptr[Decl]) -> void:
+    free(p)
+
+
+# =============================================================================
+# Linear-wrapped alloc/free with proof types
+# =============================================================================
+
+CTypeProof, ctype_alloc, ctype_free_linear = linear_wrap(
+    _ctype_alloc_raw, _ctype_free_raw, struct_name='CTypeProof')
+
+QualTypeProof, qualtype_alloc, qualtype_free_linear = linear_wrap(
+    _qualtype_alloc_raw, _qualtype_free_raw, struct_name='QualTypeProof')
+
+PtrTypeProof, ptrtype_alloc, ptrtype_free_linear = linear_wrap(
+    _ptrtype_alloc_raw, _ptrtype_free_raw, struct_name='PtrTypeProof')
+
+ArrayTypeProof, arraytype_alloc, arraytype_free_linear = linear_wrap(
+    _arraytype_alloc_raw, _arraytype_free_raw, struct_name='ArrayTypeProof')
+
+FuncTypeProof, functype_alloc, functype_free_linear = linear_wrap(
+    _functype_alloc_raw, _functype_free_raw, struct_name='FuncTypeProof')
+
+StructTypeProof, structtype_alloc, structtype_free_linear = linear_wrap(
+    _structtype_alloc_raw, _structtype_free_raw, struct_name='StructTypeProof')
+
+EnumTypeProof, enumtype_alloc, enumtype_free_linear = linear_wrap(
+    _enumtype_alloc_raw, _enumtype_free_raw, struct_name='EnumTypeProof')
+
+DeclProof, decl_alloc, decl_free_linear = linear_wrap(
+    _decl_alloc_raw, _decl_free_raw, struct_name='DeclProof')
+
+
+# =============================================================================
+# Array allocation functions (no linear tracking)
+# =============================================================================
+
+@compile
+def paraminfo_alloc(count: i32) -> ptr[ParamInfo]:
+    return ptr[ParamInfo](malloc(sizeof(ParamInfo) * count))
+
+@compile
+def fieldinfo_alloc(count: i32) -> ptr[FieldInfo]:
+    return ptr[FieldInfo](malloc(sizeof(FieldInfo) * count))
+
+@compile
+def enumvalue_alloc(count: i32) -> ptr[EnumValue]:
+    return ptr[EnumValue](malloc(sizeof(EnumValue) * count))
 
 
 # =============================================================================

@@ -127,6 +127,11 @@ class YieldInlineAdapter:
                     for decl in reversed(decls):
                         inlined_stmts.insert(0, decl)
                 
+                # NOTE: for-else is handled by stmt_loops.py, NOT here
+                # Python for-else semantics: else executes when loop completes without break
+                # This is different from attaching else to if's orelse (which would execute
+                # when condition is false, not when loop completes normally)
+                
                 # Return the statements AND old_user_globals for caller to restore
                 # Caller MUST restore globals after visiting all statements!
                 return (inlined_stmts, old_user_globals)

@@ -123,62 +123,62 @@ def test_u8_wrap() -> u8:
 # Run all tests
 # =============================================================================
 
+import unittest
+
+
+class TestCtypesMapping(unittest.TestCase):
+    """Test ctypes mapping for pythoc types"""
+
+    def test_u32_max(self):
+        """u32 max value should be 0xFFFFFFFF, not -1"""
+        self.assertEqual(test_u32_max(), 0xFFFFFFFF)
+
+    def test_u8_max(self):
+        """u8 max value should be 255, not -1"""
+        self.assertEqual(test_u8_max(), 255)
+
+    def test_u16_max(self):
+        """u16 max value should be 65535, not -1"""
+        self.assertEqual(test_u16_max(), 65535)
+
+    def test_u64_large(self):
+        """u64 large value should be positive"""
+        self.assertEqual(test_u64_large(), 0x8000000000000000)
+
+    def test_u32_rshift(self):
+        """Unsigned right shift should use logical shift"""
+        self.assertEqual(test_u32_rshift(), 0x20000000)
+
+    def test_i32_rshift(self):
+        """Signed right shift should use arithmetic shift"""
+        self.assertEqual(test_i32_rshift(), -536870912)
+
+    def test_bool_from_nonzero(self):
+        """bool(42) should be True"""
+        self.assertEqual(test_bool_from_nonzero(), True)
+
+    def test_bool_from_zero(self):
+        """bool(0) should be False"""
+        self.assertEqual(test_bool_from_zero(), False)
+
+    def test_bool_from_one(self):
+        """bool(1) should be True"""
+        self.assertEqual(test_bool_from_one(), True)
+
+    def test_struct_return(self):
+        """Struct return should work correctly"""
+        result = test_struct_return()
+        self.assertEqual(result.x, 123)
+        self.assertEqual(result.y, 456)
+
+    def test_u32_left_shift(self):
+        """Left shift to high bit"""
+        self.assertEqual(test_u32_left_shift(), 2147483648)
+
+    def test_u8_wrap(self):
+        """u8 should wrap correctly"""
+        self.assertEqual(test_u8_wrap(), 44)
+
+
 if __name__ == '__main__':
-    print("Testing ctypes mapping...")
-    
-    # Unsigned return values
-    result = test_u32_max()
-    assert result == 0xFFFFFFFF, f"test_u32_max: expected {0xFFFFFFFF}, got {result}"
-    print(f"  test_u32_max: {result} (0x{result:08X}) OK")
-    
-    result = test_u8_max()
-    assert result == 255, f"test_u8_max: expected 255, got {result}"
-    print(f"  test_u8_max: {result} OK")
-    
-    result = test_u16_max()
-    assert result == 65535, f"test_u16_max: expected 65535, got {result}"
-    print(f"  test_u16_max: {result} OK")
-    
-    result = test_u64_large()
-    assert result == 0x8000000000000000, f"test_u64_large: expected {0x8000000000000000}, got {result}"
-    print(f"  test_u64_large: {result} (0x{result:016X}) OK")
-    
-    # Unsigned shift
-    result = test_u32_rshift()
-    assert result == 0x20000000, f"test_u32_rshift: expected {0x20000000}, got {result}"
-    print(f"  test_u32_rshift: {result} (0x{result:08X}) OK")
-    
-    result = test_i32_rshift()
-    assert result == -536870912, f"test_i32_rshift: expected -536870912, got {result}"
-    print(f"  test_i32_rshift: {result} OK")
-    
-    # Bool conversion
-    result = test_bool_from_nonzero()
-    assert result == True, f"test_bool_from_nonzero: expected True, got {result}"
-    print(f"  test_bool_from_nonzero: {result} OK")
-    
-    result = test_bool_from_zero()
-    assert result == False, f"test_bool_from_zero: expected False, got {result}"
-    print(f"  test_bool_from_zero: {result} OK")
-    
-    result = test_bool_from_one()
-    assert result == True, f"test_bool_from_one: expected True, got {result}"
-    print(f"  test_bool_from_one: {result} OK")
-    
-    # Struct return
-    result = test_struct_return()
-    assert result.x == 123, f"test_struct_return.x: expected 123, got {result.x}"
-    assert result.y == 456, f"test_struct_return.y: expected 456, got {result.y}"
-    print(f"  test_struct_return: ({result.x}, {result.y}) OK")
-    
-    # Left shift
-    result = test_u32_left_shift()
-    assert result == 2147483648, f"test_u32_left_shift: expected 2147483648, got {result}"
-    print(f"  test_u32_left_shift: {result} OK")
-    
-    # Wrap
-    result = test_u8_wrap()
-    assert result == 44, f"test_u8_wrap: expected 44, got {result}"
-    print(f"  test_u8_wrap: {result} OK")
-    
-    print("\nAll ctypes mapping tests passed!")
+    unittest.main()

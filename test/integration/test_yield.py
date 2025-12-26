@@ -10,6 +10,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
+import unittest
 from pythoc import compile, i32
 from pythoc.builtin_entities.types import bool as bool_type
 
@@ -91,44 +92,27 @@ def test_empty() -> i32:
     return count
 
 
-def main():
-    """Run all tests"""
-    print("Testing yield-based generators...")
-    print()
+class TestYield(unittest.TestCase):
+    def test_simple_seq(self):
+        result = test_simple_seq()
+        expected = sum(range(10))  # 45
+        self.assertEqual(result, expected)
     
-    # Test simple_seq
-    result = test_simple_seq()
-    expected = sum(range(10))
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_simple_seq: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
+    def test_countdown(self):
+        result = test_countdown()
+        expected = 5 + 4 + 3 + 2 + 1  # 15
+        self.assertEqual(result, expected)
     
-    # Test countdown
-    result = test_countdown()
-    expected = 5 + 4 + 3 + 2 + 1
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_countdown: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
+    def test_fibonacci(self):
+        result = test_fibonacci()
+        # Fibonacci < 100: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89
+        expected = 0 + 1 + 1 + 2 + 3 + 5 + 8 + 13 + 21 + 34 + 55 + 89  # 232
+        self.assertEqual(result, expected)
     
-    # Test fibonacci
-    result = test_fibonacci()
-    # Fibonacci < 100: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89
-    expected = 0 + 1 + 1 + 2 + 3 + 5 + 8 + 13 + 21 + 34 + 55 + 89
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_fibonacci: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
-    
-    # Test empty
-    result = test_empty()
-    expected = 0
-    status = "PASS" if result == expected else "FAIL"
-    print(f"test_empty: {status} (result={result}, expected={expected})")
-    assert result == expected, f"Expected {expected}, got {result}"
-    
-    print()
-    print("All yield tests passed!")
-    return 0
+    def test_empty(self):
+        result = test_empty()
+        self.assertEqual(result, 0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    unittest.main()

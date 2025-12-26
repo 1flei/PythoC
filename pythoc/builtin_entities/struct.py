@@ -151,11 +151,19 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         return cls._python_class is not None
     
     @classmethod
-    def _build_llvm_field_map(cls) -> Dict[int, int]:
+    def _build_llvm_field_map(cls, module_context=None) -> Dict[int, int]:
         """Build mapping from PC field index to LLVM field index.
         
-        This is needed because zero-sized fields (like pyconst) are skipped
+        This is needed because zero-sized fields (like pyconst) could be skipped
         in LLVM struct layout but still exist in PC field list.
+        
+        Note: Currently all types have LLVM representation (pyconst and linear
+        use empty struct {}), so this is effectively a 1:1 mapping. The logic
+        is kept for future extensibility.
+        
+        Args:
+            module_context: Optional module context for types that need it
+                           (e.g., @compile class types)
         
         Returns:
             Dict[int, int]: PC field index -> LLVM field index
@@ -167,42 +175,43 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         llvm_idx = 0
         
         for pc_idx, field_type in enumerate(cls._field_types):
-            # Check if field is zero-sized
-            # Criteria: get_size_bytes() == 0 AND get_llvm_type() returns None
-            # (linear type is zero-sized but has LLVM representation as empty struct)
-            is_zero_sized = False
-            if hasattr(field_type, 'get_size_bytes'):
-                field_size = field_type.get_size_bytes()
-                if field_size == 0:
-                    # Check if it has no LLVM representation (like pyconst)
-                    # linear has empty struct representation, so it's NOT skipped
-                    if hasattr(field_type, 'get_llvm_type'):
-                        llvm_type = field_type.get_llvm_type()
-                        if llvm_type is None:
-                            is_zero_sized = True
+            # Check if field has LLVM representation
+            # Currently all types return non-None from get_llvm_type()
+            has_llvm_repr = True
             
-            if is_zero_sized:
-                # Zero-sized field (pyconst) - mark as -1
-                field_map[pc_idx] = -1
-            else:
-                # Normal field - assign LLVM index
+            if hasattr(field_type, 'get_llvm_type'):
+                # For types that need module_context (like @compile class),
+                # we assume they have LLVM representation if module_context is not provided
+                # This is safe because all current types have LLVM representation
+                if module_context is not None:
+                    llvm_type = field_type.get_llvm_type(module_context)
+                    if llvm_type is None:
+                        has_llvm_repr = False
+                # else: assume has LLVM representation (safe default)
+            
+            if has_llvm_repr:
                 field_map[pc_idx] = llvm_idx
                 llvm_idx += 1
+            else:
+                field_map[pc_idx] = -1
         
         return field_map
     
     @classmethod
-    def _get_llvm_field_index(cls, pc_field_index: int) -> int:
+    def _get_llvm_field_index(cls, pc_field_index: int, module_context=None) -> int:
         """Get LLVM field index from PC field index.
         
         Args:
             pc_field_index: PC field index (0-based)
+            module_context: Optional module context for building field map
         
         Returns:
             LLVM field index, or -1 for zero-sized fields
         """
-        if cls._llvm_field_map is None:
-            cls._llvm_field_map = cls._build_llvm_field_map()
+        # Rebuild map if module_context provided (for accurate mapping)
+        # or use cached map if available
+        if module_context is not None or cls._llvm_field_map is None:
+            cls._llvm_field_map = cls._build_llvm_field_map(module_context)
         
         return cls._llvm_field_map.get(pc_field_index, -1)
     
@@ -500,7 +509,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             return field_type.handle_field_access(visitor, base, field_index, attr_name, node)
         
         # Get LLVM field index (may differ from PC index due to zero-sized fields)
-        llvm_field_index = cls._get_llvm_field_index(field_index)
+        module_context = visitor.module.context if visitor.module else None
+        llvm_field_index = cls._get_llvm_field_index(field_index, module_context)
         if llvm_field_index == -1:
             # This shouldn't happen if handle_field_access is implemented correctly
             logger.error(f"Zero-sized field '{attr_name}' has no LLVM representation",
@@ -583,7 +593,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             return field_type.handle_field_access(visitor, base, index_val, field_name, node)
         
         # Get LLVM field index
-        llvm_index_val = cls._get_llvm_field_index(index_val)
+        module_context = visitor.module.context if visitor.module else None
+        llvm_index_val = cls._get_llvm_field_index(index_val, module_context)
         if llvm_index_val == -1:
             logger.error(f"Zero-sized field [{index_val}] has no LLVM representation",
                         node=node, exc_type=TypeError)

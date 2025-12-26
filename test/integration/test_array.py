@@ -364,39 +364,43 @@ def test_tuple_index_assignment() -> i32:
     
     return 0
 
-test_array()
-test_1d_array()
-test_partial_init()
-test_zero_init()
-test_array_to_pointer()
-test_2d_array()
-test_3d_array()
+if __name__ == "__main__":
+    test_array()
+    test_1d_array()
+    test_partial_init()
+    test_zero_init()
+    test_array_to_pointer()
+    test_2d_array()
+    test_3d_array()
 
-# Run demos
-printf("=== Array Sum Demo ===\n")
-array_sum()
+    # Run demos
+    printf("=== Array Sum Demo ===\n")
+    result = array_sum()
+    assert result == 150, f"array_sum expected 150, got {result}"
 
-printf("\n=== Matrix Multiply Demo ===\n")
-matrix_multiply()
+    printf("\n=== Matrix Multiply Demo ===\n")
+    matrix_multiply()
 
-printf("\n=== Array Pointer Demo ===\n")
-array_pointer_demo()
+    printf("\n=== Array Pointer Demo ===\n")
+    array_pointer_demo()
 
-# Test tuple indexing feature
-printf("\n=== Tuple Index 2D Test ===\n")
-test_tuple_index_2d()
+    # Test tuple indexing feature
+    printf("\n=== Tuple Index 2D Test ===\n")
+    test_tuple_index_2d()
 
-printf("\n=== Tuple Index 3D Test ===\n")
-test_tuple_index_3d()
+    printf("\n=== Tuple Index 3D Test ===\n")
+    test_tuple_index_3d()
 
-printf("\n=== Tuple Index 4D Test ===\n")
-test_tuple_index_4d()
+    printf("\n=== Tuple Index 4D Test ===\n")
+    test_tuple_index_4d()
 
-printf("\n=== Tuple Index Mixed Test ===\n")
-test_tuple_index_mixed()
+    printf("\n=== Tuple Index Mixed Test ===\n")
+    test_tuple_index_mixed()
 
-printf("\n=== Tuple Index Arithmetic Test ===\n")
-test_tuple_index_arithmetic()
+    printf("\n=== Tuple Index Arithmetic Test ===\n")
+    test_tuple_index_arithmetic()
 
-printf("\n=== Tuple Index Assignment Test ===\n")
-test_tuple_index_assignment()
+    printf("\n=== Tuple Index Assignment Test ===\n")
+    test_tuple_index_assignment()
+    
+    print("All array tests passed!")

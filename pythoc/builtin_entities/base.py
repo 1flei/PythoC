@@ -671,6 +671,20 @@ class BuiltinType(BuiltinEntity):
 class BuiltinFunction(BuiltinEntity):
     """Base class for built-in function entities"""
     
+    # If True, arguments to this function do NOT have their linear ownership transferred.
+    # This is used for functions like ptr() that borrow rather than consume.
+    # Default is False (normal behavior: arguments are consumed).
+    _borrows_args: bool = False
+    
     @classmethod
     def can_be_called(cls) -> bool:
         return True
+    
+    @classmethod
+    def borrows_args(cls) -> bool:
+        """Return True if this function borrows arguments without consuming them.
+        
+        When True, visit_Call will NOT call _transfer_linear_ownership on arguments.
+        This is used for functions like ptr() that take a reference without ownership.
+        """
+        return cls._borrows_args

@@ -57,48 +57,49 @@ def char_slash() -> i8:
     return char("/")
 
 
+import unittest
+
+
+class TestChar(unittest.TestCase):
+    """Test char builtin function"""
+
+    def test_char_string_first(self):
+        """Test char() with multi-character string"""
+        self.assertEqual(char_string_first(), ord('a'))
+
+    def test_char_string_single(self):
+        """Test char() with single character string"""
+        self.assertEqual(char_string_single(), ord('s'))
+
+    def test_char_string_empty(self):
+        """Test char() with empty string"""
+        self.assertEqual(char_string_empty(), 0)
+
+    def test_char_int(self):
+        """Test char() with integer"""
+        self.assertEqual(char_int(), 48)
+
+    def test_char_int_negative(self):
+        """Test char() with negative integer"""
+        self.assertEqual(char_int_negative(), -1)
+
+    def test_char_newline(self):
+        """Test char() with newline"""
+        self.assertEqual(char_newline(), ord('\n'))
+
+    def test_char_tab(self):
+        """Test char() with tab"""
+        self.assertEqual(char_tab(), ord('\t'))
+
+    def test_char_star(self):
+        """Test char() with star"""
+        self.assertEqual(char_star(), 42)
+
+    def test_char_slash(self):
+        """Test char() with slash"""
+        self.assertEqual(char_slash(), 47)
+
+
 if __name__ == "__main__":
-    print("Testing char builtin function...")
-    print()
-    
-    result = char_string_first()
-    assert result == ord('a'), f"Expected {ord('a')}, got {result}"
-    print(f"char('abc') = {result} (expected {ord('a')})")
-    
-    result = char_string_single()
-    assert result == ord('s'), f"Expected {ord('s')}, got {result}"
-    print(f"char('s') = {result} (expected {ord('s')})")
-    
-    result = char_string_empty()
-    assert result == 0, f"Expected 0, got {result}"
-    print(f"char('') = {result} (expected 0)")
-    
-    result = char_int()
-    assert result == 48, f"Expected 48, got {result}"
-    print(f"char(48) = {result} (expected 48)")
-    
-    result = char_int_negative()
-    assert result == -1, f"Expected -1, got {result}"
-    print(f"char(-1) = {result} (expected -1)")
-    
-    result_newline = char_newline()
-    expected_newline = ord('\n')
-    assert result_newline == expected_newline, f"Expected {expected_newline}, got {result_newline}"
-    print(f"char('\\n') = {result_newline} (expected {expected_newline})")
-    
-    result_tab = char_tab()
-    expected_tab = ord('\t')
-    assert result_tab == expected_tab, f"Expected {expected_tab}, got {result_tab}"
-    print(f"char('\\t') = {result_tab} (expected {expected_tab})")
-    
-    star = char_star()
-    assert star == 42, f"Expected 42 (ord('*')), got {star}"
-    print(f"char('*') = {star} (expected 42)")
-    
-    slash = char_slash()
-    assert slash == 47, f"Expected 47 (ord('/')), got {slash}"
-    print(f"char('/') = {slash} (expected 47)")
-    
-    print()
-    print("All tests passed!")
+    unittest.main()
 

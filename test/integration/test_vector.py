@@ -29,9 +29,12 @@ def test_base(vect, push_size):
         return 0
     return test_vector
 
-fs = []
-for t in [IntVec, I16Vec, I64Vec]:
-    fs += [test_base(t, 10)]
+if __name__ == "__main__":
+    fs = []
+    for t in [IntVec, I16Vec, I64Vec]:
+        fs += [test_base(t, 10)]
 
-for f in fs:
-    f()
+    for f in fs:
+        f()
+    
+    print("All vector tests passed!")

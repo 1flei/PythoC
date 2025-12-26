@@ -115,20 +115,32 @@ def test_multiple_allocations():
     print("  multiple allocations: PASS")
 
 
+import unittest
+
+
+class TestLinearWrapper(unittest.TestCase):
+    """Test linear_wrapper metaprogramming utilities"""
+
+    def test_malloc_free_wrapper(self):
+        """Test linear_wrap with malloc/free"""
+        test_alloc()
+
+    def test_fopen_fclose_wrapper(self):
+        """Test linear_wrap with fopen/fclose"""
+        test_file()
+
+    def test_malloc_struct_wrapper(self):
+        """Test linear_wrap with struct return"""
+        test_alloc_struct()
+
+    def test_file_struct_wrapper(self):
+        """Test linear_wrap with struct return for fopen/fclose"""
+        test_file_struct()
+
+    def test_multiple_allocations(self):
+        """Test multiple allocations with linear tokens"""
+        test_multi()
+
+
 if __name__ == '__main__':
-    print("Running linear_wrapper tests...\n")
-    
-    try:
-        test_malloc_free_wrapper()
-        test_fopen_fclose_wrapper()
-        test_malloc_struct_wrapper()
-        test_file_struct_wrapper()
-        test_multiple_allocations()
-        
-        print("\nAll linear_wrapper tests passed!")
-        
-    except Exception as e:
-        print(f"\nTest failed with error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    unittest.main()

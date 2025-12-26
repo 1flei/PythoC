@@ -70,4 +70,11 @@ def main() -> i32:
     printf("test_sizeof_struct3: %d\n", test_sizeof_struct3())
     return 0
 
-main()
+if __name__ == "__main__":
+    main()
+    
+    # Verify results
+    assert test_sizeof_basic() == 21, f"test_sizeof_basic expected 21, got {test_sizeof_basic()}"
+    assert test_sizeof_pointers() == 16, f"test_sizeof_pointers expected 16, got {test_sizeof_pointers()}"
+    
+    print("All sizeof tests passed!")

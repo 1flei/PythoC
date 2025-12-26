@@ -8,23 +8,24 @@ Tests:
 - Integration with array decay
 """
 
+import unittest
 from pythoc import i32, compile, seq, static, array, ptr
 from pythoc.libc.stdio import printf
 
 
 @compile
-def test_ptr_type_syntax():
+def test_ptr_type_syntax() -> i32:
     """Test that ptr[T, dims...] type syntax works"""
     xs: static[array[i32, 3, 4]]
     
     # ptr[i32, 3, 4] should be equivalent to ptr[array[i32, 4]]
     p: ptr[i32, 3, 4] = xs
     
-    printf("ptr type syntax test passed\n")
+    return 0
 
 
 @compile
-def test_ptr_2d_subscript():
+def test_ptr_2d_subscript() -> i32:
     """Test 2D pointer subscript"""
     xs: static[array[i32, 3, 4]]
     
@@ -36,13 +37,12 @@ def test_ptr_2d_subscript():
     # Access via pointer with multi-dim subscript
     p: ptr[i32, 3, 4] = xs
     
-    printf("p[0, 0] = %d (expect 0)\n", p[0, 0])
-    printf("p[1, 2] = %d (expect 12)\n", p[1, 2])
-    printf("p[2, 3] = %d (expect 23)\n", p[2, 3])
+    # p[0, 0] = 0, p[1, 2] = 12, p[2, 3] = 23
+    return p[0, 0] + p[1, 2] + p[2, 3]  # 0 + 12 + 23 = 35
 
 
 @compile  
-def test_ptr_3d_subscript():
+def test_ptr_3d_subscript() -> i32:
     """Test 3D pointer subscript"""
     xs: static[array[i32, 2, 3, 4]]
     
@@ -51,12 +51,11 @@ def test_ptr_3d_subscript():
     
     p: ptr[i32, 2, 3, 4] = xs
     
-    printf("p[0, 1, 2] = %d (expect 123)\n", p[0, 1, 2])
-    printf("p[1, 2, 3] = %d (expect 456)\n", p[1, 2, 3])
+    return p[0, 1, 2] + p[1, 2, 3]  # 123 + 456 = 579
 
 
 @compile
-def test_ptr_decay_equivalence():
+def test_ptr_decay_equivalence() -> i32:
     """Test that ptr[i32, N, M] is equivalent to ptr[array[i32, M]]"""
     xs: static[array[i32, 3, 4]]
     
@@ -66,13 +65,22 @@ def test_ptr_decay_equivalence():
     p1: ptr[i32, 3, 4] = xs
     p2: ptr[array[i32, 4]] = xs
     
-    printf("p1[1, 2] = %d\n", p1[1, 2])
-    printf("p2[1, 2] = %d\n", p2[1, 2])
+    return p1[1, 2] + p2[1, 2]  # 42 + 42 = 84
+
+
+class TestPtrMultidim(unittest.TestCase):
+    def test_type_syntax(self):
+        self.assertEqual(test_ptr_type_syntax(), 0)
+    
+    def test_2d_subscript(self):
+        self.assertEqual(test_ptr_2d_subscript(), 35)
+    
+    def test_3d_subscript(self):
+        self.assertEqual(test_ptr_3d_subscript(), 579)
+    
+    def test_decay_equivalence(self):
+        self.assertEqual(test_ptr_decay_equivalence(), 84)
 
 
 if __name__ == "__main__":
-    test_ptr_type_syntax()
-    test_ptr_2d_subscript()
-    test_ptr_3d_subscript()
-    test_ptr_decay_equivalence()
-    print("\n=== All ptr multidim tests passed ===")
+    unittest.main()

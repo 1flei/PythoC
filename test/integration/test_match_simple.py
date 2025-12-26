@@ -2,7 +2,9 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
+import unittest
 from pythoc import i32, compile
+
 
 # Test 1: Struct with tuple syntax
 @compile
@@ -10,12 +12,14 @@ class Point:
     x: i32
     y: i32
 
+
 @compile
 def make_point(x: i32, y: i32) -> Point:
     p: Point
     p.x = x
     p.y = y
     return p
+
 
 @compile
 def test_struct_tuple_pattern(px: i32, py: i32) -> i32:
@@ -34,12 +38,14 @@ def test_struct_tuple_pattern(px: i32, py: i32) -> i32:
         case (x, y):
             return x + y
 
+
 # Test 2: Nested patterns
 @compile
 class Rect:
     top_left: Point
     width: i32
     height: i32
+
 
 @compile
 def make_rect(x: i32, y: i32, w: i32, h: i32) -> Rect:
@@ -49,6 +55,7 @@ def make_rect(x: i32, y: i32, w: i32, h: i32) -> Rect:
     r.width = w
     r.height = h
     return r
+
 
 @compile
 def test_nested_pattern(x: i32, y: i32, w: i32, h: i32) -> i32:
@@ -60,34 +67,24 @@ def test_nested_pattern(x: i32, y: i32, w: i32, h: i32) -> i32:
         case ((x, y), w, h):
             return x + y + w + h
 
+
+class TestMatchSimple(unittest.TestCase):
+    def test_struct_origin(self):
+        self.assertEqual(test_struct_tuple_pattern(0, 0), 100)
+    
+    def test_struct_x_axis(self):
+        self.assertEqual(test_struct_tuple_pattern(5, 0), 5)
+    
+    def test_struct_general(self):
+        self.assertEqual(test_struct_tuple_pattern(3, 4), 7)
+    
+    def test_nested_origin(self):
+        self.assertEqual(test_nested_pattern(0, 0, 10, 20), 200)
+    
+    def test_nested_general(self):
+        self.assertEqual(test_nested_pattern(1, 2, 10, 20), 33)
+
+
 if __name__ == "__main__":
-    print("Testing simplified match pattern implementation...")
-    print("\n=== Test 1: Struct Pattern ===")
-    
-    # Test struct
-    result1 = test_struct_tuple_pattern(0, 0)
-    print(f"test_struct_tuple_pattern((0, 0)) = {result1}, expected 100: {'OK' if result1 == 100 else 'FAIL'}")
-    
-    result2 = test_struct_tuple_pattern(5, 0)
-    print(f"test_struct_tuple_pattern((5, 0)) = {result2}, expected 5: {'OK' if result2 == 5 else 'FAIL'}")
-    
-    result3 = test_struct_tuple_pattern(3, 4)
-    print(f"test_struct_tuple_pattern((3, 4)) = {result3}, expected 7: {'OK' if result3 == 7 else 'FAIL'}")
-    
-    print("\n=== Test 2: Nested Pattern ===")
-    
-    # Test nested
-    result6 = test_nested_pattern(0, 0, 10, 20)
-    print(f"test_nested_pattern(((0, 0), 10, 20)) = {result6}, expected 200: {'OK' if result6 == 200 else 'FAIL'}")
-    
-    result7 = test_nested_pattern(1, 2, 10, 20)
-    print(f"test_nested_pattern(((1, 2), 10, 20)) = {result7}, expected 33: {'OK' if result7 == 33 else 'FAIL'}")
-    
-    print("\nOK All tests passed!" if all([
-        result1 == 100,
-        result2 == 5,
-        result3 == 7,
-        result6 == 200,
-        result7 == 33,
-    ]) else "\nFAIL Some tests failed!")
+    unittest.main()
 

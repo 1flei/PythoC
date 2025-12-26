@@ -522,6 +522,13 @@ class LinearChecker:
                     # If entry is active and exit is consumed, use consumed
                     elif entry_state == 'active' and exit_state == 'consumed':
                         merged[var_name][path] = 'consumed'
+                    # If entry is active and exit is active, use active
+                    elif entry_state == 'active' and exit_state == 'active':
+                        merged[var_name][path] = 'active'
+                    # If entry is undefined and exit has a state, use exit state
+                    # (variable was created in this block)
+                    elif entry_state == 'undefined' and exit_state != 'undefined':
+                        merged[var_name][path] = exit_state
                     # Otherwise use entry state
                     else:
                         merged[var_name][path] = entry_state

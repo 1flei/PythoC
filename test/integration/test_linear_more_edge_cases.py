@@ -13,6 +13,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
+import unittest
 from pythoc.decorators.compile import compile
 from pythoc.builtin_entities import linear, consume, void, i32
 from pythoc.std.utility import move
@@ -366,206 +367,105 @@ def run_error_test_match_missing_consume():
 
 
 # =============================================================================
-# Test runner - run all tests manually to control order
+# Test class using unittest
 # =============================================================================
 
-def run_all_tests():
-    """Run all tests in correct order"""
-    print("=" * 60)
-    print("CFG Linear Checker Edge Cases Tests")
-    print("=" * 60)
+class TestLinearMoreEdgeCases(unittest.TestCase):
+    """Test CFG linear checker edge cases"""
     
-    passed = 0
-    failed = 0
+    # Error tests
+    def test_error_reassign_inconsistent(self):
+        result, msg = run_error_test_reassign_inconsistent()
+        self.assertTrue(result, msg)
     
-    # First run error tests (before any valid function is executed)
-    print("\n--- Error Tests (must run before valid tests) ---")
+    def test_error_consume_only_in_then(self):
+        result, msg = run_error_test_consume_only_in_then()
+        self.assertTrue(result, msg)
     
-    error_tests = [
-        ("error_reassign_inconsistent", run_error_test_reassign_inconsistent),
-        ("error_consume_only_in_then", run_error_test_consume_only_in_then),
-        ("error_return_without_consume", run_error_test_return_without_consume),
-        ("error_while_true_no_consume", run_error_test_while_true_no_consume),
-        ("error_match_missing_consume", run_error_test_match_missing_consume),
-    ]
+    def test_error_return_without_consume(self):
+        result, msg = run_error_test_return_without_consume()
+        self.assertTrue(result, msg)
     
-    for name, test_func in error_tests:
-        try:
-            result, msg = test_func()
-            if result:
-                print(f"OK {name}")
-                passed += 1
-            else:
-                print(f"FAIL {name}: {msg}")
-                failed += 1
-        except Exception as e:
-            print(f"ERROR {name}: {e}")
-            failed += 1
+    def test_error_while_true_no_consume(self):
+        result, msg = run_error_test_while_true_no_consume()
+        self.assertTrue(result, msg)
     
-    # Now run valid tests
-    print("\n--- Valid Tests ---")
+    def test_error_match_missing_consume(self):
+        result, msg = run_error_test_match_missing_consume()
+        self.assertTrue(result, msg)
     
     # Reassignment tests
-    print("\nReassignment tests:")
-    try:
+    def test_reassign_after_consume_simple(self):
         test_reassign_after_consume_simple(1)
-        print("OK test_reassign_after_consume_simple")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_reassign_after_consume_simple: {e}")
-        failed += 1
     
-    try:
+    def test_reassign_in_branch(self):
         test_reassign_in_branch(1)
         test_reassign_in_branch(0)
-        print("OK test_reassign_in_branch")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_reassign_in_branch: {e}")
-        failed += 1
     
-    try:
+    def test_reassign_both_branches(self):
         test_reassign_both_branches(1)
         test_reassign_both_branches(0)
-        print("OK test_reassign_both_branches")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_reassign_both_branches: {e}")
-        failed += 1
     
-    try:
+    def test_reassign_nested_branches(self):
         test_reassign_nested_branches(1, 1)
         test_reassign_nested_branches(1, 0)
         test_reassign_nested_branches(0, 1)
-        print("OK test_reassign_nested_branches")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_reassign_nested_branches: {e}")
-        failed += 1
     
     # Multiple return tests
-    print("\nMultiple return tests:")
-    try:
-        assert test_multiple_returns_all_consume(1) == 1
-        assert test_multiple_returns_all_consume(2) == 2
-        assert test_multiple_returns_all_consume(0) == 0
-        print("OK test_multiple_returns_all_consume")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_multiple_returns_all_consume: {e}")
-        failed += 1
+    def test_multiple_returns_all_consume(self):
+        self.assertEqual(test_multiple_returns_all_consume(1), 1)
+        self.assertEqual(test_multiple_returns_all_consume(2), 2)
+        self.assertEqual(test_multiple_returns_all_consume(0), 0)
     
-    try:
-        assert test_early_return_after_consume(1) == 1
-        assert test_early_return_after_consume(0) == 0
-        print("OK test_early_return_after_consume")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_early_return_after_consume: {e}")
-        failed += 1
+    def test_early_return_after_consume(self):
+        self.assertEqual(test_early_return_after_consume(1), 1)
+        self.assertEqual(test_early_return_after_consume(0), 0)
     
-    try:
-        assert test_return_in_nested_if(1, 1) == 1
-        assert test_return_in_nested_if(1, 0) == 2
-        assert test_return_in_nested_if(0, 1) == 0
-        print("OK test_return_in_nested_if")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_return_in_nested_if: {e}")
-        failed += 1
+    def test_return_in_nested_if(self):
+        self.assertEqual(test_return_in_nested_if(1, 1), 1)
+        self.assertEqual(test_return_in_nested_if(1, 0), 2)
+        self.assertEqual(test_return_in_nested_if(0, 1), 0)
     
     # While True tests
-    print("\nWhile True tests:")
-    try:
+    def test_while_true_with_break(self):
         test_while_true_with_break(1)
-        print("OK test_while_true_with_break")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_while_true_with_break: {e}")
-        failed += 1
     
-    try:
+    def test_while_true_consume_then_break(self):
         test_while_true_consume_then_break()
-        print("OK test_while_true_consume_then_break")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_while_true_consume_then_break: {e}")
-        failed += 1
     
-    try:
+    def test_while_true_conditional_break(self):
         test_while_true_conditional_break(1)
         test_while_true_conditional_break(0)
-        print("OK test_while_true_conditional_break")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_while_true_conditional_break: {e}")
-        failed += 1
     
     # Match tests
-    print("\nMatch tests:")
-    try:
+    def test_match_all_cases_consume(self):
         test_match_all_cases_consume(1)
         test_match_all_cases_consume(2)
         test_match_all_cases_consume(3)
         test_match_all_cases_consume(99)
-        print("OK test_match_all_cases_consume")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_match_all_cases_consume: {e}")
-        failed += 1
     
-    try:
+    def test_match_nested_if(self):
         test_match_nested_if(1, 1)
         test_match_nested_if(1, 0)
         test_match_nested_if(99, 1)
-        print("OK test_match_nested_if")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_match_nested_if: {e}")
-        failed += 1
     
     # Complex control flow tests
-    print("\nComplex control flow tests:")
-    try:
+    def test_diamond_control_flow(self):
         test_diamond_control_flow(1)
         test_diamond_control_flow(0)
-        print("OK test_diamond_control_flow")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_diamond_control_flow: {e}")
-        failed += 1
     
-    try:
+    def test_sequential_ifs(self):
         test_sequential_ifs(1, 1)
         test_sequential_ifs(1, 0)
         test_sequential_ifs(0, 1)
         test_sequential_ifs(0, 0)
-        print("OK test_sequential_ifs")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_sequential_ifs: {e}")
-        failed += 1
     
-    try:
+    def test_if_chain_all_paths_consume(self):
         test_if_chain_all_paths_consume(1, 0, 0)
         test_if_chain_all_paths_consume(0, 1, 0)
         test_if_chain_all_paths_consume(0, 0, 1)
         test_if_chain_all_paths_consume(0, 0, 0)
-        print("OK test_if_chain_all_paths_consume")
-        passed += 1
-    except Exception as e:
-        print(f"FAIL test_if_chain_all_paths_consume: {e}")
-        failed += 1
-    
-    # Summary
-    print("\n" + "=" * 60)
-    print(f"Results: {passed} passed, {failed} failed")
-    print("=" * 60)
-    
-    return failed == 0
 
 
 if __name__ == "__main__":
-    import sys
-    success = run_all_tests()
-    sys.exit(0 if success else 1)
+    unittest.main()

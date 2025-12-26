@@ -67,6 +67,7 @@ class AssignmentsMixin:
             rvalue: The rvalue being assigned
             node: AST node for error reporting (lineno)
         """
+        logger.debug(f"_check_linear_rvalue_copy: rvalue={rvalue}, var_name={getattr(rvalue, 'var_name', None)}, linear_path={getattr(rvalue, 'linear_path', None)}")
         if not (hasattr(rvalue, 'var_name') and rvalue.var_name and 
                 hasattr(rvalue, 'linear_path') and rvalue.linear_path is not None):
             return
@@ -76,6 +77,7 @@ class AssignmentsMixin:
             return
         
         rvalue_state = self._get_linear_state(rvalue_var_info, rvalue.linear_path)
+        logger.debug(f"_check_linear_rvalue_copy: var_name={rvalue.var_name}, state={rvalue_state}")
         if rvalue_state == 'active':
             # Format path for error message
             if rvalue.linear_path:
@@ -110,13 +112,11 @@ class AssignmentsMixin:
         target_state = self._get_linear_state(target_var_info, lvalue.linear_path)
         if target_state == 'active':
             # Format path for error message
-            if lvalue.linear_path:
-                path_str = f"{lvalue.var_name}[{']['.join(map(str, lvalue.linear_path))}]"
-            else:
-                path_str = lvalue.var_name
+            path_str = self._format_linear_path(lvalue.var_name, lvalue.linear_path, target_var_info.type_hint)
+            actual_line = self._get_actual_line_number(target_var_info.line_number)
             logger.error(
                 f"Cannot reassign '{path_str}': linear token not consumed "
-                f"(declared at line {target_var_info.line_number})",
+                f"(declared at line {actual_line})",
                 node
             )
 
@@ -201,7 +201,7 @@ class AssignmentsMixin:
         rvalue = self.type_converter.convert(rvalue, target_pc_type)
         
         # Use safe_store for qualifier-aware storage (handles const check + volatile)
-        safe_store(self.builder, ensure_ir(rvalue), ensure_ir(lvalue), target_pc_type)
+        safe_store(self.builder, ensure_ir(rvalue), ensure_ir(lvalue), target_pc_type, node=node)
 
     def _assign_to_target(self, target: ast.AST, rvalue: ValueRef, node, pc_type=None) -> None:
         """Unified single-target assignment: lvalue resolution, linear checks, store, and linear registration.
@@ -242,7 +242,7 @@ class AssignmentsMixin:
                 if hasattr(rvalue, 'var_name') and rvalue.var_name:
                     # Variable reference - transfer ownership
                     self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
-                    self._transfer_linear_ownership(rvalue, reason="assignment")
+                    self._transfer_linear_ownership(rvalue, reason="assignment", node=node)
                 elif not is_undefined:
                     # Initialized value (function return, linear(), etc.)
                     self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
@@ -349,7 +349,8 @@ class AssignmentsMixin:
                     field_val_ref = wrap_value(const_value, kind='python', type_hint=field_pc_type)
                 else:
                     # Regular field: extract from LLVM struct
-                    llvm_index = struct_type._get_llvm_field_index(i)
+                    module_context = self.module.context if self.module else None
+                    llvm_index = struct_type._get_llvm_field_index(i, module_context)
                     if llvm_index == -1:
                         logger.error(f"Zero-sized field [{i}] has no LLVM representation", node=node, exc_type=RuntimeError)
                     field_value = self.builder.extract_value(ensure_ir(rvalue), llvm_index)
@@ -421,7 +422,7 @@ class AssignmentsMixin:
             if hasattr(rvalue, 'var_name') and rvalue.var_name:
                 # Variable reference - transfer ownership
                 self._register_linear_token(var_name, pc_type, node, path=())
-                self._transfer_linear_ownership(rvalue, reason="assignment")
+                self._transfer_linear_ownership(rvalue, reason="assignment", node=node)
             elif not is_undefined:
                 # Initialized value (function return, linear(), etc.)
                 self._register_linear_token(var_name, pc_type, node, path=())

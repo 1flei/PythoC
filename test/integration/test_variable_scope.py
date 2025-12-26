@@ -225,20 +225,76 @@ def test_sequential_blocks_no_interference() -> i32:
     
     return result  # Should be 10 + 20 = 30
 
+import unittest
+
+
+class TestVariableScope(unittest.TestCase):
+    """Test variable scope and shadowing behavior"""
+
+    def test_basic_scope(self):
+        """Test basic variable scope"""
+        self.assertEqual(test_basic_scope(), 30)
+
+    def test_same_name_in_if_blocks(self):
+        """Test variable shadowing in if blocks"""
+        self.assertEqual(test_same_name_in_if_blocks(), 4)
+
+    def test_same_name_in_while_blocks(self):
+        """Test variable shadowing in while blocks"""
+        self.assertEqual(test_same_name_in_while_blocks(), 35)
+
+    def test_shadowing_in_if(self):
+        """Test variable shadowing - inner scope shadows outer scope"""
+        self.assertEqual(test_shadowing_in_if(), 20)
+
+    def test_shadowing_in_if2(self):
+        """Test variable shadowing - inner scope shadows outer scope"""
+        self.assertEqual(test_shadowing_in_if2(), 10)
+
+    def test_shadowing_in_while(self):
+        """Test variable shadowing in while loop"""
+        self.assertEqual(test_shadowing_in_while(), 200)
+
+    def test_shadowing_in_while2(self):
+        """Test variable shadowing in while loop"""
+        self.assertEqual(test_shadowing_in_while2(), 100)
+
+    def test_nested_if_shadowing(self):
+        """Test nested if with multiple levels of shadowing"""
+        self.assertEqual(test_nested_if_shadowing(), 3)
+
+    def test_nested_while_shadowing(self):
+        """Test nested while with shadowing"""
+        self.assertEqual(test_nested_while_shadowing(), 3)
+
+    def test_no_shadowing_simple(self):
+        """Test that variables in same scope are reused"""
+        self.assertEqual(test_no_shadowing_simple(), 35)
+
+    def test_loop_variable_scope(self):
+        """Test that loop variables maintain proper scope"""
+        self.assertEqual(test_loop_variable_scope(), 25)
+
+    def test_separate_if_blocks(self):
+        """Test that variables in separate if blocks don't interfere"""
+        self.assertEqual(test_separate_if_blocks(), 3)
+
+    def test_parameter_shadowing(self):
+        """Test that local variables can shadow function parameters"""
+        self.assertEqual(test_parameter_shadowing(), 150)
+
+    def test_multiple_assignment_same_scope(self):
+        """Test multiple assignments to same variable in same scope"""
+        self.assertEqual(test_multiple_assignment_same_scope(), 4)
+
+    def test_mixed_shadowing_and_assignment(self):
+        """Test mixing shadowing and assignment"""
+        self.assertEqual(test_mixed_shadowing_and_assignment(), 30)
+
+    def test_sequential_blocks_no_interference(self):
+        """Test that sequential blocks don't interfere with each other"""
+        self.assertEqual(test_sequential_blocks_no_interference(), 30)
+
+
 if __name__ == "__main__":
-    print(f"test_basic_scope: {test_basic_scope()}")  # Expected: 30
-    print(f"test_same_name_in_if_blocks: {test_same_name_in_if_blocks()}")  # Expected: 4
-    print(f"test_same_name_in_while_blocks: {test_same_name_in_while_blocks()}")  # Expected: 35
-    print(f"test_shadowing_in_if: {test_shadowing_in_if()}")  # Expected: 20
-    print(f"test_shadowing_in_if2: {test_shadowing_in_if2()}")  # Expected: 10
-    print(f"test_shadowing_in_while: {test_shadowing_in_while()}")  # Expected: 200
-    print(f"test_shadowing_in_while2: {test_shadowing_in_while2()}")  # Expected: 100
-    print(f"test_nested_if_shadowing: {test_nested_if_shadowing()}")  # Expected: 3
-    print(f"test_nested_while_shadowing: {test_nested_while_shadowing()}")  # Expected: 3
-    print(f"test_no_shadowing_simple: {test_no_shadowing_simple()}")  # Expected: 35
-    print(f"test_loop_variable_scope: {test_loop_variable_scope()}")  # Expected: 25
-    print(f"test_separate_if_blocks: {test_separate_if_blocks()}")  # Expected: 3
-    print(f"test_parameter_shadowing: {test_parameter_shadowing()}")  # Expected: 150
-    print(f"test_multiple_assignment_same_scope: {test_multiple_assignment_same_scope()}")  # Expected: 4
-    print(f"test_mixed_shadowing_and_assignment: {test_mixed_shadowing_and_assignment()}")  # Expected: 30
-    print(f"test_sequential_blocks_no_interference: {test_sequential_blocks_no_interference()}")  # Expected: 30
+    unittest.main()

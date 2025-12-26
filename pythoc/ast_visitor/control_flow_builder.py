@@ -416,7 +416,7 @@ class ControlFlowBuilder:
         
         if errors:
             for err in errors:
-                logger.error(f"CFG linear check: {err.format()}")
+                logger.error(f"CFG linear check: {err.format()}", node=err.source_node)
             return False
         
         logger.debug(f"CFG linear check passed for {self._func_name}")

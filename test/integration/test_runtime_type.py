@@ -13,4 +13,6 @@ def test_runtime_type():
 
         printf("x: %d, px: %d\n", x, p[0])
 
-test_runtime_type()
+if __name__ == "__main__":
+    test_runtime_type()
+    print("test_runtime_type passed!")

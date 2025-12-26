@@ -145,9 +145,10 @@ class LoopsMixin:
             for var_info in self.ctx.var_registry.get_all_in_current_scope():
                 if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
                     if var_info.linear_state != 'consumed':
+                        actual_line = self._get_actual_line_number(var_info.line_number)
                         logger.error(
                             f"Linear token '{var_info.name}' not consumed in while True body "
-                            f"(declared at line {var_info.line_number})", node
+                            f"(declared at line {actual_line})", node
                         )
                     var_info.linear_state = None
             
@@ -177,6 +178,7 @@ class LoopsMixin:
         CFG structure:
         - Header block: evaluate condition
         - Body block: loop body
+        - Else block (if present): executes when loop completes normally
         - Exit block: code after loop
         
         Linear type handling:
@@ -188,7 +190,13 @@ class LoopsMixin:
         loop_body = cf.create_block("while_body")
         loop_exit = cf.create_block("while_exit")
         
+        # Create else block if needed
+        has_else = node.orelse and len(node.orelse) > 0
+        if has_else:
+            else_block = cf.create_block("while_else")
+        
         # Push loop context for break/continue
+        # break -> loop_exit (skips else)
         self.loop_stack.append((loop_header, loop_exit))
         
         # Jump to loop header
@@ -197,7 +205,12 @@ class LoopsMixin:
         # Loop header: check condition
         cf.position_at_end(loop_header)
         condition = self._to_boolean(self.visit_expression(node.test))
-        cf.cbranch(condition, loop_body, loop_exit)
+        
+        # If has else: condition false -> else block, otherwise -> exit
+        if has_else:
+            cf.cbranch(condition, loop_body, else_block)
+        else:
+            cf.cbranch(condition, loop_body, loop_exit)
         
         # Loop body - increment scope depth for linear token restrictions
         cf.position_at_end(loop_body)
@@ -215,9 +228,10 @@ class LoopsMixin:
             for var_info in self.ctx.var_registry.get_all_in_current_scope():
                 if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
                     if var_info.linear_state != 'consumed':
+                        actual_line = self._get_actual_line_number(var_info.line_number)
                         logger.error(
                             f"Linear token '{var_info.name}' not consumed in loop "
-                            f"(declared at line {var_info.line_number})", node
+                            f"(declared at line {actual_line})", node
                         )
                     # Clean up consumed token
                     var_info.linear_state = None
@@ -235,6 +249,15 @@ class LoopsMixin:
         
         # Pop loop context
         self.loop_stack.pop()
+        
+        # Handle else block if present
+        if has_else:
+            cf.position_at_end(else_block)
+            for stmt in node.orelse:
+                if not cf.is_terminated():
+                    self.visit(stmt)
+            if not cf.is_terminated():
+                cf.branch(loop_exit)
         
         # Continue after loop
         cf.position_at_end(loop_exit)
@@ -282,7 +305,22 @@ class LoopsMixin:
         )
     
     def _visit_for_with_yield_inline(self, node: ast.For, iter_val):
-        """Handle for loop with yield inline, including else clause"""
+        """Handle for loop with yield inline, including else clause
+        
+        For yield inline (e.g., refine), the expansion includes:
+        - The yield function body with yield transformed to loop body
+        - For-else follows Python semantics: executes if no break occurred
+        
+        Example:
+            for x in refine(val, pred):
+                body
+            else:
+                else_body
+        
+        Python for-else semantics:
+        - else executes when loop completes normally (no break)
+        - else does NOT execute when break is used
+        """
         from ..inline.yield_adapter import YieldInlineAdapter
         from llvmlite import ir
         
@@ -293,6 +331,7 @@ class LoopsMixin:
         # Extract func_obj to get its __globals__
         func_obj = inline_info.get('func_obj', None)
         
+        # Get inlined statements (without for-else attachment - we handle it here)
         inlined_stmts, old_user_globals = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
@@ -552,9 +591,10 @@ class LoopsMixin:
                     for var_info in self.ctx.var_registry.get_all_in_current_scope():
                         if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
                             if var_info.linear_state != 'consumed':
+                                actual_line = self._get_actual_line_number(var_info.line_number)
                                 logger.error(
                                     f"Linear token '{var_info.name}' not consumed in loop iteration "
-                                    f"(declared at line {var_info.line_number})", node
+                                    f"(declared at line {actual_line})", node
                                 )
                 finally:
                     # Pop loop context

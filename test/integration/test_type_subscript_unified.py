@@ -216,69 +216,52 @@ def test_func_runtime_types() -> i32:
 # Main Test Runner
 # ============================================================================
 
-def test_all_unified_paths():
-    """Run all tests and verify results"""
-    print("\n" + "="*70)
-    print("Testing Unified Type Subscript Handling")
-    print("="*70)
-    
-    # Compile-time path tests
-    print("\n--- Compile-time Path (TypeResolver) ---")
-    
-    result = test_struct_compile_time()
-    assert result == 360, f"struct compile-time: expected 360, got {result}"
-    print(f"OK struct compile-time: {result}")
-    
-    result = test_union_compile_time()
-    assert result == 350, f"union compile-time: expected 350, got {result}"
-    print(f"OK union compile-time: {result}")
-    
-    result = test_ptr_compile_time()
-    assert result == 72, f"ptr compile-time: expected 72, got {result}"
-    print(f"OK ptr compile-time: {result}")
-    
-    result = test_array_compile_time()
-    assert result == 76, f"array compile-time: expected 76, got {result}"
-    print(f"OK array compile-time: {result}")
-    
-    result = test_func_compile_time()
-    assert result == 123, f"func compile-time: expected 123, got {result}"
-    print(f"OK func compile-time: {result}")
-    
-    # Runtime path tests
-    print("\n--- Runtime Path (__class_getitem__) ---")
-    
-    result = test_struct_runtime_types()
-    assert result == 21, f"struct runtime: expected 21, got {result}"
-    print(f"OK struct runtime: {result}")
-    
-    result = test_union_runtime_types()
-    assert result == 150, f"union runtime: expected 150, got {result}"
-    print(f"OK union runtime: {result}")
-    
-    result = test_ptr_runtime_types()
-    assert result == 72, f"ptr runtime: expected 72, got {result}"
-    print(f"OK ptr runtime: {result}")
-    
-    result = test_array_runtime_types()
-    assert result == 24, f"array runtime: expected 24, got {result}"
-    print(f"OK array runtime: {result}")
-    
-    result = test_func_runtime_types()
-    assert result == 456, f"func runtime: expected 456, got {result}"
-    print(f"OK func runtime: {result}")
-    
-    print("\n" + "="*70)
-    print("OK All tests passed!")
-    print("="*70)
-    print("\nKey findings:")
-    print("  - Runtime path (__class_getitem__) and compile-time path (TypeResolver)")
-    print("    both produce compatible types with identical behavior")
-    print("  - All composite types (struct, union, ptr, array, func) follow")
-    print("    the unified handle_type_subscript pattern")
-    print("  - Named/unnamed field handling works consistently")
-    print()
+import unittest
+
+
+class TestTypeSubscriptUnified(unittest.TestCase):
+    """Test unified type subscript handling across all composite types"""
+
+    def test_struct_compile_time(self):
+        """Test struct type subscript in compile-time context"""
+        self.assertEqual(test_struct_compile_time(), 360)
+
+    def test_union_compile_time(self):
+        """Test union type subscript in compile-time context"""
+        self.assertEqual(test_union_compile_time(), 350)
+
+    def test_ptr_compile_time(self):
+        """Test ptr type subscript in compile-time context"""
+        self.assertEqual(test_ptr_compile_time(), 72)
+
+    def test_array_compile_time(self):
+        """Test array type subscript in compile-time context"""
+        self.assertEqual(test_array_compile_time(), 76)
+
+    def test_func_compile_time(self):
+        """Test func type subscript in compile-time context"""
+        self.assertEqual(test_func_compile_time(), 123)
+
+    def test_struct_runtime_types(self):
+        """Test using struct types created in global scope"""
+        self.assertEqual(test_struct_runtime_types(), 21)
+
+    def test_union_runtime_types(self):
+        """Test using union types created in global scope"""
+        self.assertEqual(test_union_runtime_types(), 150)
+
+    def test_ptr_runtime_types(self):
+        """Test using ptr types created in global scope"""
+        self.assertEqual(test_ptr_runtime_types(), 72)
+
+    def test_array_runtime_types(self):
+        """Test using array types created in global scope"""
+        self.assertEqual(test_array_runtime_types(), 24)
+
+    def test_func_runtime_types(self):
+        """Test using func types created in global scope"""
+        self.assertEqual(test_func_runtime_types(), 456)
 
 
 if __name__ == "__main__":
-    test_all_unified_paths()
+    unittest.main()

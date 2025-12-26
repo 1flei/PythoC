@@ -188,11 +188,17 @@ def main() -> i32:
     test_dynamic_enum_suffix()
     return 0
 
+import unittest
+
+
+class TestCompositeSuffix(unittest.TestCase):
+    """Test suffix parameter for all composite types"""
+
+    def test_main(self):
+        """Run main test function"""
+        result = main()
+        self.assertEqual(result, 0)
+
+
 if __name__ == '__main__':
-    main()
-    print("\nAll suffix tests passed!")
-    print("\nGenerated LLVM types (check build/test/integration/*.ll):")
-    print("- Point_i32, Point_f64 (static and dynamic)")
-    print("- Value_i32, Value_i64, Value_f32 (static and dynamic)")
-    print("- Result_i32, Result_i64, Result_f64 (static and dynamic)")
-    print("- Suffix formatting: clean type names (i32, f64) instead of <class 'abc.i32'>")
+    unittest.main()

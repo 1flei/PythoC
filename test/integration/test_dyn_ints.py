@@ -17,4 +17,6 @@ def main() -> i32:
     test_dyn_ints()
     return 0
 
-main()
+if __name__ == "__main__":
+    main()
+    print("test_dyn_ints passed!")

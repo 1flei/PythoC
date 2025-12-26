@@ -74,68 +74,40 @@ def test_struct_assignment_lvalue() -> i32:
     return point.x
 
 
+import unittest
+
+
+class TestGetptrLvalueUnification(unittest.TestCase):
+    """Test unified implementation of ptr() and visit_lvalue"""
+
+    def test_ptr_variable(self):
+        """ptr(variable)"""
+        self.assertEqual(test_ptr_variable(), 42)
+
+    def test_ptr_array_element(self):
+        """ptr(arr[i])"""
+        self.assertEqual(test_ptr_array_element(), 20)
+
+    def test_ptr_struct_field(self):
+        """ptr(struct.field)"""
+        self.assertEqual(test_ptr_struct_field(), 100)
+
+    def test_ptr_deref(self):
+        """ptr(*ptr)"""
+        self.assertEqual(test_ptr_deref(), 99)
+
+    def test_assignment_lvalue(self):
+        """lvalue assignment"""
+        self.assertEqual(test_assignment_lvalue(), 20)
+
+    def test_array_assignment_lvalue(self):
+        """array element lvalue assignment"""
+        self.assertEqual(test_array_assignment_lvalue(), 99)
+
+    def test_struct_assignment_lvalue(self):
+        """struct field lvalue assignment"""
+        self.assertEqual(test_struct_assignment_lvalue(), 999)
+
+
 if __name__ == '__main__':
-    print("=" * 70)
-    print("Test unified implementation of ptr() and visit_lvalue")
-    print("=" * 70)
-    print()
-    
-    print("Test 1: ptr(variable)")
-    result = test_ptr_variable()
-    print(f"  Result: {result}")
-    assert result == 42, f"Expected 42, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 2: ptr(arr[i])")
-    result = test_ptr_array_element()
-    print(f"  Result: {result}")
-    assert result == 20, f"Expected 20, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 3: ptr(struct.field)")
-    result = test_ptr_struct_field()
-    print(f"  Result: {result}")
-    assert result == 100, f"Expected 100, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 4: ptr(*ptr)")
-    result = test_ptr_deref()
-    print(f"  Result: {result}")
-    assert result == 99, f"Expected 99, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 5: variable assignment lvalue")
-    result = test_assignment_lvalue()
-    print(f"  Result: {result}")
-    assert result == 20, f"Expected 20, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 6: array element assignment lvalue")
-    result = test_array_assignment_lvalue()
-    print(f"  Result: {result}")
-    assert result == 99, f"Expected 99, got {result}"
-    print("  Passed")
-    print()
-    
-    print("Test 7: struct field assignment lvalue")
-    result = test_struct_assignment_lvalue()
-    print(f"  Result: {result}")
-    assert result == 999, f"Expected 999, got {result}"
-    print("  Passed")
-    print()
-    
-    print("=" * 70)
-    print("All tests passed!")
-    print("=" * 70)
-    print()
-    print("Summary:")
-    print("  - ptr() now uses visit_expression + as_lvalue")
-    print("  - visit_lvalue also uses visit_expression + as_lvalue")
-    print("  - Both share the same code path")
-    print("  - Removed 130+ lines of duplicate code")
-    print()
+    unittest.main()

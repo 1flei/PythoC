@@ -109,11 +109,19 @@ class void(BuiltinType):
 # ============================================================================
 
 class ptr(BuiltinType):
-    """Pointer type - supports ptr[T] syntax"""
+    """Pointer type - supports ptr[T] syntax
+    
+    ptr(x) CONSUMES linear ownership of its argument.
+    ptr is an escape hatch - linear tracking ends at ptr boundary.
+    All access through ptr is untracked (p[0] is always inactive).
+    """
     _size_bytes = 8  # 64-bit pointer
     _is_signed = False
     _is_pointer = True
     pointee_type = None  # Will be set for specialized types
+    
+    # ptr() consumes linear ownership - this is the escape hatch
+    # Linear tracking ends when a value enters ptr
     
     @classmethod
     def get_name(cls) -> str:
