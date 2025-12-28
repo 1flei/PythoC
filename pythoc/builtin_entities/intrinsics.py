@@ -9,6 +9,7 @@ from .seq import seq
 from .consume import consume
 from .assume import assume
 from .refine import refine
+from .goto import __label, __goto
 
 nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="value", type_hint=ptr[i8])
 
@@ -21,4 +22,6 @@ __all__ = [
     'assume',
     'refine',
     'nullptr',
+    '__label',
+    '__goto',
 ]
