@@ -547,13 +547,28 @@ class LLVMCompiler:
         
         # Visit function body
         # Skip statements after control flow termination (e.g., after infinite loops)
+        # Exception: __label() statements are always processed because they create new reachable blocks
         for stmt in ast_node.body:
             # Check if current block is terminated (unreachable code)
             if visitor._cf_builder.is_terminated():
-                logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
-                continue
+                # Check if this is a __label() call - these should always be processed
+                is_label_stmt = False
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    func = stmt.value.func
+                    if isinstance(func, ast.Name) and func.id == '__label':
+                        is_label_stmt = True
+                
+                if not is_label_stmt:
+                    logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
+                    continue
             visitor._cf_builder.add_stmt(stmt)
             visitor.visit(stmt)
+        
+        # Check for unresolved goto statements (forward references to undefined labels)
+        if hasattr(visitor, '_pending_gotos') and visitor._pending_gotos:
+            for pending_block, pending_name, pending_node in visitor._pending_gotos:
+                logger.error(f"Undefined label '{pending_name}' in goto statement",
+                            node=pending_node, exc_type=SyntaxError)
         
         # Debug hook - capture all inlined statements accumulated during compilation
         from .utils.ast_debug import ast_debugger
