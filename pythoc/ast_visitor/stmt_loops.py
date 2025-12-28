@@ -139,6 +139,7 @@ class LoopsMixin:
             # Execute loop body
             for stmt in node.body:
                 if not cf.is_terminated():
+                    cf.add_stmt(stmt)
                     self.visit(stmt)
             
             # Check linear tokens in current scope
@@ -222,6 +223,7 @@ class LoopsMixin:
             # Execute loop body statements
             for stmt in node.body:
                 if not cf.is_terminated():
+                    cf.add_stmt(stmt)
                     self.visit(stmt)
             
             # Check that all linear tokens created in loop are consumed
@@ -255,6 +257,7 @@ class LoopsMixin:
             cf.position_at_end(else_block)
             for stmt in node.orelse:
                 if not cf.is_terminated():
+                    cf.add_stmt(stmt)
                     self.visit(stmt)
             if not cf.is_terminated():
                 cf.branch(loop_exit)
@@ -377,6 +380,7 @@ class LoopsMixin:
                         # Visit each inlined statement
                         for stmt in inlined_stmts:
                             if not cf.is_terminated():
+                                cf.add_stmt(stmt)
                                 self.visit(stmt)
                         
                         # After loop completes, check break flag
@@ -388,6 +392,7 @@ class LoopsMixin:
                         cf.position_at_end(else_block)
                         for stmt in node.orelse:
                             if not cf.is_terminated():
+                                cf.add_stmt(stmt)
                                 self.visit(stmt)
                         
                         if not cf.is_terminated():
@@ -409,11 +414,13 @@ class LoopsMixin:
                     # Visit each inlined statement (loop body)
                     for stmt in inlined_stmts:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
                     
                     # Directly execute else clause (no break_flag check)
                     for stmt in node.orelse:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
             else:
                 # No else clause, process normally
@@ -424,6 +431,7 @@ class LoopsMixin:
                 # Visit each inlined statement
                 for stmt in inlined_stmts:
                     if not cf.is_terminated():
+                        cf.add_stmt(stmt)
                         self.visit(stmt)
         finally:
             # CRITICAL: Restore globals after visiting all inlined statements
@@ -472,6 +480,7 @@ class LoopsMixin:
             if node.orelse:
                 for stmt in node.orelse:
                     if not cf.is_terminated():
+                        cf.add_stmt(stmt)
                         self.visit(stmt)
             return
         
@@ -578,6 +587,7 @@ class LoopsMixin:
                     # Execute loop body (break/continue will use loop_stack)
                     for stmt in node.body:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
                         else:
                             # Block is terminated, but we still need to process remaining statements
@@ -585,6 +595,7 @@ class LoopsMixin:
                             # Create a new unreachable block to continue codegen
                             unreachable_block = cf.create_block("unreachable_cont")
                             cf.position_at_end(unreachable_block)
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
                     
                     # Check that all linear tokens created in this iteration are consumed
@@ -628,6 +639,7 @@ class LoopsMixin:
                     cf.position_at_end(else_block)
                     for stmt in node.orelse:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
                     
                     if not cf.is_terminated():
@@ -640,6 +652,7 @@ class LoopsMixin:
                     # Directly execute else clause (no break_flag check, no merge point)
                     for stmt in node.orelse:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
         finally:
             if break_flag is not None:

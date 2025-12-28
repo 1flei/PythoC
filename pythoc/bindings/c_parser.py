@@ -1117,6 +1117,7 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
         lex_prf = token_release(p.current, prfs.current_prf, prfs.lex_prf)
         
         lexer_destroy(lex_prf, lex_raw)
+        break
     else:
         # lexer_create failed - lex_raw is null, clean up lex_prf
         consume(lex_prf)
