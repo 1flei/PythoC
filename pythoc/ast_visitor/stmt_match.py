@@ -166,6 +166,7 @@ class MatchStatementMixin:
                 # Execute case body
                 for stmt in case.body:
                     if not cf.is_terminated():
+                        cf.add_stmt(stmt)
                         self.visit(stmt)
             finally:
                 self.ctx.var_registry.exit_scope()
@@ -211,6 +212,7 @@ class MatchStatementMixin:
                 # Wildcard always matches - execute body directly
                 for stmt in case.body:
                     if not cf.is_terminated():
+                        cf.add_stmt(stmt)
                         self.visit(stmt)
                 if not cf.is_terminated():
                     cf.branch(merge_block)
@@ -252,6 +254,7 @@ class MatchStatementMixin:
                         # Execute case body
                         for stmt in case.body:
                             if not cf.is_terminated():
+                                cf.add_stmt(stmt)
                                 self.visit(stmt)
                         # Branch to merge
                         if not cf.is_terminated():
@@ -284,6 +287,7 @@ class MatchStatementMixin:
                     # Execute case body
                     for stmt in case.body:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
                     # Branch to merge
                     if not cf.is_terminated():

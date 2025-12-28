@@ -16,7 +16,7 @@ from .builtin_entities import (
     const, static, volatile,
     TYPE_MAP,
     sizeof, nullptr, typeof, char,
-    seq, linear, consume, void,
+    seq, linear, consume, move, void,
     refined, assume, refine,
     pyconst
 )
@@ -95,6 +95,7 @@ __all__ = [
     'pyconst',
     'seq',
     'linear',
+    'move',
     'consume',
     'void',
     'compile_to_executable',

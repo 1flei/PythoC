@@ -574,10 +574,7 @@ class ControlFlowBuilder:
             # Show statements
             if block.stmts:
                 for stmt in block.stmts:
-                    try:
-                        stmt_str = ast.unparse(stmt)[:60]
-                    except Exception:
-                        stmt_str = type(stmt).__name__
+                    stmt_str = ast.unparse(stmt)[:60]
                     lines.append(f"    {stmt_str}")
             else:
                 lines.append("    (no statements recorded)")

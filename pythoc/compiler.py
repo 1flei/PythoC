@@ -552,6 +552,7 @@ class LLVMCompiler:
             if visitor._cf_builder.is_terminated():
                 logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
                 continue
+            visitor._cf_builder.add_stmt(stmt)
             visitor.visit(stmt)
         
         # Debug hook - capture all inlined statements accumulated during compilation

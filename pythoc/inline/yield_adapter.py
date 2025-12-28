@@ -13,7 +13,7 @@ from typing import List, Optional, Dict, Any
 
 from .kernel import InlineKernel, InlineResult
 from .scope_analyzer import ScopeContext
-from .exit_rules import YieldExitRule
+from .exit_rules import YieldExitRule, _has_break_or_continue
 
 
 class YieldInlineAdapter:
@@ -75,11 +75,19 @@ class YieldInlineAdapter:
         if hasattr(func_ast, 'returns') and func_ast.returns:
             return_type_annotation = func_ast.returns
         
+        # Check if loop body has break/continue - need special handling
+        loop_body = copy.deepcopy(for_node.body)
+        body_has_break_or_continue = _has_break_or_continue(loop_body)
+        break_flag_var = None
+        if body_has_break_or_continue:
+            break_flag_var = "__yield_break_flag"
+        
         # Create exit rule for yield transformation with type annotation
         exit_rule = YieldExitRule(
             loop_var=loop_var,
-            loop_body=copy.deepcopy(for_node.body),
-            return_type_annotation=return_type_annotation
+            loop_body=loop_body,
+            return_type_annotation=return_type_annotation,
+            break_flag_var=break_flag_var
         )
         
         # Get callee's globals for kernel
@@ -126,6 +134,18 @@ class YieldInlineAdapter:
                     decls = self._create_loop_var_declarations(loop_var, return_type_annotation, for_node)
                     for decl in reversed(decls):
                         inlined_stmts.insert(0, decl)
+                
+                # If loop body has break/continue, declare the break flag variable
+                if break_flag_var and inlined_stmts:
+                    # Create: __yield_break_flag: bool = False
+                    break_flag_decl = ast.AnnAssign(
+                        target=ast.Name(id=break_flag_var, ctx=ast.Store()),
+                        annotation=ast.Name(id='bool', ctx=ast.Load()),
+                        value=ast.Constant(value=False),
+                        simple=1
+                    )
+                    ast.copy_location(break_flag_decl, for_node)
+                    inlined_stmts.insert(0, break_flag_decl)
                 
                 # NOTE: for-else is handled by stmt_loops.py, NOT here
                 # Python for-else semantics: else executes when loop completes without break

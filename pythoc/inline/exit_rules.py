@@ -161,23 +161,35 @@ class YieldExitRule(ExitPointRule):
             x = _tmp[0]
             y = _tmp[1]
             <loop_body>
+    
+    When loop_body contains break/continue, each yield is wrapped in a mini-loop:
+        while not __yield_break_flag:
+            loop_var = move(expr)
+            <transformed_loop_body>  # break -> set flag + break, continue -> break
+            break  # Always exit after one iteration
     """
     
     def __init__(
         self, 
         loop_var: ast.AST,  # Can be Name or Tuple
         loop_body: List[ast.stmt],
-        return_type_annotation: Optional[ast.expr] = None
+        return_type_annotation: Optional[ast.expr] = None,
+        break_flag_var: Optional[str] = None
     ):
         """
         Args:
             loop_var: Loop variable target (Name or Tuple AST node)
             loop_body: Statements in the for loop body
             return_type_annotation: Return type annotation from function (optional)
+            break_flag_var: Name of break flag variable (if loop body has break/continue)
         """
         self.loop_var = loop_var
         self.loop_body = loop_body
         self.return_type_annotation = return_type_annotation
+        self.break_flag_var = break_flag_var
+        
+        # Check if loop body has break or continue
+        self._body_has_break_or_continue = _has_break_or_continue(loop_body)
     
     def get_exit_node_types(self) -> Tuple[type, ...]:
         # Only Yield expressions, not all Expr nodes
@@ -202,6 +214,8 @@ class YieldExitRule(ExitPointRule):
         
         For tuple unpacking:
             yield a, b  -->  x, y = move((a, b)); <loop_body>
+        
+        When loop_body has break/continue, wraps in mini-loop for correct semantics.
         """
         # Extract yield value
         if isinstance(exit_node, ast.Expr) and isinstance(exit_node.value, ast.Yield):
@@ -212,7 +226,8 @@ class YieldExitRule(ExitPointRule):
             # Not a yield - return as is
             return [exit_node]
         
-        stmts = []
+        # Build the body statements (assignment + loop body)
+        body_stmts = []
         
         # Assignment: loop_var = yield_value (with type conversion if needed)
         if yield_val:
@@ -226,9 +241,6 @@ class YieldExitRule(ExitPointRule):
                 )
             
             # Wrap in move() for ownership transfer
-            # This is essential for linear types: yield is semantically a continuation call,
-            # which transfers ownership. The move() wrapper makes this explicit to the compiler.
-            # For non-linear types, move() is a no-op.
             moved_value = ast.Call(
                 func=ast.Name(id='move', ctx=ast.Load()),
                 args=[renamed_value],
@@ -237,22 +249,52 @@ class YieldExitRule(ExitPointRule):
             
             # Handle tuple unpacking vs simple assignment
             if isinstance(self.loop_var, ast.Tuple):
-                # Tuple unpacking: a, b = move((x, y))
-                stmts.extend(self._create_tuple_unpack_stmts(moved_value))
+                body_stmts.extend(self._create_tuple_unpack_stmts(moved_value))
             else:
-                # Simple assignment (loop variable is pre-declared by yield_adapter)
                 loop_var_name = self.loop_var.id if isinstance(self.loop_var, ast.Name) else str(self.loop_var)
                 assign = ast.Assign(
                     targets=[ast.Name(id=loop_var_name, ctx=ast.Store())],
                     value=moved_value
                 )
-                stmts.append(assign)
+                body_stmts.append(assign)
         
         # Insert loop body (deep copy to avoid mutation)
-        for stmt in self.loop_body:
-            stmts.append(copy.deepcopy(stmt))
+        if self._body_has_break_or_continue and self.break_flag_var:
+            # Transform break/continue in loop body
+            for stmt in self.loop_body:
+                transformed = _transform_break_continue(
+                    copy.deepcopy(stmt), 
+                    self.break_flag_var
+                )
+                body_stmts.append(transformed)
+        else:
+            for stmt in self.loop_body:
+                body_stmts.append(copy.deepcopy(stmt))
         
-        return stmts
+        # If body has break/continue, wrap in mini-loop
+        if self._body_has_break_or_continue and self.break_flag_var:
+            # Add final break to exit mini-loop after one iteration
+            body_stmts.append(ast.Break())
+            
+            # Create: while not __yield_break_flag: <body>
+            while_loop = ast.While(
+                test=ast.UnaryOp(
+                    op=ast.Not(),
+                    operand=ast.Name(id=self.break_flag_var, ctx=ast.Load())
+                ),
+                body=body_stmts,
+                orelse=[]
+            )
+            # Copy location from exit_node and fix missing locations
+            ast.copy_location(while_loop, exit_node)
+            ast.fix_missing_locations(while_loop)
+            return [while_loop]
+        else:
+            # Copy location from exit_node and fix missing locations
+            for stmt in body_stmts:
+                ast.copy_location(stmt, exit_node)
+                ast.fix_missing_locations(stmt)
+            return body_stmts
     
     def _create_tuple_unpack_stmts(self, value: ast.expr) -> List[ast.stmt]:
         """Create statements for tuple unpacking
@@ -336,3 +378,109 @@ class VariableRenamer(ast.NodeTransformer):
         if node.id in self.rename_map:
             return ast.Name(id=self.rename_map[node.id], ctx=node.ctx)
         return node
+
+
+def _has_break_or_continue(body: List[ast.stmt]) -> bool:
+    """Check if body contains any break or continue statement
+    
+    Only checks at the current loop level - does NOT recurse into nested loops.
+    
+    Args:
+        body: List of AST statements
+        
+    Returns:
+        True if body contains break or continue that would affect current loop
+    """
+    for stmt in body:
+        if isinstance(stmt, (ast.Break, ast.Continue)):
+            return True
+        # Recursively check control flow statements, but NOT nested loops
+        if isinstance(stmt, ast.If):
+            if _has_break_or_continue(stmt.body) or _has_break_or_continue(stmt.orelse):
+                return True
+        elif isinstance(stmt, ast.With):
+            if _has_break_or_continue(stmt.body):
+                return True
+        elif isinstance(stmt, ast.Try):
+            if (_has_break_or_continue(stmt.body) or 
+                _has_break_or_continue(stmt.orelse) or
+                _has_break_or_continue(stmt.finalbody)):
+                return True
+            for handler in stmt.handlers:
+                if _has_break_or_continue(handler.body):
+                    return True
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                if _has_break_or_continue(case.body):
+                    return True
+        # Do NOT recurse into For/While - break/continue inside nested loop
+        # doesn't affect the outer loop
+    return False
+
+
+def _transform_break_continue(stmt: ast.stmt, break_flag_var: str) -> ast.stmt:
+    """Transform break/continue statements in loop body for yield expansion
+    
+    Transforms:
+        break    -->  __break_flag = True; break
+        continue -->  break  (just exit mini-loop, proceed to next yield)
+    
+    Args:
+        stmt: AST statement to transform
+        break_flag_var: Name of the break flag variable
+        
+    Returns:
+        Transformed statement
+    """
+    transformer = _BreakContinueTransformer(break_flag_var)
+    return transformer.visit(stmt)
+
+
+class _BreakContinueTransformer(ast.NodeTransformer):
+    """Transform break/continue for yield expansion mini-loops"""
+    
+    def __init__(self, break_flag_var: str):
+        self.break_flag_var = break_flag_var
+        self.loop_depth = 0  # Track nested loop depth
+    
+    def visit_For(self, node: ast.For) -> ast.For:
+        """Don't transform break/continue inside nested for loops"""
+        self.loop_depth += 1
+        result = self.generic_visit(node)
+        self.loop_depth -= 1
+        return result
+    
+    def visit_While(self, node: ast.While) -> ast.While:
+        """Don't transform break/continue inside nested while loops"""
+        self.loop_depth += 1
+        result = self.generic_visit(node)
+        self.loop_depth -= 1
+        return result
+    
+    def visit_Break(self, node: ast.Break) -> ast.stmt:
+        """Transform break: set flag and break mini-loop"""
+        if self.loop_depth > 0:
+            # Inside nested loop, don't transform
+            return node
+        
+        # Create: if True: __break_flag = True; break
+        # We use If with body to create a statement list
+        set_flag = ast.Assign(
+            targets=[ast.Name(id=self.break_flag_var, ctx=ast.Store())],
+            value=ast.Constant(value=True)
+        )
+        # Return an If that always executes to hold multiple statements
+        return ast.If(
+            test=ast.Constant(value=True),
+            body=[set_flag, ast.Break()],
+            orelse=[]
+        )
+    
+    def visit_Continue(self, node: ast.Continue) -> ast.stmt:
+        """Transform continue: just break mini-loop (proceed to next yield)"""
+        if self.loop_depth > 0:
+            # Inside nested loop, don't transform
+            return node
+        
+        # continue -> break (exit mini-loop without setting flag)
+        return ast.Break()

@@ -16,6 +16,7 @@ Rules:
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
+from ..logger import logger
 import ast
 import copy
 
@@ -359,6 +360,56 @@ class LinearChecker:
         
         return copy_snapshot(first_snapshot)
     
+    def _get_block_source_node(self, cfg: CFG, block_id: int) -> Optional[ast.AST]:
+        """Get a source AST node for a block for error reporting
+        
+        Tries to find the first statement in the block, or falls back to
+        predecessor blocks if the target block is empty. Uses BFS to search
+        predecessors recursively until a block with statements is found.
+        """
+        block = cfg.get_block(block_id)
+        if block and block.stmts:
+            return block.stmts[0]
+        
+        # BFS to find nearest predecessor with statements
+        visited = {block_id}
+        queue = [block_id]
+        
+        while queue:
+            current_id = queue.pop(0)
+            for edge in cfg.get_predecessors(current_id):
+                pred_id = edge.source_id
+                if pred_id in visited:
+                    continue
+                visited.add(pred_id)
+                
+                pred_block = cfg.get_block(pred_id)
+                if pred_block and pred_block.stmts:
+                    return pred_block.stmts[-1]
+                
+                queue.append(pred_id)
+        
+        # If no predecessor has statements, try successors
+        visited = {block_id}
+        queue = [block_id]
+        
+        while queue:
+            current_id = queue.pop(0)
+            for edge in cfg.get_successors(current_id):
+                succ_id = edge.target_id
+                if succ_id in visited:
+                    continue
+                visited.add(succ_id)
+                
+                succ_block = cfg.get_block(succ_id)
+                if succ_block and succ_block.stmts:
+                    return succ_block.stmts[0]
+                
+                queue.append(succ_id)
+        
+        logger.error(f"No source node found for block {block_id}")
+        return None
+    
     def _error_merge_inconsistent(
         self, cfg: CFG, block_id: int,
         pred_info: List[Tuple[CFGEdge, LinearSnapshot]]
@@ -396,7 +447,8 @@ class LinearChecker:
             kind='merge_inconsistent',
             block_id=block_id,
             message=f"Inconsistent linear states at merge point (block {block_id})",
-            details=diffs
+            details=diffs,
+            source_node=self._get_block_source_node(cfg, block_id)
         ))
     
     def _simulate_block(
@@ -460,7 +512,8 @@ class LinearChecker:
                 kind='loop_invariant_violated',
                 block_id=back_edge.source_id,
                 message=f"Loop body changes linear state: {'; '.join(diff_strs)}",
-                details=diffs
+                details=diffs,
+                source_node=self._get_block_source_node(cfg, back_edge.source_id)
             ))
     
     def _get_effective_exit_snapshot(
@@ -629,7 +682,8 @@ class LinearChecker:
                 self.errors.append(LinearError(
                     kind='unconsumed_at_exit',
                     block_id=block_id,
-                    message=f"Linear tokens not consumed at function exit (block {block_id}): {', '.join(unconsumed)}"
+                    message=f"Linear tokens not consumed at function exit (block {block_id}): {', '.join(unconsumed)}",
+                    source_node=self._get_block_source_node(cfg, block_id)
                 ))
         
         # If multiple exit points, check consistency
@@ -646,7 +700,8 @@ class LinearChecker:
                         details=[{
                             'path_str': d['path_str'],
                             'states': [(first_block_id, d['states'][0][1]), (block_id, d['states'][1][1])]
-                        } for d in diffs]
+                        } for d in diffs],
+                        source_node=self._get_block_source_node(cfg, block_id)
                     ))
 
 

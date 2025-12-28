@@ -124,6 +124,7 @@ class IfStatementMixin:
                 try:
                     for stmt in branch:
                         if not cf.is_terminated():
+                            cf.add_stmt(stmt)
                             self.visit(stmt)
                 finally:
                     # Exit scope even if there's an error

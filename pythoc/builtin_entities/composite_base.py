@@ -234,11 +234,8 @@ class CompositeType(BuiltinType):
                 type_namespace[struct_name] = struct_info.python_class
         
         # Add all defined types from forward_ref system
-        try:
-            from ..forward_ref import _defined_types
-            type_namespace.update(_defined_types)
-        except ImportError:
-            pass
+        from ..forward_ref import _defined_types
+        type_namespace.update(_defined_types)
         
         type_resolver = TypeResolver(user_globals=type_namespace)
         
