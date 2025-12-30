@@ -564,11 +564,9 @@ class LLVMCompiler:
             visitor._cf_builder.add_stmt(stmt)
             visitor.visit(stmt)
         
-        # Check for unresolved goto statements (forward references to undefined labels)
-        if hasattr(visitor, '_pending_gotos') and visitor._pending_gotos:
-            for pending_block, pending_name, pending_node in visitor._pending_gotos:
-                logger.error(f"Undefined label '{pending_name}' in goto statement",
-                            node=pending_node, exc_type=SyntaxError)
+        # Check for unresolved goto statements and unused labels
+        from .builtin_entities.goto import check_goto_label_consistency
+        check_goto_label_consistency(visitor, ast_node)
         
         # Debug hook - capture all inlined statements accumulated during compilation
         from .utils.ast_debug import ast_debugger

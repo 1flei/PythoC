@@ -309,6 +309,14 @@ def test_goto_merge_alternating_consistent() -> i32:
 # Error tests - linear not consumed on goto path
 # =============================================================================
 
+@expect_error(["Undefined label", "nonexistent"], suffix="goto_undefined_label")
+def run_error_goto_undefined_label():
+    """Error: goto to undefined label"""
+    @compile(suffix="goto_undefined_label")
+    def bad() -> void:
+        __goto("nonexistent")  # ERROR: label 'nonexistent' not defined
+
+
 @expect_error(["not consumed"], suffix="goto_linear_not_consumed")
 def run_error_goto_linear_not_consumed():
     @compile(suffix="goto_linear_not_consumed")
@@ -537,6 +545,10 @@ class TestGotoLinear(DeferredTestCase):
         self.assertEqual(result, 6)
     
     # Error tests - basic
+    def test_error_goto_undefined_label(self):
+        """Error: goto to undefined label"""
+        run_error_goto_undefined_label()
+    
     def test_error_goto_linear_not_consumed(self):
         """Error: linear not consumed before goto"""
         run_error_goto_linear_not_consumed()

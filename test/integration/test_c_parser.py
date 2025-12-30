@@ -208,6 +208,8 @@ def test_parse_const_char_ptr() -> i32:
             if outer_tag == CType.Ptr and base_tag == CType.Char and ptr_depth == 1:
                 return 1
             return 0
+        else:
+            decl_free(decl_prf, decl)
     return 0
 
 

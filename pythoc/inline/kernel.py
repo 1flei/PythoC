@@ -177,16 +177,13 @@ class InlineKernel:
                     return a + b
                 result = add(x, 10)
                 
-            Output (for ReturnExitRule with flag variable):
+            Output (using goto approach):
                 _result: <type>
-                _is_return: bool = False
-                while True:
-                    a = x
-                    b = 10
-                    _result = a + b
-                    _is_return = True
-                    break
-                    break
+                a = x
+                b = 10
+                _result = a + b
+                __goto("_inline_exit_0")
+                __label("_inline_exit_0")
         """
         # Debug hook - capture before
         from ..utils.ast_debug import ast_debugger
@@ -205,18 +202,15 @@ class InlineKernel:
         # 2. Create parameter bindings
         param_bindings = self._create_param_bindings(op, rename_map)
         
-        # 3. For ReturnExitRule, create flag variable and result variable declarations
+        # 3. For ReturnExitRule, create exit label and result variable declarations
         from .exit_rules import ReturnExitRule
-        flag_var = None
         prefix_stmts = []
+        suffix_stmts = []
         
         if isinstance(op.exit_rule, ReturnExitRule):
-            # Create flag variable name if not already set
-            if op.exit_rule.flag_var:
-                flag_var = op.exit_rule.flag_var
-            else:
-                flag_var = f"_is_return_{op.inline_id}"
-                op.exit_rule.flag_var = flag_var
+            # Create exit label name
+            exit_label = f"_inline_exit_{op.inline_id}"
+            op.exit_rule.exit_label = exit_label
             
             # Declare result variable if needed
             if op.exit_rule.result_var:
@@ -241,42 +235,22 @@ class InlineKernel:
                     )
                     prefix_stmts.append(result_decl)
             
-            # Declare and initialize flag variable: _is_return = False
-            flag_decl = ast.AnnAssign(
-                target=ast.Name(id=flag_var, ctx=ast.Store()),
-                annotation=ast.Name(id='bool', ctx=ast.Load()),
-                value=ast.Constant(value=False),
-                simple=1
-            )
-            prefix_stmts.append(flag_decl)
+            # Create exit label at the end: __label("_inline_exit_{id}")
+            exit_label_stmt = ast.Expr(value=ast.Call(
+                func=ast.Name(id='__label', ctx=ast.Load()),
+                args=[ast.Constant(value=exit_label)],
+                keywords=[]
+            ))
+            suffix_stmts.append(exit_label_stmt)
         
-        # 4. Transform callee body with flag variable
-        transformer = InlineBodyTransformer(op.exit_rule, rename_map, flag_var)
+        # 4. Transform callee body (no flag variable needed anymore)
+        transformer = InlineBodyTransformer(op.exit_rule, rename_map, flag_var=None)
         transformed_body = transformer.transform(op.callee_body)
         
-        # 5. Wrap transformed body in while True for ReturnExitRule (Rule 3)
-        # This enables break to exit from multiple return points
-        if isinstance(op.exit_rule, ReturnExitRule):
-            # Prepend parameter bindings to while True body (move inside scope)
-            transformed_body = param_bindings + transformed_body
-            
-            # Append final break to while True wrapper
-            transformed_body.append(ast.Break())
-            
-            wrapped_body = [ast.While(
-                test=ast.Constant(value=True),
-                body=transformed_body,
-                orelse=[]
-            )]
-            transformed_body = wrapped_body
-            
-            # Clear param_bindings since they are now inside while True
-            param_bindings = []
+        # 5. Combine: param bindings + prefix (result decl) + body + suffix (exit label)
+        result = param_bindings + prefix_stmts + transformed_body + suffix_stmts
         
-        # 6. Combine: param bindings + prefix (result/flag decls) + body
-        result = param_bindings + prefix_stmts + transformed_body
-        
-        # 7. Fix AST locations (copy from call site)
+        # 6. Fix AST locations (copy from call site)
         for stmt in result:
             ast.copy_location(stmt, op.call_site)
             ast.fix_missing_locations(stmt)
@@ -303,6 +277,7 @@ class InlineKernel:
         This includes:
         1. Callee's __globals__ (for name resolution in inlined code)
         2. Intrinsics needed by the transformation (e.g., 'move' for linear types)
+        3. goto/label intrinsics for control flow
         
         IMPORTANT: Intrinsics are stored with a special key prefix '_pc_intrinsic_'
         to avoid being overwritten during merge. The adapter should apply them last.
@@ -323,11 +298,21 @@ class InlineKernel:
         # This is needed because yield/inline transformations wrap values in move()
         # CRITICAL: This must take precedence over any user-defined 'move'
         from ..builtin_entities import move, bool as pc_bool
+        # Import goto/label using getattr to avoid Python name mangling
+        # (Python mangles __name to _ClassName__name inside class methods)
+        import pythoc.builtin_entities as be
+        goto_intrinsic = getattr(be, '__goto')
+        label_intrinsic = getattr(be, '__label')
         required['move'] = move
         
         # Add 'bool' type for flag variable declarations
         # This is needed because kernel generates: _is_return: bool = False
         required['bool'] = pc_bool
+        
+        # Add goto/label intrinsics for control flow
+        # These are used by ReturnExitRule for multi-return handling
+        required['__goto'] = goto_intrinsic
+        required['__label'] = label_intrinsic
         
         return required
     
