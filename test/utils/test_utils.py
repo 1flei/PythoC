@@ -69,9 +69,9 @@ class ErrorTestRunner:
             flush_all_pending_outputs()
             return ErrorTestResult(
                 passed=False,
-                message="Expected RuntimeError but none was raised"
+                message="Expected error but none was raised"
             )
-        except RuntimeError as e:
+        except (RuntimeError, SyntaxError, TypeError, ValueError) as e:
             err_str = str(e).lower()
             for pattern in expected_patterns:
                 if pattern.lower() in err_str:

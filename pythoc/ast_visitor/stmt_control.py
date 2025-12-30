@@ -67,12 +67,7 @@ class ControlFlowMixin:
         
         cf = self._get_cf_builder()
         if not cf.is_terminated():
-            # Set break flag if for-else is active
-            if hasattr(self, '_current_break_flag') and self._current_break_flag is not None:
-                from llvmlite import ir
-                self.builder.store(ir.Constant(ir.IntType(1), 1), self._current_break_flag)
-            
-            # Get the break target (loop exit block)
+            # Get the break target (loop exit block or after_else block)
             _, break_block = self.loop_stack[-1]
             
             # Add break edge to CFG and generate IR

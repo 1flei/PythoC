@@ -205,8 +205,8 @@ def f():
     
     def test_return_exit_transformation(self):
         """
-        Transform return with ReturnExitRule:
-        return x + 1  -->  result = x + 1
+        Transform return with ReturnExitRule (goto-based):
+        return x + 1  -->  result = move(x + 1); __goto("exit_label")
         """
         code = """
 def f():
@@ -214,18 +214,22 @@ def f():
 """
         body = self._parse_body(code)
         rename_map = {}
-        rule = ReturnExitRule(result_var='result')
+        rule = ReturnExitRule(result_var='result', exit_label='_inline_exit_test')
         
         transformer = InlineBodyTransformer(rule, rename_map)
         new_body = transformer.transform(body)
         
-        # result = x + 1; break
+        # result = move(x + 1); __goto("_inline_exit_test")
         self.assertEqual(len(new_body), 2)
         assign = new_body[0]
         self.assertIsInstance(assign, ast.Assign)
         self.assertEqual(assign.targets[0].id, 'result')
-        # Second statement is break
-        self.assertIsInstance(new_body[1], ast.Break)
+        # Second statement is __goto call
+        goto_expr = new_body[1]
+        self.assertIsInstance(goto_expr, ast.Expr)
+        self.assertIsInstance(goto_expr.value, ast.Call)
+        self.assertEqual(goto_expr.value.func.id, '__goto')
+        self.assertEqual(goto_expr.value.args[0].value, '_inline_exit_test')
     
     def test_yield_exit_transformation(self):
         """

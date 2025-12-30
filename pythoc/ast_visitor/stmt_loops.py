@@ -323,9 +323,13 @@ class LoopsMixin:
         Python for-else semantics:
         - else executes when loop completes normally (no break)
         - else does NOT execute when break is used
+        
+        Pure goto approach:
+        - break in loop body -> __goto("_for_after_else_{id}")
+        - continue in loop body -> __goto("_yield_next_{id}")
+        - After all yields and else, place __label("_for_after_else_{id}")
         """
         from ..inline.yield_adapter import YieldInlineAdapter
-        from llvmlite import ir
         
         cf = self._get_cf_builder()
         adapter = YieldInlineAdapter(self)
@@ -334,8 +338,9 @@ class LoopsMixin:
         # Extract func_obj to get its __globals__
         func_obj = inline_info.get('func_obj', None)
         
-        # Get inlined statements (without for-else attachment - we handle it here)
-        inlined_stmts, old_user_globals = adapter.try_inline_for_loop(
+        # Get inlined statements
+        # after_else_label is the label name for break to jump to (skip else)
+        inlined_stmts, old_user_globals, after_else_label = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
             inline_info['call_node'],
@@ -351,88 +356,36 @@ class LoopsMixin:
             )
         
         try:
-            # If there's an else clause, we need to handle it carefully for CFG correctness
+            # Fix all missing locations in inlined statements
+            for stmt in inlined_stmts:
+                ast.fix_missing_locations(stmt)
+            
+            # Visit each inlined statement
+            for stmt in inlined_stmts:
+                if not cf.is_terminated():
+                    cf.add_stmt(stmt)
+                    self.visit(stmt)
+            
+            # Execute else clause if present (only reached if no break occurred)
             if node.orelse:
-                # Check if loop body contains any break statement
-                # If no break, else is guaranteed to execute - no need for break_flag check
-                body_has_break = _has_break_in_body(node.body)
-                
-                if body_has_break:
-                    # Has break: need break_flag to track if break occurred
-                    # CFG will have two paths to after_else (break path + else path)
-                    # Linear checker will verify both paths have consistent state
-                    else_block = cf.create_block("for_else")
-                    after_else = cf.create_block("after_for_else")
-                    
-                    # Allocate a flag to track if break occurred
-                    break_flag = self._create_alloca_in_entry(ir.IntType(1), "for_break_flag")
-                    self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
-                    
-                    # Store break flag in loop context for break statement to set
-                    old_break_flag = getattr(self, '_current_break_flag', None)
-                    self._current_break_flag = break_flag
-                    
-                    try:
-                        # Fix all missing locations in inlined statements
-                        for stmt in inlined_stmts:
-                            ast.fix_missing_locations(stmt)
-                        
-                        # Visit each inlined statement
-                        for stmt in inlined_stmts:
-                            if not cf.is_terminated():
-                                cf.add_stmt(stmt)
-                                self.visit(stmt)
-                        
-                        # After loop completes, check break flag
-                        if not cf.is_terminated():
-                            broke = self.builder.load(break_flag, "broke")
-                            cf.cbranch(broke, after_else, else_block)
-                        
-                        # Else block: execute if no break
-                        cf.position_at_end(else_block)
-                        for stmt in node.orelse:
-                            if not cf.is_terminated():
-                                cf.add_stmt(stmt)
-                                self.visit(stmt)
-                        
-                        if not cf.is_terminated():
-                            cf.branch(after_else)
-                        
-                        # Continue after for-else
-                        cf.position_at_end(after_else)
-                    finally:
-                        self._current_break_flag = old_break_flag
-                else:
-                    # No break in body: else is guaranteed to execute
-                    # CFG has only one path: loop body -> else -> after
-                    # No break_flag needed, no merge point with inconsistent states
-                    
-                    # Fix all missing locations in inlined statements
-                    for stmt in inlined_stmts:
-                        ast.fix_missing_locations(stmt)
-                    
-                    # Visit each inlined statement (loop body)
-                    for stmt in inlined_stmts:
-                        if not cf.is_terminated():
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
-                    
-                    # Directly execute else clause (no break_flag check)
-                    for stmt in node.orelse:
-                        if not cf.is_terminated():
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
-            else:
-                # No else clause, process normally
-                # Fix all missing locations in inlined statements
-                for stmt in inlined_stmts:
-                    ast.fix_missing_locations(stmt)
-                
-                # Visit each inlined statement
-                for stmt in inlined_stmts:
+                for stmt in node.orelse:
                     if not cf.is_terminated():
                         cf.add_stmt(stmt)
                         self.visit(stmt)
+            
+            # Place the after_else label (break jumps here to skip else)
+            if after_else_label:
+                # Create __label("_for_after_else_{id}") statement
+                label_stmt = ast.Expr(value=ast.Call(
+                    func=ast.Name(id='__label', ctx=ast.Load()),
+                    args=[ast.Constant(value=after_else_label)],
+                    keywords=[]
+                ))
+                ast.copy_location(label_stmt, node)
+                ast.fix_missing_locations(label_stmt)
+                if not cf.is_terminated():
+                    cf.add_stmt(label_stmt)
+                    self.visit(label_stmt)
         finally:
             # CRITICAL: Restore globals after visiting all inlined statements
             if old_user_globals is not None:
@@ -469,7 +422,6 @@ class LoopsMixin:
             after_else:
         """
         from ..builtin_entities.python_type import PythonType
-        from llvmlite import ir
 
         cf = self._get_cf_builder()
         py_iterable = list(py_iterable)
@@ -507,19 +459,16 @@ class LoopsMixin:
         # Create loop exit block
         loop_exit = cf.create_block("const_loop_exit")
         
-        # If there's an else clause and body has break, need to track breaks
+        # If there's an else clause and body has break, create after_else block
+        # break will jump directly to after_else (skipping else)
         if node.orelse and body_has_break:
-            else_block = cf.create_block("const_loop_else")
             after_else = cf.create_block("after_const_loop_else")
-            # Allocate break flag
-            break_flag = self._create_alloca_in_entry(ir.IntType(1), "const_for_break_flag")
-            self.builder.store(ir.Constant(ir.IntType(1), 0), break_flag)
-            
-            old_break_flag = getattr(self, '_current_break_flag', None)
-            self._current_break_flag = break_flag
+            # break target is after_else (skip else)
+            break_target = after_else
         else:
-            break_flag = None
-            old_break_flag = None
+            after_else = None
+            # break target is loop_exit
+            break_target = loop_exit
         
         try:
             # Unroll with basic blocks
@@ -541,8 +490,8 @@ class LoopsMixin:
                 
                 # Push loop context for this iteration (for break/continue support)
                 # continue -> jump to continue_target (next iteration or loop_exit if last)
-                # break -> jump to loop_exit (exit the entire loop)
-                self.loop_stack.append((continue_target, loop_exit))
+                # break -> jump to break_target (after_else if has else+break, else loop_exit)
+                self.loop_stack.append((continue_target, break_target))
                 
                 # Helper function to bind variables recursively
                 def bind_vars_recursive(pattern, value):
@@ -625,35 +574,21 @@ class LoopsMixin:
                 if not is_last:
                     cf.position_at_end(continue_target)
             
-            # Position at exit
+            # Position at exit (normal loop completion)
             cf.position_at_end(loop_exit)
             
             # Handle else clause if present
             if node.orelse:
-                if body_has_break:
-                    # Has break: check break flag to decide if else executes
-                    broke = self.builder.load(break_flag, "const_broke")
-                    cf.cbranch(broke, after_else, else_block)
-                    
-                    # Else block
-                    cf.position_at_end(else_block)
-                    for stmt in node.orelse:
-                        if not cf.is_terminated():
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
-                    
+                # Execute else clause (only reached if no break occurred)
+                for stmt in node.orelse:
+                    if not cf.is_terminated():
+                        cf.add_stmt(stmt)
+                        self.visit(stmt)
+                
+                # If has break, branch to after_else and position there
+                if body_has_break and after_else:
                     if not cf.is_terminated():
                         cf.branch(after_else)
-                    
-                    # Continue after else
                     cf.position_at_end(after_else)
-                else:
-                    # No break in body: else is guaranteed to execute
-                    # Directly execute else clause (no break_flag check, no merge point)
-                    for stmt in node.orelse:
-                        if not cf.is_terminated():
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
         finally:
-            if break_flag is not None:
-                self._current_break_flag = old_break_flag
+            pass  # No break_flag cleanup needed anymore

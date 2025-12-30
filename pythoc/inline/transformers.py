@@ -31,11 +31,14 @@ class InlineBodyTransformer(ast.NodeTransformer):
     Transform callee body by:
     1. Renaming variables according to rename_map
     2. Transforming exit points according to exit_rule
-    3. Adding flag checks after all loops (for ReturnExitRule)
-    4. Preserving control flow structure
+    3. Preserving control flow structure
+    
+    Note: With goto-based ReturnExitRule, we no longer need:
+    - flag_var parameter
+    - flag checks after loops
     
     Usage:
-        transformer = InlineBodyTransformer(exit_rule, rename_map, flag_var)
+        transformer = InlineBodyTransformer(exit_rule, rename_map)
         new_body = transformer.transform(original_body)
     """
     
@@ -44,13 +47,13 @@ class InlineBodyTransformer(ast.NodeTransformer):
         Args:
             exit_rule: Rule for transforming exit points
             rename_map: Mapping of old variable names to new names
-            flag_var: Flag variable for return propagation (only for ReturnExitRule)
+            flag_var: DEPRECATED - kept for API compatibility, ignored
         """
         self.exit_rule = exit_rule
         self.rename_map = rename_map
         self.exit_types = exit_rule.get_exit_node_types()
         self.context = InlineContext(rename_map=rename_map)
-        self.flag_var = flag_var
+        # flag_var is no longer used with goto-based approach
     
     def transform(self, body: List[ast.stmt]) -> List[ast.stmt]:
         """
@@ -94,29 +97,16 @@ class InlineBodyTransformer(ast.NodeTransformer):
         # Otherwise, just rename variables (use generic_visit's return value)
         return self.generic_visit(node)
     
-    def visit_While(self, node: ast.While) -> List[ast.stmt]:
+    def visit_While(self, node: ast.While) -> ast.While:
         """Transform while loop (recursively transform body)
         
-        Returns a list containing:
-        1. The transformed while loop
-        2. Flag check: if flag_var: break (for ReturnExitRule)
+        With goto-based approach, no flag check is needed after the loop.
         """
         new_test = self.visit(node.test)
         new_body = self.transform(node.body)
         new_orelse = self.transform(node.orelse) if node.orelse else []
         
-        result = [ast.While(test=new_test, body=new_body, orelse=new_orelse)]
-        
-        # Add flag check after loop (Rule 2)
-        if self.flag_var:
-            flag_check = ast.If(
-                test=ast.Name(id=self.flag_var, ctx=ast.Load()),
-                body=[ast.Break()],
-                orelse=[]
-            )
-            result.append(flag_check)
-        
-        return result
+        return ast.While(test=new_test, body=new_body, orelse=new_orelse)
     
     def visit_If(self, node: ast.If) -> ast.If:
         """Transform if statement (recursively transform branches)
@@ -135,35 +125,22 @@ class InlineBodyTransformer(ast.NodeTransformer):
         
         return ast.If(test=new_test, body=new_body, orelse=new_orelse)
     
-    def visit_For(self, node: ast.For) -> List[ast.stmt]:
+    def visit_For(self, node: ast.For) -> ast.For:
         """Transform for loop (recursively transform body)
         
-        Returns a list containing:
-        1. The transformed for loop
-        2. Flag check: if flag_var: break (for ReturnExitRule)
+        With goto-based approach, no flag check is needed after the loop.
         """
         new_target = self.visit(node.target)
         new_iter = self.visit(node.iter)
         new_body = self.transform(node.body)
         new_orelse = self.transform(node.orelse) if node.orelse else []
         
-        result = [ast.For(
+        return ast.For(
             target=new_target, 
             iter=new_iter, 
             body=new_body, 
             orelse=new_orelse
-        )]
-        
-        # Add flag check after loop (Rule 2)
-        if self.flag_var:
-            flag_check = ast.If(
-                test=ast.Name(id=self.flag_var, ctx=ast.Load()),
-                body=[ast.Break()],
-                orelse=[]
-            )
-            result.append(flag_check)
-        
-        return result
+        )
     
     def visit_With(self, node: ast.With) -> ast.With:
         """Transform with statement (rename variables in context)"""

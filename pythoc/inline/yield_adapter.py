@@ -52,17 +52,18 @@ class YieldInlineAdapter:
             func_obj: Original function object (to access __globals__)
             
         Returns:
-            (inlined_stmts, old_user_globals) tuple if successful, (None, None) if failed
+            (inlined_stmts, old_user_globals, break_flag_var) tuple if successful, 
+            (None, None, None) if failed.
             Caller MUST restore user_globals after visiting the statements!
         """
         # Validate basic requirements
         if not self._is_inlinable(func_ast):
-            return (None, None)
+            return (None, None, None)
         
         # Get loop variable name
         loop_var = self._extract_loop_var(for_node)
         if not loop_var:
-            return (None, None)
+            return (None, None, None)
         
         # Extract call arguments from call node
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
@@ -78,16 +79,17 @@ class YieldInlineAdapter:
         # Check if loop body has break/continue - need special handling
         loop_body = copy.deepcopy(for_node.body)
         body_has_break_or_continue = _has_break_or_continue(loop_body)
-        break_flag_var = None
-        if body_has_break_or_continue:
-            break_flag_var = "__yield_break_flag"
+        
+        # Generate unique label for after-else (used by break to skip else)
+        from ..utils import get_next_id
+        after_else_label = f"_for_after_else_{get_next_id()}" if body_has_break_or_continue else None
         
         # Create exit rule for yield transformation with type annotation
         exit_rule = YieldExitRule(
             loop_var=loop_var,
             loop_body=loop_body,
             return_type_annotation=return_type_annotation,
-            break_flag_var=break_flag_var
+            after_else_label=after_else_label
         )
         
         # Get callee's globals for kernel
@@ -110,7 +112,7 @@ class YieldInlineAdapter:
                 # If kernel rejects the operation, cannot inline
                 from ..logger import logger
                 logger.debug(f"Kernel rejected yield inline: {e}")
-                return (None, None)
+                return (None, None, None)
             
             # Execute inlining - kernel now returns InlineResult
             try:
@@ -135,32 +137,20 @@ class YieldInlineAdapter:
                     for decl in reversed(decls):
                         inlined_stmts.insert(0, decl)
                 
-                # If loop body has break/continue, declare the break flag variable
-                if break_flag_var and inlined_stmts:
-                    # Create: __yield_break_flag: bool = False
-                    break_flag_decl = ast.AnnAssign(
-                        target=ast.Name(id=break_flag_var, ctx=ast.Store()),
-                        annotation=ast.Name(id='bool', ctx=ast.Load()),
-                        value=ast.Constant(value=False),
-                        simple=1
-                    )
-                    ast.copy_location(break_flag_decl, for_node)
-                    inlined_stmts.insert(0, break_flag_decl)
-                
                 # NOTE: for-else is handled by stmt_loops.py, NOT here
                 # Python for-else semantics: else executes when loop completes without break
                 # This is different from attaching else to if's orelse (which would execute
                 # when condition is false, not when loop completes normally)
                 
-                # Return the statements AND old_user_globals for caller to restore
+                # Return the statements, old_user_globals, and after_else_label for caller
                 # Caller MUST restore globals after visiting all statements!
-                return (inlined_stmts, old_user_globals)
+                return (inlined_stmts, old_user_globals, after_else_label)
             except Exception as e:
                 from ..logger import logger
                 logger.warning(f"Yield inlining failed: {e}")
                 import traceback
                 logger.warning(traceback.format_exc())
-                return (None, None)
+                return (None, None, None)
         except Exception as e:
             raise
     

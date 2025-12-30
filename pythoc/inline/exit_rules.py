@@ -67,25 +67,29 @@ class ReturnExitRule(ExitPointRule):
     """
     Transform return statements for @inline and closures
     
-    Transformation using flag variable approach:
-        return expr  -->  result_var = expr; is_return_flag = True; break
+    Transformation using goto approach:
+        return expr  -->  result_var = move(expr); __goto("_inline_exit_{id}")
         
     Multiple returns are handled by:
-    1. Each return sets the flag and breaks
-    2. All loops get flag check after them: if is_return_flag: break
-    3. Entire body wrapped in while True
+    1. Each return assigns result and jumps to exit label
+    2. Exit label is placed at the end of inlined body
+    
+    This is cleaner than the old while True + break approach:
+    - No wrapper loop needed
+    - No flag variable needed
+    - No flag checks after nested loops
+    - Direct control flow
     """
     
-    def __init__(self, result_var: Optional[str] = None, flag_var: Optional[str] = None):
+    def __init__(self, result_var: Optional[str] = None, exit_label: Optional[str] = None):
         """
         Args:
             result_var: Variable name to store return value
                        If None, return value is discarded
-            flag_var: Variable name for return flag (is_return)
-                     If None, auto-generated
+            exit_label: Label name for exit point (set by kernel)
         """
         self.result_var = result_var
-        self.flag_var = flag_var
+        self.exit_label = exit_label
     
     def get_exit_node_types(self) -> Tuple[type, ...]:
         return (ast.Return,)
@@ -96,7 +100,7 @@ class ReturnExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        return expr  -->  result_var = move(expr); is_return_flag = True; break
+        return expr  -->  result_var = move(expr); __goto("_inline_exit_{id}")
         
         Note: We wrap the return value in move() to properly transfer
         ownership of linear types. This is necessary because the generated
@@ -120,26 +124,24 @@ class ReturnExitRule(ExitPointRule):
             )
             stmts.append(assign)
         
-        # Set flag: is_return_flag = True (use 1 for PC bool)
-        if self.flag_var:
-            set_flag = ast.Assign(
-                targets=[ast.Name(id=self.flag_var, ctx=ast.Store())],
-                value=ast.Constant(value=1)  # 1 will be converted to bool
-            )
-            stmts.append(set_flag)
-        
-        # Break to exit current loop
-        stmts.append(ast.Break())
+        # Jump to exit label: __goto("_inline_exit_{id}")
+        if self.exit_label:
+            goto_call = ast.Expr(value=ast.Call(
+                func=ast.Name(id='__goto', ctx=ast.Load()),
+                args=[ast.Constant(value=self.exit_label)],
+                keywords=[]
+            ))
+            stmts.append(goto_call)
         
         return stmts
 
 
 class YieldExitRule(ExitPointRule):
     """
-    Transform yield statements for generators
+    Transform yield statements for generators using pure goto approach
     
     Transformation:
-        yield expr  -->  loop_var = expr; <loop_body>
+        yield expr  -->  loop_var = expr; <loop_body>; __label("_yield_next_{id}")
         
     With type annotation:
         def gen() -> i32:
@@ -148,6 +150,7 @@ class YieldExitRule(ExitPointRule):
         Becomes:
             loop_var: i32 = i32(1)
             <loop_body>
+            __label("_yield_next_0")
     
     For tuple unpacking:
         def gen() -> struct[i32, i32]:
@@ -161,12 +164,16 @@ class YieldExitRule(ExitPointRule):
             x = _tmp[0]
             y = _tmp[1]
             <loop_body>
+            __label("_yield_next_0")
     
-    When loop_body contains break/continue, each yield is wrapped in a mini-loop:
-        while not __yield_break_flag:
-            loop_var = move(expr)
-            <transformed_loop_body>  # break -> set flag + break, continue -> break
-            break  # Always exit after one iteration
+    When loop_body contains break/continue, transforms them to goto:
+        break    --> __goto("_for_after_else_{id}")  (skip all remaining yields and else)
+        continue --> __goto("_yield_next_{id}")      (skip to next yield)
+        
+    This pure goto approach avoids:
+    - Mini-loops with flag variables
+    - Conditional branches for break flag checking
+    - Linear analysis issues with conditional jumps
     """
     
     def __init__(
@@ -174,19 +181,19 @@ class YieldExitRule(ExitPointRule):
         loop_var: ast.AST,  # Can be Name or Tuple
         loop_body: List[ast.stmt],
         return_type_annotation: Optional[ast.expr] = None,
-        break_flag_var: Optional[str] = None
+        after_else_label: Optional[str] = None
     ):
         """
         Args:
             loop_var: Loop variable target (Name or Tuple AST node)
             loop_body: Statements in the for loop body
             return_type_annotation: Return type annotation from function (optional)
-            break_flag_var: Name of break flag variable (if loop body has break/continue)
+            after_else_label: Label name for after-else (if loop body has break)
         """
         self.loop_var = loop_var
         self.loop_body = loop_body
         self.return_type_annotation = return_type_annotation
-        self.break_flag_var = break_flag_var
+        self.after_else_label = after_else_label
         
         # Check if loop body has break or continue
         self._body_has_break_or_continue = _has_break_or_continue(loop_body)
@@ -202,7 +209,7 @@ class YieldExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        yield expr  -->  loop_var = move(expr); <loop_body>
+        yield expr  -->  loop_var = move(expr); <loop_body>; __label("_yield_next_{id}")
         
         The move() wrapper is essential for linear types because:
         - yield is semantically a continuation call: yield x <==> continuation(x)
@@ -215,8 +222,12 @@ class YieldExitRule(ExitPointRule):
         For tuple unpacking:
             yield a, b  -->  x, y = move((a, b)); <loop_body>
         
-        When loop_body has break/continue, wraps in mini-loop for correct semantics.
+        When loop_body has break/continue, transforms them to goto:
+            break    --> __goto("_for_after_else_{id}")
+            continue --> __goto("_yield_next_{id}")
         """
+        from ..utils import get_next_id
+        
         # Extract yield value
         if isinstance(exit_node, ast.Expr) and isinstance(exit_node.value, ast.Yield):
             yield_val = exit_node.value.value
@@ -226,7 +237,10 @@ class YieldExitRule(ExitPointRule):
             # Not a yield - return as is
             return [exit_node]
         
-        # Build the body statements (assignment + loop body)
+        # Generate unique label for this yield's "next" point (for continue)
+        yield_next_label = f"_yield_next_{get_next_id()}" if self._body_has_break_or_continue else None
+        
+        # Build the body statements (assignment + loop body + label)
         body_stmts = []
         
         # Assignment: loop_var = yield_value (with type conversion if needed)
@@ -259,42 +273,32 @@ class YieldExitRule(ExitPointRule):
                 body_stmts.append(assign)
         
         # Insert loop body (deep copy to avoid mutation)
-        if self._body_has_break_or_continue and self.break_flag_var:
-            # Transform break/continue in loop body
+        if self._body_has_break_or_continue and self.after_else_label:
+            # Transform break/continue in loop body to goto
             for stmt in self.loop_body:
                 transformed = _transform_break_continue(
                     copy.deepcopy(stmt), 
-                    self.break_flag_var
+                    self.after_else_label,
+                    yield_next_label
                 )
                 body_stmts.append(transformed)
+            
+            # Add label at the end for continue to jump to
+            label_stmt = ast.Expr(value=ast.Call(
+                func=ast.Name(id='__label', ctx=ast.Load()),
+                args=[ast.Constant(value=yield_next_label)],
+                keywords=[]
+            ))
+            body_stmts.append(label_stmt)
         else:
             for stmt in self.loop_body:
                 body_stmts.append(copy.deepcopy(stmt))
         
-        # If body has break/continue, wrap in mini-loop
-        if self._body_has_break_or_continue and self.break_flag_var:
-            # Add final break to exit mini-loop after one iteration
-            body_stmts.append(ast.Break())
-            
-            # Create: while not __yield_break_flag: <body>
-            while_loop = ast.While(
-                test=ast.UnaryOp(
-                    op=ast.Not(),
-                    operand=ast.Name(id=self.break_flag_var, ctx=ast.Load())
-                ),
-                body=body_stmts,
-                orelse=[]
-            )
-            # Copy location from exit_node and fix missing locations
-            ast.copy_location(while_loop, exit_node)
-            ast.fix_missing_locations(while_loop)
-            return [while_loop]
-        else:
-            # Copy location from exit_node and fix missing locations
-            for stmt in body_stmts:
-                ast.copy_location(stmt, exit_node)
-                ast.fix_missing_locations(stmt)
-            return body_stmts
+        # Copy location from exit_node and fix missing locations
+        for stmt in body_stmts:
+            ast.copy_location(stmt, exit_node)
+            ast.fix_missing_locations(stmt)
+        return body_stmts
     
     def _create_tuple_unpack_stmts(self, value: ast.expr) -> List[ast.stmt]:
         """Create statements for tuple unpacking
@@ -418,29 +422,31 @@ def _has_break_or_continue(body: List[ast.stmt]) -> bool:
     return False
 
 
-def _transform_break_continue(stmt: ast.stmt, break_flag_var: str) -> ast.stmt:
+def _transform_break_continue(stmt: ast.stmt, after_else_label: str, yield_next_label: str) -> ast.stmt:
     """Transform break/continue statements in loop body for yield expansion
     
     Transforms:
-        break    -->  __break_flag = True; break
-        continue -->  break  (just exit mini-loop, proceed to next yield)
+        break    -->  __goto(after_else_label)   (skip all remaining yields and else)
+        continue -->  __goto(yield_next_label)   (skip to next yield)
     
     Args:
         stmt: AST statement to transform
-        break_flag_var: Name of the break flag variable
+        after_else_label: Label name for after-else (break target)
+        yield_next_label: Label name for this yield's next point (continue target)
         
     Returns:
         Transformed statement
     """
-    transformer = _BreakContinueTransformer(break_flag_var)
+    transformer = _BreakContinueTransformer(after_else_label, yield_next_label)
     return transformer.visit(stmt)
 
 
 class _BreakContinueTransformer(ast.NodeTransformer):
-    """Transform break/continue for yield expansion mini-loops"""
+    """Transform break/continue for yield expansion using pure goto"""
     
-    def __init__(self, break_flag_var: str):
-        self.break_flag_var = break_flag_var
+    def __init__(self, after_else_label: str, yield_next_label: str):
+        self.after_else_label = after_else_label
+        self.yield_next_label = yield_next_label
         self.loop_depth = 0  # Track nested loop depth
     
     def visit_For(self, node: ast.For) -> ast.For:
@@ -458,29 +464,31 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         return result
     
     def visit_Break(self, node: ast.Break) -> ast.stmt:
-        """Transform break: set flag and break mini-loop"""
+        """Transform break: __goto(after_else_label) to skip all remaining code"""
         if self.loop_depth > 0:
             # Inside nested loop, don't transform
             return node
         
-        # Create: if True: __break_flag = True; break
-        # We use If with body to create a statement list
-        set_flag = ast.Assign(
-            targets=[ast.Name(id=self.break_flag_var, ctx=ast.Store())],
-            value=ast.Constant(value=True)
-        )
-        # Return an If that always executes to hold multiple statements
-        return ast.If(
-            test=ast.Constant(value=True),
-            body=[set_flag, ast.Break()],
-            orelse=[]
-        )
+        # Create: __goto("_for_after_else_{id}")
+        # This jumps directly to after the else block, skipping all remaining yields
+        goto_call = ast.Expr(value=ast.Call(
+            func=ast.Name(id='__goto', ctx=ast.Load()),
+            args=[ast.Constant(value=self.after_else_label)],
+            keywords=[]
+        ))
+        return goto_call
     
     def visit_Continue(self, node: ast.Continue) -> ast.stmt:
-        """Transform continue: just break mini-loop (proceed to next yield)"""
+        """Transform continue: __goto(yield_next_label) to skip to next yield"""
         if self.loop_depth > 0:
             # Inside nested loop, don't transform
             return node
         
-        # continue -> break (exit mini-loop without setting flag)
-        return ast.Break()
+        # Create: __goto("_yield_next_{id}")
+        # This jumps to the label at the end of this yield's expansion
+        goto_call = ast.Expr(value=ast.Call(
+            func=ast.Name(id='__goto', ctx=ast.Load()),
+            args=[ast.Constant(value=self.yield_next_label)],
+            keywords=[]
+        ))
+        return goto_call

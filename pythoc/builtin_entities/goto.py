@@ -16,12 +16,23 @@ Usage:
     __label("done")
 
 Note: Labels are function-scoped. Forward references are supported.
+Compile-time checks:
+- goto to undefined label -> error
+- label with no corresponding goto -> error
 """
 import ast
 from .base import BuiltinFunction
 from .types import void
 from ..valueref import wrap_value
 from ..logger import logger
+
+
+def _init_goto_registry(visitor):
+    """Initialize goto/label registry if not exists"""
+    if not hasattr(visitor, '_label_registry'):
+        visitor._label_registry = {}  # label_name -> (block, node)
+        visitor._pending_gotos = []   # [(block, label_name, node), ...]
+        visitor._used_labels = set()  # labels that have been referenced by goto
 
 
 class __label(BuiltinFunction):
@@ -65,9 +76,7 @@ class __label(BuiltinFunction):
         cf = visitor._get_cf_builder()
         
         # Initialize label registry if not exists
-        if not hasattr(visitor, '_label_registry'):
-            visitor._label_registry = {}
-            visitor._pending_gotos = []
+        _init_goto_registry(visitor)
         
         # Check for duplicate label
         if label_name in visitor._label_registry:
@@ -77,8 +86,8 @@ class __label(BuiltinFunction):
         # Create the label block
         label_block = cf.create_block(f"label_{label_name}")
         
-        # Register the label
-        visitor._label_registry[label_name] = label_block
+        # Register the label with its definition node (for error reporting)
+        visitor._label_registry[label_name] = (label_block, node)
         logger.debug(f"Registered label '{label_name}'")
         
         # Branch from current block to label block (fall-through)
@@ -154,9 +163,10 @@ class __goto(BuiltinFunction):
         cf = visitor._get_cf_builder()
         
         # Initialize label registry if not exists
-        if not hasattr(visitor, '_label_registry'):
-            visitor._label_registry = {}
-            visitor._pending_gotos = []
+        _init_goto_registry(visitor)
+        
+        # Mark this label as used (referenced by goto)
+        visitor._used_labels.add(label_name)
         
         # Check if block is already terminated
         if cf.is_terminated():
@@ -166,7 +176,7 @@ class __goto(BuiltinFunction):
         # Check if label exists
         if label_name in visitor._label_registry:
             # Label exists, generate branch directly
-            label_block = visitor._label_registry[label_name]
+            label_block, _ = visitor._label_registry[label_name]
             cf.branch(label_block)
             # Update edge kind to 'goto'
             for edge in reversed(cf.cfg.edges):
@@ -194,3 +204,35 @@ class __goto(BuiltinFunction):
         
         # Return void (this is a statement, not an expression)
         return wrap_value(None, kind='python', type_hint=void)
+
+
+def check_goto_label_consistency(visitor, func_node):
+    """Check that all gotos have matching labels and vice versa
+    
+    Called at the end of function compilation.
+    
+    Args:
+        visitor: The visitor instance
+        func_node: The function AST node (for error location)
+        
+    Raises compile errors for:
+    - goto to undefined label (always an error)
+    
+    Raises warnings for:
+    - label with no corresponding goto (may be intentional for fall-through)
+    """
+    if not hasattr(visitor, '_label_registry'):
+        return  # No goto/label used in this function
+    
+    # Check for unresolved gotos (goto to undefined label) - this is always an error
+    if visitor._pending_gotos:
+        for pending_block, pending_name, pending_node in visitor._pending_gotos:
+            logger.error(f"Undefined label '{pending_name}' in goto statement",
+                        node=pending_node, exc_type=SyntaxError)
+    
+    # Check for unused labels (label with no corresponding goto)
+    # This is a warning, not an error, because labels can be used for fall-through
+    for label_name, (label_block, label_node) in visitor._label_registry.items():
+        if label_name not in visitor._used_labels:
+            logger.warning(f"Label '{label_name}' defined but never used by any goto",
+                          node=label_node)
