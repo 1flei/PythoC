@@ -86,6 +86,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.source_globals = self.ctx.source_globals
         self.compiler = compiler
         self.loop_stack = self.ctx.loop_stack
+        self.loop_scope_stack = self.ctx.loop_scope_stack
     
     @property
     def backend(self) -> Optional["AbstractBackend"]:

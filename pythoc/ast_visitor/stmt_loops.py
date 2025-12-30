@@ -128,12 +128,14 @@ class LoopsMixin:
         cf.branch(loop_body_start)
         cf.position_at_end(loop_body_start)
         
-        # Push loop context: continue -> loop back to body start, break -> exit
-        self.loop_stack.append((loop_body_start, loop_exit))
-        
         # Enter scope for loop body
         self.ctx.var_registry.enter_scope()
         self.scope_depth += 1
+        
+        # Push loop context: continue -> loop back to body start, break -> exit
+        # Also push loop scope depth for defer execution on break/continue
+        self.loop_stack.append((loop_body_start, loop_exit))
+        self.loop_scope_stack.append(self.scope_depth)
         
         try:
             # Execute loop body
@@ -153,6 +155,11 @@ class LoopsMixin:
                         )
                     var_info.linear_state = None
             
+            # Execute deferred calls for this scope at end of iteration
+            if not cf.is_terminated():
+                from ..builtin_entities.defer import execute_deferred_calls
+                execute_deferred_calls(self, scope_depth=self.scope_depth)
+            
             # If body can fall through, it's an infinite loop - loop back
             if not cf.is_terminated():
                 cf.branch(loop_body_start)
@@ -163,6 +170,7 @@ class LoopsMixin:
         
         # Pop loop context
         self.loop_stack.pop()
+        self.loop_scope_stack.pop()
         
         # Position at exit block
         cf.position_at_end(loop_exit)
@@ -196,10 +204,6 @@ class LoopsMixin:
         if has_else:
             else_block = cf.create_block("while_else")
         
-        # Push loop context for break/continue
-        # break -> loop_exit (skips else)
-        self.loop_stack.append((loop_header, loop_exit))
-        
         # Jump to loop header
         cf.branch(loop_header)
         
@@ -219,6 +223,12 @@ class LoopsMixin:
         # Enter new scope for loop body and increment scope depth
         self.ctx.var_registry.enter_scope()
         self.scope_depth += 1
+        
+        # Push loop context for break/continue (after scope_depth increment)
+        # break -> loop_exit (skips else)
+        self.loop_stack.append((loop_header, loop_exit))
+        self.loop_scope_stack.append(self.scope_depth)
+        
         try:
             # Execute loop body statements
             for stmt in node.body:
@@ -238,8 +248,16 @@ class LoopsMixin:
                     # Clean up consumed token
                     var_info.linear_state = None
             
+            # Execute deferred calls for this scope at end of iteration
+            if not cf.is_terminated():
+                from ..builtin_entities.defer import execute_deferred_calls
+                execute_deferred_calls(self, scope_depth=self.scope_depth)
+            
             # Loop invariant is checked by CFG linear checker at function end
         finally:
+            # Pop loop context before decrementing scope
+            self.loop_stack.pop()
+            self.loop_scope_stack.pop()
             # Decrement scope depth and exit scope
             self.scope_depth -= 1
             self.ctx.var_registry.exit_scope()
@@ -248,9 +266,6 @@ class LoopsMixin:
         if not cf.is_terminated():
             cf.branch(loop_header)
             cf.mark_loop_back(loop_header)
-        
-        # Pop loop context
-        self.loop_stack.pop()
         
         # Handle else block if present
         if has_else:
@@ -492,6 +507,7 @@ class LoopsMixin:
                 # continue -> jump to continue_target (next iteration or loop_exit if last)
                 # break -> jump to break_target (after_else if has else+break, else loop_exit)
                 self.loop_stack.append((continue_target, break_target))
+                self.loop_scope_stack.append(self.scope_depth)
                 
                 # Helper function to bind variables recursively
                 def bind_vars_recursive(pattern, value):
@@ -556,9 +572,18 @@ class LoopsMixin:
                                     f"Linear token '{var_info.name}' not consumed in loop iteration "
                                     f"(declared at line {actual_line})", node
                                 )
+                    
+                    # Emit deferred calls for this scope at end of iteration (normal exit)
+                    if not cf.is_terminated():
+                        from ..builtin_entities.defer import emit_deferred_calls
+                        emit_deferred_calls(self, scope_depth=self.scope_depth)
                 finally:
+                    # Unregister defers for this iteration scope
+                    from ..builtin_entities.defer import unregister_defers_for_scope
+                    unregister_defers_for_scope(self, self.scope_depth)
                     # Pop loop context
                     self.loop_stack.pop()
+                    self.loop_scope_stack.pop()
                     # Linear tokens check is done by CFG checker at function end
                     # Decrement scope depth and exit scope
                     self.scope_depth -= 1
