@@ -268,6 +268,12 @@ class OutputManager:
                     source_file, scope, suffix = group_key
                     raise RuntimeError(f"Module verification failed for group {group_key}")
                 
+                # Save unoptimized IR if requested
+                if os.environ.get('PC_SAVE_UNOPT_IR'):
+                    unopt_ir_file = group['ir_file'].replace('.ll', '.unopt.ll')
+                    with open(unopt_ir_file, 'w') as f:
+                        f.write(str(compiler.module))
+                
                 # Optimize
                 opt_level = int(os.environ.get('PC_OPT_LEVEL', '2'))
                 compiler.optimize_module(optimization_level=opt_level)

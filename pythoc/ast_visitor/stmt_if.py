@@ -118,16 +118,25 @@ class IfStatementMixin:
         def make_branch_fn(branch):
             # branch is a list of AST statements
             def execute_stmts():
-                # Enter new scope for the if/else block (for variable isolation)
-                # but DON'T increment scope_depth (linear tokens can still be consumed)
+                # Enter new scope for the if/else block
+                # Increment scope_depth so defer can track block-level defers
                 self.ctx.var_registry.enter_scope()
+                self.scope_depth += 1
+                current_scope = self.scope_depth
                 try:
                     for stmt in branch:
                         if not cf.is_terminated():
                             cf.add_stmt(stmt)
                             self.visit(stmt)
+                    # Emit deferred calls for this block before exiting (normal exit)
+                    if not cf.is_terminated():
+                        self._emit_deferred_calls_for_scope(current_scope)
                 finally:
+                    # Unregister defers for this scope (they've been emitted at all exit points)
+                    from ..builtin_entities.defer import unregister_defers_for_scope
+                    unregister_defers_for_scope(self, current_scope)
                     # Exit scope even if there's an error
+                    self.scope_depth -= 1
                     self.ctx.var_registry.exit_scope()
             return execute_stmts
             

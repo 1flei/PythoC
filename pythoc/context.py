@@ -84,6 +84,8 @@ class CompilationContext:
         
         # Loop context (for break/continue)
         self.loop_stack: List[tuple] = []
+        # Track scope_depth for each loop (for defer execution on break/continue)
+        self.loop_scope_stack: List[int] = []
         
         # Label counter for unique names
         self.label_counter = 0

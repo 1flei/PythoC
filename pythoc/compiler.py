@@ -568,6 +568,10 @@ class LLVMCompiler:
         from .builtin_entities.goto import check_goto_label_consistency
         check_goto_label_consistency(visitor, ast_node)
         
+        # Check for unexecuted deferred calls (should not happen if implementation is correct)
+        from .builtin_entities.defer import check_defers_at_function_end
+        check_defers_at_function_end(visitor, ast_node)
+        
         # Debug hook - capture all inlined statements accumulated during compilation
         from .utils.ast_debug import ast_debugger
         if visitor._all_inlined_stmts:
