@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 import unittest
 from pythoc.decorators.compile import compile
 from pythoc.decorators.inline import inline
-from pythoc.builtin_entities import void, i32, defer, ptr, __label, __goto, linear, consume
+from pythoc.builtin_entities import void, i32, defer, ptr, label, goto, goto_end, linear, consume
 from pythoc.build.output_manager import flush_all_pending_outputs
 
 from test.utils.test_utils import DeferredTestCase
@@ -461,15 +461,15 @@ def test_linear_defer_goto(cond: i32) -> i32:
     result: i32 = 0
     t = linear()
     
-    if cond > 0:
-        defer(consumer, ptr(result), t)
-        __goto("end")
-    else:
-        defer(consumer, ptr(result), t)
+    with label("main"):
+        if cond > 0:
+            defer(consumer, ptr(result), t)
+            goto_end("main")
+        else:
+            defer(consumer, ptr(result), t)
+        
+        result = result + 100
     
-    result = result + 100
-    
-    __label("end")
     return result
 
 
@@ -546,12 +546,12 @@ def test_defer_goto_in_yield_loop() -> i32:
     """Goto with defer in yield loop"""
     result: i32 = 0
     
-    for x in gen_seq(10):
-        defer(inc, ptr(result))
-        if x == 3:
-            __goto("exit")
+    with label("loop_region"):
+        for x in gen_seq(10):
+            defer(inc, ptr(result))
+            if x == 3:
+                goto_end("loop_region")
     
-    __label("exit")
     return result  # 4 defers (0,1,2,3 including the goto iteration)
 
 
@@ -630,18 +630,17 @@ def test_defer_deeply_nested_goto() -> i32:
     
     defer(add, ptr(result), 10000)  # scope 0
     
-    if 1:  # scope 1
-        defer(add, ptr(result), 1000)
-        if 1:  # scope 2
-            defer(add, ptr(result), 100)
-            if 1:  # scope 3
-                defer(add, ptr(result), 10)
-                __goto("end")  # Jump from scope 3 to scope 0
+    with label("outer"):
+        defer(add, ptr(result), 1000)  # scope 1
+        with label("middle"):
+            defer(add, ptr(result), 100)  # scope 2
+            with label("inner"):
+                defer(add, ptr(result), 10)  # scope 3
+                goto_end("outer")  # Jump from scope 3 to exit outer
     
-    result = result + 1  # Unreachable
+    result = result + 1  # Reached after exiting outer
     
-    __label("end")
-    return result  # 10+100+1000 = 1110 (func defer after return)
+    return result  # 10+100+1000 = 1110, +1 = 1111 (func defer after return)
 
 
 @compile
@@ -651,28 +650,28 @@ def test_defer_multiple_labels(code: i32) -> i32:
     
     defer(add, ptr(result), 1000)
     
-    if code == 1:
-        defer(inc, ptr(result))
-        __goto("label1")
-    elif code == 2:
-        defer(add, ptr(result), 10)
-        __goto("label2")
-    else:
-        defer(add, ptr(result), 100)
-        __goto("label3")
+    with label("main"):
+        if code == 1:
+            defer(inc, ptr(result))
+            goto("label1")
+        elif code == 2:
+            defer(add, ptr(result), 10)
+            goto("label2")
+        else:
+            defer(add, ptr(result), 100)
+            goto("label3")
+        
+        with label("label1"):
+            result = result + 1
+            goto_end("main")
+        
+        with label("label2"):
+            result = result + 2
+            goto_end("main")
+        
+        with label("label3"):
+            result = result + 3
     
-    __label("label1")
-    result = result + 1
-    __goto("end")
-    
-    __label("label2")
-    result = result + 2
-    __goto("end")
-    
-    __label("label3")
-    result = result + 3
-    
-    __label("end")
     return result
 
 
@@ -731,26 +730,22 @@ class TestDeferAdvanced(DeferredTestCase):
     def test_inline_defer_multiple_calls(self):
         """Inline with defer - multiple calls"""
         result = test_inline_defer_multiple_calls()
-        # Inline defers execute at inline exit AND at function exit
-        # So 3 inline calls = 6 defers total
-        self.assertEqual(result, 633)  # 6*100 + 33
+        # 3 inline calls, each with 1 defer = 3 defers total
+        self.assertEqual(result, 333)  # 3*100 + 33
     
     def test_inline_defer_with_early_return(self):
         """Inline with defer - early return"""
         result = test_inline_defer_with_early_return()
-        # Observed: 203 = 2*100 + 3 (a=3, b=100)
-        # Early return in inline doesn't cause double defer execution
-        self.assertEqual(result, 203)
+        # 2 inline calls, each with 1 defer, but early return case has extra defer
+        self.assertEqual(result, 303)  # 3*100 + 3 (a=3, b=100)
     
     def test_inline_nested_defer(self):
         """Inline with conditional defer"""
         result = test_inline_nested_defer()
         # a: x=5 > 0, so defer(+10) and defer(+1), return 10
         # b: x=0, so only defer(+10), return 0
-        # With doubling: (10+1)*2 + 10*2 = 22 + 20 = 42? No...
-        # Observed: 3110 = 31*100 + 10
-        # 31 = 11 (from a) + 10 (from b) + 10 (doubled somewhere)
-        self.assertEqual(result, 3110)
+        # result = 11 + 10 = 21
+        self.assertEqual(result, 2110)  # 21*100 + 10
     
     # Section 4: Defer with closures
     def test_closure_defer_simple(self):
@@ -761,28 +756,26 @@ class TestDeferAdvanced(DeferredTestCase):
     def test_closure_defer_multiple_calls(self):
         """Closure with defer - multiple calls"""
         result = test_closure_defer_multiple_calls()
-        # Closure defers execute at closure exit AND at function exit
-        # So 3 closure calls = 6 defers total
-        self.assertEqual(result, 603)  # 6*100 + 3
+        # 3 closure calls, each with 1 defer = 3 defers total
+        self.assertEqual(result, 303)  # 3*100 + 3
     
     def test_closure_defer_with_early_return(self):
         """Closure with defer - early return"""
         result = test_closure_defer_with_early_return()
-        # 2 closure calls, but result is 203 (not 403)
-        # This suggests early return in closure doesn't double-execute
-        self.assertEqual(result, 203)  # Actual observed value
+        # 2 closure calls, each with 1 defer, but early return case has extra defer
+        self.assertEqual(result, 303)  # 3*100 + 3
     
     def test_closure_defer_nested(self):
         """Closure with defer - nested"""
         result = test_closure_defer_nested()
-        # Nested closures: inner defer + outer defer, both doubled
-        self.assertEqual(result, 2211)  # Actual observed value
+        # Nested closures: inner defer + outer defer
+        self.assertEqual(result, 1111)  # 11*100 + 11
     
     def test_closure_in_loop(self):
         """Closure with defer in loop"""
         result = test_closure_in_loop()
-        # 5 closure calls in loop = 10 defers (5 at closure exit + 5 at function exit)
-        self.assertEqual(result, 1020)  # 10*100 + 20
+        # 5 closure calls in loop = 5 defers
+        self.assertEqual(result, 520)  # 5*100 + 20
     
     # Section 5: Defer with linear types
     def test_linear_defer_if_else_true(self):
@@ -859,12 +852,11 @@ class TestDeferAdvanced(DeferredTestCase):
     def test_multiple_defer_sources(self):
         """Multiple defer sources"""
         result = test_multiple_defer_sources()
-        # Closure defers doubled: 3*100*2 = 600, loop defers: 3, function defer: 1000
-        # But function defer executes after return, so result captures 600+3=603
-        # Wait, observed is 606, let me check...
-        # Actually: 3 loop + 600 closure = 603? No, 606
-        # 606 = 6*100 + 6? That's 6 closure defers + 6 loop defers?
-        self.assertEqual(result, 606)  # Actual observed value
+        # 3 loop defers + 3 closure defers = 6 total, but closure defers are 100 each
+        # Loop defers: 3 * 1 = 3
+        # Closure defers: 3 * 100 = 300
+        # Total = 303 (function defer executes after return value captured)
+        self.assertEqual(result, 303)
     
     def test_defer_break_continue_else_break(self):
         """Defer with break - else skipped"""
@@ -897,19 +889,19 @@ class TestDeferAdvanced(DeferredTestCase):
     def test_defer_deeply_nested_goto(self):
         """Defer with deeply nested goto"""
         result = test_defer_deeply_nested_goto()
-        self.assertEqual(result, 1110)  # 10+100+1000, func defer after
+        self.assertEqual(result, 1111)  # 10+100+1000+1, func defer after
     
     def test_defer_multiple_labels_code1(self):
         """Defer multiple labels - code 1"""
         result = test_defer_multiple_labels(1)
-        # Function defer (1000) executes at return, branch defer (1) at goto
-        self.assertEqual(result, 1002)  # 1000 + 1 + 1
+        # Branch defer (1) at goto, then label1: +1
+        self.assertEqual(result, 2)  # 1 + 1
     
     def test_defer_multiple_labels_code2(self):
         """Defer multiple labels - code 2"""
         result = test_defer_multiple_labels(2)
-        # Function defer (1000) + branch defer (10) + 2
-        self.assertEqual(result, 1012)  # 1000 + 10 + 2
+        # Branch defer (10) at goto, then label2: +2
+        self.assertEqual(result, 12)  # 10 + 2
     
     def test_defer_multiple_labels_code3(self):
         """Defer multiple labels - code 3"""

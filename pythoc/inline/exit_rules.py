@@ -67,18 +67,17 @@ class ReturnExitRule(ExitPointRule):
     """
     Transform return statements for @inline and closures
     
-    Transformation using goto approach:
-        return expr  -->  result_var = move(expr); __goto("_inline_exit_{id}")
+    Transformation using scoped label approach:
+        return expr  -->  result_var = move(expr); goto_end("_inline_exit_{id}")
         
     Multiple returns are handled by:
-    1. Each return assigns result and jumps to exit label
-    2. Exit label is placed at the end of inlined body
+    1. Each return assigns result and jumps to exit label via goto_end
+    2. Inlined body is wrapped in with label("_inline_exit_{id}")
     
-    This is cleaner than the old while True + break approach:
-    - No wrapper loop needed
-    - No flag variable needed
-    - No flag checks after nested loops
-    - Direct control flow
+    This uses scoped labels for structured control flow:
+    - goto_end exits the label scope cleanly
+    - Defers are properly executed on exit
+    - No unstructured jumps
     """
     
     def __init__(self, result_var: Optional[str] = None, exit_label: Optional[str] = None):
@@ -100,7 +99,7 @@ class ReturnExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        return expr  -->  result_var = move(expr); __goto("_inline_exit_{id}")
+        return expr  -->  result_var = move(expr); goto_end("_inline_exit_{id}")
         
         Note: We wrap the return value in move() to properly transfer
         ownership of linear types. This is necessary because the generated
@@ -124,10 +123,10 @@ class ReturnExitRule(ExitPointRule):
             )
             stmts.append(assign)
         
-        # Jump to exit label: __goto("_inline_exit_{id}")
+        # Jump to exit label using scoped goto_end: goto_end("_inline_exit_{id}")
         if self.exit_label:
             goto_call = ast.Expr(value=ast.Call(
-                func=ast.Name(id='__goto', ctx=ast.Load()),
+                func=ast.Name(id='goto_end', ctx=ast.Load()),
                 args=[ast.Constant(value=self.exit_label)],
                 keywords=[]
             ))
@@ -138,19 +137,19 @@ class ReturnExitRule(ExitPointRule):
 
 class YieldExitRule(ExitPointRule):
     """
-    Transform yield statements for generators using pure goto approach
+    Transform yield statements for generators using scoped label approach
     
     Transformation:
-        yield expr  -->  loop_var = expr; <loop_body>; __label("_yield_next_{id}")
+        yield expr  -->  with label("_yield_{id}"): loop_var = expr; <loop_body>
         
     With type annotation:
         def gen() -> i32:
             yield 1
         
         Becomes:
-            loop_var: i32 = i32(1)
-            <loop_body>
-            __label("_yield_next_0")
+            with label("_yield_0"):
+                loop_var: i32 = i32(1)
+                <loop_body>
     
     For tuple unpacking:
         def gen() -> struct[i32, i32]:
@@ -160,20 +159,20 @@ class YieldExitRule(ExitPointRule):
             ...
         
         Becomes:
-            _tmp = (a, b)
-            x = _tmp[0]
-            y = _tmp[1]
-            <loop_body>
-            __label("_yield_next_0")
+            with label("_yield_0"):
+                _tmp = (a, b)
+                x = _tmp[0]
+                y = _tmp[1]
+                <loop_body>
     
-    When loop_body contains break/continue, transforms them to goto:
-        break    --> __goto("_for_after_else_{id}")  (skip all remaining yields and else)
-        continue --> __goto("_yield_next_{id}")      (skip to next yield)
+    When loop_body contains break/continue, transforms them to scoped goto:
+        break    --> goto_begin("_for_after_else_{id}")  (skip all remaining yields and else)
+        continue --> goto_end("_yield_{id}")             (skip to next yield)
         
-    This pure goto approach avoids:
-    - Mini-loops with flag variables
-    - Conditional branches for break flag checking
-    - Linear analysis issues with conditional jumps
+    This scoped label approach:
+    - Uses structured control flow
+    - Properly handles defer execution
+    - No unstructured jumps
     """
     
     def __init__(
@@ -209,7 +208,7 @@ class YieldExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        yield expr  -->  loop_var = move(expr); <loop_body>; __label("_yield_next_{id}")
+        yield expr  -->  with label("_yield_{id}"): loop_var = move(expr); <loop_body>
         
         The move() wrapper is essential for linear types because:
         - yield is semantically a continuation call: yield x <==> continuation(x)
@@ -222,9 +221,9 @@ class YieldExitRule(ExitPointRule):
         For tuple unpacking:
             yield a, b  -->  x, y = move((a, b)); <loop_body>
         
-        When loop_body has break/continue, transforms them to goto:
-            break    --> __goto("_for_after_else_{id}")
-            continue --> __goto("_yield_next_{id}")
+        When loop_body has break/continue, transforms them to scoped goto:
+            break    --> goto_begin("_for_after_else_{id}")
+            continue --> goto_end("_yield_{id}")
         """
         from ..utils import get_next_id
         
@@ -237,11 +236,11 @@ class YieldExitRule(ExitPointRule):
             # Not a yield - return as is
             return [exit_node]
         
-        # Generate unique label for this yield's "next" point (for continue)
-        yield_next_label = f"_yield_next_{get_next_id()}" if self._body_has_break_or_continue else None
+        # Generate unique label for this yield scope
+        yield_label = f"_yield_{get_next_id()}" if self._body_has_break_or_continue else None
         
-        # Build the body statements (assignment + loop body + label)
-        body_stmts = []
+        # Build the body statements (assignment + loop body)
+        inner_stmts = []
         
         # Assignment: loop_var = yield_value (with type conversion if needed)
         if yield_val:
@@ -263,36 +262,44 @@ class YieldExitRule(ExitPointRule):
             
             # Handle tuple unpacking vs simple assignment
             if isinstance(self.loop_var, ast.Tuple):
-                body_stmts.extend(self._create_tuple_unpack_stmts(moved_value))
+                inner_stmts.extend(self._create_tuple_unpack_stmts(moved_value))
             else:
                 loop_var_name = self.loop_var.id if isinstance(self.loop_var, ast.Name) else str(self.loop_var)
                 assign = ast.Assign(
                     targets=[ast.Name(id=loop_var_name, ctx=ast.Store())],
                     value=moved_value
                 )
-                body_stmts.append(assign)
+                inner_stmts.append(assign)
         
         # Insert loop body (deep copy to avoid mutation)
         if self._body_has_break_or_continue and self.after_else_label:
-            # Transform break/continue in loop body to goto
+            # Transform break/continue in loop body to scoped goto
             for stmt in self.loop_body:
-                transformed = _transform_break_continue(
+                transformed = _transform_break_continue_scoped(
                     copy.deepcopy(stmt), 
                     self.after_else_label,
-                    yield_next_label
+                    yield_label
                 )
-                body_stmts.append(transformed)
-            
-            # Add label at the end for continue to jump to
-            label_stmt = ast.Expr(value=ast.Call(
-                func=ast.Name(id='__label', ctx=ast.Load()),
-                args=[ast.Constant(value=yield_next_label)],
-                keywords=[]
-            ))
-            body_stmts.append(label_stmt)
+                inner_stmts.append(transformed)
         else:
             for stmt in self.loop_body:
-                body_stmts.append(copy.deepcopy(stmt))
+                inner_stmts.append(copy.deepcopy(stmt))
+        
+        # Wrap in scoped label if we have break/continue
+        if yield_label:
+            # Create: with label("_yield_{id}"): <inner_stmts>
+            label_call = ast.Call(
+                func=ast.Name(id='label', ctx=ast.Load()),
+                args=[ast.Constant(value=yield_label)],
+                keywords=[]
+            )
+            with_stmt = ast.With(
+                items=[ast.withitem(context_expr=label_call, optional_vars=None)],
+                body=inner_stmts
+            )
+            body_stmts = [with_stmt]
+        else:
+            body_stmts = inner_stmts
         
         # Copy location from exit_node and fix missing locations
         for stmt in body_stmts:
@@ -319,8 +326,6 @@ class YieldExitRule(ExitPointRule):
             value=value
         )
         return [unpack_assign]
-        
-        return stmts
     
     def _wrap_with_type_conversion(self, value: ast.expr, type_annotation: ast.expr) -> ast.expr:
         """
@@ -422,31 +427,31 @@ def _has_break_or_continue(body: List[ast.stmt]) -> bool:
     return False
 
 
-def _transform_break_continue(stmt: ast.stmt, after_else_label: str, yield_next_label: str) -> ast.stmt:
-    """Transform break/continue statements in loop body for yield expansion
+def _transform_break_continue_scoped(stmt: ast.stmt, after_else_label: str, yield_label: str) -> ast.stmt:
+    """Transform break/continue statements in loop body for yield expansion using scoped labels
     
     Transforms:
-        break    -->  __goto(after_else_label)   (skip all remaining yields and else)
-        continue -->  __goto(yield_next_label)   (skip to next yield)
+        break    -->  goto_begin(after_else_label)  (skip all remaining yields and else)
+        continue -->  goto_end(yield_label)         (exit current yield scope)
     
     Args:
         stmt: AST statement to transform
         after_else_label: Label name for after-else (break target)
-        yield_next_label: Label name for this yield's next point (continue target)
+        yield_label: Label name for current yield scope (continue target)
         
     Returns:
         Transformed statement
     """
-    transformer = _BreakContinueTransformer(after_else_label, yield_next_label)
+    transformer = _BreakContinueTransformer(after_else_label, yield_label)
     return transformer.visit(stmt)
 
 
 class _BreakContinueTransformer(ast.NodeTransformer):
-    """Transform break/continue for yield expansion using pure goto"""
+    """Transform break/continue for yield expansion using scoped labels."""
     
-    def __init__(self, after_else_label: str, yield_next_label: str):
+    def __init__(self, after_else_label: str, yield_label: str, use_scoped: bool = True):
         self.after_else_label = after_else_label
-        self.yield_next_label = yield_next_label
+        self.yield_label = yield_label
         self.loop_depth = 0  # Track nested loop depth
     
     def visit_For(self, node: ast.For) -> ast.For:
@@ -464,31 +469,36 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         return result
     
     def visit_Break(self, node: ast.Break) -> ast.stmt:
-        """Transform break: __goto(after_else_label) to skip all remaining code"""
+        """Transform break to skip all remaining code
+        
+        Uses goto_begin(after_else_label) - forward sibling jump
+        """
         if self.loop_depth > 0:
             # Inside nested loop, don't transform
             return node
         
-        # Create: __goto("_for_after_else_{id}")
-        # This jumps directly to after the else block, skipping all remaining yields
+        # Create: goto_begin("_for_after_else_{id}")
         goto_call = ast.Expr(value=ast.Call(
-            func=ast.Name(id='__goto', ctx=ast.Load()),
+            func=ast.Name(id='goto_begin', ctx=ast.Load()),
             args=[ast.Constant(value=self.after_else_label)],
             keywords=[]
         ))
         return goto_call
     
     def visit_Continue(self, node: ast.Continue) -> ast.stmt:
-        """Transform continue: __goto(yield_next_label) to skip to next yield"""
+        """Transform continue to skip to next yield
+        
+        Uses goto_end(yield_label) - exit current yield scope
+        """
         if self.loop_depth > 0:
             # Inside nested loop, don't transform
             return node
         
-        # Create: __goto("_yield_next_{id}")
-        # This jumps to the label at the end of this yield's expansion
+        # Create: goto_end("_yield_{id}")
+        # This exits the current yield scope, moving to the next yield
         goto_call = ast.Expr(value=ast.Call(
-            func=ast.Name(id='__goto', ctx=ast.Load()),
-            args=[ast.Constant(value=self.yield_next_label)],
+            func=ast.Name(id='goto_end', ctx=ast.Load()),
+            args=[ast.Constant(value=self.yield_label)],
             keywords=[]
         ))
         return goto_call

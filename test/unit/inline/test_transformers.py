@@ -219,16 +219,16 @@ def f():
         transformer = InlineBodyTransformer(rule, rename_map)
         new_body = transformer.transform(body)
         
-        # result = move(x + 1); __goto("_inline_exit_test")
+        # result = move(x + 1); goto_end("_inline_exit_test")
         self.assertEqual(len(new_body), 2)
         assign = new_body[0]
         self.assertIsInstance(assign, ast.Assign)
         self.assertEqual(assign.targets[0].id, 'result')
-        # Second statement is __goto call
+        # Second statement is goto_end call (scoped label)
         goto_expr = new_body[1]
         self.assertIsInstance(goto_expr, ast.Expr)
         self.assertIsInstance(goto_expr.value, ast.Call)
-        self.assertEqual(goto_expr.value.func.id, '__goto')
+        self.assertEqual(goto_expr.value.func.id, 'goto_end')
         self.assertEqual(goto_expr.value.args[0].value, '_inline_exit_test')
     
     def test_yield_exit_transformation(self):

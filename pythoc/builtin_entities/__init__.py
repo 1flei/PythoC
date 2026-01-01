@@ -52,7 +52,9 @@ from .refined import refined, RefinedType
 from .qualifiers import const, static, volatile
 
 # Built-in functions
-from .intrinsics import sizeof, nullptr, seq, consume, assume, refine, typeof, char, __label, __goto, defer
+from .intrinsics import sizeof, nullptr, seq, consume, assume, refine, typeof, char, defer
+# Scoped goto/label (user-facing API)
+from .intrinsics import label, goto, goto_begin, goto_end
 
 # Python type wrapper
 from .python_type import PythonType, is_python_type, pyconst
@@ -146,9 +148,12 @@ __all__ = [
     'assume',
     'refine',
     'char',
-    '__label',
-    '__goto',
     'defer',
+    # Scoped goto/label (user-facing API)
+    'label',
+    'goto',
+    'goto_begin',  # Backward compatibility alias
+    'goto_end',
     
     # Python type wrapper
     'PythonType',

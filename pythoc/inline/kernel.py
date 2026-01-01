@@ -177,13 +177,13 @@ class InlineKernel:
                     return a + b
                 result = add(x, 10)
                 
-            Output (using goto approach):
+            Output (using scoped label approach):
                 _result: <type>
                 a = x
                 b = 10
-                _result = a + b
-                __goto("_inline_exit_0")
-                __label("_inline_exit_0")
+                with label("_inline_exit_0"):
+                    _result = a + b
+                    goto_end("_inline_exit_0")
         """
         # Debug hook - capture before
         from ..utils.ast_debug import ast_debugger
@@ -205,7 +205,6 @@ class InlineKernel:
         # 3. For ReturnExitRule, create exit label and result variable declarations
         from .exit_rules import ReturnExitRule
         prefix_stmts = []
-        suffix_stmts = []
         
         if isinstance(op.exit_rule, ReturnExitRule):
             # Create exit label name
@@ -234,23 +233,32 @@ class InlineKernel:
                         simple=1
                     )
                     prefix_stmts.append(result_decl)
-            
-            # Create exit label at the end: __label("_inline_exit_{id}")
-            exit_label_stmt = ast.Expr(value=ast.Call(
-                func=ast.Name(id='__label', ctx=ast.Load()),
-                args=[ast.Constant(value=exit_label)],
-                keywords=[]
-            ))
-            suffix_stmts.append(exit_label_stmt)
         
         # 4. Transform callee body (no flag variable needed anymore)
         transformer = InlineBodyTransformer(op.exit_rule, rename_map, flag_var=None)
         transformed_body = transformer.transform(op.callee_body)
         
-        # 5. Combine: param bindings + prefix (result decl) + body + suffix (exit label)
-        result = param_bindings + prefix_stmts + transformed_body + suffix_stmts
+        # 5. Wrap body in scoped label if ReturnExitRule with exit_label
+        if isinstance(op.exit_rule, ReturnExitRule) and op.exit_rule.exit_label:
+            # Create: with label("_inline_exit_{id}"): <body>
+            exit_label = op.exit_rule.exit_label
+            label_call = ast.Call(
+                func=ast.Name(id='label', ctx=ast.Load()),
+                args=[ast.Constant(value=exit_label)],
+                keywords=[]
+            )
+            with_stmt = ast.With(
+                items=[ast.withitem(context_expr=label_call, optional_vars=None)],
+                body=transformed_body
+            )
+            wrapped_body = [with_stmt]
+        else:
+            wrapped_body = transformed_body
         
-        # 6. Fix AST locations (copy from call site)
+        # 6. Combine: param bindings + prefix (result decl) + wrapped body
+        result = param_bindings + prefix_stmts + wrapped_body
+        
+        # 7. Fix AST locations (copy from call site)
         for stmt in result:
             ast.copy_location(stmt, op.call_site)
             ast.fix_missing_locations(stmt)
@@ -277,7 +285,7 @@ class InlineKernel:
         This includes:
         1. Callee's __globals__ (for name resolution in inlined code)
         2. Intrinsics needed by the transformation (e.g., 'move' for linear types)
-        3. goto/label intrinsics for control flow
+        3. Scoped label intrinsics for control flow (label, goto_begin, goto_end)
         
         IMPORTANT: Intrinsics are stored with a special key prefix '_pc_intrinsic_'
         to avoid being overwritten during merge. The adapter should apply them last.
@@ -298,21 +306,19 @@ class InlineKernel:
         # This is needed because yield/inline transformations wrap values in move()
         # CRITICAL: This must take precedence over any user-defined 'move'
         from ..builtin_entities import move, bool as pc_bool
-        # Import goto/label using getattr to avoid Python name mangling
-        # (Python mangles __name to _ClassName__name inside class methods)
-        import pythoc.builtin_entities as be
-        goto_intrinsic = getattr(be, '__goto')
-        label_intrinsic = getattr(be, '__label')
+        # Import scoped label intrinsics
+        from ..builtin_entities import label, goto_begin, goto_end
         required['move'] = move
         
         # Add 'bool' type for flag variable declarations
         # This is needed because kernel generates: _is_return: bool = False
         required['bool'] = pc_bool
         
-        # Add goto/label intrinsics for control flow
+        # Add scoped label intrinsics for control flow
         # These are used by ReturnExitRule for multi-return handling
-        required['__goto'] = goto_intrinsic
-        required['__label'] = label_intrinsic
+        required['label'] = label
+        required['goto_begin'] = goto_begin
+        required['goto_end'] = goto_end
         
         return required
     

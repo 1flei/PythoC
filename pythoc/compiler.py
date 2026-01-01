@@ -370,6 +370,10 @@ class LLVMCompiler:
         ir_builder = ir.IRBuilder(entry_block)
         visitor.builder = LLVMBuilder(ir_builder)
         
+        # Reset scoped label tracking for this function
+        from .builtin_entities.scoped_label import reset_label_tracking
+        reset_label_tracking(visitor)
+        
         # Set ABI context for struct returns
         sret_info = func_type_hints.get('_sret_info') if func_type_hints else None
         visitor.builder.set_return_abi_context(llvm_function, sret_info)
@@ -547,16 +551,19 @@ class LLVMCompiler:
         
         # Visit function body
         # Skip statements after control flow termination (e.g., after infinite loops)
-        # Exception: __label() statements are always processed because they create new reachable blocks
+        # Exception: with label() statements are always processed because they create new reachable blocks
         for stmt in ast_node.body:
             # Check if current block is terminated (unreachable code)
             if visitor._cf_builder.is_terminated():
-                # Check if this is a __label() call - these should always be processed
+                # Check if this is a with label() statement - these should always be processed
                 is_label_stmt = False
-                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-                    func = stmt.value.func
-                    if isinstance(func, ast.Name) and func.id == '__label':
-                        is_label_stmt = True
+                if isinstance(stmt, ast.With):
+                    for item in stmt.items:
+                        if isinstance(item.context_expr, ast.Call):
+                            func = item.context_expr.func
+                            if isinstance(func, ast.Name) and func.id == 'label':
+                                is_label_stmt = True
+                                break
                 
                 if not is_label_stmt:
                     logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
@@ -564,9 +571,9 @@ class LLVMCompiler:
             visitor._cf_builder.add_stmt(stmt)
             visitor.visit(stmt)
         
-        # Check for unresolved goto statements and unused labels
-        from .builtin_entities.goto import check_goto_label_consistency
-        check_goto_label_consistency(visitor, ast_node)
+        # Check for unresolved scoped goto statements
+        from .builtin_entities.scoped_label import check_scoped_goto_consistency
+        check_scoped_goto_consistency(visitor, ast_node)
         
         # Check for unexecuted deferred calls (should not happen if implementation is correct)
         from .builtin_entities.defer import check_defers_at_function_end
@@ -606,18 +613,19 @@ class LLVMCompiler:
             else:
                 visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
         
-        # Clean up empty basic blocks by adding unreachable instructions
-        # This is needed because constant loop unrolling may create empty blocks
-        empty_blocks_cleaned = 0
+        # Clean up basic blocks without terminator instructions
+        # This is needed because:
+        # 1. Constant loop unrolling may create empty blocks
+        # 2. goto_begin/goto_end create unreachable blocks that may have dead code
+        blocks_cleaned = 0
         for block in llvm_function.blocks:
-            instr_list = list(block.instructions)
-            if not instr_list:
-                # Empty block - add unreachable to make it valid LLVM IR
+            if not block.is_terminated:
+                # Block without terminator - add unreachable to make it valid LLVM IR
                 visitor.builder.position_at_end(block)
                 visitor.builder.unreachable()
-                empty_blocks_cleaned += 1
-        if empty_blocks_cleaned > 0:
-            logger.info(f"Cleaned up {empty_blocks_cleaned} empty blocks in {llvm_function.name}")
+                blocks_cleaned += 1
+        if blocks_cleaned > 0:
+            logger.debug(f"Cleaned up {blocks_cleaned} unterminated blocks in {llvm_function.name}")
         
         self.compiled_functions.append(llvm_function)
         return llvm_function

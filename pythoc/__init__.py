@@ -18,7 +18,7 @@ from .builtin_entities import (
     sizeof, nullptr, typeof, char,
     seq, linear, consume, move, void,
     refined, assume, refine,
-    pyconst, __goto, __label
+    pyconst, defer, goto, goto_end
 )
 
 # Provide lowercase alias for convenience
@@ -98,8 +98,9 @@ __all__ = [
     'move',
     'consume',
     'void',
-    '__label',
-    '__goto',
+    'defer',
+    'goto',
+    'goto_end',
 
     'compile_to_executable',
     

@@ -9,8 +9,8 @@ from .seq import seq
 from .consume import consume
 from .assume import assume
 from .refine import refine
-from .goto import __label, __goto
 from .defer import defer
+from .scoped_label import label, goto, goto_begin, goto_end
 
 nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="value", type_hint=ptr[i8])
 
@@ -23,7 +23,10 @@ __all__ = [
     'assume',
     'refine',
     'nullptr',
-    '__label',
-    '__goto',
     'defer',
+    # Scoped goto/label
+    'label',
+    'goto',
+    'goto_begin',  # Backward compatibility alias
+    'goto_end',
 ]

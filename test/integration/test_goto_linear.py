@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test goto/label with linear types.
+Test scoped goto/label with linear types.
 
 Linear types must be properly consumed on all paths, including goto paths.
 """
@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import unittest
 from pythoc.decorators.compile import compile
-from pythoc.builtin_entities import linear, consume, void, i32, __label, __goto
+from pythoc.builtin_entities import linear, consume, void, i32, label, goto, goto_end
 from pythoc.std.utility import move
 from pythoc.build.output_manager import flush_all_pending_outputs
 from pythoc.libc.stdio import printf
@@ -27,16 +27,16 @@ from test.utils.test_utils import DeferredTestCase, expect_error
 def test_goto_linear_simple() -> void:
     """Simple goto with linear - consume before goto"""
     t = linear()
-    consume(t)
-    __goto("end")
-    __label("end")
+    with label("main"):
+        consume(t)
+        goto_end("main")
 
 
 @compile(suffix="goto_linear_after_label")
 def test_goto_linear_after_label() -> void:
     """Create and consume linear after label"""
-    __goto("start")
-    __label("start")
+    with label("start"):
+        pass
     t = linear()
     consume(t)
 
@@ -47,14 +47,14 @@ def test_goto_linear_in_branch() -> i32:
     x: i32 = 5
     t = linear()
     
-    if x > 3:
-        consume(t)
-        __goto("done")
-    else:
-        consume(t)
-        __goto("done")
+    with label("main"):
+        if x > 3:
+            consume(t)
+            goto_end("main")
+        else:
+            consume(t)
+            goto_end("main")
     
-    __label("done")
     return x
 
 
@@ -63,12 +63,12 @@ def test_goto_linear_loop() -> i32:
     """Linear in goto-based loop"""
     count: i32 = 0
     
-    __label("loop")
-    t = linear()
-    consume(t)
-    count = count + 1
-    if count < 3:
-        __goto("loop")
+    with label("loop"):
+        t = linear()
+        consume(t)
+        count = count + 1
+        if count < 3:
+            goto("loop")
     
     return count
 
@@ -78,8 +78,8 @@ def test_goto_linear_move_then_goto() -> void:
     """Move linear then goto"""
     t1 = linear()
     t2 = move(t1)
-    __goto("end")
-    __label("end")
+    with label("main"):
+        goto_end("main")
     consume(t2)
 
 
@@ -90,9 +90,8 @@ def test_goto_linear_multiple_tokens() -> i32:
     t2 = linear()
     
     consume(t1)
-    __goto("middle")
-    
-    __label("middle")
+    with label("middle"):
+        pass
     consume(t2)
     return 1
 
@@ -103,14 +102,14 @@ def test_goto_linear_diamond() -> i32:
     x: i32 = 10
     t = linear()
     
-    if x > 5:
-        consume(t)
-        __goto("merge")
-    else:
-        consume(t)
-        __goto("merge")
+    with label("main"):
+        if x > 5:
+            consume(t)
+            goto_end("main")
+        else:
+            consume(t)
+            goto_end("main")
     
-    __label("merge")
     return x
 
 
@@ -120,27 +119,27 @@ def test_goto_linear_state_machine() -> i32:
     state: i32 = 0
     result: i32 = 0
     
-    __label("state_0")
-    if state == 0:
-        t = linear()
-        consume(t)
-        result = result + 1
-        state = 1
-        __goto("state_1")
+    with label("state_0"):
+        if state == 0:
+            t = linear()
+            consume(t)
+            result = result + 1
+            state = 1
+            goto("state_1")
     
-    __label("state_1")
-    if state == 1:
-        t2 = linear()
-        consume(t2)
-        result = result + 10
-        state = 2
-        __goto("state_2")
+    with label("state_1"):
+        if state == 1:
+            t2 = linear()
+            consume(t2)
+            result = result + 10
+            state = 2
+            goto("state_2")
     
-    __label("state_2")
-    if state == 2:
-        t3 = linear()
-        consume(t3)
-        result = result + 100
+    with label("state_2"):
+        if state == 2:
+            t3 = linear()
+            consume(t3)
+            result = result + 100
     
     return result  # Expected: 111
 
@@ -155,17 +154,17 @@ def test_goto_merge_all_consumed() -> i32:
     code: i32 = 2
     t = linear()
     
-    if code == 1:
-        consume(t)
-        __goto("end")
-    elif code == 2:
-        consume(t)
-        __goto("end")
-    else:
-        consume(t)
-        __goto("end")
+    with label("main"):
+        if code == 1:
+            consume(t)
+            goto_end("main")
+        elif code == 2:
+            consume(t)
+            goto_end("main")
+        else:
+            consume(t)
+            goto_end("main")
     
-    __label("end")
     return code  # Expected: 2
 
 
@@ -175,14 +174,14 @@ def test_goto_merge_all_active() -> i32:
     code: i32 = 2
     t = linear()
     
-    if code == 1:
-        __goto("end")
-    elif code == 2:
-        __goto("end")
-    else:
-        __goto("end")
+    with label("main"):
+        if code == 1:
+            goto_end("main")
+        elif code == 2:
+            goto_end("main")
+        else:
+            goto_end("main")
     
-    __label("end")
     consume(t)  # Consume at merge point
     return code  # Expected: 2
 
@@ -193,14 +192,14 @@ def test_goto_merge_with_fallthrough_consumed() -> i32:
     x: i32 = 3
     t = linear()
     
-    if x > 10:
-        consume(t)
-        __goto("target")
-    else:
-        consume(t)
-        # fallthrough to target
+    with label("main"):
+        if x > 10:
+            consume(t)
+            goto_end("main")
+        else:
+            consume(t)
+            # fallthrough to end
     
-    __label("target")
     return x  # Expected: 3
 
 
@@ -210,11 +209,11 @@ def test_goto_merge_with_fallthrough_active() -> i32:
     x: i32 = 3
     t = linear()
     
-    if x > 10:
-        __goto("target")
-    # else: fallthrough - token still active
+    with label("main"):
+        if x > 10:
+            goto_end("main")
+        # else: fallthrough - token still active
     
-    __label("target")
     consume(t)  # Consume at merge point
     return x  # Expected: 3
 
@@ -225,17 +224,17 @@ def test_goto_merge_three_paths() -> i32:
     x: i32 = 5
     t = linear()
     
-    if x > 10:
-        consume(t)
-        __goto("merge")
-    elif x > 20:
-        consume(t)
-        __goto("merge")
-    else:
-        consume(t)
-        # fallthrough to merge
+    with label("main"):
+        if x > 10:
+            consume(t)
+            goto_end("main")
+        elif x > 20:
+            consume(t)
+            goto_end("main")
+        else:
+            consume(t)
+            # fallthrough to end
     
-    __label("merge")
     return x  # Expected: 5
 
 
@@ -246,18 +245,18 @@ def test_goto_merge_nested_if() -> i32:
     y: i32 = 10
     t = linear()
     
-    if x > 0:
-        if y > 5:
-            consume(t)
-            __goto("done")
+    with label("main"):
+        if x > 0:
+            if y > 5:
+                consume(t)
+                goto_end("main")
+            else:
+                consume(t)
+                goto_end("main")
         else:
             consume(t)
-            __goto("done")
-    else:
-        consume(t)
-        __goto("done")
+            goto_end("main")
     
-    __label("done")
     return x + y  # Expected: 15
 
 
@@ -266,13 +265,13 @@ def test_goto_merge_loop_consistent() -> i32:
     """Loop via goto with consistent linear state - create fresh each iteration"""
     count: i32 = 0
     
-    __label("loop")
-    t = linear()  # Create fresh token each iteration
-    consume(t)    # Consume it
-    count = count + 1
-    
-    if count < 3:
-        __goto("loop")  # Loop back - no token active
+    with label("loop"):
+        t = linear()  # Create fresh token each iteration
+        consume(t)    # Consume it
+        count = count + 1
+        
+        if count < 3:
+            goto("loop")  # Loop back - no token active
     
     return count  # Expected: 3
 
@@ -283,25 +282,27 @@ def test_goto_merge_alternating_consistent() -> i32:
     count: i32 = 0
     result: i32 = 0
     
-    __label("ping")
-    if count >= 4:
-        __goto("done")
-    t1 = linear()
-    consume(t1)
-    result = result + 1
-    count = count + 1
-    __goto("pong")
+    with label("ping"):
+        if count >= 4:
+            goto("done")
+        t1 = linear()
+        consume(t1)
+        result = result + 1
+        count = count + 1
+        goto("pong")
     
-    __label("pong")
-    if count >= 4:
-        __goto("done")
-    t2 = linear()
-    consume(t2)
-    result = result + 2
-    count = count + 1
-    __goto("ping")
+    with label("pong"):
+        if count >= 4:
+            goto("done")
+        t2 = linear()
+        consume(t2)
+        result = result + 2
+        count = count + 1
+        goto("ping")
     
-    __label("done")
+    with label("done"):
+        pass
+    
     return result  # Expected: 1+2+1+2 = 6
 
 
@@ -309,12 +310,13 @@ def test_goto_merge_alternating_consistent() -> i32:
 # Error tests - linear not consumed on goto path
 # =============================================================================
 
-@expect_error(["Undefined label", "nonexistent"], suffix="goto_undefined_label")
+@expect_error(["not visible", "nonexistent"], suffix="goto_undefined_label")
 def run_error_goto_undefined_label():
     """Error: goto to undefined label"""
     @compile(suffix="goto_undefined_label")
     def bad() -> void:
-        __goto("nonexistent")  # ERROR: label 'nonexistent' not defined
+        with label("main"):
+            goto("nonexistent")  # ERROR: label 'nonexistent' not defined
 
 
 @expect_error(["not consumed"], suffix="goto_linear_not_consumed")
@@ -322,9 +324,9 @@ def run_error_goto_linear_not_consumed():
     @compile(suffix="goto_linear_not_consumed")
     def bad() -> void:
         t = linear()
-        __goto("end")  # ERROR: t not consumed before goto
+        with label("main"):
+            goto_end("main")  # ERROR: t not consumed before goto
         consume(t)
-        __label("end")
 
 
 @expect_error(["not consumed"], suffix="goto_linear_branch_missing")
@@ -334,13 +336,13 @@ def run_error_goto_linear_branch_missing():
         x: i32 = 5
         t = linear()
         
-        if x > 3:
-            consume(t)
-            __goto("done")
-        else:
-            __goto("done")  # ERROR: t not consumed in else branch
+        with label("main"):
+            if x > 3:
+                consume(t)
+                goto_end("main")
+            else:
+                goto_end("main")  # ERROR: t not consumed in else branch
         
-        __label("done")
         return x
 
 
@@ -350,8 +352,8 @@ def run_error_goto_linear_double_consume():
     def bad() -> void:
         t = linear()
         consume(t)
-        __goto("again")
-        __label("again")
+        with label("again"):
+            pass
         consume(t)  # ERROR: already consumed
 
 
@@ -367,13 +369,13 @@ def run_error_goto_merge_inconsistent_1():
         x: i32 = 5
         t = linear()
         
-        if x > 3:
-            consume(t)
-            __goto("merge")  # t consumed
-        else:
-            __goto("merge")  # t NOT consumed - inconsistent!
+        with label("main"):
+            if x > 3:
+                consume(t)
+                goto_end("main")  # t consumed
+            else:
+                goto_end("main")  # t NOT consumed - inconsistent!
         
-        __label("merge")
         return x
 
 
@@ -385,13 +387,14 @@ def run_error_goto_merge_inconsistent_2():
         x: i32 = 5
         t = linear()
         
-        if x > 10:
-            __goto("target")  # t NOT consumed
+        with label("main"):
+            if x > 10:
+                goto_end("main")  # t NOT consumed
+            
+            # Fallthrough path
+            consume(t)  # t consumed here
         
-        # Fallthrough path
-        consume(t)  # t consumed here
-        
-        __label("target")  # merge point: one path consumed, one not
+        # merge point: one path consumed, one not
         return x
 
 
@@ -403,16 +406,16 @@ def run_error_goto_merge_inconsistent_3():
         code: i32 = 2
         t = linear()
         
-        if code == 1:
-            consume(t)
-            __goto("end")  # consumed
-        elif code == 2:
-            __goto("end")  # NOT consumed - inconsistent!
-        else:
-            consume(t)
-            __goto("end")  # consumed
+        with label("main"):
+            if code == 1:
+                consume(t)
+                goto_end("main")  # consumed
+            elif code == 2:
+                goto_end("main")  # NOT consumed - inconsistent!
+            else:
+                consume(t)
+                goto_end("main")  # consumed
         
-        __label("end")
         return code
 
 
@@ -423,14 +426,14 @@ def run_error_goto_merge_different_tokens():
     def bad() -> i32:
         x: i32 = 5
         
-        if x > 3:
-            t1 = linear()
-            __goto("merge")  # t1 active
-        else:
-            t2 = linear()
-            __goto("merge")  # t2 active - different token!
+        with label("main"):
+            if x > 3:
+                t1 = linear()
+                goto_end("main")  # t1 active
+            else:
+                t2 = linear()
+                goto_end("main")  # t2 active - different token!
         
-        __label("merge")
         # Which token to consume here? t1 or t2?
         return x
 
@@ -443,12 +446,12 @@ def run_error_goto_loop_merge_inconsistent():
         count: i32 = 0
         t = linear()
         
-        __label("loop")  # merge point: first entry has t, loop back doesn't
-        count = count + 1
-        
-        if count < 3:
-            consume(t)  # consume on first iteration
-            __goto("loop")  # loop back without t
+        with label("loop"):  # merge point: first entry has t, loop back doesn't
+            count = count + 1
+            
+            if count < 3:
+                consume(t)  # consume on first iteration
+                goto("loop")  # loop back without t
         
         return count
 
@@ -458,7 +461,7 @@ def run_error_goto_loop_merge_inconsistent():
 # =============================================================================
 
 class TestGotoLinear(DeferredTestCase):
-    """Tests for goto/label with linear types"""
+    """Tests for scoped goto/label with linear types"""
     
     @classmethod
     def setUpClass(cls):
