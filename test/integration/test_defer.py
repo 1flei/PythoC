@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import unittest
 from pythoc.decorators.compile import compile
-from pythoc.builtin_entities import void, i32, defer, ptr, __label, __goto, linear, consume
+from pythoc.builtin_entities import void, i32, defer, ptr, label, goto_begin, goto_end, linear, consume
 from pythoc.build.output_manager import flush_all_pending_outputs
 from pythoc.libc.stdio import printf
 
@@ -38,7 +38,6 @@ from test.utils.test_utils import DeferredTestCase
 def test_defer_simple() -> i32:
     """Simple defer - single deferred call
     
-    Zig/Go semantics: return value (0) is evaluated before defer executes.
     Defer modifies result to 1, but return value is already captured as 0.
     """
     result: i32 = 0
@@ -56,7 +55,6 @@ def test_defer_simple() -> i32:
 def test_defer_fifo_order() -> i32:
     """Multiple defers execute in FIFO order
     
-    Zig/Go semantics: return value (0) is captured before any defer executes.
     """
     result: i32 = 0
     
@@ -74,7 +72,6 @@ def test_defer_fifo_order() -> i32:
 def test_defer_with_work() -> i32:
     """Defer with work between registration and execution
     
-    Zig/Go semantics: return value (15) is captured before defer executes.
     """
     result: i32 = 10
     
@@ -91,7 +88,6 @@ def test_defer_with_work() -> i32:
 def test_defer_early_return(cond: i32) -> i32:
     """Defer executes on early return
     
-    Zig/Go semantics: return value is captured before defer executes.
     """
     result: i32 = 0
     
@@ -112,7 +108,6 @@ def test_defer_early_return(cond: i32) -> i32:
 def test_defer_in_branch(cond: i32) -> i32:
     """Defer registered in branch
     
-    Zig/Go semantics: return value is captured before defer executes.
     """
     result: i32 = 0
     
@@ -243,14 +238,14 @@ def test_defer_with_goto() -> i32:
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    defer(inc, ptr(result))
+    with label("main"):
+        defer(inc, ptr(result))
+        
+        goto_end("main")
+        
+        # This code is unreachable
+        result = result + 100
     
-    __goto("end")
-    
-    # This code is unreachable
-    result = result + 100
-    
-    __label("end")
     return result  # Should be 1
 
 
@@ -380,14 +375,14 @@ def test_defer_goto_same_scope() -> i32:
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    defer(inc, ptr(result))
-    result = result + 10
+    with label("main"):
+        defer(inc, ptr(result))
+        result = result + 10
+        
+        goto_end("main")
+        
+        result = result + 100  # Unreachable
     
-    __goto("end")
-    
-    result = result + 100  # Unreachable
-    
-    __label("end")
     return result  # Defer executed before goto, result = 11, returns 11
 
 
@@ -400,14 +395,14 @@ def test_defer_goto_forward() -> i32:
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    defer(inc, ptr(result))
+    with label("main"):
+        defer(inc, ptr(result))
+        
+        if result == 0:
+            goto_end("main")
+        
+        result = result + 100  # Skipped
     
-    if result == 0:
-        __goto("skip")
-    
-    result = result + 100  # Skipped
-    
-    __label("skip")
     result = result + 10
     return result  # Defer before goto: result=1, +10=11, returns 11
 
@@ -422,13 +417,12 @@ def test_defer_goto_backward() -> i32:
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    __label("loop_start")
-    
-    defer(inc, ptr(result))  # Registered each iteration, executed before goto
-    count = count + 1
-    
-    if count < 3:
-        __goto("loop_start")  # Defer executes before each goto
+    with label("loop_body"):
+        defer(inc, ptr(result))  # Registered each iteration, executed before goto
+        count = count + 1
+        
+        if count < 3:
+            goto_begin("loop_body")  # Defer executes before each goto
     
     return result  # 3 iterations, 3 defers executed, returns 3
 
@@ -442,21 +436,17 @@ def test_defer_goto_conditional(cond: i32) -> i32:
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    defer(inc, ptr(result))
+    with label("main"):
+        defer(inc, ptr(result))
+        
+        with label("path_a"):
+            if cond > 0:
+                result = result + 10
+                goto_end("main")
+        
+        # path_b (fallthrough when cond <= 0)
+        result = result + 20
     
-    if cond > 0:
-        __goto("path_a")
-    else:
-        __goto("path_b")
-    
-    __label("path_a")
-    result = result + 10
-    __goto("end")
-    
-    __label("path_b")
-    result = result + 20
-    
-    __label("end")
     return result  # cond>0: 1+10=11, cond<=0: 1+20=21
 
 
@@ -476,12 +466,12 @@ def test_defer_goto_out_of_loop() -> i32:
     # Function-level defer
     defer(inc, ptr(result))
     
-    for i in [1, 2, 3, 4, 5]:
-        defer(inc, ptr(result))  # Loop defer
-        if i == 3:
-            __goto("exit")  # Jump out of loop
+    with label("loop_region"):
+        for i in [1, 2, 3, 4, 5]:
+            defer(inc, ptr(result))  # Loop defer
+            if i == 3:
+                goto_end("loop_region")  # Jump out of loop
     
-    __label("exit")
     return result  # Loop defers: 3, func defer after return value: returns 3
 
 
@@ -494,15 +484,18 @@ def test_defer_goto_into_after_loop() -> i32:
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    defer(inc, ptr(result))  # Function defer
+    with label("main"):
+        defer(inc, ptr(result))  # Function defer
+        
+        with label("before_loop"):
+            goto_begin("after_loop")
+        
+        for i in [1, 2, 3]:
+            defer(inc, ptr(result))  # Never executed
+        
+        with label("after_loop"):
+            result = result + 10
     
-    __goto("after_loop")
-    
-    for i in [1, 2, 3]:
-        defer(inc, ptr(result))  # Never executed
-    
-    __label("after_loop")
-    result = result + 10
     return result  # Func defer before goto: 1, +10=11, returns 11
 
 
@@ -517,23 +510,24 @@ def test_defer_multiple_gotos_same_label(code: i32) -> i32:
     
     defer(inc, ptr(result))  # Function defer
     
-    if code == 1:
-        defer(inc, ptr(result))  # Branch defer
-        __goto("merge")
-    elif code == 2:
-        result = result + 10
-        __goto("merge")
-    else:
-        for i in [1]:
-            defer(inc, ptr(result))  # Loop defer
-            __goto("merge")
+    with label("main"):
+        if code == 1:
+            defer(inc, ptr(result))  # Branch defer
+            # goto_end exits main, branch defer executes
+        elif code == 2:
+            result = result + 10
+            # falls through to end of main
+        else:
+            for i in [1]:
+                defer(inc, ptr(result))  # Loop defer
+                # loop defer executes at end of iteration
     
-    __label("merge")
-    result = result + 100
+    result = result + 100  # After main label
+    
     return result
-    # code=1: func_defer(1) + branch_defer(1) + 100 = 102, returns 102
-    # code=2: func_defer(1) + 10 + 100 = 111, returns 111
-    # code=3: func_defer(1) + loop_defer(1) + 100 = 102, returns 102
+    # code=1: branch_defer(1) at label exit, then +100 = 101, func_defer at return
+    # code=2: +10, then +100 = 110, func_defer at return
+    # code=3: loop_defer(1) at iteration end, then +100 = 101, func_defer at return
 
 
 # =============================================================================
@@ -605,13 +599,14 @@ def test_defer_linear_with_goto() -> i32:
         p[0] = p[0] + 1
     
     t = linear()
-    defer(consumer, ptr(result), t)
     
-    __goto("end")
+    with label("main"):
+        defer(consumer, ptr(result), t)
+        
+        goto_end("main")
+        
+        result = result + 100  # Unreachable
     
-    result = result + 100  # Unreachable
-    
-    __label("end")
     return result  # Defer executes before goto, returns 1
 
 
@@ -794,17 +789,17 @@ class TestDefer(DeferredTestCase):
     def test_defer_goto_forward(self):
         """Defer with forward goto"""
         result = test_defer_goto_forward()
-        self.assertEqual(result, 10)  # Defer at return: value captured before defer
+        self.assertEqual(result, 11)  # Defer at label exit: 1, +10 = 11
     
     def test_defer_goto_backward(self):
         """Defer with backward goto (loop)"""
         result = test_defer_goto_backward()
-        self.assertEqual(result, 0)  # Defers execute at return, value captured before
+        self.assertEqual(result, 3)  # 3 iterations, defer executes each time
     
     def test_defer_goto_conditional(self):
         """Defer with conditional goto"""
-        self.assertEqual(test_defer_goto_conditional(1), 11)   # defer in if block: 1+10=11
-        self.assertEqual(test_defer_goto_conditional(0), 20)   # defer at return, value captured
+        self.assertEqual(test_defer_goto_conditional(1), 11)   # defer + 10 = 11
+        self.assertEqual(test_defer_goto_conditional(0), 21)   # defer + 20 = 21
     
     # Goto different scope tests
     def test_defer_goto_out_of_loop(self):
@@ -822,9 +817,9 @@ class TestDefer(DeferredTestCase):
     
     def test_defer_multiple_gotos_same_label(self):
         """Multiple gotos to same label"""
-        self.assertEqual(test_defer_multiple_gotos_same_label(1), 101)  # branch defer + 100
+        self.assertEqual(test_defer_multiple_gotos_same_label(1), 101)  # branch_defer + 100
         self.assertEqual(test_defer_multiple_gotos_same_label(2), 110)  # 10 + 100
-        self.assertEqual(test_defer_multiple_gotos_same_label(3), 101)  # loop defer + 100
+        self.assertEqual(test_defer_multiple_gotos_same_label(3), 101)  # loop_defer + 100
     
     # Defer with linear tests
     def test_defer_linear_simple(self):

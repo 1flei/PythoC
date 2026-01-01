@@ -20,6 +20,36 @@ class ControlFlowMixin:
             self._cf_builder = ControlFlowBuilder(self, func_name)
         return self._cf_builder
     
+    def _visit_stmt_list(self, stmts, add_to_cfg: bool = True):
+        """Visit a list of statements, handling terminated blocks properly.
+        
+        When current block is terminated, we still need to visit nested
+        with-label statements to register labels for forward goto resolution.
+        Other statements are skipped when block is terminated.
+        
+        Args:
+            stmts: List of AST statements to visit
+            add_to_cfg: Whether to add statements to CFG (default True)
+        """
+        cf = self._get_cf_builder()
+        for stmt in stmts:
+            if cf.is_terminated():
+                # Check if this is a with-label statement that needs visiting
+                if isinstance(stmt, ast.With) and len(stmt.items) == 1:
+                    ctx_expr = self.visit_expression(stmt.items[0].context_expr)
+                    if ctx_expr.is_python_value():
+                        py_val = ctx_expr.get_python_value()
+                        if isinstance(py_val, tuple) and len(py_val) == 2 and py_val[0] == '__scoped_label__':
+                            if add_to_cfg:
+                                cf.add_stmt(stmt)
+                            self.visit(stmt)
+                            continue
+                # Skip non-label statements when block is terminated
+                continue
+            if add_to_cfg:
+                cf.add_stmt(stmt)
+            self.visit(stmt)
+    
     def _execute_deferred_calls_for_return(self):
         """Emit all deferred calls before return (all scopes) and clear stack
         
@@ -78,7 +108,6 @@ class ControlFlowMixin:
                 expected_pc_type = hint.get("return")
         if not cf.is_terminated():
             # Evaluate return value first (before executing defers)
-            # This follows Zig/Go semantics: defer cannot modify the return value
             value = None
             if node.value:
                 # Evaluate the return value first to get ValueRef with tracking info
@@ -182,3 +211,59 @@ class ControlFlowMixin:
             )
         
         return result
+    
+    def visit_With(self, node: ast.With):
+        """Handle with statements - currently only supports scoped labels
+        
+        Syntax:
+            with label("name"):
+                # body can use goto_begin("name") or goto_end("name")
+                pass
+        """
+        # Currently only support single context manager
+        if len(node.items) != 1:
+            logger.error("with statement currently only supports single context manager",
+                        node=node, exc_type=SyntaxError)
+        
+        item = node.items[0]
+        
+        # Evaluate the context expression
+        ctx_expr = self.visit_expression(item.context_expr)
+        
+        # Check if this is a scoped label
+        if ctx_expr.is_python_value():
+            py_val = ctx_expr.get_python_value()
+            if isinstance(py_val, tuple) and len(py_val) == 2 and py_val[0] == '__scoped_label__':
+                label_name = py_val[1]
+                self._visit_with_scoped_label(node, label_name)
+                return
+        
+        # Other with statements not supported yet
+        logger.error("with statement currently only supports 'label' context manager",
+                    node=node, exc_type=NotImplementedError)
+    
+    def _visit_with_scoped_label(self, node: ast.With, label_name: str):
+        """Handle with label("name"): statement
+        
+        Creates a scoped label with begin and end blocks.
+        """
+        from ..builtin_entities.scoped_label import label as LabelClass
+        
+        # Enter label scope (creates begin/end blocks, pushes context)
+        ctx = LabelClass.enter_label_scope(self, label_name, node)
+        
+        # Increment scope depth for the label body
+        self.scope_depth += 1
+        self.ctx.var_registry.enter_scope()
+        
+        try:
+            # Visit body statements (don't add to CFG, label body is special)
+            self._visit_stmt_list(node.body, add_to_cfg=False)
+        finally:
+            # Exit label scope FIRST (while scope_depth is still correct)
+            # This emits defers for the label scope
+            LabelClass.exit_label_scope(self, ctx)
+            
+            # Then exit the variable scope and decrement depth
+            self.ctx.var_registry.exit_scope()
+            self.scope_depth -= 1

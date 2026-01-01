@@ -79,9 +79,9 @@ class LoopsMixin:
         """
         cf = self._get_cf_builder()
         
-        # Don't process if current block is already terminated
-        if cf.is_terminated():
-            return
+        # Note: We do NOT skip processing when terminated because the loop body
+        # may contain label definitions that need to be registered for forward
+        # goto resolution.
         
         # Check for compile-time constant condition
         condition_val = self.visit_expression(node.test)
@@ -139,10 +139,7 @@ class LoopsMixin:
         
         try:
             # Execute loop body
-            for stmt in node.body:
-                if not cf.is_terminated():
-                    cf.add_stmt(stmt)
-                    self.visit(stmt)
+            self._visit_stmt_list(node.body, add_to_cfg=True)
             
             # Check linear tokens in current scope
             for var_info in self.ctx.var_registry.get_all_in_current_scope():
@@ -231,10 +228,7 @@ class LoopsMixin:
         
         try:
             # Execute loop body statements
-            for stmt in node.body:
-                if not cf.is_terminated():
-                    cf.add_stmt(stmt)
-                    self.visit(stmt)
+            self._visit_stmt_list(node.body, add_to_cfg=True)
             
             # Check that all linear tokens created in loop are consumed
             for var_info in self.ctx.var_registry.get_all_in_current_scope():
@@ -270,10 +264,7 @@ class LoopsMixin:
         # Handle else block if present
         if has_else:
             cf.position_at_end(else_block)
-            for stmt in node.orelse:
-                if not cf.is_terminated():
-                    cf.add_stmt(stmt)
-                    self.visit(stmt)
+            self._visit_stmt_list(node.orelse, add_to_cfg=True)
             if not cf.is_terminated():
                 cf.branch(loop_exit)
         
@@ -339,10 +330,10 @@ class LoopsMixin:
         - else executes when loop completes normally (no break)
         - else does NOT execute when break is used
         
-        Pure goto approach:
-        - break in loop body -> __goto("_for_after_else_{id}")
-        - continue in loop body -> __goto("_yield_next_{id}")
-        - After all yields and else, place __label("_for_after_else_{id}")
+        Scoped label approach:
+        - break in loop body -> goto_begin("_for_after_else_{id}")
+        - continue in loop body -> goto_end("_yield_{id}")
+        - After all yields and else, place with label("_for_after_else_{id}"): pass
         """
         from ..inline.yield_adapter import YieldInlineAdapter
         
@@ -376,26 +367,24 @@ class LoopsMixin:
                 ast.fix_missing_locations(stmt)
             
             # Visit each inlined statement
-            for stmt in inlined_stmts:
-                if not cf.is_terminated():
-                    cf.add_stmt(stmt)
-                    self.visit(stmt)
+            self._visit_stmt_list(inlined_stmts, add_to_cfg=True)
             
             # Execute else clause if present (only reached if no break occurred)
             if node.orelse:
-                for stmt in node.orelse:
-                    if not cf.is_terminated():
-                        cf.add_stmt(stmt)
-                        self.visit(stmt)
+                self._visit_stmt_list(node.orelse, add_to_cfg=True)
             
-            # Place the after_else label (break jumps here to skip else)
+            # Place the after_else label as a scoped label (break jumps here to skip else)
             if after_else_label:
-                # Create __label("_for_after_else_{id}") statement
-                label_stmt = ast.Expr(value=ast.Call(
-                    func=ast.Name(id='__label', ctx=ast.Load()),
+                # Create: with label("_for_after_else_{id}"): pass
+                label_call = ast.Call(
+                    func=ast.Name(id='label', ctx=ast.Load()),
                     args=[ast.Constant(value=after_else_label)],
                     keywords=[]
-                ))
+                )
+                label_stmt = ast.With(
+                    items=[ast.withitem(context_expr=label_call, optional_vars=None)],
+                    body=[ast.Pass()]
+                )
                 ast.copy_location(label_stmt, node)
                 ast.fix_missing_locations(label_stmt)
                 if not cf.is_terminated():
@@ -445,10 +434,7 @@ class LoopsMixin:
         if len(py_iterable) == 0:
             # Empty iterator: execute else clause if present
             if node.orelse:
-                for stmt in node.orelse:
-                    if not cf.is_terminated():
-                        cf.add_stmt(stmt)
-                        self.visit(stmt)
+                self._visit_stmt_list(node.orelse, add_to_cfg=True)
             return
         
         # Get loop variable pattern (supports nested tuple unpacking)
@@ -487,10 +473,10 @@ class LoopsMixin:
         
         try:
             # Unroll with basic blocks
+            # Note: We do NOT skip iterations when terminated because later iterations
+            # may contain label definitions that need to be registered for forward
+            # goto resolution.
             for i, element in enumerate(py_iterable):
-                if cf.is_terminated():
-                    break
-                
                 # Enter new scope for this iteration
                 self.ctx.var_registry.enter_scope()
                 # Increment scope depth for this iteration
@@ -605,10 +591,7 @@ class LoopsMixin:
             # Handle else clause if present
             if node.orelse:
                 # Execute else clause (only reached if no break occurred)
-                for stmt in node.orelse:
-                    if not cf.is_terminated():
-                        cf.add_stmt(stmt)
-                        self.visit(stmt)
+                self._visit_stmt_list(node.orelse, add_to_cfg=True)
                 
                 # If has break, branch to after_else and position there
                 if body_has_break and after_else:

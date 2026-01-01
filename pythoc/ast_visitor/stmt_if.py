@@ -105,11 +105,12 @@ class IfStatementMixin:
         
         For compile-time constant conditions (if True/False), only one branch
         executes.
+        
+        Note: We do NOT skip processing when terminated because the if body
+        may contain label definitions that need to be registered for forward
+        goto resolution.
         """
-        # Don't process if current block is already terminated
         cf = self._get_cf_builder()
-        if cf.is_terminated():
-            return
 
         # Capture linear state before if statement for branch restoration
         linear_states_before = cf.capture_linear_snapshot()
@@ -124,10 +125,7 @@ class IfStatementMixin:
                 self.scope_depth += 1
                 current_scope = self.scope_depth
                 try:
-                    for stmt in branch:
-                        if not cf.is_terminated():
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
+                    self._visit_stmt_list(branch, add_to_cfg=True)
                     # Emit deferred calls for this block before exiting (normal exit)
                     if not cf.is_terminated():
                         self._emit_deferred_calls_for_scope(current_scope)
