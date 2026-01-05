@@ -282,15 +282,16 @@ class YieldInlineAdapter:
         Current restrictions:
         - Must contain at least one yield
         - No return statements with values
-        - No nested function definitions (for now)
+        
+        Note: Nested functions are allowed - the InlineBodyTransformer.visit_FunctionDef
+        handles variable renaming in nested function bodies correctly.
         """
         checker = _YieldInlinabilityChecker()
         checker.visit(func_ast)
         
         return (
             checker.has_yield and
-            not checker.has_return_value and
-            not checker.has_nested_function
+            not checker.has_return_value
         )
 
 

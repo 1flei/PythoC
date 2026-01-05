@@ -17,7 +17,7 @@ Design:
 
 from pythoc import (
     compile, inline, i32, i64, i8, bool, ptr, array, nullptr, sizeof, void,
-    char, refine, assume, struct, consume, linear
+    char, refine, assume, struct, consume, linear, defer
 )
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import memcpy
@@ -1007,6 +1007,7 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
             decl_free(decl_prf, decl)
     """
     lex_prf, lex_raw = lexer_create(source)
+    defer(lexer_destroy, lex_prf, lex_raw)
     
     for lex in refine(lex_raw, lexer_nonnull):
         # Create parser state (no linear fields)
@@ -1024,6 +1025,10 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
         # Get first token - ptr(parser) for stack variable is always non-null
         p: ParserRef = assume(ptr(parser), parser_nonnull)
         prfs = parser_advance(p, prfs)
+
+        def token_release_fn():
+            lex_prf = token_release(p.current, prfs.current_prf, prfs.lex_prf)
+        defer(token_release_fn)
         
         while p.current.type != TokenType.EOF:
             # Skip storage class specifiers
@@ -1113,11 +1118,3 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
                                 if parser_match(p, TokenType.SEMICOLON):
                                     prfs = parser_advance(p, prfs)
         
-        # Release final token - parser_advance guarantees has_token = 1
-        lex_prf = token_release(p.current, prfs.current_prf, prfs.lex_prf)
-        
-        lexer_destroy(lex_prf, lex_raw)
-        break
-    else:
-        # lexer_create failed - lex_raw is null, clean up lex_prf
-        consume(lex_prf)
