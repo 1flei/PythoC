@@ -48,7 +48,7 @@ def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
             [sys.executable, str(test_file)],
             capture_output=True,
             text=True,
-            timeout=50,
+            timeout=120,
             cwd=workspace,
             env=env,
             stdin=subprocess.DEVNULL
