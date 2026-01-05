@@ -225,10 +225,13 @@ class AssignmentsMixin:
             from ..builtin_entities.python_type import PythonType
             
             var_name = target.id
-            existing = self.lookup_variable(var_name)
             
-            if existing is None:
-                # New variable - declare it directly with the Python value
+            # Check if variable exists in var_registry (not user_globals)
+            existing_in_registry = self.ctx.var_registry.lookup(var_name)
+            
+            if existing_in_registry is None:
+                # New variable OR shadowing a user_globals variable
+                # Either way, declare it in var_registry
                 pc_type = pc_type or rvalue.get_pc_type()
                 if pc_type is None:
                     pc_type = PythonType.wrap(rvalue.get_python_value(), is_constant=True)
@@ -251,9 +254,9 @@ class AssignmentsMixin:
                 self.ctx.var_registry.declare(var_info, allow_shadow=True)
                 return
             else:
-                # Variable exists - if it's also a Python value, update it
-                if existing.alloca is None:
-                    existing.value_ref = rvalue
+                # Variable exists in var_registry - if it's also a Python value, update it
+                if existing_in_registry.alloca is None:
+                    existing_in_registry.value_ref = rvalue
                     return
                 # Otherwise fall through to normal assignment (will likely fail)
         

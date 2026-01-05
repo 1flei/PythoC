@@ -414,6 +414,17 @@ class PythonType(_PythonTypeBase):
                 logger.error(f"List subscript requires constant index at compile time, got {type(node.slice)}",
                             node=node, exc_type=TypeError)
         
+        # Handle dict subscript
+        if isinstance(self._python_object, dict):
+            if index_val not in self._python_object:
+                logger.error(f"Dict key not found: {index_val}, available keys={list(self._python_object.keys())}", node=node, exc_type=KeyError)
+            result = self._python_object[index_val]
+            return self._wrap_constant_result(visitor, result)
+        
+        # Handle list/tuple subscript - check bounds
+        if isinstance(index_val, int) and index_val >= len(self._python_object):
+            logger.error(f"List index out of range: {index_val} >= {len(self._python_object)}, obj={self._python_object}", node=node, exc_type=IndexError)
+
         result = self._python_object[index_val]
         return self._wrap_constant_result(visitor, result)
     
