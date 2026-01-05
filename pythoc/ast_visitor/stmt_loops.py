@@ -131,7 +131,8 @@ class LoopsMixin:
         # Enter LOOP scope with continue -> loop_body_start, break -> loop_exit
         with self.scope_manager.scope(ScopeType.LOOP, cf, 
                                        continue_target=loop_body_start, 
-                                       break_target=loop_exit) as scope:
+                                       break_target=loop_exit,
+                                       node=node) as scope:
             # Keep legacy scope_depth in sync
             self.scope_depth = self.scope_manager.current_depth
             
@@ -224,7 +225,8 @@ class LoopsMixin:
         # Enter LOOP scope with continue -> loop_header, break -> loop_exit
         with self.scope_manager.scope(ScopeType.LOOP, cf,
                                        continue_target=loop_header,
-                                       break_target=loop_exit) as scope:
+                                       break_target=loop_exit,
+                                       node=node) as scope:
             # Keep legacy scope_depth in sync
             self.scope_depth = self.scope_manager.current_depth
             

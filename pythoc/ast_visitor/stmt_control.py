@@ -274,7 +274,8 @@ class ControlFlowMixin:
         ctx = LabelClass.enter_label_scope(self, label_name, node)
         
         # Use ScopeManager for the label body
-        with self.scope_manager.scope(ScopeType.LABEL, self._get_cf_builder()) as scope:
+        with self.scope_manager.scope(ScopeType.LABEL, self._get_cf_builder(),
+                                       node=node) as scope:
             # Keep legacy scope_depth in sync
             self.scope_depth = self.scope_manager.current_depth
             

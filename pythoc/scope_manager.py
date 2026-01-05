@@ -148,7 +148,8 @@ class ScopeManager:
         logger.debug(f"Entered scope {scope}")
         return scope
     
-    def exit_scope(self, cf: Any, check_linear: bool = True) -> Scope:
+    def exit_scope(self, cf: Any, check_linear: bool = True,
+                   node: Optional[ast.AST] = None) -> Scope:
         """Exit current scope
         
         This:
@@ -159,6 +160,7 @@ class ScopeManager:
         Args:
             cf: ControlFlowBuilder for checking termination
             check_linear: Whether to check linear tokens (False for early exits)
+            node: Optional AST node for error reporting
         
         Returns:
             The exited Scope
@@ -174,7 +176,7 @@ class ScopeManager:
         
         # 2. Check linear tokens (optional)
         if check_linear and not cf.is_terminated():
-            self._check_linear_tokens(scope)
+            self._check_linear_tokens(scope, node)
         
         # 3. Sync with var_registry
         self._var_registry.exit_scope()
@@ -263,11 +265,15 @@ class ScopeManager:
         
         logger.debug(f"Emitted {executed_count}/{len(defers_to_emit)} defers for scope depth {scope.depth}")
     
-    def _check_linear_tokens(self, scope: Scope):
+    def _check_linear_tokens(self, scope: Scope, node: Optional[ast.AST] = None):
         """Check that all linear tokens in scope are consumed
         
         This checks that all linear tokens declared at this scope depth
         have been consumed before the scope exits.
+        
+        Args:
+            scope: The scope being exited
+            node: Optional AST node for error reporting
         """
         if self._visitor is None:
             return
@@ -288,7 +294,8 @@ class ScopeManager:
         
         if unconsumed:
             logger.error(
-                f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}"
+                f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}",
+                node=node
             )
     
     def register_defer(self, callable_obj: Any, func_ref: ValueRef, 
@@ -350,15 +357,23 @@ class ScopeManager:
         return self._var_registry.lookup(name)
     
     def scope(self, scope_type: ScopeType, cf: Any = None,
-              continue_target: Any = None, break_target: Any = None):
+              continue_target: Any = None, break_target: Any = None,
+              node: Optional[ast.AST] = None):
         """Context manager for automatic scope management
         
         Usage:
-            with scope_manager.scope(ScopeType.IF, cf) as scope:
+            with scope_manager.scope(ScopeType.IF, cf, node=if_node) as scope:
                 # ... code ...
             # Defers executed, scope cleaned up
+        
+        Args:
+            scope_type: Type of scope (IF, LOOP, etc.)
+            cf: ControlFlowBuilder for termination checks
+            continue_target: Target block for continue statements
+            break_target: Target block for break statements
+            node: AST node for error reporting
         """
-        return _ScopeContext(self, scope_type, cf, continue_target, break_target)
+        return _ScopeContext(self, scope_type, cf, continue_target, break_target, node)
     
     def clear(self):
         """Clear all scopes (for testing or function end)"""
@@ -369,13 +384,15 @@ class _ScopeContext:
     """Context manager for ScopeManager.scope()"""
     
     def __init__(self, manager: ScopeManager, scope_type: ScopeType, 
-                 cf: Any, continue_target: Any, break_target: Any):
+                 cf: Any, continue_target: Any, break_target: Any,
+                 node: Optional[ast.AST] = None):
         self._manager = manager
         self._scope_type = scope_type
         self._cf = cf
         self._continue_target = continue_target
         self._break_target = break_target
         self._scope: Optional[Scope] = None
+        self._node = node
     
     def __enter__(self) -> Scope:
         self._scope = self._manager.enter_scope(
@@ -387,7 +404,7 @@ class _ScopeContext:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self._cf is not None:
-            self._manager.exit_scope(self._cf)
+            self._manager.exit_scope(self._cf, node=self._node)
         else:
             # No CF provided, just pop scope without defer execution
             if self._manager._scopes:

@@ -197,14 +197,19 @@ class ClosureAdapter:
         
         This tells the kernel what variables are available in outer scope,
         so it can correctly identify captured variables.
+        
+        CRITICAL: Must use get_all_visible() to include variables from ALL
+        enclosing scopes, not just the current scope. This is essential for
+        by-ref capture to work correctly when closure is defined in nested
+        scopes (e.g., inside a while loop).
         """
         available_vars = set()
         
-        # Get all variables from visitor's registry
+        # Get all visible variables from ALL scopes (not just current)
         if hasattr(self.visitor, 'ctx') and hasattr(self.visitor.ctx, 'var_registry'):
             registry = self.visitor.ctx.var_registry
-            for var_info in registry.get_all_in_current_scope():
-                available_vars.add(var_info.name)
+            for var_name in registry.get_all_visible().keys():
+                available_vars.add(var_name)
         
         return ScopeContext(available_vars=available_vars)
     

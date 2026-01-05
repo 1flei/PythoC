@@ -121,7 +121,7 @@ class IfStatementMixin:
             # branch is a list of AST statements
             def execute_stmts():
                 # Use unified ScopeManager for scope/defer management
-                with self.scope_manager.scope(ScopeType.IF, cf) as scope:
+                with self.scope_manager.scope(ScopeType.IF, cf, node=node) as scope:
                     # Keep scope_depth in sync for backward compatibility
                     # TODO: Remove this once all code uses scope_manager.current_depth
                     self.scope_depth = self.scope_manager.current_depth
