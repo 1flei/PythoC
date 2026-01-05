@@ -5,6 +5,7 @@ Control flow statement visitor mixin (return, break, continue)
 import ast
 from ..valueref import ensure_ir, ValueRef
 from ..logger import logger
+from ..scope_manager import ScopeType
 from .control_flow_builder import ControlFlowBuilder
 
 
@@ -51,21 +52,31 @@ class ControlFlowMixin:
             self.visit(stmt)
     
     def _execute_deferred_calls_for_return(self):
-        """Emit all deferred calls before return (all scopes) and clear stack
+        """Emit all deferred calls before return (all scopes)
         
-        Return terminates the function, so we emit all defers and clear the stack.
+        Note: We do NOT clear the defer stack here because other branches
+        (e.g., else branch in if-then-return pattern) may also need to emit
+        the same defers. The defer stack is managed at scope exit, not at return.
+        
+        Each branch that returns will emit its own copy of the deferred calls.
         """
-        from ..builtin_entities.defer import emit_deferred_calls, _init_defer_registry
-        emit_deferred_calls(self, all_scopes=True)
-        # Clear the defer stack since return terminates the function
-        _init_defer_registry(self)
-        self._defer_stack = []
+        # Use ScopeManager to emit all defers
+        cf = self._get_cf_builder()
+        self.scope_manager.emit_all_defers(cf)
     
     def _emit_deferred_calls_for_scope(self, scope_depth: int):
         """Emit deferred calls for a specific scope (without unregistering)
         
         Used at normal block exit points. The unregister happens in finally block.
+        
+        Note: This is a legacy API. New code should use scope_manager directly.
         """
+        # Find the scope with this depth and emit its defers
+        for scope in reversed(self.scope_manager._scopes):
+            if scope.depth == scope_depth:
+                self.scope_manager._emit_defers_for_scope(scope)
+                return
+        # Fallback to old API if scope not found in scope_manager
         from ..builtin_entities.defer import emit_deferred_calls
         emit_deferred_calls(self, scope_depth=scope_depth)
     
@@ -80,12 +91,10 @@ class ControlFlowMixin:
         Used by break/continue to emit defers for all nested scopes
         before jumping out to the loop scope. Does not unregister.
         """
-        from ..builtin_entities.defer import emit_deferred_calls
-        # Emit defers from current scope down to target scope
-        logger.debug(f"Emitting defers from scope {self.scope_depth} down to {target_scope_depth}")
-        for depth in range(self.scope_depth, target_scope_depth - 1, -1):
-            logger.debug(f"  Emitting defers for scope {depth}")
-            emit_deferred_calls(self, scope_depth=depth)
+        # Use ScopeManager to emit defers down to target depth
+        cf = self._get_cf_builder()
+        logger.debug(f"Emitting defers from scope {self.scope_manager.current_depth} down to {target_scope_depth}")
+        self.scope_manager.exit_scopes_to(target_scope_depth - 1, cf, emit_defers=True)
     
     def _execute_deferred_calls_down_to_scope(self, target_scope_depth: int):
         """Execute deferred calls from current scope down to target scope (legacy API)"""
@@ -151,16 +160,22 @@ class ControlFlowMixin:
         
         cf = self._get_cf_builder()
         if not cf.is_terminated():
-            # Get loop scope depth from loop_stack
-            loop_scope_depth = self.loop_scope_stack[-1] if hasattr(self, 'loop_scope_stack') and self.loop_scope_stack else self.scope_depth
+            # Get loop scope depth from scope_manager or legacy loop_scope_stack
+            loop_scope_depth = self.scope_manager.get_loop_scope_depth()
+            if loop_scope_depth is None:
+                # Fallback to legacy
+                loop_scope_depth = self.loop_scope_stack[-1] if self.loop_scope_stack else self.scope_depth
             
-            logger.debug(f"Break: current scope={self.scope_depth}, loop scope={loop_scope_depth}")
+            logger.debug(f"Break: current scope={self.scope_manager.current_depth}, loop scope={loop_scope_depth}")
             
-            # Execute deferred calls from current scope down to loop scope (inclusive)
-            self._execute_deferred_calls_down_to_scope(loop_scope_depth)
+            # Emit deferred calls from current scope down to loop scope (inclusive)
+            self._emit_deferred_calls_down_to_scope(loop_scope_depth)
             
-            # Get the break target (loop exit block or after_else block)
-            _, break_block = self.loop_stack[-1]
+            # Get the break target from scope_manager or legacy loop_stack
+            _, break_block = self.scope_manager.get_loop_targets()
+            if break_block is None:
+                # Fallback to legacy
+                _, break_block = self.loop_stack[-1]
             
             # Add break edge to CFG and generate IR
             cf.branch(break_block)
@@ -180,14 +195,20 @@ class ControlFlowMixin:
         
         cf = self._get_cf_builder()
         if not cf.is_terminated():
-            # Get loop scope depth from loop_stack
-            loop_scope_depth = self.loop_scope_stack[-1] if hasattr(self, 'loop_scope_stack') and self.loop_scope_stack else self.scope_depth
+            # Get loop scope depth from scope_manager or legacy loop_scope_stack
+            loop_scope_depth = self.scope_manager.get_loop_scope_depth()
+            if loop_scope_depth is None:
+                # Fallback to legacy
+                loop_scope_depth = self.loop_scope_stack[-1] if self.loop_scope_stack else self.scope_depth
             
-            # Execute deferred calls from current scope down to loop scope (inclusive)
-            self._execute_deferred_calls_down_to_scope(loop_scope_depth)
+            # Emit deferred calls from current scope down to loop scope (inclusive)
+            self._emit_deferred_calls_down_to_scope(loop_scope_depth)
             
-            # Get the continue target (loop header block)
-            continue_block, _ = self.loop_stack[-1]
+            # Get the continue target from scope_manager or legacy loop_stack
+            continue_block, _ = self.scope_manager.get_loop_targets()
+            if continue_block is None:
+                # Fallback to legacy
+                continue_block, _ = self.loop_stack[-1]
             
             # Add continue edge to CFG and generate IR
             cf.branch(continue_block)
@@ -252,18 +273,23 @@ class ControlFlowMixin:
         # Enter label scope (creates begin/end blocks, pushes context)
         ctx = LabelClass.enter_label_scope(self, label_name, node)
         
-        # Increment scope depth for the label body
-        self.scope_depth += 1
-        self.ctx.var_registry.enter_scope()
-        
-        try:
-            # Visit body statements (don't add to CFG, label body is special)
-            self._visit_stmt_list(node.body, add_to_cfg=False)
-        finally:
-            # Exit label scope FIRST (while scope_depth is still correct)
-            # This emits defers for the label scope
-            LabelClass.exit_label_scope(self, ctx)
+        # Use ScopeManager for the label body
+        with self.scope_manager.scope(ScopeType.LABEL, self._get_cf_builder()) as scope:
+            # Keep legacy scope_depth in sync
+            self.scope_depth = self.scope_manager.current_depth
             
-            # Then exit the variable scope and decrement depth
-            self.ctx.var_registry.exit_scope()
-            self.scope_depth -= 1
+            try:
+                # Visit body statements (don't add to CFG, label body is special)
+                self._visit_stmt_list(node.body, add_to_cfg=False)
+            finally:
+                # Exit label scope (branches to end block, pops label stack)
+                # NOTE: Does NOT position_at_end - that's done after scope_manager exits
+                LabelClass.exit_label_scope(self, ctx)
+        
+        # Position at end block AFTER scope_manager.exit_scope()
+        # This ensures is_terminated() check in exit_scope works correctly
+        cf = self._get_cf_builder()
+        cf.position_at_end(ctx.end_block)
+        
+        # Restore scope_depth after exiting scope
+        self.scope_depth = self.scope_manager.current_depth

@@ -33,14 +33,22 @@ class typeof(BuiltinFunction):
         return True
     
     def __new__(cls, value_or_type):
-        """Support direct Python-level calls: typeof(5), typeof(i32)"""
+        """Support direct Python-level calls: typeof(5), typeof(i32)
+        
+        Python-level semantics:
+        - typeof(5)   -> pyconst[5]
+        - typeof(T)   -> T        (when T is a PC BuiltinEntity type)
+        """
         if isinstance(value_or_type, type) and issubclass(value_or_type, BuiltinEntity):
+            # PC type class: typeof(i32) -> i32
             return value_or_type
         elif isinstance(value_or_type, BuiltinEntity):
-            return value_or_type
+            # PC type instance: typeof(i32()) -> its type
+            return type(value_or_type)
         else:
-            from .python_type import PythonType
-            return PythonType.wrap(value_or_type, is_constant=True)
+            # Python value: typeof(5) -> pyconst[5]
+            from .python_type import pyconst
+            return pyconst[value_or_type]
     
     @classmethod
     def handle_call(cls, visitor, func_ref, args, node: ast.Call):

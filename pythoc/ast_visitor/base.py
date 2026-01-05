@@ -34,6 +34,7 @@ from ..builtin_entities import bool as pc_bool
 from ..registry import get_unified_registry, infer_struct_from_access
 from ..type_resolver import TypeResolver
 from ..logger import logger
+from ..scope_manager import ScopeManager, ScopeType
 
 if TYPE_CHECKING:
     from ..backend import AbstractBackend
@@ -76,7 +77,12 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # Type converter for centralized type conversion
         self.type_converter = TypeConverter(self)
         
+        # Unified scope manager for defer, linear types, and variable lifetime
+        self.scope_manager = ScopeManager(self.ctx.var_registry)
+        self.scope_manager.set_visitor(self)
+        
         # Linear type tracking - now integrated with VariableInfo
+        # TODO: scope_depth will be replaced by scope_manager.current_depth
         self.scope_depth = 0  # Track scope depth for loop restrictions
         
         # Backward compatibility aliases

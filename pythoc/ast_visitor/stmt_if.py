@@ -6,6 +6,7 @@ import ast
 from llvmlite import ir
 from ..valueref import ensure_ir, ValueRef
 from ..logger import logger
+from ..scope_manager import ScopeType
 from .control_flow_builder import ControlFlowBuilder
 
 
@@ -119,23 +120,15 @@ class IfStatementMixin:
         def make_branch_fn(branch):
             # branch is a list of AST statements
             def execute_stmts():
-                # Enter new scope for the if/else block
-                # Increment scope_depth so defer can track block-level defers
-                self.ctx.var_registry.enter_scope()
-                self.scope_depth += 1
-                current_scope = self.scope_depth
-                try:
+                # Use unified ScopeManager for scope/defer management
+                with self.scope_manager.scope(ScopeType.IF, cf) as scope:
+                    # Keep scope_depth in sync for backward compatibility
+                    # TODO: Remove this once all code uses scope_manager.current_depth
+                    self.scope_depth = self.scope_manager.current_depth
                     self._visit_stmt_list(branch, add_to_cfg=True)
-                    # Emit deferred calls for this block before exiting (normal exit)
-                    if not cf.is_terminated():
-                        self._emit_deferred_calls_for_scope(current_scope)
-                finally:
-                    # Unregister defers for this scope (they've been emitted at all exit points)
-                    from ..builtin_entities.defer import unregister_defers_for_scope
-                    unregister_defers_for_scope(self, current_scope)
-                    # Exit scope even if there's an error
-                    self.scope_depth -= 1
-                    self.ctx.var_registry.exit_scope()
+                    # Defers are automatically emitted by scope_manager.exit_scope()
+                # scope_depth restored automatically since scope_manager tracks it
+                self.scope_depth = self.scope_manager.current_depth
             return execute_stmts
             
         condition = self.visit_expression(node.test)

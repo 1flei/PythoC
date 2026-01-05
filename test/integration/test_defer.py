@@ -43,7 +43,6 @@ def test_defer_simple() -> i32:
     result: i32 = 0
     
     # Define helper inline
-    @compile(suffix="defer_simple_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -58,7 +57,6 @@ def test_defer_fifo_order() -> i32:
     """
     result: i32 = 0
     
-    @compile(suffix="defer_fifo_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -75,7 +73,6 @@ def test_defer_with_work() -> i32:
     """
     result: i32 = 10
     
-    @compile(suffix="defer_work_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -91,7 +88,6 @@ def test_defer_early_return(cond: i32) -> i32:
     """
     result: i32 = 0
     
-    @compile(suffix="defer_early_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -111,7 +107,6 @@ def test_defer_in_branch(cond: i32) -> i32:
     """
     result: i32 = 0
     
-    @compile(suffix="defer_branch_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -133,7 +128,6 @@ def test_defer_in_for_loop() -> i32:
     """Defer in for loop - executes at end of each iteration"""
     result: i32 = 0
     
-    @compile(suffix="defer_for_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -150,7 +144,6 @@ def test_defer_with_break() -> i32:
     """Defer executes before break"""
     result: i32 = 0
     
-    @compile(suffix="defer_break_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -167,7 +160,6 @@ def test_defer_with_continue() -> i32:
     """Defer executes before continue"""
     result: i32 = 0
     
-    @compile(suffix="defer_continue_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -189,7 +181,6 @@ def test_defer_nested_scopes() -> i32:
     """Defer in nested scopes - inner scope defers execute first"""
     result: i32 = 0
     
-    @compile(suffix="defer_nested_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -210,7 +201,6 @@ def test_defer_multiple_loops() -> i32:
     """Defer in multiple sequential loops"""
     result: i32 = 0
     
-    @compile(suffix="defer_multi_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -234,7 +224,6 @@ def test_defer_with_goto() -> i32:
     """Defer executes before goto"""
     result: i32 = 0
     
-    @compile(suffix="defer_goto_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -259,7 +248,6 @@ def test_defer_captures_args() -> i32:
     result: i32 = 0
     val: i32 = 5
     
-    @compile(suffix="defer_capture_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -281,7 +269,6 @@ def test_defer_nested_loops() -> i32:
     """Defer in nested loops - inner defers execute first"""
     result: i32 = 0
     
-    @compile(suffix="defer_nested_loops_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -301,11 +288,9 @@ def test_defer_if_else_branches(cond: i32) -> i32:
     """Defer in different if/else branches"""
     result: i32 = 0
     
-    @compile(suffix="defer_if_else_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
-    @compile(suffix="defer_if_else_add10")
     def add10(p: ptr[i32]) -> void:
         p[0] = p[0] + 10
     
@@ -324,7 +309,6 @@ def test_defer_multiple_returns(code: i32) -> i32:
     """Defer with multiple return paths"""
     result: i32 = 0
     
-    @compile(suffix="defer_multi_ret_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -345,7 +329,6 @@ def test_defer_loop_early_exit(limit: i32) -> i32:
     """Defer in loop with early exit via break"""
     result: i32 = 0
     
-    @compile(suffix="defer_loop_exit_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -371,7 +354,6 @@ def test_defer_goto_same_scope() -> i32:
     """Defer with goto in same scope - defer executes before goto"""
     result: i32 = 0
     
-    @compile(suffix="defer_goto_same_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -391,7 +373,6 @@ def test_defer_goto_forward() -> i32:
     """Defer with forward goto"""
     result: i32 = 0
     
-    @compile(suffix="defer_goto_fwd_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -413,7 +394,6 @@ def test_defer_goto_backward() -> i32:
     result: i32 = 0
     count: i32 = 0
     
-    @compile(suffix="defer_goto_back_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -432,7 +412,6 @@ def test_defer_goto_conditional(cond: i32) -> i32:
     """Defer with conditional goto"""
     result: i32 = 0
     
-    @compile(suffix="defer_goto_cond_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -459,7 +438,6 @@ def test_defer_goto_out_of_loop() -> i32:
     """Defer in loop with goto jumping out of loop"""
     result: i32 = 0
     
-    @compile(suffix="defer_goto_out_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -480,7 +458,6 @@ def test_defer_goto_into_after_loop() -> i32:
     """Goto from before loop to after loop"""
     result: i32 = 0
     
-    @compile(suffix="defer_goto_after_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -504,7 +481,6 @@ def test_defer_multiple_gotos_same_label(code: i32) -> i32:
     """Multiple gotos to same label from different scopes"""
     result: i32 = 0
     
-    @compile(suffix="defer_multi_goto_inc")
     def inc(p: ptr[i32]) -> void:
         p[0] = p[0] + 1
     
@@ -539,7 +515,6 @@ def test_defer_linear_simple() -> i32:
     """Defer with linear type - consume in defer"""
     result: i32 = 0
     
-    @compile(suffix="defer_linear_consumer")
     def consumer(p: ptr[i32], t: linear) -> void:
         consume(t)
         p[0] = p[0] + 1
@@ -555,7 +530,6 @@ def test_defer_linear_in_loop() -> i32:
     """Defer with linear in loop - each iteration creates and defers"""
     result: i32 = 0
     
-    @compile(suffix="defer_linear_loop_consumer")
     def consumer(p: ptr[i32], t: linear) -> void:
         consume(t)
         p[0] = p[0] + 1
@@ -572,7 +546,6 @@ def test_defer_linear_multiple() -> i32:
     """Multiple defers with different linear tokens"""
     result: i32 = 0
     
-    @compile(suffix="defer_linear_multi_consumer")
     def consumer(p: ptr[i32], t: linear) -> void:
         consume(t)
         p[0] = p[0] + 1
@@ -593,7 +566,6 @@ def test_defer_linear_with_goto() -> i32:
     """Defer with linear and goto"""
     result: i32 = 0
     
-    @compile(suffix="defer_linear_goto_consumer")
     def consumer(p: ptr[i32], t: linear) -> void:
         consume(t)
         p[0] = p[0] + 1
@@ -615,7 +587,6 @@ def test_defer_linear_conditional(cond: i32) -> i32:
     """Defer with linear in conditional branches"""
     result: i32 = 0
     
-    @compile(suffix="defer_linear_cond_consumer")
     def consumer(p: ptr[i32], t: linear) -> void:
         consume(t)
         p[0] = p[0] + 1
@@ -637,7 +608,6 @@ def test_defer_linear_nested_scope() -> i32:
     """Defer with linear in nested scopes"""
     result: i32 = 0
     
-    @compile(suffix="defer_linear_nested_consumer")
     def consumer(p: ptr[i32], t: linear) -> void:
         consume(t)
         p[0] = p[0] + 1

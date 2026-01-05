@@ -549,6 +549,12 @@ class LLVMCompiler:
         from .ast_visitor.control_flow_builder import ControlFlowBuilder
         visitor._cf_builder = ControlFlowBuilder(visitor, ast_node.name)
         
+        # Enter function-level scope in ScopeManager
+        # This is the root scope for all defers in this function
+        from .scope_manager import ScopeType
+        visitor.scope_manager.enter_scope(ScopeType.FUNCTION)
+        visitor.scope_depth = visitor.scope_manager.current_depth
+        
         # Visit function body
         # Skip statements after control flow termination (e.g., after infinite loops)
         # Exception: with label() statements are always processed because they create new reachable blocks
@@ -570,6 +576,12 @@ class LLVMCompiler:
                     continue
             visitor._cf_builder.add_stmt(stmt)
             visitor.visit(stmt)
+        
+        # Exit function-level scope in ScopeManager
+        # Note: Defers should have been emitted at return statements
+        # This just cleans up the scope stack
+        visitor.scope_manager.clear()
+        visitor.scope_depth = 0
         
         # Check for unresolved scoped goto statements
         from .builtin_entities.scoped_label import check_scoped_goto_consistency

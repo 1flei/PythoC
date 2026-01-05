@@ -21,6 +21,7 @@ Note:
 - defer captures the arguments at registration time, not at execution time
 - Deferred calls are scope-bound: they execute when their scope exits
 - Multiple defers in same scope execute in FIFO order (first defer runs first)
+- All defer management is done through ScopeManager (no legacy _defer_stack)
 """
 import ast
 from .base import BuiltinFunction
@@ -29,117 +30,90 @@ from ..valueref import wrap_value, ValueRef
 from ..logger import logger
 
 
-def _init_defer_registry(visitor):
-    """Initialize defer registry if not exists
+# ============================================================================
+# ScopeManager-based defer functions (current implementation)
+# ============================================================================
+
+def _get_defers_for_scope_via_manager(visitor, scope_depth: int):
+    """Get defers for a specific scope depth from ScopeManager
     
-    The defer registry tracks:
-    - _defer_stack: List of (scope_depth, callable_obj, func_ref, args, node)
+    Returns list of (callable_obj, func_ref, args, node) tuples
     """
-    if not hasattr(visitor, '_defer_stack'):
-        visitor._defer_stack = []
-
-
-def _get_defers_for_scope(visitor, scope_depth: int):
-    """Get all deferred calls for a specific scope depth (without removing)
+    if not hasattr(visitor, 'scope_manager'):
+        return []
     
-    Returns list of (callable_obj, func_ref, args, node) tuples in FIFO order
+    for scope in visitor.scope_manager._scopes:
+        if scope.depth == scope_depth:
+            return [
+                (d.callable_obj, d.func_ref, d.args, d.node)
+                for d in scope.defers
+            ]
+    return []
+
+
+def _get_all_defers_via_manager(visitor):
+    """Get all defers from all scopes via ScopeManager
+    
+    Returns list of (depth, callable_obj, func_ref, args, node) tuples
     """
-    _init_defer_registry(visitor)
-    defers = []
+    if not hasattr(visitor, 'scope_manager'):
+        return []
     
-    for item in visitor._defer_stack:
-        depth, callable_obj, func_ref, args, node = item
-        if depth == scope_depth:
-            defers.append((callable_obj, func_ref, args, node))
-    
-    return defers
-
-
-def _get_defers_for_scope_and_above(visitor, min_scope_depth: int):
-    """Get all deferred calls for scopes >= min_scope_depth (without removing)
-    
-    Used when exiting multiple scopes (e.g., return from nested scope)
-    Returns list of (scope_depth, callable_obj, func_ref, args, node) tuples in FIFO order
-    """
-    _init_defer_registry(visitor)
-    defers = []
-    
-    for item in visitor._defer_stack:
-        depth, callable_obj, func_ref, args, node = item
-        if depth >= min_scope_depth:
-            defers.append((depth, callable_obj, func_ref, args, node))
-    
-    return defers
-
-
-def unregister_defers_for_scope(visitor, scope_depth: int):
-    """Remove deferred calls for a specific scope from the stack (without executing)
-    
-    Called when exiting a block to clean up defers registered in that block.
-    The defers should have already been emitted at all exit points.
-    """
-    _init_defer_registry(visitor)
-    visitor._defer_stack = [
-        item for item in visitor._defer_stack
-        if item[0] != scope_depth
-    ]
-    logger.debug(f"Unregistered defers for scope {scope_depth}")
+    result = []
+    for scope in visitor.scope_manager._scopes:
+        for d in scope.defers:
+            result.append((scope.depth, d.callable_obj, d.func_ref, d.args, d.node))
+    return result
 
 
 def emit_deferred_calls(visitor, scope_depth: int = None, all_scopes: bool = False):
-    """Emit IR for deferred calls (without removing from stack)
+    """Emit IR for deferred calls via ScopeManager
     
     This generates the IR to execute defers at the current position.
-    The defers remain in the stack until explicitly unregistered.
     
     Args:
         visitor: AST visitor
         scope_depth: Specific scope depth to emit defers for
-        all_scopes: If True, emit all defers from scope 0 and above
+        all_scopes: If True, emit all defers from all scopes
     
     Deferred calls are emitted in FIFO order (first registered, first executed)
     """
-    _init_defer_registry(visitor)
+    if not hasattr(visitor, 'scope_manager'):
+        logger.error("emit_deferred_calls: visitor has no scope_manager", node=None)
+        return
     
     if all_scopes:
-        # Get all defers from scope 0 (function scope) and above
-        defers = _get_defers_for_scope_and_above(visitor, 0)
+        # Emit all defers from all scopes (innermost first for proper cleanup order)
+        for scope in reversed(visitor.scope_manager._scopes):
+            visitor.scope_manager._emit_defers_for_scope(scope)
     elif scope_depth is not None:
-        # Get defers only for the specific scope
-        defers = [
-            (scope_depth, c, f, a, n) 
-            for c, f, a, n in _get_defers_for_scope(visitor, scope_depth)
-        ]
-    else:
-        return
-    
-    if not defers:
-        return
-    
-    # Emit in FIFO order (list is already in registration order)
-    for item in defers:
-        if len(item) == 5:
-            depth, callable_obj, func_ref, args, node = item
-        else:
-            callable_obj, func_ref, args, node = item
-        
-        # Generate the call
-        _execute_single_defer(visitor, callable_obj, func_ref, args, node)
+        # Find and emit defers for specific scope
+        for scope in visitor.scope_manager._scopes:
+            if scope.depth == scope_depth:
+                visitor.scope_manager._emit_defers_for_scope(scope)
+                break
 
 
-# Keep old name for backward compatibility during transition
-def execute_deferred_calls(visitor, scope_depth: int = None, all_scopes: bool = False):
-    """Emit and unregister deferred calls (legacy API)
+def unregister_defers_for_scope(visitor, scope_depth: int):
+    """Clear defers for a specific scope (they should already be emitted)
     
-    This is the old behavior that both emits and removes defers.
-    New code should use emit_deferred_calls + unregister_defers_for_scope.
+    This is called when exiting a scope to ensure defers don't get double-executed.
+    With ScopeManager, defers are cleared when emitted, so this is mostly a no-op.
     """
+    if not hasattr(visitor, 'scope_manager'):
+        return
+    
+    for scope in visitor.scope_manager._scopes:
+        if scope.depth == scope_depth:
+            scope.defers.clear()
+            logger.debug(f"Cleared defers for scope {scope_depth}")
+            break
+
+
+# Legacy API - now just delegates to ScopeManager
+def execute_deferred_calls(visitor, scope_depth: int = None, all_scopes: bool = False):
+    """Emit deferred calls (legacy API, delegates to emit_deferred_calls)"""
     emit_deferred_calls(visitor, scope_depth=scope_depth, all_scopes=all_scopes)
-    if all_scopes:
-        # Clear all defers
-        visitor._defer_stack = []
-    elif scope_depth is not None:
-        unregister_defers_for_scope(visitor, scope_depth)
 
 
 def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list, node: ast.AST):
@@ -153,12 +127,25 @@ def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list,
         func_ref: ValueRef of the function
         args: List of ValueRef arguments
         node: Original AST node for error reporting
+    
+    Linear semantics:
+    - Linear ownership is transferred HERE at defer execution time
+    - NOT at defer registration time (visit_Call skips it for defer)
+    - This matches the semantic that linear tokens are consumed when defer runs
     """
     cf = visitor._get_cf_builder()
     
     # Skip if block is terminated
     if cf.is_terminated():
         return
+    
+    logger.debug(f"_execute_single_defer: {callable_obj}")
+    
+    # Transfer linear ownership NOW at execution time
+    # This is deferred from registration time to match the semantic
+    # that linear tokens are consumed when the deferred call actually runs
+    for arg in args:
+        visitor._transfer_linear_ownership(arg, reason="deferred function argument", node=node)
     
     # Use the standard handle_call protocol
     callable_obj.handle_call(visitor, func_ref, args, node)
@@ -193,7 +180,16 @@ class defer(BuiltinFunction):
     Arguments are evaluated at defer() time, not at execution time.
     
     Multiple defers in the same scope execute in FIFO order.
+    
+    Linear type semantics:
+    - Linear arguments are NOT consumed at defer registration time
+    - Linear arguments are consumed when the defer actually executes
+    - This allows linear tokens to be "held" by defer until scope exit
     """
+    
+    # Flag to indicate defer should skip linear transfer at registration
+    # Linear transfer happens at execution time instead
+    defer_linear_transfer = True
     
     @classmethod
     def get_name(cls) -> str:
@@ -233,20 +229,18 @@ class defer(BuiltinFunction):
                 node=node, exc_type=TypeError
             )
         
-        # Initialize defer registry
-        _init_defer_registry(visitor)
+        # Register with ScopeManager (required - no fallback)
+        if not hasattr(visitor, 'scope_manager') or visitor.scope_manager.current_scope is None:
+            logger.error(
+                "defer() called outside of any scope (no scope_manager)",
+                node=node, exc_type=RuntimeError
+            )
         
-        # Register the deferred call with current scope depth
-        visitor._defer_stack.append((
-            visitor.scope_depth,
-            callable_obj,
-            deferred_func,
-            deferred_args,
-            node
-        ))
-        
+        visitor.scope_manager.register_defer(
+            callable_obj, deferred_func, deferred_args, node
+        )
         logger.debug(
-            f"Registered deferred call at scope depth {visitor.scope_depth}: "
+            f"Registered deferred call via ScopeManager at scope depth {visitor.scope_manager.current_depth}: "
             f"{deferred_func} with {len(deferred_args)} args"
         )
         
@@ -254,23 +248,15 @@ class defer(BuiltinFunction):
 
 
 def check_defers_at_function_end(visitor, func_node):
-    """Check that all deferred calls have been executed
+    """Clean up defer tracking at function end
     
-    Called at the end of function compilation to ensure no defers are leaked.
-    This should not happen if the implementation is correct.
+    Called at the end of function compilation.
+    With ScopeManager, this is mostly a no-op since scopes handle cleanup.
     
     Args:
         visitor: The visitor instance
         func_node: The function AST node (for error location)
     """
-    _init_defer_registry(visitor)
-    
-    if visitor._defer_stack:
-        # This indicates a bug in the implementation
-        logger.warning(
-            f"Internal: {len(visitor._defer_stack)} deferred calls were not executed. "
-            f"This may indicate a bug in the defer implementation.",
-            node=func_node
-        )
-        # Clear the stack to avoid affecting other functions
-        visitor._defer_stack = []
+    # ScopeManager handles cleanup automatically
+    # This function is kept for API compatibility
+    pass

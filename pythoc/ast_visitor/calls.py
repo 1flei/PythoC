@@ -48,6 +48,11 @@ class CallsMixin:
         where:
         - func_ref: ValueRef of the callable (for func pointers, this is the pointer value)
         - args: list of pre-evaluated ValueRef objects
+        
+        Linear type semantics:
+        - For regular calls: linear ownership is transferred at call site
+        - For defer calls: linear ownership is deferred until execution time
+          (checked via defer_linear_transfer flag on callable_obj)
         """
         callable_obj, func_ref = self._get_callable(node.func)
         
@@ -63,9 +68,14 @@ class CallsMixin:
                 arg_value = self.visit_expression(arg)
                 args.append(arg_value)
         
-        for arg in args:
-            # Transfer linear ownership for function arguments
-            self._transfer_linear_ownership(arg, reason="function argument", node=node)
+        # Check if this callable defers linear transfer (e.g., defer intrinsic)
+        # If so, skip linear transfer here - it will happen at execution time
+        defer_linear = getattr(callable_obj, 'defer_linear_transfer', False)
+        
+        if not defer_linear:
+            for arg in args:
+                # Transfer linear ownership for function arguments
+                self._transfer_linear_ownership(arg, reason="function argument", node=node)
         
         return callable_obj.handle_call(self, func_ref, args, node)
     

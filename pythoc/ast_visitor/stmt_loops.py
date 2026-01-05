@@ -3,9 +3,8 @@ Loop statement visitor mixin (for, while)
 """
 
 import ast
-from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
-from ..registry import VariableInfo
 from ..logger import logger
+from ..scope_manager import ScopeType
 from .control_flow_builder import ControlFlowBuilder
 
 
@@ -128,46 +127,51 @@ class LoopsMixin:
         cf.branch(loop_body_start)
         cf.position_at_end(loop_body_start)
         
-        # Enter scope for loop body
-        self.ctx.var_registry.enter_scope()
-        self.scope_depth += 1
-        
-        # Push loop context: continue -> loop back to body start, break -> exit
-        # Also push loop scope depth for defer execution on break/continue
-        self.loop_stack.append((loop_body_start, loop_exit))
-        self.loop_scope_stack.append(self.scope_depth)
-        
-        try:
-            # Execute loop body
-            self._visit_stmt_list(node.body, add_to_cfg=True)
+        # Use ScopeManager for unified scope/defer management
+        # Enter LOOP scope with continue -> loop_body_start, break -> loop_exit
+        with self.scope_manager.scope(ScopeType.LOOP, cf, 
+                                       continue_target=loop_body_start, 
+                                       break_target=loop_exit) as scope:
+            # Keep legacy scope_depth in sync
+            self.scope_depth = self.scope_manager.current_depth
             
-            # Check linear tokens in current scope
-            for var_info in self.ctx.var_registry.get_all_in_current_scope():
-                if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
-                    if var_info.linear_state != 'consumed':
-                        actual_line = self._get_actual_line_number(var_info.line_number)
-                        logger.error(
-                            f"Linear token '{var_info.name}' not consumed in while True body "
-                            f"(declared at line {actual_line})", node
-                        )
-                    var_info.linear_state = None
+            # Push to legacy loop_stack for backward compatibility
+            # TODO: Remove once all code uses scope_manager
+            self.loop_stack.append((loop_body_start, loop_exit))
+            self.loop_scope_stack.append(self.scope_depth)
             
-            # Execute deferred calls for this scope at end of iteration
-            if not cf.is_terminated():
-                from ..builtin_entities.defer import execute_deferred_calls
-                execute_deferred_calls(self, scope_depth=self.scope_depth)
-            
-            # If body can fall through, it's an infinite loop - loop back
-            if not cf.is_terminated():
-                cf.branch(loop_body_start)
-                cf.mark_loop_back(loop_body_start)
-        finally:
-            self.scope_depth -= 1
-            self.ctx.var_registry.exit_scope()
+            try:
+                # Execute loop body
+                self._visit_stmt_list(node.body, add_to_cfg=True)
+                
+                # Check linear tokens in current scope
+                for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                    if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
+                        if var_info.linear_state != 'consumed':
+                            actual_line = self._get_actual_line_number(var_info.line_number)
+                            logger.error(
+                                f"Linear token '{var_info.name}' not consumed in while True body "
+                                f"(declared at line {actual_line})", node
+                            )
+                        var_info.linear_state = None
+                
+                # Defers are automatically emitted by scope_manager.exit_scope()
+                # But for loop back, we need to emit manually before the branch
+                if not cf.is_terminated():
+                    # Emit defers for this iteration before looping back
+                    self.scope_manager._emit_defers_for_scope(scope)
+                
+                # If body can fall through, it's an infinite loop - loop back
+                if not cf.is_terminated():
+                    cf.branch(loop_body_start)
+                    cf.mark_loop_back(loop_body_start)
+            finally:
+                # Pop legacy loop context
+                self.loop_stack.pop()
+                self.loop_scope_stack.pop()
         
-        # Pop loop context
-        self.loop_stack.pop()
-        self.loop_scope_stack.pop()
+        # Restore scope_depth after exiting scope
+        self.scope_depth = self.scope_manager.current_depth
         
         # Position at exit block
         cf.position_at_end(loop_exit)
@@ -214,47 +218,35 @@ class LoopsMixin:
         else:
             cf.cbranch(condition, loop_body, loop_exit)
         
-        # Loop body - increment scope depth for linear token restrictions
+        # Loop body - use ScopeManager for unified scope/defer management
         cf.position_at_end(loop_body)
         
-        # Enter new scope for loop body and increment scope depth
-        self.ctx.var_registry.enter_scope()
-        self.scope_depth += 1
+        # Enter LOOP scope with continue -> loop_header, break -> loop_exit
+        with self.scope_manager.scope(ScopeType.LOOP, cf,
+                                       continue_target=loop_header,
+                                       break_target=loop_exit) as scope:
+            # Keep legacy scope_depth in sync
+            self.scope_depth = self.scope_manager.current_depth
+            
+            # Push to legacy loop_stack for backward compatibility
+            self.loop_stack.append((loop_header, loop_exit))
+            self.loop_scope_stack.append(self.scope_depth)
+            
+            try:
+                # Execute loop body statements
+                self._visit_stmt_list(node.body, add_to_cfg=True)
+                
+                # Note: Linear token checking is done by CFG linear checker
+                # at function end, NOT here. The defer execution in scope exit
+                # will consume linear tokens, and CFG checker will verify
+                # all paths have consistent linear states.
+            finally:
+                # Pop legacy loop context
+                self.loop_stack.pop()
+                self.loop_scope_stack.pop()
         
-        # Push loop context for break/continue (after scope_depth increment)
-        # break -> loop_exit (skips else)
-        self.loop_stack.append((loop_header, loop_exit))
-        self.loop_scope_stack.append(self.scope_depth)
-        
-        try:
-            # Execute loop body statements
-            self._visit_stmt_list(node.body, add_to_cfg=True)
-            
-            # Check that all linear tokens created in loop are consumed
-            for var_info in self.ctx.var_registry.get_all_in_current_scope():
-                if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
-                    if var_info.linear_state != 'consumed':
-                        actual_line = self._get_actual_line_number(var_info.line_number)
-                        logger.error(
-                            f"Linear token '{var_info.name}' not consumed in loop "
-                            f"(declared at line {actual_line})", node
-                        )
-                    # Clean up consumed token
-                    var_info.linear_state = None
-            
-            # Execute deferred calls for this scope at end of iteration
-            if not cf.is_terminated():
-                from ..builtin_entities.defer import execute_deferred_calls
-                execute_deferred_calls(self, scope_depth=self.scope_depth)
-            
-            # Loop invariant is checked by CFG linear checker at function end
-        finally:
-            # Pop loop context before decrementing scope
-            self.loop_stack.pop()
-            self.loop_scope_stack.pop()
-            # Decrement scope depth and exit scope
-            self.scope_depth -= 1
-            self.ctx.var_registry.exit_scope()
+        # Restore scope_depth after exiting scope
+        self.scope_depth = self.scope_manager.current_depth
         
         # Jump back to header (if not terminated by return/break)
         if not cf.is_terminated():
@@ -398,205 +390,74 @@ class LoopsMixin:
     def _visit_for_with_constant_unroll(self, node: ast.For, py_iterable):
         """Unroll for loop at compile time for constant iterables
         
-        Translates:
+        Uses AST transformation to convert the loop into repeated scope blocks.
+        This allows defer and other scope-based features to work correctly.
+        
+        Transforms:
             for i in [1, 2, 3]:
+                defer(cleanup)
                 body
             else:
                 else_body
         
-        To (unrolled with blocks for break/continue support):
-            iter_0:
+        To:
+            with label("_const_loop_iter_0"):
                 i = 1
+                defer(cleanup)
                 body
-                br iter_1
-            iter_1:
+            with label("_const_loop_iter_1"):
                 i = 2
+                defer(cleanup)
                 body
-                br iter_2
-            iter_2:
+            with label("_const_loop_iter_2"):
                 i = 3
+                defer(cleanup)
                 body
-                br check_break
-            check_break:
-                if broke: br after_else
-                else: br for_else
-            for_else:
-                else_body
-                br after_else
-            after_else:
+            else_body
+            with label("_const_loop_exit_N"):
+                pass
+        
+        Each iteration is a separate scope (via label), so:
+        - defer is registered and executed per-iteration automatically
+        - break transforms to goto_begin(exit_label)
+        - continue transforms to goto_end(iter_label)
         """
-        from ..builtin_entities.python_type import PythonType
-
+        from ..inline.constant_loop_adapter import ConstantLoopAdapter
+        from ..builtin_entities import label, goto_begin, goto_end
+        
         cf = self._get_cf_builder()
-        py_iterable = list(py_iterable)
         
-        # Handle empty iterator
-        if len(py_iterable) == 0:
-            # Empty iterator: execute else clause if present
-            if node.orelse:
-                self._visit_stmt_list(node.orelse, add_to_cfg=True)
-            return
+        # Use AST transformation
+        adapter = ConstantLoopAdapter(self)
+        result = adapter.transform_constant_loop(node, py_iterable)
         
-        # Get loop variable pattern (supports nested tuple unpacking)
-        # Returns a structure that mirrors the target pattern:
-        # - str for ast.Name
-        # - list for ast.Tuple (can contain str or nested list)
-        def parse_target_pattern(target):
-            """Parse target pattern recursively, returns str or list"""
-            if isinstance(target, ast.Name):
-                return target.id
-            elif isinstance(target, ast.Tuple):
-                return [parse_target_pattern(elt) for elt in target.elts]
-            else:
-                logger.error("Unsupported loop target type in constant unroll",
-                            node=node, exc_type=NotImplementedError)
+        # Debug: output transformed AST if enabled
+        from ..utils.ast_debug import ast_debugger
+        ast_debugger.capture(
+            "constant_loop_unroll",
+            result.stmts,
+            original=ast.unparse(node) if hasattr(ast, 'unparse') else str(node),
+            exit_label=result.exit_label
+        )
         
-        loop_var_pattern = parse_target_pattern(node.target)
-        is_tuple_unpack = isinstance(loop_var_pattern, list)
+        # Fix locations for all transformed statements
+        for stmt in result.stmts:
+            ast.copy_location(stmt, node)
+            ast.fix_missing_locations(stmt)
         
-        # Check if loop body contains any break statement
-        body_has_break = _has_break_in_body(node.body)
-        
-        # Create loop exit block
-        loop_exit = cf.create_block("const_loop_exit")
-        
-        # If there's an else clause and body has break, create after_else block
-        # break will jump directly to after_else (skipping else)
-        if node.orelse and body_has_break:
-            after_else = cf.create_block("after_const_loop_else")
-            # break target is after_else (skip else)
-            break_target = after_else
-        else:
-            after_else = None
-            # break target is loop_exit
-            break_target = loop_exit
+        # Ensure scoped label intrinsics are available in user_globals
+        old_user_globals = self.ctx.user_globals
+        merged_globals = {}
+        if old_user_globals:
+            merged_globals.update(old_user_globals)
+        merged_globals['label'] = label
+        merged_globals['goto_begin'] = goto_begin
+        merged_globals['goto_end'] = goto_end
+        self.ctx.user_globals = merged_globals
         
         try:
-            # Unroll with basic blocks
-            # Note: We do NOT skip iterations when terminated because later iterations
-            # may contain label definitions that need to be registered for forward
-            # goto resolution.
-            for i, element in enumerate(py_iterable):
-                # Enter new scope for this iteration
-                self.ctx.var_registry.enter_scope()
-                # Increment scope depth for this iteration
-                self.scope_depth += 1
-                
-                # Determine continue target
-                is_last = (i == len(py_iterable) - 1)
-                if is_last:
-                    continue_target = loop_exit
-                else:
-                    continue_target = cf.create_block(f"const_loop_iter_{i+1}")
-                
-                # Push loop context for this iteration (for break/continue support)
-                # continue -> jump to continue_target (next iteration or loop_exit if last)
-                # break -> jump to break_target (after_else if has else+break, else loop_exit)
-                self.loop_stack.append((continue_target, break_target))
-                self.loop_scope_stack.append(self.scope_depth)
-                
-                # Helper function to bind variables recursively
-                def bind_vars_recursive(pattern, value):
-                    """Recursively bind variables according to pattern.
-                    pattern: str (variable name) or list (nested pattern)
-                    value: Python value to bind
-                    """
-                    if isinstance(pattern, str):
-                        # Simple variable binding
-                        if isinstance(value, ValueRef):
-                            elem_value_ref = value
-                        else:
-                            elem_value_ref = wrap_value(
-                                value,
-                                kind="python",
-                                type_hint=PythonType.wrap(value, is_constant=True)
-                            )
-                        loop_var_info = VariableInfo(
-                            name=pattern,
-                            value_ref=elem_value_ref,
-                            alloca=None,
-                            source="for_loop_unrolled"
-                        )
-                        self.ctx.var_registry.declare(loop_var_info, allow_shadow=True)
-                    elif isinstance(pattern, list):
-                        # Nested tuple unpacking
-                        if not isinstance(value, (tuple, list)) or len(value) != len(pattern):
-                            logger.error(
-                                f"Cannot unpack {value} into {len(pattern)} variables",
-                                node=node, exc_type=TypeError
-                            )
-                        for sub_pattern, sub_value in zip(pattern, value):
-                            bind_vars_recursive(sub_pattern, sub_value)
-                    else:
-                        logger.error(f"Invalid pattern type: {type(pattern)}", 
-                                    node=node, exc_type=TypeError)
-                
-                # Bind loop variables using the pattern
-                bind_vars_recursive(loop_var_pattern, element)
-                
-                try:
-                    # Execute loop body (break/continue will use loop_stack)
-                    for stmt in node.body:
-                        if not cf.is_terminated():
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
-                        else:
-                            # Block is terminated, but we still need to process remaining statements
-                            # to generate their basic blocks (they might be reachable from other paths)
-                            # Create a new unreachable block to continue codegen
-                            unreachable_block = cf.create_block("unreachable_cont")
-                            cf.position_at_end(unreachable_block)
-                            cf.add_stmt(stmt)
-                            self.visit(stmt)
-                    
-                    # Check that all linear tokens created in this iteration are consumed
-                    for var_info in self.ctx.var_registry.get_all_in_current_scope():
-                        if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
-                            if var_info.linear_state != 'consumed':
-                                actual_line = self._get_actual_line_number(var_info.line_number)
-                                logger.error(
-                                    f"Linear token '{var_info.name}' not consumed in loop iteration "
-                                    f"(declared at line {actual_line})", node
-                                )
-                    
-                    # Emit deferred calls for this scope at end of iteration (normal exit)
-                    if not cf.is_terminated():
-                        from ..builtin_entities.defer import emit_deferred_calls
-                        emit_deferred_calls(self, scope_depth=self.scope_depth)
-                finally:
-                    # Unregister defers for this iteration scope
-                    from ..builtin_entities.defer import unregister_defers_for_scope
-                    unregister_defers_for_scope(self, self.scope_depth)
-                    # Pop loop context
-                    self.loop_stack.pop()
-                    self.loop_scope_stack.pop()
-                    # Linear tokens check is done by CFG checker at function end
-                    # Decrement scope depth and exit scope
-                    self.scope_depth -= 1
-                    self.ctx.var_registry.exit_scope()
-                
-                # Branch to next iteration
-                if not cf.is_terminated():
-                    cf.branch(continue_target)
-                
-                # Position at next block for next iteration (if not last)
-                # Note: Even if current block is terminated, we still need to process
-                # remaining iterations, as the terminator might be in a conditional branch
-                if not is_last:
-                    cf.position_at_end(continue_target)
-            
-            # Position at exit (normal loop completion)
-            cf.position_at_end(loop_exit)
-            
-            # Handle else clause if present
-            if node.orelse:
-                # Execute else clause (only reached if no break occurred)
-                self._visit_stmt_list(node.orelse, add_to_cfg=True)
-                
-                # If has break, branch to after_else and position there
-                if body_has_break and after_else:
-                    if not cf.is_terminated():
-                        cf.branch(after_else)
-                    cf.position_at_end(after_else)
+            # Visit the transformed statements
+            self._visit_stmt_list(result.stmts, add_to_cfg=True)
         finally:
-            pass  # No break_flag cleanup needed anymore
+            # Restore user_globals
+            self.ctx.user_globals = old_user_globals
