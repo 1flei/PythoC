@@ -219,14 +219,18 @@ def benchmark_compile_speed():
     elapsed = time.perf_counter() - start
     
     # Parse output to get test count
+    # Strip ANSI color codes for reliable parsing
+    import re
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
     lines = result.stdout.strip().split('\n')
     total_tests = 0
     passed_tests = 0
     for line in lines:
-        if line.startswith('Total:'):
-            total_tests = int(line.split(':')[1].strip())
-        elif line.startswith('Passed:'):
-            passed_tests = int(line.split(':')[1].strip())
+        clean_line = ansi_escape.sub('', line).strip()
+        if clean_line.startswith('Total:'):
+            total_tests = int(clean_line.split(':')[1].strip())
+        elif clean_line.startswith('Passed:'):
+            passed_tests = int(clean_line.split(':')[1].strip())
     
     if result.returncode != 0:
         print(f"    ERROR: Some tests failed")
@@ -238,7 +242,10 @@ def benchmark_compile_speed():
     print(f"RESULTS:")
     print(f"  Tests: {passed_tests}/{total_tests}")
     print(f"  Total compile time: {elapsed:.2f}s")
-    print(f"  Average per test: {elapsed/total_tests:.3f}s")
+    if total_tests > 0:
+        print(f"  Average per test: {elapsed/total_tests:.3f}s")
+    else:
+        print(f"  Average per test: N/A (no tests found)")
     print(f"{'='*70}")
     
     return {
