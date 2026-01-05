@@ -133,6 +133,7 @@ PythoC provides complete C runtime capabilities:
 - `if`/`else`, `while`, `for` loops
 - `break`, `continue`, `return`
 - Pattern matching: `match`/`case` (enhanced switch)
+- Scoped `goto` and labels for low-level control (similar to labeled continue/break, limited but safer)
 
 **Operations**:
 - Arithmetic: `+`, `-`, `*`, `/`, `%`, `//`
@@ -153,9 +154,8 @@ from pythoc.libc.math import sin, cos, pow
 
 Features deliberately excluded or pending:
 
-- **`goto`**: Use structured control flow instead
 - **Fall-through `switch`**: Use `match`/`case` with explicit branches
-- **Global variable initialization**: Workaround with init functions
+- **Global variable initialization**: Workaround with init functions and effect system
 - **Variable-length arrays (VLA)**: Use fixed-size arrays or malloc
 - **Flexible array members**: Use separate size tracking
 
@@ -442,8 +442,6 @@ def make_adder(base: i32) -> i32:
     
     return add_both(5)  # Closure body inlined at call site
 ```
-
-**Note**: Current implementation has limitations - closures cannot be called inside loops or nested (requires architecture redesign).
 
 ### Yield-based Iterators
 

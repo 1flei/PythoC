@@ -154,6 +154,46 @@ def _check_sibling_crossing(visitor, target_ctx: LabelContext, node: ast.AST):
     pass
 
 
+def _simulate_defer_linear_consumption(snapshot: dict, defer_args: list, visitor) -> dict:
+    """Simulate defer execution's effect on linear states in a snapshot.
+    
+    This is used for forward goto to compute the exit_snapshot that reflects
+    the state AFTER defers are executed, without actually modifying the
+    global linear state.
+    
+    Args:
+        snapshot: Linear snapshot to modify (will be mutated)
+        defer_args: List of ValueRef arguments from defer
+        visitor: AST visitor (for type checking)
+        
+    Returns:
+        Modified snapshot
+    """
+    for arg in defer_args:
+        # Check if this arg has linear tracking info
+        if not hasattr(arg, 'var_name') or not arg.var_name:
+            continue
+        if not hasattr(arg, 'linear_path') or arg.linear_path is None:
+            continue
+        
+        var_name = arg.var_name
+        base_path = arg.linear_path
+        
+        # Check if this variable is in the snapshot
+        if var_name not in snapshot:
+            continue
+        
+        # Get all linear paths in this value
+        linear_paths = visitor._get_linear_paths(arg.type_hint, base_path)
+        
+        # Mark each path as consumed in the snapshot
+        for path in linear_paths:
+            if path in snapshot[var_name]:
+                snapshot[var_name][path] = 'consumed'
+    
+    return snapshot
+
+
 def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end: bool, is_ancestor: bool):
     """Emit deferred calls for scoped goto.
     
@@ -178,8 +218,6 @@ def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end:
         is_goto_end: True if this is goto_end, False if goto
         is_ancestor: True if target is in ancestor chain (self or containing label)
     """
-    from .defer import _get_defers_for_scope, _execute_single_defer
-    
     current_scope = visitor.scope_depth
     target_parent = target_ctx.parent_scope_depth
     
@@ -187,16 +225,11 @@ def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end:
                 f"target_parent={target_parent}, "
                 f"is_goto_end={is_goto_end}, is_ancestor={is_ancestor}")
     
-    # Simple rule from design doc: exit to target's parent depth
-    # Execute defers for all scopes from current down to target_parent (exclusive)
-    # i.e., scopes [current, current-1, ..., target_parent+1]
-    for depth in range(current_scope, target_parent, -1):
-        scope_defers = _get_defers_for_scope(visitor, depth)
-        logger.debug(f"  Scope {depth}: {len(scope_defers)} defers")
-        for callable_obj, func_ref, args, defer_node in scope_defers:
-            _execute_single_defer(visitor, callable_obj, func_ref, args, defer_node)
-        # NOTE: Do NOT unregister defers here!
-        # The other branch (non-goto path) still needs them.
+    # Use ScopeManager to emit defers for scopes being exited
+    if hasattr(visitor, 'scope_manager'):
+        visitor.scope_manager.exit_scopes_to(target_parent, visitor._get_cf_builder())
+    else:
+        logger.error("_emit_defers_for_scoped_goto: visitor has no scope_manager", node=None)
 
 
 class label(BuiltinFunction):
@@ -375,29 +408,31 @@ class label(BuiltinFunction):
     def exit_label_scope(cls, visitor, ctx: LabelContext):
         """Called by visit_With to clean up the label scope
         
-        Emits defers for this scope and branches to end block.
+        Emits defers and branches to end block.
+        
+        IMPORTANT: Does NOT call position_at_end here - that must be done AFTER
+        scope_manager.exit_scope() so that is_terminated() check works correctly.
         """
         cf = visitor._get_cf_builder()
-        from .defer import emit_deferred_calls, unregister_defers_for_scope
         
-        # Execute defers for this scope if not already terminated
+        # If not terminated, emit defers and branch to end block
+        # This must happen BEFORE scope_manager.exit_scope() which also checks is_terminated()
         if not cf.is_terminated():
-            emit_deferred_calls(visitor, scope_depth=visitor.scope_depth)
-            unregister_defers_for_scope(visitor, visitor.scope_depth)
+            # Emit defers for this scope
+            if hasattr(visitor, 'scope_manager'):
+                for scope in visitor.scope_manager._scopes:
+                    if scope.depth == visitor.scope_depth:
+                        visitor.scope_manager._emit_defers_for_scope(scope)
+                        break
+            # Branch to end block (this terminates the block)
             cf.branch(ctx.end_block)
-        else:
-            # Even if terminated (e.g., by goto), we need to unregister defers
-            # to prevent them from being executed by sibling labels
-            unregister_defers_for_scope(visitor, visitor.scope_depth)
         
         # Pop from label stack (but keep in _all_labels and _scope_labels for sibling access)
         _init_label_tracking(visitor)
         if visitor._scoped_label_stack and visitor._scoped_label_stack[-1].name == ctx.name:
             visitor._scoped_label_stack.pop()
         
-        # Position at end block
-        cf.position_at_end(ctx.end_block)
-        
+        # NOTE: position_at_end is done by caller AFTER scope_manager exits
         logger.debug(f"Exited label scope '{ctx.name}'")
 
 
@@ -493,14 +528,22 @@ class goto(BuiltinFunction):
             current_block = visitor.builder.block
             goto_scope_depth = visitor.scope_depth
             
-            # Capture defer snapshot for later execution
-            from .defer import _init_defer_registry
-            _init_defer_registry(visitor)
+            # Capture defer snapshot for later execution via ScopeManager
             defer_snapshot = []
-            for item in visitor._defer_stack:
-                depth, callable_obj, func_ref_defer, args_defer, defer_node = item
-                if depth <= goto_scope_depth:
-                    defer_snapshot.append((depth, callable_obj, func_ref_defer, args_defer, defer_node))
+            if not hasattr(visitor, 'scope_manager') or not visitor.scope_manager._scopes:
+                logger.error("Forward goto: visitor has no scope_manager", node=node)
+            else:
+                # Capture from ScopeManager
+                for scope in visitor.scope_manager._scopes:
+                    if scope.depth <= goto_scope_depth:
+                        for defer_info in scope.defers:
+                            defer_snapshot.append((
+                                scope.depth,
+                                defer_info.callable_obj,
+                                defer_info.func_ref,
+                                defer_info.args,
+                                defer_info.node
+                            ))
             
             logger.debug(f"Forward goto to '{label_name}': captured {len(defer_snapshot)} defers at scope {goto_scope_depth}")
             
@@ -509,9 +552,17 @@ class goto(BuiltinFunction):
                 (current_block, label_name, goto_scope_depth, defer_snapshot, node, False)  # False = goto (not goto_end)
             )
             
-            # Record exit snapshot for current block
+            # Capture exit snapshot and simulate defer execution's effect on linear states
+            # This is critical: CFG linear checker needs to see the state AFTER defers
+            # are executed, not before. We simulate this without modifying global state.
             current_block_id = cf._get_cfg_block_id(current_block)
-            cf._exit_snapshots[current_block_id] = cf.capture_linear_snapshot()
+            exit_snapshot = cf.capture_linear_snapshot()
+            
+            # Simulate defer execution for linear state tracking
+            for depth, callable_obj, func_ref, args, defer_node in defer_snapshot:
+                _simulate_defer_linear_consumption(exit_snapshot, args, visitor)
+            
+            cf._exit_snapshots[current_block_id] = exit_snapshot
             
             # Mark current block as terminated in CFG
             cf._terminated[current_block_id] = True

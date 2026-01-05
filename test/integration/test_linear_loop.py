@@ -163,6 +163,16 @@ def test_constant_for_token_each_iteration() -> i32:
         consume(t)
     return sum
 
+@compile
+def test_consume_early_break() -> i32:
+    """Test consume early break"""
+    while True:
+        t = linear()
+        consume(t)
+        break
+        consume(t)
+    return 0
+
 
 @compile
 def consume_linear_void(t: linear) -> void:

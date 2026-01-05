@@ -207,11 +207,56 @@ class AssignmentsMixin:
         """Unified single-target assignment: lvalue resolution, linear checks, store, and linear registration.
         
         Args:
-            target: AST node for assignment target (ast.Name, ast.Attribute, ast.Subscript)
+            target: AST node for assignment target (ast.Name, ast.Attribute, ast.Subscript, ast.Tuple)
             rvalue: Value to assign
             node: AST node for error reporting
             pc_type: Explicit PC type (optional, overrides inference)
         """
+        # Handle nested tuple unpacking recursively
+        if isinstance(target, ast.Tuple):
+            self._handle_tuple_unpacking(target, node, rvalue, node)
+            return
+        
+        # Special case: Python value assigned to a simple Name
+        # Python values don't have addresses, so we directly bind them to var_registry
+        # without creating an alloca
+        if isinstance(target, ast.Name) and rvalue.is_python_value():
+            from ..context import VariableInfo
+            from ..builtin_entities.python_type import PythonType
+            
+            var_name = target.id
+            existing = self.lookup_variable(var_name)
+            
+            if existing is None:
+                # New variable - declare it directly with the Python value
+                pc_type = pc_type or rvalue.get_pc_type()
+                if pc_type is None:
+                    pc_type = PythonType.wrap(rvalue.get_python_value(), is_constant=True)
+                
+                # Set type_hint on the value_ref
+                rvalue_copy = rvalue
+                if rvalue_copy.type_hint is None:
+                    rvalue_copy = wrap_value(
+                        rvalue.value,
+                        kind=rvalue.kind,
+                        type_hint=pc_type
+                    )
+                
+                var_info = VariableInfo(
+                    name=var_name,
+                    value_ref=rvalue_copy,
+                    alloca=None,  # No alloca for Python values
+                    source="python_value_assign"
+                )
+                self.ctx.var_registry.declare(var_info, allow_shadow=True)
+                return
+            else:
+                # Variable exists - if it's also a Python value, update it
+                if existing.alloca is None:
+                    existing.value_ref = rvalue
+                    return
+                # Otherwise fall through to normal assignment (will likely fail)
+        
         decayed_rvalue = self._apply_assign_decay(rvalue)
         
         # Get or create lvalue
