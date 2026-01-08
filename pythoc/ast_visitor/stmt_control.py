@@ -59,6 +59,9 @@ class ControlFlowMixin:
         the same defers. The defer stack is managed at scope exit, not at return.
         
         Each branch that returns will emit its own copy of the deferred calls.
+        
+        Linear token checking is done by CFG merge point analysis at the
+        virtual exit block, not here.
         """
         # Use ScopeManager to emit all defers
         cf = self._get_cf_builder()

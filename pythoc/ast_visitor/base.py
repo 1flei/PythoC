@@ -688,24 +688,32 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
     
     def _check_linear_tokens_consumed(self):
-        """Check that all active linear tokens have been consumed before scope exit"""
-        unconsumed = []
-        logger.debug(f"Checking linear tokens at scope depth {self.scope_depth}")
+        """Check that all active linear tokens have been consumed before scope exit
         
-        # Check variables in current scope
-        for var_info in self.ctx.var_registry.get_all_in_current_scope():
-            if var_info.linear_scope_depth == self.scope_depth:
-                logger.debug(f"Checking variable {var_info}")
-                for path, state in var_info.linear_states.items():
-                    if state == 'active':
-                        path_str = self._format_linear_path(var_info.name, path, var_info.type_hint)
-                        actual_line = self._get_actual_line_number(var_info.line_number)
-                        unconsumed.append(f"'{path_str}' (declared at line {actual_line})")
+        DISABLED: This check is redundant - CFG linear checker handles this.
+        Keeping method stub to avoid breaking calls.
+        """
+        # DISABLED FOR TESTING: Only CFG checker should validate linear states
+        return
         
-        if unconsumed:
-            logger.error(
-                f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}"
-            )
+        # OLD CODE (disabled):
+        # unconsumed = []
+        # logger.debug(f"Checking linear tokens at scope depth {self.scope_depth}")
+        # 
+        # # Check variables in current scope
+        # for var_info in self.ctx.var_registry.get_all_in_current_scope():
+        #     if var_info.linear_scope_depth == self.scope_depth:
+        #         logger.debug(f"Checking variable {var_info}")
+        #         for path, state in var_info.linear_states.items():
+        #             if state == 'active':
+        #                 path_str = self._format_linear_path(var_info.name, path, var_info.type_hint)
+        #                 actual_line = self._get_actual_line_number(var_info.line_number)
+        #                 unconsumed.append(f"'{path_str}' (declared at line {actual_line})")
+        # 
+        # if unconsumed:
+        #     logger.error(
+        #         f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}"
+        #     )
 
 
 

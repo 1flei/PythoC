@@ -83,6 +83,12 @@ class ControlFlowBuilder:
         self._entry_block = self._cfg.add_block()
         self._cfg.entry_id = self._entry_block.id
         
+        # Create virtual exit block in CFG
+        # All return statements and fall-through paths connect to this block.
+        # This makes the exit block a merge point for linear state checking.
+        self._exit_block = self._cfg.add_block()
+        self._cfg.exit_id = self._exit_block.id
+        
         # Current block in CFG
         self._current_block_id = self._entry_block.id
         
@@ -325,14 +331,18 @@ class ControlFlowBuilder:
     def mark_return(self):
         """Mark current block as containing a return statement
         
-        Also records exit snapshot for CFG-based linear checking.
+        Records exit snapshot and connects to the virtual exit block.
+        This makes the exit block a merge point for linear state checking.
         """
         # Record exit snapshot for current block
         self._exit_snapshots[self._current_block_id] = self.capture_linear_snapshot()
         
+        # Connect to virtual exit block (makes exit block a merge point)
+        self._cfg.add_edge(self._current_block_id, self._exit_block.id, kind='return')
+        
         self._cfg.return_blocks.append(self._current_block_id)
         self._terminated[self._current_block_id] = True
-        logger.debug(f"CFG: return at CFGBlock({self._current_block_id})")
+        logger.debug(f"CFG: return at CFGBlock({self._current_block_id}) -> exit({self._exit_block.id})")
     
     def mark_loop_back(self, target: ir.Block):
         """Mark a loop back edge (for loop analysis)
@@ -356,32 +366,38 @@ class ControlFlowBuilder:
         """Finalize CFG construction
         
         Call this at the end of function compilation to:
-        1. Set exit block
+        1. Connect fall-through blocks to exit block
         2. Record exit snapshot for blocks that need it
-        3. Validate CFG
+        3. Compute loop headers
         4. Log CFG structure
         
-        NOTE: Exit snapshots are recorded when blocks terminate via branch/cbranch/return.
-        For blocks that don't have explicit terminators (e.g., void function without
-        return statement, or unreachable code after while True), we record exit snapshot
-        here if the block is reachable and doesn't have one yet.
+        The virtual exit block is a merge point for all function exit paths.
+        Linear state checking uses merge point analysis to verify all paths
+        have consistent linear states (all tokens consumed).
         """
-        # For blocks without explicit terminator, record exit snapshot if needed
+        # For blocks without explicit terminator, connect to exit block
         # This handles void functions that fall through without return
         reachable = self._cfg.get_reachable_blocks()
         for block_id in reachable:
+            # Skip the exit block itself
+            if block_id == self._exit_block.id:
+                continue
+            
             successors = self._cfg.get_successors(block_id)
-            # If block has no successors and no exit snapshot, record one
-            if not successors and block_id not in self._exit_snapshots:
-                # We need to position at this block to capture its state
-                # But we can only capture current state, so this only works
-                # for the current block
-                if block_id == self._current_block_id:
-                    self._exit_snapshots[block_id] = self.capture_linear_snapshot()
+            # If block has no successors, it's a fall-through to function end
+            if not successors:
+                # Record exit snapshot if not already recorded
+                if block_id not in self._exit_snapshots:
+                    if block_id == self._current_block_id:
+                        self._exit_snapshots[block_id] = self.capture_linear_snapshot()
+                
+                # Connect to exit block (makes exit block a merge point)
+                self._cfg.add_edge(block_id, self._exit_block.id, kind='fallthrough')
+                logger.debug(f"CFG: fallthrough at CFGBlock({block_id}) -> exit({self._exit_block.id})")
         
-        # Set exit_id to current block (for compatibility with CFG visualization)
-        # The actual exit point detection is done by linear_checker._check_function_exit
-        self._cfg.exit_id = self._current_block_id
+        # Record entry snapshot for exit block from all predecessors
+        # The exit block's entry snapshot is the merge of all incoming paths
+        # This is handled by the linear checker's merge point analysis
         
         # Compute loop headers
         self._cfg.compute_loop_headers()

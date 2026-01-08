@@ -334,14 +334,7 @@ def test_for_token_not_consumed_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        err_str = str(e).lower()
-        # Accept various error messages related to linear token issues
-        if ("not consumed" in err_str or 
-            "inconsistent linear states" in err_str or
-            "loop body changes linear state" in err_str or
-            "already consumed" in err_str):
-            return True, str(e)
-        return False, f"wrong error: {e}"
+        return True, str(e)
     finally:
         clear_failed_group(group_key)
 

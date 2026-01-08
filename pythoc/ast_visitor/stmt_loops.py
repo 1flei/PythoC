@@ -145,16 +145,17 @@ class LoopsMixin:
                 # Execute loop body
                 self._visit_stmt_list(node.body, add_to_cfg=True)
                 
-                # Check linear tokens in current scope
-                for var_info in self.ctx.var_registry.get_all_in_current_scope():
-                    if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
-                        if var_info.linear_state != 'consumed':
-                            actual_line = self._get_actual_line_number(var_info.line_number)
-                            logger.error(
-                                f"Linear token '{var_info.name}' not consumed in while True body "
-                                f"(declared at line {actual_line})", node
-                            )
-                        var_info.linear_state = None
+                # DISABLED: Linear check for while True - CFG checker handles this
+                # # Check linear tokens in current scope
+                # for var_info in self.ctx.var_registry.get_all_in_current_scope():
+                #     if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
+                #         if var_info.linear_state != 'consumed':
+                #             actual_line = self._get_actual_line_number(var_info.line_number)
+                #             logger.error(
+                #                 f"Linear token '{var_info.name}' not consumed in while True body "
+                #                 f"(declared at line {actual_line})", node
+                #             )
+                #         var_info.linear_state = None
                 
                 # Defers are automatically emitted by scope_manager.exit_scope()
                 # But for loop back, we need to emit manually before the branch

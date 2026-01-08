@@ -10,7 +10,7 @@ from pythoc import compile, i32, i8, ptr, void, struct, consume, refine
 from pythoc.libc.stdio import printf
 
 from pythoc.bindings.c_ast import (
-    CType, QualType, Decl,
+    CType, QualType, Decl, DeclKind,
     qualtype_nonnull, QualTypeRef, ctype_nonnull, CTypeRef,
     QUAL_NONE, QUAL_CONST, QUAL_VOLATILE,
 )
@@ -303,6 +303,69 @@ def test_parse_const_char_ptr() -> i32:
 
 
 # =============================================================================
+# Complex file parsing test
+# =============================================================================
+
+# Read nsieve.c content at compile time
+import os as _os
+_nsieve_path = _os.path.join(_os.path.dirname(__file__), '..', 'example', 'nsieve.c')
+with open(_nsieve_path, 'r') as _f:
+    NSIEVE_SOURCE = _f.read()
+
+
+@compile
+def test_parse_nsieve_file() -> i32:
+    """
+    Test parsing nsieve.c file content.
+    Expected declarations:
+    - nsieve function: static void nsieve(int m)
+    - main function: int main(int argc, char **argv)
+    
+    Returns 1 if all expected declarations found, 0 otherwise.
+    """
+    found_nsieve: i8 = 0
+    found_main: i8 = 0
+    decl_count: i32 = 0
+    
+    for decl_prf, decl in parse_declarations(NSIEVE_SOURCE):
+        decl_count = decl_count + 1
+        
+        # Check declaration kind and name
+        match decl.kind[0]:
+            case DeclKind.Func:
+                # Check if it's nsieve or main function
+                for qt in refine(decl.type, qualtype_nonnull):
+                    match qt.type[0]:
+                        case (CType.Func, ft):
+                            # Check return type and validate function structure
+                            for ret_qt in refine(ft.ret, qualtype_nonnull):
+                                ret_tag: i8 = get_base_type_tag(ret_qt)
+                                
+                                # nsieve: void return, 1 param
+                                if ret_tag == CType.Void and ft.param_count == 1:
+                                    found_nsieve = 1
+                                
+                                # main: int return, 2 params
+                                if ret_tag == CType.Int and ft.param_count == 2:
+                                    found_main = 1
+                        case _:
+                            pass
+            case _:
+                pass
+        
+        decl_free(decl_prf, decl)
+    
+    printf("  Declarations found: %d\n", decl_count)
+    printf("  nsieve function: %d\n", found_nsieve)
+    printf("  main function: %d\n", found_main)
+    
+    # Success if we found both functions
+    if found_nsieve != 0 and found_main != 0:
+        return 1
+    return 0
+
+
+# =============================================================================
 # Main test runner
 # =============================================================================
 
@@ -357,6 +420,13 @@ def main() -> i32:
     
     result = test_parse_const_char_ptr()
     printf("parse_const_char_ptr: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+    
+    printf("\n--- Complex File Parsing Test ---\n")
+    printf("Parsing nsieve.c...\n")
+    result = test_parse_nsieve_file()
+    printf("parse_nsieve_file: %d (expected 1)\n", result)
     if result != 1:
         return 1
     

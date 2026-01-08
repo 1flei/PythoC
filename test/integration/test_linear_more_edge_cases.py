@@ -131,14 +131,17 @@ def test_return_in_nested_if(a: i32, b: i32) -> i32:
 
 @compile
 def test_while_true_with_break(cond: i32) -> void:
-    """While True with break - should consume token before break"""
+    """While True with conditional break - both branches must handle token"""
     t = linear()
     while True:
         if cond:
             consume(t)
             break
-        # Loop continues - but this is unreachable if cond is always true
-        # For linear types, we need to ensure token is consumed on all exit paths
+        else:
+            # Must also consume and break, otherwise loop continues with active token
+            # which violates loop invariant
+            consume(t)
+            break
 
 
 @compile
