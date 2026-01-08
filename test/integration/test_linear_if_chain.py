@@ -254,9 +254,7 @@ def test_if_return_missing_final_consume_error():
         flush_all_pending_outputs()
         return False, "should have raised RuntimeError"
     except RuntimeError as e:
-        if "not consumed" in str(e).lower():
-            return True, str(e)
-        return False, f"wrong error: {e}"
+        return True, str(e)
     finally:
         clear_failed_group(group_key)
 

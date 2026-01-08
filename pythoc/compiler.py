@@ -577,10 +577,58 @@ class LLVMCompiler:
             visitor._cf_builder.add_stmt(stmt)
             visitor.visit(stmt)
         
+        # Finalize CFG while variables are still in scope.
+        # For fallthrough functions, finalize() may record exit snapshots for the
+        # current block, which requires variables to remain visible.
+        visitor._cf_builder.finalize()
+        visitor._cf_builder.dump_cfg()  # Uses logger.debug by default
+        
+        def _make_ir_structurally_valid():
+            """Make LLVM IR parseable even if we are about to error out."""
+            # Ensure function has a return
+            if not visitor.builder.block.is_terminated:
+                if return_type == ir.VoidType():
+                    visitor.builder.ret_void()
+                elif isinstance(return_type, ir.PointerType):
+                    visitor.builder.ret(ir.Constant(return_type, None))
+                elif isinstance(return_type, ir.IntType):
+                    visitor.builder.ret(ir.Constant(return_type, 0))
+                elif isinstance(return_type, (ir.FloatType, ir.DoubleType)):
+                    visitor.builder.ret(ir.Constant(return_type, 0.0))
+                elif isinstance(return_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
+                    visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+                elif isinstance(return_type, ir.ArrayType):
+                    visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+                else:
+                    visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+            
+            # Clean up basic blocks without terminator instructions
+            blocks_cleaned = 0
+            for block in llvm_function.blocks:
+                if not block.is_terminated:
+                    visitor.builder.position_at_end(block)
+                    visitor.builder.unreachable()
+                    blocks_cleaned += 1
+            if blocks_cleaned > 0:
+                logger.debug(f"Cleaned up {blocks_cleaned} unterminated blocks in {llvm_function.name}")
+        
+        # CFG merge checks (and loop invariants). If this errors, keep IR valid
+        # to avoid secondary LLVM parse/verify errors hiding the real problem.
+        try:
+            visitor._cf_builder.run_cfg_linear_check()
+        except (SystemExit, Exception):
+            _make_ir_structurally_valid()
+            raise
+        
         # Exit function-level scope in ScopeManager
-        # Note: Defers should have been emitted at return statements
-        # This just cleans up the scope stack
-        visitor.scope_manager.clear()
+        # This enforces: when variables go out of scope, all linear states are inactive.
+        # If this errors, also keep IR valid to avoid secondary LLVM parse/verify errors.
+        try:
+            visitor.scope_manager.exit_scope(visitor._cf_builder, node=ast_node)
+        except (SystemExit, Exception):
+            _make_ir_structurally_valid()
+            raise
+        
         visitor.scope_depth = 0
         
         # Check for unresolved scoped goto statements
@@ -602,42 +650,8 @@ class LLVMCompiler:
                 total_stmts=len(visitor._all_inlined_stmts)
             )
         
-        # Finalize CFG and run CFG-based linear type checking
-        # CFG checker correctly handles unreachable code (e.g., after infinite loops)
-        visitor._cf_builder.finalize()
-        visitor._cf_builder.dump_cfg()  # Uses logger.debug by default
-        visitor._cf_builder.run_cfg_linear_check()
-        
-        # Ensure function has a return
-        if not visitor.builder.block.is_terminated:
-            if return_type == ir.VoidType():
-                visitor.builder.ret_void()
-            elif isinstance(return_type, ir.PointerType):
-                visitor.builder.ret(ir.Constant(return_type, None))
-            elif isinstance(return_type, ir.IntType):
-                visitor.builder.ret(ir.Constant(return_type, 0))
-            elif isinstance(return_type, (ir.FloatType, ir.DoubleType)):
-                visitor.builder.ret(ir.Constant(return_type, 0.0))
-            elif isinstance(return_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-                visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
-            elif isinstance(return_type, ir.ArrayType):
-                visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
-            else:
-                visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
-        
-        # Clean up basic blocks without terminator instructions
-        # This is needed because:
-        # 1. Constant loop unrolling may create empty blocks
-        # 2. goto_begin/goto_end create unreachable blocks that may have dead code
-        blocks_cleaned = 0
-        for block in llvm_function.blocks:
-            if not block.is_terminated:
-                # Block without terminator - add unreachable to make it valid LLVM IR
-                visitor.builder.position_at_end(block)
-                visitor.builder.unreachable()
-                blocks_cleaned += 1
-        if blocks_cleaned > 0:
-            logger.debug(f"Cleaned up {blocks_cleaned} unterminated blocks in {llvm_function.name}")
+        # Normal completion: ensure IR is structurally valid
+        _make_ir_structurally_valid()
         
         self.compiled_functions.append(llvm_function)
         return llvm_function

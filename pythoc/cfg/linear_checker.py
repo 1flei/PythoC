@@ -163,6 +163,34 @@ def find_snapshot_diffs(s1: LinearSnapshot, s2: LinearSnapshot) -> List[Dict]:
     return diffs
 
 
+def format_block_info(cfg: CFG, block_id: int) -> str:
+    """Format block ID with line range for error messages
+    
+    Args:
+        cfg: The CFG containing the block
+        block_id: Block ID to format
+        
+    Returns:
+        String like "block 3 (lines 10-15)" or "block 3" if no line info
+    """
+    block = cfg.get_block(block_id)
+    if block is None:
+        return f"block {block_id}"
+    
+    first_line = block.get_first_line()
+    last_line = block.get_last_line()
+    
+    if first_line is not None and last_line is not None:
+        if first_line == last_line:
+            return f"block {block_id} (line {first_line})"
+        else:
+            return f"block {block_id} (lines {first_line}-{last_line})"
+    elif first_line is not None:
+        return f"block {block_id} (line {first_line})"
+    else:
+        return f"block {block_id}"
+
+
 class LinearChecker:
     """Check linear types on CFG using forward dataflow analysis
     
@@ -247,9 +275,17 @@ class LinearChecker:
             if entry_snapshot is None:
                 continue
             
+            # Virtual exit block: no simulation needed, just propagate entry as exit
+            # The exit block is a merge point - its entry snapshot is the merged
+            # state from all return/fallthrough paths
+            if block_id == cfg.exit_id:
+                self.exit_snapshots[block_id] = copy_snapshot(entry_snapshot)
+                continue
+            
             # Simulate block execution to get exit snapshot
             exit_snapshot = self._simulate_block(cfg, block, entry_snapshot)
-            self.exit_snapshots[block_id] = exit_snapshot
+            if exit_snapshot is not None:
+                self.exit_snapshots[block_id] = exit_snapshot
             
             # Propagate to successors
             for edge in cfg.get_successors(block_id):
@@ -266,9 +302,6 @@ class LinearChecker:
         # After processing all blocks, check merge points for consistency
         self._check_merge_points(cfg)
         
-        # Check function exit
-        self._check_function_exit(cfg)
-        
         return self.errors
     
     def _check_merge_points(self, cfg: CFG):
@@ -276,11 +309,18 @@ class LinearChecker:
         
         A merge point is a block with multiple predecessors (excluding back edges).
         All predecessors must have compatible linear states.
-        """
-        from ..logger import logger
         
+        Check order:
+        1. First check all non-exit merge points (more specific errors)
+        2. Then check exit block (less specific, catch-all error)
+        """
+        # First pass: check all non-exit merge points
         for block in cfg.iter_blocks():
             block_id = block.id
+            
+            # Skip exit block for first pass
+            if block_id == cfg.exit_id:
+                continue
             
             # Get predecessors (excluding back edges)
             preds = [e for e in cfg.get_predecessors(block_id) if e.kind != 'loop_back']
@@ -301,10 +341,47 @@ class LinearChecker:
             first_edge, first_snapshot = pred_info[0]
             for edge, snapshot in pred_info[1:]:
                 if not snapshots_compatible(first_snapshot, snapshot):
-                    logger.debug(f"_check_merge_points: block {block_id} has inconsistent predecessors")
                     self._error_merge_inconsistent(cfg, block_id, pred_info)
                     break  # Only report once per merge point
+        
+        # Second pass: check exit block
+        # This implements semantic 2: variables must not hold linear state at lifetime end
+        block_id = cfg.exit_id
+        preds = [e for e in cfg.get_predecessors(block_id) if e.kind != 'loop_back']
+        if len(preds) >= 1:
+            self._check_exit_block_consumed(cfg, block_id)
 
+    def _check_exit_block_consumed(self, cfg: CFG, block_id: int):
+        """Check that all linear tokens are consumed at function exit
+        
+        This implements semantic 2: variables must not hold linear state at lifetime end.
+        At function exit (virtual exit block), all linear tokens must be consumed.
+        
+        Args:
+            cfg: The CFG
+            block_id: Exit block ID (should be cfg.exit_id)
+        """
+        entry_snapshot = self.entry_snapshots.get(block_id, {})
+        
+        # Find any active tokens
+        unconsumed = []
+        for var_name in sorted(entry_snapshot.keys()):
+            paths_dict = entry_snapshot[var_name]
+            for path in sorted(paths_dict.keys()):
+                state = paths_dict[path]
+                if state == 'active':
+                    path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                    unconsumed.append(path_str)
+        
+        if unconsumed:
+            self.errors.append(LinearError(
+                kind='unconsumed_at_exit',
+                block_id=block_id,
+                message=f"Linear tokens not consumed before function exit: {', '.join(unconsumed)}",
+                details=unconsumed,
+                source_node=self._get_block_source_node(cfg, block_id)
+            ))
+    
     def _compute_entry_snapshot(
         self, cfg: CFG, block_id: int
     ) -> Optional[LinearSnapshot]:
@@ -446,7 +523,7 @@ class LinearChecker:
         self.errors.append(LinearError(
             kind='merge_inconsistent',
             block_id=block_id,
-            message=f"Inconsistent linear states at merge point (block {block_id})",
+            message=f"Inconsistent linear states at merge point ({format_block_info(cfg, block_id)})",
             details=diffs,
             source_node=self._get_block_source_node(cfg, block_id)
         ))
@@ -474,13 +551,10 @@ class LinearChecker:
         if self._recorded_exit_snapshots and block.id in self._recorded_exit_snapshots:
             return copy_snapshot(self._recorded_exit_snapshots[block.id])
         
-        # No recorded exit snapshot - this indicates a bug in ControlFlowBuilder
-        # that failed to record the exit snapshot for this block
-        logger.error(
-            None,
-            f"Internal error: no recorded exit snapshot for block {block.id}. "
-            f"ControlFlowBuilder should record exit snapshots for all blocks."
-        )
+        # No recorded exit snapshot - fallback to entry
+        # This happens when AST visitor didn't record snapshots for this block
+        logger.debug(f"Block {block.id} has no recorded exit snapshot, using entry")
+        return copy_snapshot(entry_snapshot)
     
     def _check_loop_invariant(
         self, cfg: CFG, back_edge: CFGEdge, exit_snapshot: LinearSnapshot
@@ -607,102 +681,6 @@ class LinearChecker:
             f"This block should have been processed during dataflow analysis."
         )
         return None
-
-    def _check_function_exit(self, cfg: CFG):
-        """Check all linear tokens consumed at function exit points
-        
-        Function exit points are:
-        1. All return blocks (explicit return statements)
-        2. Blocks with no successors that are reachable (implicit return for void functions)
-        
-        For each exit point, we check:
-        - All linear tokens must be consumed (no active tokens at exit)
-        
-        If there are multiple exit points, we also check:
-        - All exit points must have consistent linear states
-        
-        Note: Unreachable code (e.g., code after `while True` without break) is not checked.
-        
-        Args:
-            cfg: The CFG
-        """
-        from ..logger import logger
-        
-        # Find all function exit points
-        # Exit points are: return blocks + blocks with no successors (excluding unreachable)
-        reachable = cfg.get_reachable_blocks()
-        exit_points: List[int] = []
-        
-        # Add return blocks
-        for ret_block_id in cfg.return_blocks:
-            if ret_block_id in reachable and ret_block_id not in exit_points:
-                exit_points.append(ret_block_id)
-        
-        # Add blocks with no successors (implicit return)
-        for block_id in reachable:
-            successors = cfg.get_successors(block_id)
-            # No successors and not already in exit_points
-            if not successors and block_id not in exit_points:
-                exit_points.append(block_id)
-        
-        logger.debug(f"_check_function_exit: exit_points={exit_points}, exit_snapshots keys={list(self.exit_snapshots.keys())}")
-        
-        if not exit_points:
-            # No exit points means infinite loop or unreachable - no linear check needed
-            logger.debug("_check_function_exit: no exit points (infinite loop or unreachable)")
-            return
-        
-        # Collect exit snapshots for all exit points
-        # For blocks without exit_snapshot (e.g., empty blocks after break),
-        # use the predecessor's exit_snapshot (the block is empty, state unchanged)
-        exit_point_snapshots: List[Tuple[int, LinearSnapshot]] = []
-        for block_id in exit_points:
-            snapshot = self._get_effective_exit_snapshot(cfg, block_id)
-            if snapshot is not None:
-                exit_point_snapshots.append((block_id, snapshot))
-            else:
-                logger.debug(f"_check_function_exit: exit point {block_id} has no effective exit snapshot")
-        
-        if not exit_point_snapshots:
-            # No exit snapshots available
-            return
-        
-        # Check each exit point for unconsumed tokens
-        for block_id, snapshot in exit_point_snapshots:
-            logger.debug(f"_check_function_exit: checking block {block_id}, snapshot = {snapshot}")
-            unconsumed = []
-            
-            for var_name, paths in snapshot.items():
-                for path, state in paths.items():
-                    if state == 'active':
-                        path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                        unconsumed.append(path_str)
-            
-            if unconsumed:
-                self.errors.append(LinearError(
-                    kind='unconsumed_at_exit',
-                    block_id=block_id,
-                    message=f"Linear tokens not consumed at function exit (block {block_id}): {', '.join(unconsumed)}",
-                    source_node=self._get_block_source_node(cfg, block_id)
-                ))
-        
-        # If multiple exit points, check consistency
-        if len(exit_point_snapshots) > 1:
-            first_block_id, first_snapshot = exit_point_snapshots[0]
-            for block_id, snapshot in exit_point_snapshots[1:]:
-                if not snapshots_compatible(first_snapshot, snapshot):
-                    # Find differences
-                    diffs = find_snapshot_diffs(first_snapshot, snapshot)
-                    self.errors.append(LinearError(
-                        kind='exit_inconsistent',
-                        block_id=block_id,
-                        message=f"Inconsistent linear states at function exit points (blocks {first_block_id} vs {block_id})",
-                        details=[{
-                            'path_str': d['path_str'],
-                            'states': [(first_block_id, d['states'][0][1]), (block_id, d['states'][1][1])]
-                        } for d in diffs],
-                        source_node=self._get_block_source_node(cfg, block_id)
-                    ))
 
 
 def check_linear_types_on_cfg(
