@@ -119,7 +119,7 @@ def execute_deferred_calls(visitor, scope_depth: int = None, all_scopes: bool = 
 def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list, node: ast.AST):
     """Execute a single deferred call
     
-    Uses the same handle_call protocol as visit_Call for consistency.
+    Unified function for executing defers in all contexts.
     
     Args:
         visitor: AST visitor
@@ -142,12 +142,10 @@ def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list,
     logger.debug(f"_execute_single_defer: {callable_obj}")
     
     # Transfer linear ownership NOW at execution time
-    # This is deferred from registration time to match the semantic
-    # that linear tokens are consumed when the deferred call actually runs
     for arg in args:
         visitor._transfer_linear_ownership(arg, reason="deferred function argument", node=node)
     
-    # Use the standard handle_call protocol
+    # Generate the actual defer call IR
     callable_obj.handle_call(visitor, func_ref, args, node)
 
 

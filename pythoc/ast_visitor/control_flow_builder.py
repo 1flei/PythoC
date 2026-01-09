@@ -27,6 +27,9 @@ import ast
 from ..cfg import CFG, CFGBlock, CFGEdge
 from ..cfg.linear_checker import (
     LinearSnapshot,
+    LinearRegister,
+    LinearTransition,
+    LinearEvent,
     capture_linear_snapshot,
     restore_linear_snapshot,
     copy_snapshot,
@@ -100,14 +103,6 @@ class ControlFlowBuilder:
         
         # Track if current CFG block is terminated (has outgoing edge)
         self._terminated: Dict[int, bool] = {self._entry_block.id: False}
-        
-        # Linear state tracking for CFG-based validation
-        # Maps block_id -> snapshot at block entry
-        self._entry_snapshots: Dict[int, LinearSnapshot] = {}
-        # Maps block_id -> snapshot at block exit
-        self._exit_snapshots: Dict[int, LinearSnapshot] = {}
-        # Track merge points that need validation
-        self._pending_merge_validations: List[Tuple[int, List[Tuple[int, LinearSnapshot]]]] = []
     
     @property
     def cfg(self) -> CFG:
@@ -197,6 +192,7 @@ class ControlFlowBuilder:
         """
         # Update CFG current block
         cfg_block_id = self._get_cfg_block_id(block)
+        
         self._current_block_id = cfg_block_id
         
         # Update IR builder
@@ -214,9 +210,6 @@ class ControlFlowBuilder:
         """
         src_id = self._current_block_id
         dst_id = self._get_cfg_block_id(target)
-        
-        # Record exit snapshot for current block
-        self._exit_snapshots[src_id] = self.capture_linear_snapshot()
         
         # Add edge to CFG
         self._cfg.add_edge(src_id, dst_id, kind='sequential')
@@ -240,9 +233,6 @@ class ControlFlowBuilder:
         src_id = self._current_block_id
         true_id = self._get_cfg_block_id(true_block)
         false_id = self._get_cfg_block_id(false_block)
-        
-        # Record exit snapshot for current block
-        self._exit_snapshots[src_id] = self.capture_linear_snapshot()
         
         # Add edges to CFG
         # Note: condition is LLVM IR value, not AST. We could store the AST
@@ -277,9 +267,6 @@ class ControlFlowBuilder:
         """
         src_id = self._current_block_id
         default_id = self._get_cfg_block_id(default_block)
-        
-        # Record exit snapshot for current block
-        self._exit_snapshots[src_id] = self.capture_linear_snapshot()
         
         # Add default edge to CFG
         self._cfg.add_edge(src_id, default_id, kind='sequential')
@@ -328,15 +315,58 @@ class ControlFlowBuilder:
         cfg_block = self._cfg.blocks[self._current_block_id]
         cfg_block.stmts.append(stmt)
     
+    # ========== Linear Event Recording Methods ==========
+    
+    def record_linear_register(self, var_id: int, var_name: str, path: Tuple[int, ...],
+                               initial_state: str, line_number: int = None, 
+                               node: ast.AST = None):
+        """Record a LinearRegister event - variable with linear type enters scope
+        
+        Args:
+            var_id: Unique variable ID from VariableInfo.var_id
+            var_name: Variable name for error messages
+            path: Index path for composite types, () for simple
+            initial_state: 'valid' (function param) or 'invalid' (declaration)
+            line_number: Source line for error messages
+            node: AST node for error reporting
+        """
+        event = LinearRegister(var_id, var_name, path, initial_state, line_number, node)
+        self._add_linear_event(event)
+        logger.debug(f"CFG: LinearRegister(id={var_id}, {var_name}, path={path}, initial={initial_state})")
+    
+    def record_linear_transition(self, var_id: int, var_name: str, path: Tuple[int, ...],
+                                  old_state: str, new_state: str, line_number: int = None,
+                                  node: ast.AST = None):
+        """Record a LinearTransition event - linear state change
+        
+        Args:
+            var_id: Unique variable ID from VariableInfo.var_id
+            var_name: Variable name for error messages
+            path: Index path for composite types, () for simple
+            old_state: Expected current state ('valid' or 'invalid')
+            new_state: New state after transition ('valid' or 'invalid')
+            line_number: Source line for error messages
+            node: AST node for error reporting
+        """
+        event = LinearTransition(var_id, var_name, path, old_state, new_state, line_number, node)
+        self._add_linear_event(event)
+        logger.debug(f"CFG: LinearTransition(id={var_id}, {var_name}, path={path}, {old_state}->{new_state})")
+    
+    def _add_linear_event(self, event: LinearEvent):
+        """Add a linear event to the current block
+        
+        Args:
+            event: LinearRegister or LinearTransition event
+        """        
+        cfg_block = self._cfg.blocks[self._current_block_id]
+        cfg_block.linear_events.append(event)
+    
     def mark_return(self):
         """Mark current block as containing a return statement
         
         Records exit snapshot and connects to the virtual exit block.
         This makes the exit block a merge point for linear state checking.
         """
-        # Record exit snapshot for current block
-        self._exit_snapshots[self._current_block_id] = self.capture_linear_snapshot()
-        
         # Connect to virtual exit block (makes exit block a merge point)
         self._cfg.add_edge(self._current_block_id, self._exit_block.id, kind='return')
         
@@ -386,11 +416,6 @@ class ControlFlowBuilder:
             successors = self._cfg.get_successors(block_id)
             # If block has no successors, it's a fall-through to function end
             if not successors:
-                # Record exit snapshot if not already recorded
-                if block_id not in self._exit_snapshots:
-                    if block_id == self._current_block_id:
-                        self._exit_snapshots[block_id] = self.capture_linear_snapshot()
-                
                 # Connect to exit block (makes exit block a merge point)
                 self._cfg.add_edge(block_id, self._exit_block.id, kind='fallthrough')
                 logger.debug(f"CFG: fallthrough at CFGBlock({block_id}) -> exit({self._exit_block.id})")
@@ -423,12 +448,7 @@ class ControlFlowBuilder:
             initial_snapshot = {}
         
         checker = LinearChecker(self._visitor.ctx.var_registry)
-        errors = checker.check(
-            self._cfg,
-            initial_snapshot,
-            recorded_entry_snapshots=self._entry_snapshots,
-            recorded_exit_snapshots=self._exit_snapshots
-        )
+        errors = checker.check(self._cfg, initial_snapshot)
         
         if errors:
             for err in errors:
@@ -456,59 +476,6 @@ class ControlFlowBuilder:
         """
         restore_linear_snapshot(self._visitor.ctx.var_registry, snapshot)
     
-    def record_block_entry(self, block_id: Optional[int] = None) -> LinearSnapshot:
-        """Record linear state at block entry
-        
-        Args:
-            block_id: Block ID (defaults to current block)
-            
-        Returns:
-            The captured snapshot
-        """
-        if block_id is None:
-            block_id = self._current_block_id
-        snapshot = self.capture_linear_snapshot()
-        self._entry_snapshots[block_id] = snapshot
-        logger.debug(f"CFG: recorded entry snapshot for block {block_id}")
-        return snapshot
-    
-    def record_block_exit(self, block_id: Optional[int] = None) -> LinearSnapshot:
-        """Record linear state at block exit
-        
-        Args:
-            block_id: Block ID (defaults to current block)
-            
-        Returns:
-            The captured snapshot
-        """
-        if block_id is None:
-            block_id = self._current_block_id
-        snapshot = self.capture_linear_snapshot()
-        self._exit_snapshots[block_id] = snapshot
-        logger.debug(f"CFG: recorded exit snapshot for block {block_id}")
-        return snapshot
-    
-    def get_entry_snapshot(self, block_id: int) -> Optional[LinearSnapshot]:
-        """Get recorded entry snapshot for a block
-        
-        Args:
-            block_id: Block ID
-            
-        Returns:
-            The snapshot, or None if not recorded
-        """
-        return self._entry_snapshots.get(block_id)
-    
-    def get_exit_snapshot(self, block_id: int) -> Optional[LinearSnapshot]:
-        """Get recorded exit snapshot for a block
-        
-        Args:
-            block_id: Block ID
-            
-        Returns:
-            The snapshot, or None if not recorded
-        """
-        return self._exit_snapshots.get(block_id)
     
     def validate_merge_point(
         self, 
@@ -594,6 +561,12 @@ class ControlFlowBuilder:
                     lines.append(f"    {stmt_str}")
             else:
                 lines.append("    (no statements recorded)")
+            
+            # Show linear events
+            if block.linear_events:
+                lines.append(f"    Linear events: {len(block.linear_events)}")
+                for event in block.linear_events:
+                    lines.append(f"      {event}")
         
         # Dump edges
         lines.append("\nEdges:")

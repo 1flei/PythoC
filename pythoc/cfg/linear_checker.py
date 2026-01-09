@@ -5,8 +5,14 @@ This module provides CFG-based linear type checking using forward dataflow analy
 Linear type checking ensures that linear resources (tokens) are used exactly once.
 
 Key concepts:
-- LinearSnapshot: Captures the linear state of all variables at a program point
+- LinearEvent: Events emitted by AST visitor describing linear operations
+- LinearSnapshot: State of all linear variables at a program point
 - LinearChecker: Performs forward dataflow analysis on CFG to check linear constraints
+
+Architecture:
+- AST visitor emits LinearRegister/LinearTransition events to CFG
+- CFG checker simulates execution by processing events
+- All linear state checking happens in CFG checker (single source of truth)
 
 Rules:
 1. At merge points: all incoming paths must have compatible linear states
@@ -15,7 +21,7 @@ Rules:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple, Any, TYPE_CHECKING
+from typing import Dict, List, Optional, Set, Tuple, Any, Union, TYPE_CHECKING
 from ..logger import logger
 import ast
 import copy
@@ -26,10 +32,64 @@ if TYPE_CHECKING:
     from ..registry import VariableRegistry, VariableInfo
 
 
-# Type alias: var_name -> {path -> state}
+# =============================================================================
+# Linear Events - emitted by AST visitor, processed by CFG checker
+# =============================================================================
+
+@dataclass
+class LinearRegister:
+    """Event: Variable with linear type enters scope
+    
+    Emitted when:
+    - Variable declaration: `t: linear` -> initial_state='invalid'
+    - Function parameter: `def f(t: linear)` -> initial_state='valid'
+    - Assignment to new var: `t = linear()` -> initial_state='invalid' (then LinearTransition)
+    
+    Uses var_id (unique ID) instead of var_name to distinguish shadowed variables.
+    var_name and line_number are stored for error reporting.
+    """
+    var_id: int            # Unique variable ID from VariableInfo.var_id
+    var_name: str          # Variable name for error messages
+    path: Tuple[int, ...]  # Index path for composite types, () for simple
+    initial_state: str     # 'valid' (function param) or 'invalid' (declaration)
+    line_number: Optional[int] = None  # Source line for error messages
+    node: Optional[ast.AST] = None
+
+
+@dataclass
+class LinearTransition:
+    """Event: Linear state change
+    
+    Emitted when:
+    - `t = linear()` -> ('invalid', 'valid') - create token
+    - `consume(t)` -> ('valid', 'invalid') - consume token
+    - `f(t)` where f takes linear -> ('valid', 'invalid') - transfer ownership
+    - `return t` -> ('valid', 'invalid') - return transfers ownership
+    
+    Uses var_id (unique ID) instead of var_name to distinguish shadowed variables.
+    var_name and line_number are stored for error reporting.
+    """
+    var_id: int            # Unique variable ID from VariableInfo.var_id
+    var_name: str          # Variable name for error messages
+    path: Tuple[int, ...]  # Index path for composite types, () for simple
+    old_state: str         # 'valid' or 'invalid' - expected current state
+    new_state: str         # 'valid' or 'invalid' - new state after transition
+    line_number: Optional[int] = None  # Source line for error messages
+    node: Optional[ast.AST] = None
+
+
+# Union type for all linear events
+LinearEvent = Union[LinearRegister, LinearTransition]
+
+
+# Type alias: var_id -> {path -> state}
+# var_id is unique ID from VariableInfo.var_id (distinguishes shadowed variables)
 # path is a tuple of integers representing field access path
-# state is 'active', 'consumed', or 'undefined'
-LinearSnapshot = Dict[str, Dict[Tuple[int, ...], str]]
+# state is 'valid' (active/usable) or 'invalid' (consumed/undefined)
+LinearSnapshot = Dict[int, Dict[Tuple[int, ...], str]]
+
+# Mapping from var_id to (var_name, line_number) for error reporting
+VarIdInfo = Dict[int, Tuple[str, Optional[int]]]
 
 
 @dataclass
@@ -56,51 +116,44 @@ class LinearError:
 
 
 def capture_linear_snapshot(var_registry: "VariableRegistry") -> LinearSnapshot:
-    """Capture current linear states of all visible variables
+    """Capture current linear states - DEPRECATED, returns empty snapshot
+    
+    Linear state tracking is now done entirely by CFG checker.
+    This function is kept for API compatibility but returns empty snapshot.
     
     Args:
-        var_registry: The variable registry to capture from
+        var_registry: The variable registry (ignored)
         
     Returns:
-        LinearSnapshot mapping var_name -> {path -> state}
+        Empty LinearSnapshot
     """
-    snapshot: LinearSnapshot = {}
-    for name, var_info in var_registry.list_all_visible().items():
-        if var_info.linear_states:
-            snapshot[name] = dict(var_info.linear_states)
-    return snapshot
+    return {}
 
 
 def restore_linear_snapshot(var_registry: "VariableRegistry", snapshot: LinearSnapshot):
-    """Restore linear states from snapshot
+    """Restore linear states - DEPRECATED, no-op
+    
+    Linear state tracking is now done entirely by CFG checker.
+    This function is kept for API compatibility but does nothing.
     
     Args:
-        var_registry: The variable registry to restore to
-        snapshot: The snapshot to restore from
+        var_registry: The variable registry (ignored)
+        snapshot: The snapshot to restore (ignored)
     """
-    # Clear all current linear states
-    for name, var_info in var_registry.list_all_visible().items():
-        if var_info.linear_states:
-            var_info.linear_states.clear()
-    
-    # Restore from snapshot
-    for name, states_dict in snapshot.items():
-        var_info = var_registry.lookup(name)
-        if var_info:
-            var_info.linear_states = dict(states_dict)
+    pass
 
 
 def copy_snapshot(snapshot: LinearSnapshot) -> LinearSnapshot:
     """Deep copy a snapshot"""
-    return {var: dict(paths) for var, paths in snapshot.items()}
+    return {var_id: dict(paths) for var_id, paths in snapshot.items()}
 
 
 def snapshots_compatible(s1: LinearSnapshot, s2: LinearSnapshot) -> bool:
     """Check if two snapshots are compatible for merging
     
-    Two snapshots are compatible if for every (var_name, path):
-    - Both have 'active', OR
-    - Both have non-active (consumed/undefined)
+    Two snapshots are compatible if for every (var_id, path):
+    - Both have 'valid' (active), OR
+    - Both have non-valid (invalid/undefined)
     
     We don't require exact state match - just whether it's usable or not.
     
@@ -111,49 +164,58 @@ def snapshots_compatible(s1: LinearSnapshot, s2: LinearSnapshot) -> bool:
     Returns:
         True if snapshots are compatible
     """
-    all_vars = set(s1.keys()) | set(s2.keys())
-    for var_name in all_vars:
-        paths1 = s1.get(var_name, {})
-        paths2 = s2.get(var_name, {})
+    all_var_ids = set(s1.keys()) | set(s2.keys())
+    for var_id in all_var_ids:
+        paths1 = s1.get(var_id, {})
+        paths2 = s2.get(var_id, {})
         all_paths = set(paths1.keys()) | set(paths2.keys())
         
         for path in all_paths:
-            state1 = paths1.get(path, 'undefined')
-            state2 = paths2.get(path, 'undefined')
-            # Only compare active vs non-active
-            is_active1 = (state1 == 'active')
-            is_active2 = (state2 == 'active')
-            if is_active1 != is_active2:
+            state1 = paths1.get(path, 'invalid')
+            state2 = paths2.get(path, 'invalid')
+            # Only compare valid vs non-valid
+            # Map old states: 'active' -> 'valid', 'consumed'/'undefined' -> 'invalid'
+            is_valid1 = (state1 in ('valid', 'active'))
+            is_valid2 = (state2 in ('valid', 'active'))
+            if is_valid1 != is_valid2:
                 return False
     return True
 
 
-def find_snapshot_diffs(s1: LinearSnapshot, s2: LinearSnapshot) -> List[Dict]:
+def find_snapshot_diffs(
+    s1: LinearSnapshot, s2: LinearSnapshot, 
+    var_id_info: Optional[VarIdInfo] = None
+) -> List[Dict]:
     """Find differences between two snapshots
     
     Args:
         s1: First snapshot (typically 'before' or 'expected')
         s2: Second snapshot (typically 'after' or 'actual')
+        var_id_info: Optional mapping from var_id to (var_name, line_number)
         
     Returns:
         List of diffs, each with 'path_str' and 'states'
     """
     diffs = []
-    all_vars = set(s1.keys()) | set(s2.keys())
+    all_var_ids = set(s1.keys()) | set(s2.keys())
     
-    for var_name in sorted(all_vars):
-        paths1 = s1.get(var_name, {})
-        paths2 = s2.get(var_name, {})
+    for var_id in sorted(all_var_ids):
+        var_name = f"<id={var_id}>"
+        if var_id_info and var_id in var_id_info:
+            var_name, _ = var_id_info[var_id]
+        
+        paths1 = s1.get(var_id, {})
+        paths2 = s2.get(var_id, {})
         all_paths = set(paths1.keys()) | set(paths2.keys())
         
         for path in sorted(all_paths):
-            state1 = paths1.get(path, 'undefined')
-            state2 = paths2.get(path, 'undefined')
+            state1 = paths1.get(path, 'invalid')
+            state2 = paths2.get(path, 'invalid')
             
-            # Check if active status differs
-            is_active1 = (state1 == 'active')
-            is_active2 = (state2 == 'active')
-            if is_active1 != is_active2:
+            # Check if valid status differs (handle both old and new naming)
+            is_valid1 = (state1 in ('valid', 'active'))
+            is_valid2 = (state2 in ('valid', 'active'))
+            if is_valid1 != is_valid2:
                 path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
                 diffs.append({
                     'path_str': path_str,
@@ -208,12 +270,6 @@ class LinearChecker:
         if errors:
             for err in errors:
                 print(err.format())
-                
-    For CFG-based checking with pre-recorded snapshots:
-        checker = LinearChecker(var_registry)
-        errors = checker.check(cfg, initial_snapshot, 
-                               recorded_entry_snapshots=cf._entry_snapshots,
-                               recorded_exit_snapshots=cf._exit_snapshots)
     """
     
     def __init__(self, var_registry: "VariableRegistry"):
@@ -225,35 +281,29 @@ class LinearChecker:
         self.var_registry = var_registry
         self.errors: List[LinearError] = []
         
-        # Snapshots at block entry/exit
+        # Mapping from var_id to (var_name, line_number) for error reporting
+        self._var_id_info: VarIdInfo = {}
+        
+        # Snapshots at block entry/exit (computed during dataflow analysis)
         self.entry_snapshots: Dict[int, LinearSnapshot] = {}
         self.exit_snapshots: Dict[int, LinearSnapshot] = {}
-        
-        # Pre-recorded snapshots from ControlFlowBuilder (if provided)
-        self._recorded_entry_snapshots: Optional[Dict[int, LinearSnapshot]] = None
-        self._recorded_exit_snapshots: Optional[Dict[int, LinearSnapshot]] = None
     
     def check(
         self, 
         cfg: CFG, 
-        initial_snapshot: LinearSnapshot,
-        recorded_entry_snapshots: Optional[Dict[int, LinearSnapshot]] = None,
-        recorded_exit_snapshots: Optional[Dict[int, LinearSnapshot]] = None
+        initial_snapshot: LinearSnapshot
     ) -> List[LinearError]:
         """Run linear type checking on CFG
         
         Args:
             cfg: The control flow graph to check
             initial_snapshot: Initial linear state (from function parameters)
-            recorded_entry_snapshots: Pre-recorded entry snapshots from ControlFlowBuilder
-            recorded_exit_snapshots: Pre-recorded exit snapshots from ControlFlowBuilder
             
         Returns:
             List of LinearError objects describing any violations
         """
         self.errors = []
-        self._recorded_entry_snapshots = recorded_entry_snapshots
-        self._recorded_exit_snapshots = recorded_exit_snapshots
+        self._var_id_info = {}  # Reset var_id info for each check
         
         self.entry_snapshots = {cfg.entry_id: copy_snapshot(initial_snapshot)}
         self.exit_snapshots = {}
@@ -363,14 +413,18 @@ class LinearChecker:
         """
         entry_snapshot = self.entry_snapshots.get(block_id, {})
         
-        # Find any active tokens
+        # Find any valid (unconsumed) tokens
         unconsumed = []
-        for var_name in sorted(entry_snapshot.keys()):
-            paths_dict = entry_snapshot[var_name]
+        for var_id in sorted(entry_snapshot.keys()):
+            paths_dict = entry_snapshot[var_id]
+            var_name, line_number = self._var_id_info.get(var_id, (f"<id={var_id}>", None))
             for path in sorted(paths_dict.keys()):
                 state = paths_dict[path]
-                if state == 'active':
+                # Check for valid/active state (both old and new naming)
+                if state in ('valid', 'active'):
                     path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                    if line_number:
+                        path_str = f"{path_str} (line {line_number})"
                     unconsumed.append(path_str)
         
         if unconsumed:
@@ -492,29 +546,32 @@ class LinearChecker:
         pred_info: List[Tuple[CFGEdge, LinearSnapshot]]
     ):
         """Report inconsistent snapshots at merge point"""
-        # Find which (var, path) pairs have different active status
-        all_vars: Set[str] = set()
+        # Find which (var_id, path) pairs have different valid status
+        all_var_ids: Set[int] = set()
         for _, snapshot in pred_info:
-            all_vars.update(snapshot.keys())
+            all_var_ids.update(snapshot.keys())
         
         diffs = []
-        for var_name in sorted(all_vars):
+        for var_id in sorted(all_var_ids):
+            var_name, line_number = self._var_id_info.get(var_id, (f"<id={var_id}>", None))
             # Collect all paths for this variable
             all_paths: Set[Tuple[int, ...]] = set()
             for _, snapshot in pred_info:
-                if var_name in snapshot:
-                    all_paths.update(snapshot[var_name].keys())
+                if var_id in snapshot:
+                    all_paths.update(snapshot[var_id].keys())
             
             for path in sorted(all_paths):
                 states_for_path = []
                 for edge, snapshot in pred_info:
-                    state = snapshot.get(var_name, {}).get(path, 'undefined')
+                    state = snapshot.get(var_id, {}).get(path, 'invalid')
                     states_for_path.append((edge.source_id, state))
                 
-                # Check if active status differs
-                active_values = set(s == 'active' for _, s in states_for_path)
-                if len(active_values) > 1:
+                # Check if valid status differs (handle both old and new naming)
+                valid_values = set(s in ('valid', 'active') for _, s in states_for_path)
+                if len(valid_values) > 1:
                     path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+                    if line_number:
+                        path_str = f"{path_str} (line {line_number})"
                     diffs.append({
                         'path_str': path_str,
                         'states': states_for_path
@@ -531,11 +588,10 @@ class LinearChecker:
     def _simulate_block(
         self, cfg: CFG, block: CFGBlock, entry_snapshot: LinearSnapshot
     ) -> LinearSnapshot:
-        """Simulate block execution, return exit snapshot
+        """Simulate block execution by processing linear events
         
-        Uses pre-recorded exit snapshots from ControlFlowBuilder.
-        The actual linear state tracking is done by the AST visitor during
-        code generation. This checker validates the recorded snapshots.
+        Processes LinearRegister and LinearTransition events recorded in the block.
+        This is the core of event-based linear type checking.
         
         Args:
             cfg: The CFG
@@ -545,16 +601,59 @@ class LinearChecker:
         Returns:
             Snapshot at block exit
         """
-        from ..logger import logger
+        result = copy_snapshot(entry_snapshot)
         
-        # Use pre-recorded exit snapshot if available
-        if self._recorded_exit_snapshots and block.id in self._recorded_exit_snapshots:
-            return copy_snapshot(self._recorded_exit_snapshots[block.id])
+        # Process each linear event in the block
+        for event in block.linear_events:
+            if isinstance(event, LinearRegister):
+                # Variable enters scope with initial state
+                var_id = event.var_id
+                path = event.path
+                if var_id not in result:
+                    result[var_id] = {}
+                result[var_id][path] = event.initial_state
+                # Store var info for error reporting
+                self._var_id_info[var_id] = (event.var_name, event.line_number)
+                logger.debug(f"LinearChecker: Register id={var_id} {event.var_name}{path} = {event.initial_state}")
+            
+            elif isinstance(event, LinearTransition):
+                # State transition
+                var_id = event.var_id
+                path = event.path
+                
+                # Get current state
+                current_state = result.get(var_id, {}).get(path, 'invalid')
+                
+                # Validate transition: current state must match expected old_state
+                if current_state != event.old_state:
+                    # State mismatch - report error
+                    path_str = f"{event.var_name}[{']['.join(map(str, path))}]" if path else event.var_name
+                    line_info = f" (line {event.line_number})" if event.line_number else ""
+                    
+                    if event.old_state == 'valid' and current_state == 'invalid':
+                        # Expected valid but got invalid -> use after consume or use undefined
+                        self.errors.append(LinearError(
+                            kind='use_after_consume',
+                            block_id=block.id,
+                            message=f"Linear token '{path_str}' already consumed or undefined{line_info}",
+                            source_node=event.node
+                        ))
+                    elif event.old_state == 'invalid' and current_state == 'valid':
+                        # Expected invalid but got valid -> reassigning valid token
+                        self.errors.append(LinearError(
+                            kind='reassign_valid',
+                            block_id=block.id,
+                            message=f"Cannot reassign '{path_str}': linear token not consumed{line_info}",
+                            source_node=event.node
+                        ))
+                
+                # Apply transition regardless (to continue analysis)
+                if var_id not in result:
+                    result[var_id] = {}
+                result[var_id][path] = event.new_state
+                logger.debug(f"LinearChecker: Transition id={var_id} {event.var_name}{path}: {current_state} -> {event.new_state}")
         
-        # No recorded exit snapshot - fallback to entry
-        # This happens when AST visitor didn't record snapshots for this block
-        logger.debug(f"Block {block.id} has no recorded exit snapshot, using entry")
-        return copy_snapshot(entry_snapshot)
+        return result
     
     def _check_loop_invariant(
         self, cfg: CFG, back_edge: CFGEdge, exit_snapshot: LinearSnapshot
@@ -686,9 +785,7 @@ class LinearChecker:
 def check_linear_types_on_cfg(
     cfg: CFG,
     var_registry: "VariableRegistry",
-    initial_snapshot: Optional[LinearSnapshot] = None,
-    recorded_entry_snapshots: Optional[Dict[int, LinearSnapshot]] = None,
-    recorded_exit_snapshots: Optional[Dict[int, LinearSnapshot]] = None
+    initial_snapshot: Optional[LinearSnapshot] = None
 ) -> List[LinearError]:
     """Convenience function to run linear type checking on CFG
     
@@ -696,8 +793,6 @@ def check_linear_types_on_cfg(
         cfg: The control flow graph
         var_registry: Variable registry
         initial_snapshot: Optional initial snapshot (defaults to capturing current state)
-        recorded_entry_snapshots: Pre-recorded entry snapshots from ControlFlowBuilder
-        recorded_exit_snapshots: Pre-recorded exit snapshots from ControlFlowBuilder
         
     Returns:
         List of linear type errors
@@ -706,9 +801,4 @@ def check_linear_types_on_cfg(
         initial_snapshot = capture_linear_snapshot(var_registry)
     
     checker = LinearChecker(var_registry)
-    return checker.check(
-        cfg, 
-        initial_snapshot,
-        recorded_entry_snapshots=recorded_entry_snapshots,
-        recorded_exit_snapshots=recorded_exit_snapshots
-    )
+    return checker.check(cfg, initial_snapshot)

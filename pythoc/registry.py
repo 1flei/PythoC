@@ -17,12 +17,25 @@ from llvmlite import ir
 import ast
 
 
+# Global counter for unique variable IDs
+_next_var_id: int = 0
+
+def _get_next_var_id() -> int:
+    """Get next unique variable ID"""
+    global _next_var_id
+    _next_var_id += 1
+    return _next_var_id
+
+
 @dataclass
 class VariableInfo:
     """Information about a variable
     
     Stores variable metadata and value reference. The value_ref field contains
     the actual value (LLVM or Python) and type information.
+    
+    Each VariableInfo has a unique ID for CFG linear tracking, which allows
+    distinguishing shadowed variables with the same name.
     """
     name: str
     value_ref: Optional[Any] = None  # ValueRef - unified value storage
@@ -37,30 +50,8 @@ class VariableInfo:
     scope_level: int = 0
     column: Optional[int] = None
     
-    # Linear type tracking - path-based for composite types
-    # Maps index path (tuple of ints) to linear state
-    # Examples:
-    #   Simple linear: {(): 'active'}
-    #   Struct field: {(0, 1): 'active', (1, 0): 'undefined'}
-    linear_states: Dict[Tuple[int, ...], str] = field(default_factory=dict)
-    linear_scope_depth: int = 0  # Scope depth where linear token was created
-    
-    # Backward compatibility: linear_state property for simple linear variables
-    @property
-    def linear_state(self) -> Optional[str]:
-        """Get linear state for simple (non-composite) linear variables"""
-        if not self.linear_states:
-            return None
-        # For simple linear variables, use path ()
-        return self.linear_states.get((), None)
-    
-    @linear_state.setter
-    def linear_state(self, value: Optional[str]):
-        """Set linear state for simple linear variables"""
-        if value is None:
-            self.linear_states.pop((), None)
-        else:
-            self.linear_states[()] = value
+    # Unique ID for CFG linear tracking (distinguishes shadowed variables)
+    var_id: int = field(default_factory=_get_next_var_id)
     
     # Type information accessed via value_ref
     @property

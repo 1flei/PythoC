@@ -47,24 +47,34 @@ class LabelContext:
     node: ast.AST              # Original AST node for error reporting
 
 
-def _init_label_tracking(visitor):
-    """Initialize scoped label tracking structures
+@dataclass
+class PendingGoto:
+    """A forward goto reference waiting to be resolved.
     
-    Structures maintained:
-    1. _scoped_label_stack: Current nesting chain (for ancestor lookup)
-    2. _scope_labels: parent_depth -> list of labels (for sibling/uncle lookup)
-    3. _all_labels: name -> LabelContext (for duplicate check and forward reference)
-    4. _pending_scoped_gotos: List of forward goto references to resolve
+    Attributes:
+        block: The IR block where the goto was issued
+        label_name: Target label name
+        goto_scope_depth: Scope depth when goto was issued
+        defer_snapshot: List of (depth, callable_obj, func_ref, args, node) tuples
+        node: AST node for error reporting
+        is_goto_end: True if this is goto_end, False if goto
+        emitted_to_depth: Defers with depth > this have been emitted.
+                          Initialized to goto_scope_depth, decremented as scopes exit.
     """
-    if not hasattr(visitor, '_scoped_label_stack'):
-        visitor._scoped_label_stack = []  # Stack of LabelContext (current nesting)
-    if not hasattr(visitor, '_scope_labels'):
-        visitor._scope_labels = {}  # parent_depth -> [LabelContext, ...]
-    if not hasattr(visitor, '_all_labels'):
-        visitor._all_labels = {}  # name -> LabelContext (for duplicate check)
-    if not hasattr(visitor, '_pending_scoped_gotos'):
-        # List of (current_block, label_name, goto_scope_depth, defer_snapshot, node, is_goto_end)
-        visitor._pending_scoped_gotos = []
+    block: object
+    label_name: str
+    goto_scope_depth: int
+    defer_snapshot: List  # List of (depth, callable_obj, func_ref, args, node)
+    node: ast.AST
+    is_goto_end: bool
+    emitted_to_depth: int = field(default=None)
+    
+    def __post_init__(self):
+        if self.emitted_to_depth is None:
+            # Initially, no defers have been emitted
+            # We'll emit defers for depth > emitted_to_depth
+            # Start with goto_scope_depth + 1 so nothing is emitted yet
+            self.emitted_to_depth = self.goto_scope_depth + 1
 
 
 def _find_label_for_begin(visitor, label_name: str) -> Optional[LabelContext]:
@@ -79,8 +89,6 @@ def _find_label_for_begin(visitor, label_name: str) -> Optional[LabelContext]:
     Returns:
         LabelContext if found and visible, None otherwise
     """
-    _init_label_tracking(visitor)
-    
     # 1. Check ancestor chain (including self)
     for ctx in visitor._scoped_label_stack:
         if ctx.name == label_name:
@@ -114,8 +122,6 @@ def _find_label_for_end(visitor, label_name: str) -> Optional[LabelContext]:
     Returns:
         LabelContext if found in ancestor chain, None otherwise
     """
-    _init_label_tracking(visitor)
-    
     # Only check ancestor chain (including self)
     for ctx in visitor._scoped_label_stack:
         if ctx.name == label_name:
@@ -126,7 +132,6 @@ def _find_label_for_end(visitor, label_name: str) -> Optional[LabelContext]:
 
 def _is_ancestor_label(visitor, ctx: LabelContext) -> bool:
     """Check if a label is in the current ancestor chain"""
-    _init_label_tracking(visitor)
     return ctx in visitor._scoped_label_stack
 
 
@@ -154,44 +159,8 @@ def _check_sibling_crossing(visitor, target_ctx: LabelContext, node: ast.AST):
     pass
 
 
-def _simulate_defer_linear_consumption(snapshot: dict, defer_args: list, visitor) -> dict:
-    """Simulate defer execution's effect on linear states in a snapshot.
-    
-    This is used for forward goto to compute the exit_snapshot that reflects
-    the state AFTER defers are executed, without actually modifying the
-    global linear state.
-    
-    Args:
-        snapshot: Linear snapshot to modify (will be mutated)
-        defer_args: List of ValueRef arguments from defer
-        visitor: AST visitor (for type checking)
-        
-    Returns:
-        Modified snapshot
-    """
-    for arg in defer_args:
-        # Check if this arg has linear tracking info
-        if not hasattr(arg, 'var_name') or not arg.var_name:
-            continue
-        if not hasattr(arg, 'linear_path') or arg.linear_path is None:
-            continue
-        
-        var_name = arg.var_name
-        base_path = arg.linear_path
-        
-        # Check if this variable is in the snapshot
-        if var_name not in snapshot:
-            continue
-        
-        # Get all linear paths in this value
-        linear_paths = visitor._get_linear_paths(arg.type_hint, base_path)
-        
-        # Mark each path as consumed in the snapshot
-        for path in linear_paths:
-            if path in snapshot[var_name]:
-                snapshot[var_name][path] = 'consumed'
-    
-    return snapshot
+# REMOVED: _simulate_defer_linear_consumption - old snapshot system
+# Now we emit LinearTransition events directly to CFG
 
 
 def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end: bool, is_ancestor: bool):
@@ -291,8 +260,7 @@ class label(BuiltinFunction):
         The scope_depth will be parent_scope_depth + 1 (inside the body).
         """
         cf = visitor._get_cf_builder()
-        _init_label_tracking(visitor)
-        
+
         # Check for duplicate label name in function
         if label_name in visitor._all_labels:
             logger.error(f"Label '{label_name}' already defined in this function",
@@ -339,7 +307,12 @@ class label(BuiltinFunction):
     
     @classmethod
     def _resolve_pending_gotos(cls, visitor, ctx: LabelContext):
-        """Resolve pending forward goto references to this label"""
+        """Resolve pending forward goto references to this label.
+        
+        Note: Some defers may have already been emitted by scope_manager.exit_scope()
+        as scopes exited. We only emit defers that haven't been emitted yet
+        (those with depth <= pending.emitted_to_depth and depth > target_parent).
+        """
         from .defer import _execute_single_defer
         
         cf = visitor._get_cf_builder()
@@ -347,37 +320,50 @@ class label(BuiltinFunction):
         target_parent = ctx.parent_scope_depth
         
         resolved = []
+        
         for pending in visitor._pending_scoped_gotos:
-            pending_block, pending_name, goto_scope_depth, defer_snapshot, pending_node, is_goto_end = pending
-            
-            if pending_name != label_name:
+            if pending.label_name != label_name:
                 continue
             
-            if is_goto_end:
+            if pending.is_goto_end:
                 # goto_end forward reference - should not happen for sibling jumps
                 # (goto_end can only target ancestors, which are always backward refs)
                 logger.error(f"Internal error: forward goto_end to '{label_name}'",
-                            node=pending_node, exc_type=RuntimeError)
+                            node=pending.node, exc_type=RuntimeError)
                 continue
             
             # Save current position
             saved_block = visitor.builder.block
-            visitor.builder.position_at_end(pending_block)
+            saved_cfg_block_id = cf._current_block_id
+            
+            # Get CFG block ID first (needed for logging)
+            pending_block_id = cf._get_cfg_block_id(pending.block)
+            
+            # Position at pending block for both IR and CFG
+            # This is CRITICAL: we need to update CFG's _current_block_id so that
+            # linear events from defer execution are added to the correct CFG block
+            cf.position_at_end(pending.block)
             
             # Temporarily clear terminated flag so defer can emit IR
-            pending_block_id = cf._get_cfg_block_id(pending_block)
             was_terminated = cf._terminated.get(pending_block_id, False)
             cf._terminated[pending_block_id] = False
             
-            # Execute defers for scopes from goto_scope down to target_parent (exclusive)
-            # Filter defer_snapshot based on actual target
+            # Execute defers that haven't been emitted yet:
+            # - depth <= emitted_to_depth (already emitted by scope exits)
+            # - depth > target_parent (need to exit these scopes)
+            # So we emit defers where: target_parent < depth <= emitted_to_depth
+            # Wait, that's wrong. emitted_to_depth tracks what we've already emitted.
+            # We need to emit defers where: target_parent < depth < emitted_to_depth
+            # Because scope_manager emits defers for depth == current_scope.depth,
+            # and updates emitted_to_depth to current_scope.depth.
             defers_to_execute = [
                 (callable_obj, func_ref, args, defer_node)
-                for depth, callable_obj, func_ref, args, defer_node in defer_snapshot
-                if depth > target_parent
+                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
+                if target_parent < depth < pending.emitted_to_depth
             ]
-            logger.debug(f"Resolving forward goto '{pending_name}': executing {len(defers_to_execute)} defers "
-                        f"(goto_scope={goto_scope_depth}, target_parent={target_parent})")
+            logger.debug(f"Resolving forward goto '{pending.label_name}': executing {len(defers_to_execute)} defers "
+                        f"(goto_scope={pending.goto_scope_depth}, target_parent={target_parent}, "
+                        f"emitted_to_depth={pending.emitted_to_depth})")
             
             # Emit defers
             for callable_obj, func_ref, args, defer_node in defers_to_execute:
@@ -389,7 +375,8 @@ class label(BuiltinFunction):
             # Restore terminated flag
             cf._terminated[pending_block_id] = was_terminated
             
-            # Restore position
+            # Restore position for both IR and CFG
+            cf._current_block_id = saved_cfg_block_id
             visitor.builder.position_at_end(saved_block)
             
             # Add CFG edge for the goto
@@ -428,7 +415,6 @@ class label(BuiltinFunction):
             cf.branch(ctx.end_block)
         
         # Pop from label stack (but keep in _all_labels and _scope_labels for sibling access)
-        _init_label_tracking(visitor)
         if visitor._scoped_label_stack and visitor._scoped_label_stack[-1].name == ctx.name:
             visitor._scoped_label_stack.pop()
         
@@ -493,7 +479,6 @@ class goto(BuiltinFunction):
                         node=node, exc_type=TypeError)
         
         cf = visitor._get_cf_builder()
-        _init_label_tracking(visitor)
         
         # Check if block is already terminated
         if cf.is_terminated():
@@ -547,24 +532,19 @@ class goto(BuiltinFunction):
             
             logger.debug(f"Forward goto to '{label_name}': captured {len(defer_snapshot)} defers at scope {goto_scope_depth}")
             
-            # Record pending goto for later resolution
-            visitor._pending_scoped_gotos.append(
-                (current_block, label_name, goto_scope_depth, defer_snapshot, node, False)  # False = goto (not goto_end)
+            # Record pending goto for later resolution (to generate IR branch)
+            pending = PendingGoto(
+                block=current_block,
+                label_name=label_name,
+                goto_scope_depth=goto_scope_depth,
+                defer_snapshot=defer_snapshot,
+                node=node,
+                is_goto_end=False
             )
+            visitor._pending_scoped_gotos.append(pending)
             
-            # Capture exit snapshot and simulate defer execution's effect on linear states
-            # This is critical: CFG linear checker needs to see the state AFTER defers
-            # are executed, not before. We simulate this without modifying global state.
+            # Mark current block as terminated in CFG (forward goto exits the block)
             current_block_id = cf._get_cfg_block_id(current_block)
-            exit_snapshot = cf.capture_linear_snapshot()
-            
-            # Simulate defer execution for linear state tracking
-            for depth, callable_obj, func_ref, args, defer_node in defer_snapshot:
-                _simulate_defer_linear_consumption(exit_snapshot, args, visitor)
-            
-            cf._exit_snapshots[current_block_id] = exit_snapshot
-            
-            # Mark current block as terminated in CFG
             cf._terminated[current_block_id] = True
         
         return wrap_value(None, kind='python', type_hint=void)
@@ -674,11 +654,9 @@ def check_scoped_goto_consistency(visitor, func_node):
         visitor: The visitor instance
         func_node: The function AST node (for error location)
     """
-    _init_label_tracking(visitor)
-    
     # Check for unresolved forward gotos
     if visitor._pending_scoped_gotos:
-        for pending_block, pending_name, goto_scope_depth, defer_snapshot, pending_node, is_goto_end in visitor._pending_scoped_gotos:
-            goto_type = "goto_end" if is_goto_end else "goto"
-            logger.error(f"Undefined label '{pending_name}' in {goto_type} statement",
-                        node=pending_node, exc_type=SyntaxError)
+        for pending in visitor._pending_scoped_gotos:
+            goto_type = "goto_end" if pending.is_goto_end else "goto"
+            logger.error(f"Undefined label '{pending.label_name}' in {goto_type} statement",
+                        node=pending.node, exc_type=SyntaxError)

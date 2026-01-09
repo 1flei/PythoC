@@ -73,7 +73,7 @@ class Scope:
 
 
 class ScopeManager:
-    """Unified scope manager for variables, defers, and linear types
+    """Unified scope manager for variables, defers
     
     This replaces the separate mechanisms:
     - var_registry.enter_scope() / exit_scope()
@@ -85,7 +85,7 @@ class ScopeManager:
         with scope_manager.scope(ScopeType.IF) as scope:
             # Variables, defers automatically managed
             ...
-        # Defers executed, linear checked, scope cleaned up
+        # Defers executed, scope cleaned up
     
     Or manually:
         scope = scope_manager.enter_scope(ScopeType.LOOP)
@@ -148,18 +148,17 @@ class ScopeManager:
         logger.debug(f"Entered scope {scope}")
         return scope
     
-    def exit_scope(self, cf: Any, check_linear: bool = True,
-                   node: Optional[ast.AST] = None) -> Scope:
+    def exit_scope(self, cf: Any, node: Optional[ast.AST] = None) -> Scope:
         """Exit current scope
         
         This:
-        1. Emits deferred calls (if block not terminated)
-        2. Checks linear tokens consumed (if check_linear=True)
+        1. Emits deferred calls for pending forward gotos from this scope
+           (MUST happen before var_registry.exit_scope() so vars are still accessible)
+        2. Emits deferred calls for normal exit (if block not terminated)
         3. Removes variables from registry
         
         Args:
             cf: ControlFlowBuilder for checking termination
-            check_linear: Whether to check linear tokens (False for early exits)
             node: Optional AST node for error reporting
         
         Returns:
@@ -171,21 +170,104 @@ class ScopeManager:
         scope = self._scopes.pop()
         
         try:
-            # 1. Emit deferred calls (if not terminated)
+            # 1. Emit defers for pending forward gotos from this scope
+            self._emit_defers_for_pending_gotos(scope, cf)
+            
+            # 2. Emit deferred calls for normal exit (if not terminated)
             if not cf.is_terminated():
                 self._emit_defers_for_scope(scope)
-            
-            # 2. Check linear tokens (optional)
-            # Linear tokens must be inactive when a scope ends, regardless of whether
-            # the current block is terminated (e.g., via return).
-            if check_linear:
-                self._check_linear_tokens(scope, node)
         finally:
-            # 3. Sync with var_registry (must happen even if checks raise)
+            # 4. Sync with var_registry (must happen even if checks raise)
             self._var_registry.exit_scope()
         
         logger.debug(f"Exited scope {scope}")
         return scope
+    
+    def _emit_defers_for_pending_gotos(self, scope: Scope, cf: Any):
+        """Emit defers for pending forward gotos that originate from this scope.
+        
+        When exiting a scope, any pending forward goto that was issued from within
+        this scope MUST be exiting this scope (since the label hasn't been defined yet).
+        We emit the defers for this scope at the goto point NOW, while variables are
+        still in the registry.
+        
+        This is the key insight: if goto("forward") is inside scope S, and we're
+        exiting S without having seen label("forward"), then the goto MUST be
+        jumping out of S. So we emit S's defers at the goto point.
+        
+        Args:
+            scope: The scope being exited
+            cf: ControlFlowBuilder
+        """
+        if not self._visitor:
+            return
+        
+        # Check if visitor has pending gotos
+        if not hasattr(self._visitor, '_pending_scoped_gotos'):
+            return
+        
+        from pythoc.builtin_entities.defer import _execute_single_defer
+        
+        scope_depth = scope.depth
+        
+        for pending in self._visitor._pending_scoped_gotos:
+            # Only process gotos that originate from this scope or deeper
+            # If goto_scope_depth >= scope_depth, the goto is from within this scope
+            if pending.goto_scope_depth < scope_depth:
+                continue
+            
+            # Skip if we've already emitted defers for this scope depth
+            # (emitted_to_depth tracks the minimum depth we've emitted to)
+            if pending.emitted_to_depth <= scope_depth:
+                continue
+            
+            # Find defers in the snapshot that belong to this scope
+            defers_for_this_scope = [
+                (callable_obj, func_ref, args, defer_node)
+                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
+                if depth == scope_depth
+            ]
+            
+            if not defers_for_this_scope:
+                # Still update emitted_to_depth even if no defers
+                pending.emitted_to_depth = scope_depth
+                continue
+            
+            logger.debug(f"Emitting {len(defers_for_this_scope)} defers for pending goto "
+                        f"'{pending.label_name}' at scope depth {scope_depth}")
+            
+            # Save current position
+            saved_block = self._visitor.builder.block
+            saved_cfg_block_id = cf._current_block_id
+            
+            # Position at pending block for both IR and CFG
+            # Note: pending.block may have been updated by previous defer emissions
+            pending_block_id = cf._get_cfg_block_id(pending.block)
+            cf.position_at_end(pending.block)
+            
+            # Temporarily clear terminated flag so defer can emit IR
+            was_terminated = cf._terminated.get(pending_block_id, False)
+            cf._terminated[pending_block_id] = False
+            
+            # Emit defers for this scope
+            for callable_obj, func_ref, args, defer_node in defers_for_this_scope:
+                _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
+            
+            # Update emitted_to_depth to track that we've emitted defers for this scope
+            pending.emitted_to_depth = scope_depth
+            
+            # CRITICAL: Update pending.block to current block after defer execution
+            # Defer execution may create new blocks (e.g., closure inlining with labels)
+            # The final branch to target label should be from the current block, not
+            # the original pending block which may now be terminated.
+            pending.block = self._visitor.builder.block
+            
+            # Restore terminated flag for original block
+            cf._terminated[pending_block_id] = was_terminated
+            
+            # Restore position for both IR and CFG
+            cf._current_block_id = saved_cfg_block_id
+            self._visitor.builder.position_at_end(saved_block)
     
     def exit_scopes_to(self, target_depth: int, cf: Any, emit_defers: bool = True) -> List[Scope]:
         """Exit scopes down to target depth (for break/continue/goto)
@@ -241,6 +323,8 @@ class ScopeManager:
         if not self._visitor:
             return
         
+        from pythoc.builtin_entities.defer import _execute_single_defer
+        
         cf = self._visitor._get_cf_builder()
         
         # Do NOT clear defers - they may be needed by other code paths
@@ -254,91 +338,17 @@ class ScopeManager:
             
             logger.debug(f"  emitting defer: {defer_info.callable_obj}")
             
-            # Transfer linear ownership at execution time
-            for arg in defer_info.args:
-                self._visitor._transfer_linear_ownership(
-                    arg, reason="deferred function argument", node=defer_info.node
-                )
-            
-            # Execute the deferred call
-            defer_info.callable_obj.handle_call(
-                self._visitor, defer_info.func_ref, defer_info.args, defer_info.node
+            # Use the unified defer execution function
+            _execute_single_defer(
+                self._visitor,
+                defer_info.callable_obj,
+                defer_info.func_ref,
+                defer_info.args,
+                defer_info.node
             )
             executed_count += 1
         
         logger.debug(f"Emitted {executed_count}/{len(defers_to_emit)} defers for scope depth {scope.depth}")
-    
-    def _check_linear_tokens(self, scope: Scope, node: Optional[ast.AST] = None):
-        """Check that all linear tokens in scope are consumed
-        
-        DISABLED: This check is redundant - CFG linear checker handles this.
-        Keeping method stub to avoid breaking calls.
-        
-        Args:
-            scope: The scope being exited
-            node: Optional AST node for error reporting
-        """
-        # DISABLED FOR TESTING: Only CFG checker should validate linear states
-        return
-        
-        # OLD CODE (disabled):
-        # if self._visitor is None:
-        #     return
-        # 
-        # unconsumed = []
-        # scope_depth = scope.depth
-        # 
-        # # Check variables in current scope
-        # for var_info in self._var_registry.get_all_in_current_scope():
-        #     if var_info.linear_scope_depth == scope_depth:
-        #         for path, state in var_info.linear_states.items():
-        #             if state == 'active':
-        #                 path_str = self._visitor._format_linear_path(
-        #                     var_info.name, path, var_info.type_hint
-        #                 )
-        #                 actual_line = self._visitor._get_actual_line_number(var_info.line_number)
-        #                 unconsumed.append(f"'{path_str}' (declared at line {actual_line})")
-        # 
-        # if unconsumed:
-        #     logger.error(
-        #         f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}",
-        #         node=node
-        #     )
-    
-    def check_all_linear_tokens(self, node: Optional[ast.AST] = None):
-        """Check that all linear tokens in all scopes are consumed
-        
-        DISABLED: This check is redundant - CFG linear checker handles this.
-        Keeping method stub to avoid breaking calls.
-        
-        Args:
-            node: Optional AST node for error reporting
-        """
-        # DISABLED FOR TESTING: Only CFG checker should validate linear states
-        return
-        
-        # OLD CODE (disabled):
-        # if self._visitor is None:
-        #     return
-        # 
-        # unconsumed = []
-        # 
-        # # Check all visible variables with linear states
-        # for name, var_info in self._var_registry.list_all_visible().items():
-        #     if var_info.linear_states:
-        #         for path, state in var_info.linear_states.items():
-        #             if state == 'active':
-        #                 path_str = self._visitor._format_linear_path(
-        #                     var_info.name, path, var_info.type_hint
-        #                 )
-        #                 actual_line = self._visitor._get_actual_line_number(var_info.line_number)
-        #                 unconsumed.append(f"'{path_str}' (declared at line {actual_line})")
-        # 
-        # if unconsumed:
-        #     logger.error(
-        #         f"Linear tokens not consumed before return: {', '.join(unconsumed)}",
-        #         node=node
-        #     )
     
     def register_defer(self, callable_obj: Any, func_ref: ValueRef, 
                        args: List[ValueRef], node: ast.AST):

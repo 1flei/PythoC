@@ -30,10 +30,12 @@ class CFGBlock:
         id: Unique identifier for this block
         stmts: List of AST statements in this block
         source_range: Optional (start_line, end_line) for error reporting
+        linear_events: List of linear type events for CFG-based checking
     """
     id: int
     stmts: List[ast.stmt] = field(default_factory=list)
     source_range: Optional[Tuple[int, int]] = None
+    linear_events: List[Any] = field(default_factory=list)  # List[LinearEvent]
     
     def __repr__(self) -> str:
         stmt_count = len(self.stmts)
