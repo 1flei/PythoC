@@ -244,7 +244,18 @@ class TestLinearSnapshotUtils(unittest.TestCase):
         
         diffs = find_snapshot_diffs(s1, s2)
         self.assertEqual(len(diffs), 1)
-        self.assertEqual(diffs[0]['path_str'], 'token')
+        # Without var_id_info, path_str uses <id=...> format
+        self.assertEqual(diffs[0]['path_str'], '<id=token>')
+    
+    def test_find_snapshot_diffs_with_var_id_info(self):
+        """Test that var_id_info provides readable variable names"""
+        s1: LinearSnapshot = {'token': {(): 'active'}}
+        s2: LinearSnapshot = {'token': {(): 'consumed'}}
+        var_id_info = {'token': ('my_token', 10)}
+        
+        diffs = find_snapshot_diffs(s1, s2, var_id_info=var_id_info)
+        self.assertEqual(len(diffs), 1)
+        self.assertEqual(diffs[0]['path_str'], 'my_token')
     
     def test_find_snapshot_diffs_multiple_vars(self):
         s1: LinearSnapshot = {'a': {(): 'active'}, 'b': {(): 'consumed'}}
@@ -252,7 +263,8 @@ class TestLinearSnapshotUtils(unittest.TestCase):
         
         diffs = find_snapshot_diffs(s1, s2)
         self.assertEqual(len(diffs), 1)
-        self.assertEqual(diffs[0]['path_str'], 'a')
+        # Without var_id_info, path_str uses <id=...> format
+        self.assertEqual(diffs[0]['path_str'], '<id=a>')
 
 
 class TestLinearError(unittest.TestCase):
