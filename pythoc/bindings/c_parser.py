@@ -366,9 +366,9 @@ def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRe
                 if parser_match(p, TokenType.LBRACE):
                     prfs = parser_skip_balanced(p, prfs, TokenType.LBRACE, TokenType.RBRACE)
                 break
-            # Identifier (typedef name) - only if no base type yet
+            # Identifier (typedef name) - only if no base type yet AND no sign specifier
             case TokenType.IDENTIFIER:
-                if ts.base_token == 0:
+                if ts.base_token == 0 and ts.is_signed == 0:
                     ts.base_token = TokenType.IDENTIFIER
                     ts.name = span_from_token(p.current)
                     prfs = parser_advance(p, prfs)
@@ -1053,28 +1053,104 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
                         prfs = parser_advance(p, prfs)
                 
                 case TokenType.STRUCT:
+                    # Look ahead to determine if this is:
+                    # 1. A struct definition: struct Name { ... };
+                    # 2. A function/var with struct return type: struct Name* func();
+                    # We parse the struct type first, then check what follows
                     prfs = parser_advance(p, prfs)
                     ty_prf, ty, prfs = parse_struct_or_union(p, prfs, 0)
-                    success, decl_prf, decl = try_make_struct_decl(ty_prf, ty, storage)
-                    if success != 0:
-                        yield decl_prf, decl
+                    
+                    # Check if there's a pointer or identifier after the struct
+                    # If so, this is a function/variable declaration, not just a struct
+                    if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.IDENTIFIER):
+                        # This is a function/variable with struct return type
+                        # Build QualType from the struct type
+                        qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
+                        
+                        # Parse pointer indirections
+                        while parser_match(p, TokenType.STAR):
+                            prfs = parser_advance(p, prfs)
+                            # Skip pointer qualifiers
+                            while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE):
+                                prfs = parser_advance(p, prfs)
+                            qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+                        
+                        # Parse declarator name
+                        name: Span
+                        name, prfs = parse_declarator_name(p, prfs)
+                        
+                        if not span_is_empty(name):
+                            match p.current.type:
+                                case TokenType.LPAREN:
+                                    # Function declaration
+                                    decl_prf, decl, prfs = parse_function_decl(p, prfs, qt_prf, qt, name)
+                                    decl.storage = storage
+                                    yield decl_prf, decl
+                                case _:
+                                    # Variable declaration - skip for now
+                                    qualtype_free(qt_prf, qt)
+                                    prfs = parser_skip_until_semicolon(p, prfs)
+                                    if parser_match(p, TokenType.SEMICOLON):
+                                        prfs = parser_advance(p, prfs)
+                        else:
+                            qualtype_free(qt_prf, qt)
+                            prfs = parser_skip_until_semicolon(p, prfs)
+                            if parser_match(p, TokenType.SEMICOLON):
+                                prfs = parser_advance(p, prfs)
                     else:
-                        decl_free(decl_prf, decl)
-                    prfs = parser_skip_until_semicolon(p, prfs)
-                    if parser_match(p, TokenType.SEMICOLON):
-                        prfs = parser_advance(p, prfs)
+                        # This is a struct definition/forward declaration
+                        success, decl_prf, decl = try_make_struct_decl(ty_prf, ty, storage)
+                        if success != 0:
+                            yield decl_prf, decl
+                        else:
+                            decl_free(decl_prf, decl)
+                        prfs = parser_skip_until_semicolon(p, prfs)
+                        if parser_match(p, TokenType.SEMICOLON):
+                            prfs = parser_advance(p, prfs)
                 
                 case TokenType.UNION:
+                    # Same logic as STRUCT - check if this is a union type in a declaration
                     prfs = parser_advance(p, prfs)
                     ty_prf, ty, prfs = parse_struct_or_union(p, prfs, 1)
-                    success, decl_prf, decl = try_make_union_decl(ty_prf, ty, storage)
-                    if success != 0:
-                        yield decl_prf, decl
+                    
+                    if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.IDENTIFIER):
+                        # Function/variable with union return type
+                        qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
+                        
+                        while parser_match(p, TokenType.STAR):
+                            prfs = parser_advance(p, prfs)
+                            while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE):
+                                prfs = parser_advance(p, prfs)
+                            qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+                        
+                        name: Span
+                        name, prfs = parse_declarator_name(p, prfs)
+                        
+                        if not span_is_empty(name):
+                            match p.current.type:
+                                case TokenType.LPAREN:
+                                    decl_prf, decl, prfs = parse_function_decl(p, prfs, qt_prf, qt, name)
+                                    decl.storage = storage
+                                    yield decl_prf, decl
+                                case _:
+                                    qualtype_free(qt_prf, qt)
+                                    prfs = parser_skip_until_semicolon(p, prfs)
+                                    if parser_match(p, TokenType.SEMICOLON):
+                                        prfs = parser_advance(p, prfs)
+                        else:
+                            qualtype_free(qt_prf, qt)
+                            prfs = parser_skip_until_semicolon(p, prfs)
+                            if parser_match(p, TokenType.SEMICOLON):
+                                prfs = parser_advance(p, prfs)
                     else:
-                        decl_free(decl_prf, decl)
-                    prfs = parser_skip_until_semicolon(p, prfs)
-                    if parser_match(p, TokenType.SEMICOLON):
-                        prfs = parser_advance(p, prfs)
+                        success, decl_prf, decl = try_make_union_decl(ty_prf, ty, storage)
+                        if success != 0:
+                            yield decl_prf, decl
+                        else:
+                            decl_free(decl_prf, decl)
+                        prfs = parser_skip_until_semicolon(p, prfs)
+                        if parser_match(p, TokenType.SEMICOLON):
+                            prfs = parser_advance(p, prfs)
                 
                 case TokenType.ENUM:
                     prfs = parser_advance(p, prfs)

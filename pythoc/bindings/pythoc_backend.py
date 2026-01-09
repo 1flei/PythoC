@@ -451,8 +451,14 @@ def emit_enum_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
 
 
 @compile
-def emit_func_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
-    """Emit a function declaration as @extern def"""
+def emit_func_decl(buf: ptr[StringBuffer], decl: ptr[Decl], lib: ptr[i8]) -> void:
+    """Emit a function declaration as @extern def
+    
+    Args:
+        buf: Output buffer
+        decl: Function declaration
+        lib: Library name for @extern (e.g. "c", "m", or full path)
+    """
     if decl == nullptr or decl.type == nullptr:
         return
     
@@ -470,8 +476,10 @@ def emit_func_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
     if ft == nullptr:
         return
     
-    # @extern(lib='c')
-    strbuf_push_cstr(buf, "@extern(lib='c')\n")
+    # @extern(lib='...')
+    strbuf_push_cstr(buf, "@extern(lib='")
+    strbuf_push_cstr(buf, lib)
+    strbuf_push_cstr(buf, "')\n")
     
     # def name(params) -> ret:
     strbuf_push_cstr(buf, "def ")
@@ -510,8 +518,47 @@ def emit_func_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
 
 
 @compile
-def emit_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
-    """Emit any declaration to the buffer"""
+def emit_typedef_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
+    """Emit a typedef declaration as a type alias
+    
+    Generates: TypeName = UnderlyingType
+    """
+    if decl == nullptr or decl.type == nullptr:
+        return
+    
+    # Name = Type
+    strbuf_push_span(buf, decl.name)
+    strbuf_push_cstr(buf, " = ")
+    emit_qualtype(buf, decl.type)
+    strbuf_push_cstr(buf, "\n\n")
+
+
+@compile
+def emit_var_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
+    """Emit a variable declaration as a typed global
+    
+    Generates: # var_name: Type (as comment since pythoc doesn't have global vars)
+    """
+    if decl == nullptr or decl.type == nullptr:
+        return
+    
+    # Emit as comment since pythoc doesn't support global variables directly
+    strbuf_push_cstr(buf, "# ")
+    strbuf_push_span(buf, decl.name)
+    strbuf_push_cstr(buf, ": ")
+    emit_qualtype(buf, decl.type)
+    strbuf_push_cstr(buf, "\n")
+
+
+@compile
+def emit_decl(buf: ptr[StringBuffer], decl: ptr[Decl], lib: ptr[i8]) -> void:
+    """Emit any declaration to the buffer
+    
+    Args:
+        buf: Output buffer
+        decl: Declaration to emit
+        lib: Library name for @extern functions (e.g. "c", "m", or full path)
+    """
     if decl == nullptr:
         return
     
@@ -523,7 +570,11 @@ def emit_decl(buf: ptr[StringBuffer], decl: ptr[Decl]) -> void:
         case DeclKind.Enum:
             emit_enum_decl(buf, decl)
         case DeclKind.Func:
-            emit_func_decl(buf, decl)
+            emit_func_decl(buf, decl, lib)
+        case DeclKind.Typedef:
+            emit_typedef_decl(buf, decl)
+        case DeclKind.Var:
+            emit_var_decl(buf, decl)
         case _:
             pass
 
