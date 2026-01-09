@@ -58,10 +58,13 @@ class AssignmentsMixin:
         return value_ref
 
     def _check_linear_rvalue_copy(self, rvalue: ValueRef, node) -> None:
-        """Check if rvalue is an active linear token - forbid copy.
+        """Check if rvalue is a linear token - forbid copy.
         
         Linear tokens cannot be copied; they must be moved explicitly.
-        Raises error via logger if attempting to copy an active linear token.
+        Raises error via logger if attempting to copy a linear token.
+        
+        This is a syntactic check - any direct assignment of a linear variable
+        (without move()) is an error, regardless of the current state.
         
         Args:
             rvalue: The rvalue being assigned
@@ -72,53 +75,20 @@ class AssignmentsMixin:
                 hasattr(rvalue, 'linear_path') and rvalue.linear_path is not None):
             return
         
-        rvalue_var_info = self.lookup_variable(rvalue.var_name)
-        if not rvalue_var_info:
+        # Check if the rvalue's type is linear
+        if not self._is_linear_type(rvalue.type_hint):
             return
         
-        rvalue_state = self._get_linear_state(rvalue_var_info, rvalue.linear_path)
-        logger.debug(f"_check_linear_rvalue_copy: var_name={rvalue.var_name}, state={rvalue_state}")
-        if rvalue_state == 'active':
-            # Format path for error message
-            if rvalue.linear_path:
-                path_str = f"{rvalue.var_name}[{']['.join(map(str, rvalue.linear_path))}]"
-            else:
-                path_str = rvalue.var_name
-            logger.error(
-                f"Cannot assign linear token '{path_str}' "
-                f"(use move() to transfer ownership)",
-                node
-            )
-
-    def _check_linear_lvalue_overwrite(self, lvalue: ValueRef, node) -> None:
-        """Check if lvalue holds an unconsumed linear token - forbid overwrite.
-        
-        Cannot reassign to a location that holds an active linear token
-        without first consuming it.
-        Raises error via logger if attempting to overwrite an unconsumed linear token.
-        
-        Args:
-            lvalue: The lvalue being assigned to
-            node: AST node for error reporting (lineno)
-        """
-        if not (hasattr(lvalue, 'var_name') and lvalue.var_name and 
-                hasattr(lvalue, 'linear_path') and lvalue.linear_path is not None):
-            return
-        
-        target_var_info = self.lookup_variable(lvalue.var_name)
-        if not target_var_info:
-            return
-        
-        target_state = self._get_linear_state(target_var_info, lvalue.linear_path)
-        if target_state == 'active':
-            # Format path for error message
-            path_str = self._format_linear_path(lvalue.var_name, lvalue.linear_path, target_var_info.type_hint)
-            actual_line = self._get_actual_line_number(target_var_info.line_number)
-            logger.error(
-                f"Cannot reassign '{path_str}': linear token not consumed "
-                f"(declared at line {actual_line})",
-                node
-            )
+        # Format path for error message
+        if rvalue.linear_path:
+            path_str = f"{rvalue.var_name}[{']['.join(map(str, rvalue.linear_path))}]"
+        else:
+            path_str = rvalue.var_name
+        logger.error(
+            f"Cannot assign linear token '{path_str}' "
+            f"(use move() to transfer ownership)",
+            node
+        )
 
     def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef, pc_type=None, source="inference") -> ValueRef:
         """Visit lvalue or define new variable if it doesn't exist
@@ -264,9 +234,6 @@ class AssignmentsMixin:
         
         # Get or create lvalue
         lvalue = self.visit_lvalue_or_define(target, value_ref=decayed_rvalue, pc_type=pc_type, source="inference")
-        
-        # Check if lvalue holds an unconsumed linear token (forbid overwrite)
-        self._check_linear_lvalue_overwrite(lvalue, node)
         
         # Store value to lvalue
         self._store_to_lvalue(lvalue, decayed_rvalue, node)

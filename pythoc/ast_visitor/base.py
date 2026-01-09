@@ -111,31 +111,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.label_counter += 1
         return label
     
-    def get_llvm_type(self, type_hint):
-        """Convert type hint to LLVM type"""
-        from ..builtin_entities import get_llvm_type_by_name, BuiltinEntity
-        
-        if isinstance(type_hint, type) and issubclass(type_hint, BuiltinEntity):
-            if type_hint.can_be_type():
-                return type_hint.get_llvm_type(self.module.context)
-        
-        if isinstance(type_hint, str):
-            llvm_type = get_llvm_type_by_name(type_hint)
-            if llvm_type is not None:
-                return llvm_type
-        
-        if type_hint in TYPE_MAP:
-            type_name = TYPE_MAP[type_hint]
-            llvm_type = get_llvm_type_by_name(type_name)
-            if llvm_type is not None:
-                return llvm_type
-        
-        if isinstance(type_hint, ptr):
-            pointee_type = self.get_llvm_type(type_hint.pointee_type)
-            return ir.PointerType(pointee_type)
-        
-        return ir.IntType(32)
-    
     def get_pc_type_from_annotation(self, annotation) -> Optional[Any]:
         """Convert type annotation to builtin type class"""
         return self.type_resolver.parse_annotation(annotation)
@@ -512,22 +487,24 @@ class LLVMIRVisitor(ast.NodeVisitor):
         
         return []
     
-    def _get_linear_state(self, var_info, path: Tuple[int, ...] = ()) -> Optional[str]:
-        """Get linear state at a specific path"""
-        return var_info.linear_states.get(path, None)
-    
-    def _set_linear_state(self, var_info, path: Tuple[int, ...], state: str):
-        """Set linear state at a specific path"""
-        logger.debug(f"Set linear state, var_info={var_info.name}, path={path}, state={state}")
-        var_info.linear_states[path] = state
-    
     def _init_linear_states(self, var_info, type_hint, initial_state: str = 'consumed'):
-        """Initialize linear states for all linear paths in a type"""
+        """Initialize linear states for all linear paths in a type
+        
+        Emits LinearRegister events to CFG for path-sensitive analysis.
+        """
         paths = self._get_linear_paths(type_hint)
         for path in paths:
-            self._set_linear_state(var_info, path, initial_state)
+            # Emit LinearRegister event to CFG
+            # Map 'active' -> 'valid', 'consumed' -> 'invalid'
+            cfg_state = 'valid' if initial_state == 'active' else 'invalid'
+            if hasattr(self, '_get_cf_builder'):
+                cf = self._get_cf_builder()
+                if cf is not None:
+                    cf.record_linear_register(
+                        var_info.var_id, var_info.name, path, cfg_state,
+                        line_number=var_info.line_number, node=None
+                    )
         if paths:
-            var_info.linear_scope_depth = self.scope_depth
             logger.debug(f"Initialized linear states for '{var_info.name}': {paths} -> {initial_state}")
     
     def _format_linear_path(self, var_name: str, path: Tuple[int, ...], type_hint) -> str:
@@ -583,7 +560,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
     def _register_linear_token(self, var_name: str, type_hint, node: ast.AST, path: Tuple[int, ...] = ()):
         """Register/update linear token states when value is assigned
         
-        Transitions all linear paths from undefined/consumed -> active
+        Transitions all linear paths from undefined/consumed -> active.
+        Emits LinearTransition events to CFG for path-sensitive analysis.
         
         Args:
             var_name: Variable name
@@ -597,9 +575,15 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 # Get all linear paths in the assigned value
                 linear_paths = self._get_linear_paths(type_hint, path)
                 for lin_path in linear_paths:
-                    # Transition to active
-                    self._set_linear_state(var_info, lin_path, 'active')
-                var_info.linear_scope_depth = self.scope_depth
+                    # Emit LinearTransition event: invalid -> valid (token created)
+                    if hasattr(self, '_get_cf_builder'):
+                        cf = self._get_cf_builder()
+                        if cf is not None:
+                            line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
+                            cf.record_linear_transition(
+                                var_info.var_id, var_name, lin_path, 'invalid', 'valid',
+                                line_number=line_num, node=node
+                            )
                 logger.debug(f"Linear token '{var_name}' paths {linear_paths} transitioned to active")
     
     def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer", node=None):
@@ -609,6 +593,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         - Function calls (arguments)
         - Returns (return value)
         - Move operations
+        
+        Emits LinearTransition events to CFG for path-sensitive analysis.
+        CFG checker validates state transitions; AST visitor just emits events.
         
         Args:
             value_ref: ValueRef carrying linear tracking info (via var_name)
@@ -651,70 +638,16 @@ class LLVMIRVisitor(ast.NodeVisitor):
         linear_paths = self._get_linear_paths(value_ref.type_hint, base_path)
         logger.debug(f"_transfer_linear_ownership: {var_name} has {len(linear_paths)} linear paths: {linear_paths}")
         
-        # Get the variable's type for formatting path with field names
-        var_type_hint = var_info.type_hint
-        
         # Transfer each linear path
         for path in linear_paths:
-            state = self._get_linear_state(var_info, path)
-            logger.debug(f"_transfer_linear_ownership: {var_name}{path} state={state}")
-            
-            # Format path with field names for better error messages
-            path_str = self._format_linear_path(var_name, path, var_type_hint)
-            actual_line = self._get_actual_line_number(var_info.line_number)
-            
-            if state == 'undefined':
-                logger.error(
-                    f"'{path_str}' undefined. reason: {reason} "
-                    f"(declared at line {actual_line})",
-                    node=node
-                )
-            
-            if state == 'consumed':
-                logger.error(
-                    f"'{path_str}' consumed. reason: {reason} "
-                    f"(declared at line {actual_line})",
-                    node=node
-                )
-            
-            if state == 'active':
-                # Note: We no longer block consuming external tokens inside loops.
-                # Instead, we check at loop exit that external tokens are reassigned.
-                # This allows patterns like: prf, val = transform(prf, val)
-                
-                # Mark as consumed (ownership transferred)
-                self._set_linear_state(var_info, path, 'consumed')
-                logger.debug(f"Transferred ownership of '{path_str}' ({reason})")
-
-    
-    def _check_linear_tokens_consumed(self):
-        """Check that all active linear tokens have been consumed before scope exit
-        
-        DISABLED: This check is redundant - CFG linear checker handles this.
-        Keeping method stub to avoid breaking calls.
-        """
-        # DISABLED FOR TESTING: Only CFG checker should validate linear states
-        return
-        
-        # OLD CODE (disabled):
-        # unconsumed = []
-        # logger.debug(f"Checking linear tokens at scope depth {self.scope_depth}")
-        # 
-        # # Check variables in current scope
-        # for var_info in self.ctx.var_registry.get_all_in_current_scope():
-        #     if var_info.linear_scope_depth == self.scope_depth:
-        #         logger.debug(f"Checking variable {var_info}")
-        #         for path, state in var_info.linear_states.items():
-        #             if state == 'active':
-        #                 path_str = self._format_linear_path(var_info.name, path, var_info.type_hint)
-        #                 actual_line = self._get_actual_line_number(var_info.line_number)
-        #                 unconsumed.append(f"'{path_str}' (declared at line {actual_line})")
-        # 
-        # if unconsumed:
-        #     logger.error(
-        #         f"Linear tokens not consumed before scope exit: {', '.join(unconsumed)}"
-        #     )
-
-
-
+            # Emit LinearTransition event: valid -> invalid (token consumed)
+            # CFG checker will validate that current state is 'valid'
+            if hasattr(self, '_get_cf_builder'):
+                cf = self._get_cf_builder()
+                if cf is not None:
+                    line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
+                    cf.record_linear_transition(
+                        var_info.var_id, var_name, path, 'valid', 'invalid',
+                        line_number=line_num, node=node
+                    )
 

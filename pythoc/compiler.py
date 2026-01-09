@@ -549,6 +549,20 @@ class LLVMCompiler:
         from .ast_visitor.control_flow_builder import ControlFlowBuilder
         visitor._cf_builder = ControlFlowBuilder(visitor, ast_node.name)
         
+        # Emit LinearRegister events for linear parameters
+        # This must happen after _cf_builder is created
+        for var_info in visitor.ctx.var_registry.get_all_in_current_scope():
+            if var_info.is_parameter and var_info.type_hint:
+                # Check if parameter type is linear and get all linear paths
+                if visitor._is_linear_type(var_info.type_hint):
+                    paths = visitor._get_linear_paths(var_info.type_hint)
+                    for path in paths:
+                        # Parameters with linear types start as 'valid' (ownership passed in)
+                        visitor._cf_builder.record_linear_register(
+                            var_info.var_id, var_info.name, path, 'valid',
+                            line_number=var_info.line_number, node=ast_node
+                        )
+        
         # Enter function-level scope in ScopeManager
         # This is the root scope for all defers in this function
         from .scope_manager import ScopeType
