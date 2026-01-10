@@ -596,26 +596,3 @@ def emit_module_header(buf: ptr[StringBuffer]) -> void:
     strbuf_push_cstr(buf, "void, char, nullptr, sizeof, struct, union\n")
     strbuf_push_cstr(buf, ")\n\n")
 
-
-# =============================================================================
-# High-level API
-# =============================================================================
-
-# Note: generate_bindings is not provided as a compiled function because
-# inlining parse_declarations from a different module causes linear type
-# tracking issues. Instead, users should compose the functions directly:
-#
-# Usage:
-#     from pythoc.bindings.pythoc_backend import (
-#         StringBuffer, strbuf_init, strbuf_destroy, strbuf_to_cstr,
-#         emit_module_header, emit_decl
-#     )
-#     from pythoc.bindings.c_parser import parse_declarations
-#     from pythoc.bindings.c_ast import decl_free
-#
-#     @compile
-#     def my_generate_bindings(source: ptr[i8], buf: ptr[StringBuffer]) -> void:
-#         emit_module_header(buf)
-#         for decl_prf, decl in parse_declarations(source):
-#             emit_decl(buf, decl)
-#             decl_free(decl_prf, decl)

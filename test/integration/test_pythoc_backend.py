@@ -370,6 +370,170 @@ const char* get_const_string(void);
 
 
 @compile
+def test_c_source_file() -> i32:
+    """Test parsing a full C source file with function definitions
+    
+    This tests:
+    - typedef struct parsing
+    - Function definitions (with bodies that get skipped)
+    - Functions using typedef names as return/parameter types
+    """
+    buf: StringBuffer
+    strbuf_init(ptr(buf))
+    
+    emit_module_header(ptr(buf))
+    
+    # C source code similar to base_binary_tree_test.c
+    source: ptr[i8] = """
+typedef struct tn {
+    struct tn*    left;
+    struct tn*    right;
+} treeNode;
+
+treeNode* NewTreeNode(treeNode* left, treeNode* right)
+{
+    treeNode*    new;
+    new = (treeNode*)malloc(sizeof(treeNode));
+    new->left = left;
+    new->right = right;
+    return new;
+}
+
+long ItemCheck(treeNode* tree)
+{
+    if (tree->left == NULL)
+        return 1;
+    else
+        return 1 + ItemCheck(tree->left) + ItemCheck(tree->right);
+}
+
+treeNode* BottomUpTree(unsigned depth)
+{
+    if (depth > 0)
+        return NewTreeNode(BottomUpTree(depth - 1), BottomUpTree(depth - 1));
+    else
+        return NewTreeNode(NULL, NULL);
+}
+
+void DeleteTree(treeNode* tree)
+{
+    if (tree->left != NULL)
+    {
+        DeleteTree(tree->left);
+        DeleteTree(tree->right);
+    }
+    free(tree);
+}
+
+int main(int argc, char* argv[])
+{
+    return 0;
+}
+"""
+    
+    for decl_prf, decl in parse_declarations(source):
+        emit_decl(ptr(buf), decl, "c")
+        decl_free(decl_prf, decl)
+    
+    result: ptr[i8] = strbuf_to_cstr(ptr(buf))
+    printf("=== C Source File ===\n%s\n", result)
+    
+    # Verify typedef is generated
+    if strstr(result, "treeNode = tn") == ptr[i8](0):
+        printf("FAIL: Expected 'treeNode = tn' typedef\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    
+    # Verify function declarations are generated
+    if strstr(result, "def NewTreeNode") == ptr[i8](0):
+        printf("FAIL: Expected 'def NewTreeNode'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    if strstr(result, "def ItemCheck") == ptr[i8](0):
+        printf("FAIL: Expected 'def ItemCheck'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    if strstr(result, "def BottomUpTree") == ptr[i8](0):
+        printf("FAIL: Expected 'def BottomUpTree'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    if strstr(result, "def DeleteTree") == ptr[i8](0):
+        printf("FAIL: Expected 'def DeleteTree'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    if strstr(result, "def main") == ptr[i8](0):
+        printf("FAIL: Expected 'def main'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    
+    # Verify typedef usage in function signatures
+    # Functions should use treeNode (typedef name) in their signatures
+    if strstr(result, "ptr[treeNode]") == ptr[i8](0):
+        printf("FAIL: Expected 'ptr[treeNode]' in function signatures\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    
+    strbuf_destroy(ptr(buf))
+    printf("PASS: test_c_source_file\n\n")
+    return 0
+
+
+@compile
+def test_typedef_variants() -> i32:
+    """Test various typedef patterns"""
+    buf: StringBuffer
+    strbuf_init(ptr(buf))
+    
+    emit_module_header(ptr(buf))
+    
+    source: ptr[i8] = """
+typedef int myint;
+typedef unsigned long size_t;
+typedef char* string;
+typedef void (*callback)(int);
+typedef struct Point { int x; int y; } Point;
+typedef enum Color { RED, GREEN, BLUE } Color;
+"""
+    
+    for decl_prf, decl in parse_declarations(source):
+        emit_decl(ptr(buf), decl, "c")
+        decl_free(decl_prf, decl)
+    
+    result: ptr[i8] = strbuf_to_cstr(ptr(buf))
+    printf("=== Typedef Variants ===\n%s\n", result)
+    
+    # Verify basic typedefs
+    if strstr(result, "myint = i32") == ptr[i8](0):
+        printf("FAIL: Expected 'myint = i32'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    if strstr(result, "size_t = u64") == ptr[i8](0):
+        printf("FAIL: Expected 'size_t = u64'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    if strstr(result, "string = ptr[char]") == ptr[i8](0):
+        printf("FAIL: Expected 'string = ptr[char]'\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    
+    # Verify struct typedef
+    if strstr(result, "Point = Point") == ptr[i8](0):
+        printf("FAIL: Expected 'Point = Point' typedef\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    
+    # Verify enum typedef
+    if strstr(result, "Color = Color") == ptr[i8](0):
+        printf("FAIL: Expected 'Color = Color' typedef\n")
+        strbuf_destroy(ptr(buf))
+        return 1
+    
+    strbuf_destroy(ptr(buf))
+    printf("PASS: test_typedef_variants\n\n")
+    return 0
+
+
+@compile
 def main() -> i32:
     printf("=== Pythoc Backend Tests ===\n\n")
     
@@ -382,6 +546,8 @@ def main() -> i32:
     failed = failed + test_binary_tree_style()
     failed = failed + test_complex_header()
     failed = failed + test_pointer_types()
+    failed = failed + test_c_source_file()
+    failed = failed + test_typedef_variants()
     
     if failed > 0:
         printf("\n%d test(s) FAILED!\n", failed)

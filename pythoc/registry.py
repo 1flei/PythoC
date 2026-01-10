@@ -112,7 +112,7 @@ class FunctionInfo:
 class ExternFunctionInfo:
     """Information about an external function"""
     name: str
-    lib: str = "libc"
+    lib: str = "c"
     calling_convention: str = "cdecl"
     return_type: Optional[Any] = None
     param_types: List[Any] = field(default_factory=list)
@@ -475,6 +475,10 @@ class UnifiedCompilationRegistry:
         # ===== Link Libraries Registry =====
         # Libraries to link against (collected from extern functions)
         self._link_libraries: Set[str] = set()
+        
+        # ===== Link Objects Registry =====
+        # Object files to link (from cimport compiled sources)
+        self._link_objects: Set[str] = set()
     
     # ========== Variable Registry Methods ==========
     
@@ -867,6 +871,28 @@ class UnifiedCompilationRegistry:
         
         return sorted(libs)
     
+    # ========== Link Objects Methods ==========
+    
+    def add_link_object(self, path: str):
+        """Add an object file to link against
+        
+        Args:
+            path: Path to .o object file
+        """
+        self._link_objects.add(path)
+    
+    def get_link_objects(self) -> List[str]:
+        """Get all object files to link
+        
+        Returns:
+            Sorted list of object file paths
+        """
+        return sorted(self._link_objects)
+    
+    def clear_link_objects(self):
+        """Clear all registered link objects"""
+        self._link_objects.clear()
+    
     # ========== Utility Methods ==========
     
     def clear_all(self):
@@ -886,6 +912,7 @@ class UnifiedCompilationRegistry:
         self._structs.clear()
         self._builtin_entities.clear()
         self._link_libraries.clear()
+        self._link_objects.clear()
     
     def clear_functions(self):
         """Clear only function-related registries"""
@@ -960,7 +987,7 @@ def get_unified_registry() -> UnifiedCompilationRegistry:
 
 def register_extern_function(name: str, return_type: Any = None, 
                             param_types: List[Any] = None, 
-                            lib: str = "libc", 
+                            lib: str = "c", 
                             calling_convention: str = "cdecl",
                             **kwargs) -> None:
     """Register an external function (backward compatibility)

@@ -36,6 +36,7 @@ from .utils import (
     create_build_info
 )
 from .utils.build_utils import compile_to_executable
+from .cimport import cimport, cimport_header, cimport_source
 
 # Import libc module for convenient access
 from . import libc
@@ -104,6 +105,11 @@ __all__ = [
     'goto_end',
 
     'compile_to_executable',
+    
+    # C Import
+    'cimport',
+    'cimport_header',
+    'cimport_source',
     
     # Metadata
     '__version__',

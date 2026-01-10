@@ -257,13 +257,19 @@ def build_link_command(obj_files: List[str], output_file: str,
     Returns:
         Link command as list of arguments
     """
+    from ..registry import get_unified_registry
+    
     # Split linker command (handles 'python-zig cc' etc.)
     linker_cmd = linker.split()
     
     platform_flags = get_platform_link_flags(shared, linker=linker)
     lib_flags = get_link_flags()
     
-    return linker_cmd + platform_flags + obj_files + ['-o', output_file] + lib_flags
+    # Include link objects from registry (from cimport compiled sources)
+    link_objects = get_unified_registry().get_link_objects()
+    all_obj_files = list(obj_files) + link_objects
+    
+    return linker_cmd + platform_flags + all_obj_files + ['-o', output_file] + lib_flags
 
 
 def try_link_with_linkers(obj_files: List[str], output_file: str, 

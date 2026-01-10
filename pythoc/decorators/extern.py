@@ -173,7 +173,7 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
             name=f.__name__,
             return_type=return_type,
             param_types=param_types,
-            lib=lib or 'libc',
+            lib=lib or 'c',
             calling_convention=calling_convention,
             signature=sig,
             function=f,
@@ -181,7 +181,7 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
         )
         wrapper = ExternFunctionWrapper(
             func=f,
-            lib=lib or 'libc',
+            lib=lib or 'c',
             calling_convention=calling_convention,
             return_type=return_type,
             param_types=param_types,
@@ -189,7 +189,7 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
         )
         wrapper._is_extern = True
         wrapper._extern_config = {
-            'lib': lib or 'libc',
+            'lib': lib or 'c',
             'calling_convention': calling_convention,
             'signature': sig,
             'function': f,
