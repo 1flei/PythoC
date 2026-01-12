@@ -43,13 +43,17 @@ def get_build_paths(source_file, suffix=None, scope=None):
     Returns:
         tuple: (build_dir, ir_file, obj_file, so_file)
     """
+    import os
     cwd = os.getcwd()
     
     # Calculate relative path for build directory
-    if source_file.startswith(cwd):
+    if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
         rel_path = os.path.relpath(source_file, cwd)
     else:
-        rel_path = source_file
+        # For files outside cwd, use a safe relative path based on filename
+        # This prevents absolute paths in build_dir
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
+        rel_path = f"external/{base_name}"
     
     build_dir = os.path.join('build', os.path.dirname(rel_path))
     base_name = os.path.splitext(os.path.basename(source_file))[0]

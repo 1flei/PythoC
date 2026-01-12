@@ -56,10 +56,12 @@ def determine_output_path(source_file: str, output_path: Optional[str] = None) -
         return output_path
     
     cwd = os.getcwd()
-    if source_file.startswith(cwd):
+    if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
         rel_path = os.path.relpath(source_file, cwd)
     else:
-        rel_path = source_file
+        # For files outside cwd, use a safe relative path
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
+        rel_path = f"external/{base_name}"
     
     base_name = os.path.splitext(os.path.basename(source_file))[0]
     output_dir = os.path.join('build', os.path.dirname(rel_path))
@@ -82,10 +84,12 @@ def get_object_file_path(source_file: str) -> str:
         Path to the object file in build directory
     """
     cwd = os.getcwd()
-    if source_file.startswith(cwd):
+    if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
         rel_path = os.path.relpath(source_file, cwd)
     else:
-        rel_path = source_file
+        # For files outside cwd, use a safe relative path
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
+        rel_path = f"external/{base_name}"
     
     base_name = os.path.splitext(os.path.basename(source_file))[0]
     return os.path.join('build', os.path.dirname(rel_path), base_name + '.o')

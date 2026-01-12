@@ -360,10 +360,12 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
             
             # Build file paths with scope and suffix
             cwd = os.getcwd()
-            if definition_file.startswith(cwd):
+            if definition_file.startswith(cwd + os.sep) or definition_file.startswith(cwd + '/'):
                 rel_path = os.path.relpath(definition_file, cwd)
             else:
-                rel_path = definition_file
+                # For files outside cwd, use a safe relative path
+                base_name = os.path.splitext(os.path.basename(definition_file))[0]
+                rel_path = f"external/{base_name}"
             build_dir = os.path.join('build', os.path.dirname(rel_path))
             base_name = os.path.splitext(os.path.basename(definition_file))[0]
             file_base = f"{base_name}.{scope_name}.{safe_suffix}"
