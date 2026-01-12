@@ -474,10 +474,12 @@ class MultiSOExecutor:
         # Check if any loaded library corresponds to this source file
         # Build the expected shared library path from source file
         cwd = os.getcwd()
-        if source_file.startswith(cwd):
+        if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
             rel_path = os.path.relpath(source_file, cwd)
         else:
-            rel_path = source_file
+            # For files outside cwd, use a safe relative path
+            base_name = os.path.splitext(os.path.basename(source_file))[0]
+            rel_path = f"external/{base_name}"
         lib_ext = get_shared_lib_extension()
         so_file = os.path.join('build', os.path.dirname(rel_path), 
                               os.path.splitext(os.path.basename(source_file))[0] + lib_ext)
@@ -644,7 +646,12 @@ class MultiSOExecutor:
                 else:
                     # Fallback to old behavior for functions without so_file
                     cwd = os.getcwd()
-                    rel_path = os.path.relpath(dep_source_file, cwd) if dep_source_file.startswith(cwd) else dep_source_file
+                    if dep_source_file.startswith(cwd + os.sep) or dep_source_file.startswith(cwd + '/'):
+                        rel_path = os.path.relpath(dep_source_file, cwd)
+                    else:
+                        # For files outside cwd, use a safe relative path
+                        base_name = os.path.splitext(os.path.basename(dep_source_file))[0]
+                        rel_path = f"external/{base_name}"
                     lib_ext = get_shared_lib_extension()
                     dep_so_file = os.path.join('build', os.path.dirname(rel_path), os.path.splitext(os.path.basename(dep_source_file))[0] + lib_ext)
                 
