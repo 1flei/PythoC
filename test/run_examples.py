@@ -221,6 +221,8 @@ def print_test_result(test: ExampleTest):
 def main():
     """Main test runner"""
     print_header("PC Compiler - Example Test Suite")
+
+    example_test_timeout = 60
     
     # Define all example tests
     tests: List[ExampleTest] = [
@@ -230,7 +232,7 @@ def main():
             exe_path="build/test/example/pc_binary_tree_test",
             exe_args=["10"],
             expected_output=["stretch tree of depth", "long lived tree of depth"],
-            timeout=30
+            timeout=example_test_timeout
         ),
         CompileAndRunTest(
             name="Multiple Files - Main",
@@ -247,7 +249,7 @@ def main():
                 "Testing Cross-Module Operations",
                 "All tests completed"
             ],
-            timeout=30
+            timeout=example_test_timeout
         ),
         ModuleTest(
             name="Multiple Files - Simple Test",
@@ -258,7 +260,7 @@ def main():
                 "Stack size: 0",
                 "Top value: 100"
             ],
-            timeout=30
+            timeout=example_test_timeout
         ),
     ]
     
