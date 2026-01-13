@@ -472,7 +472,16 @@ def sum_fibonacci(n: i32) -> i32:
 
 **Common kernel**: All three features use the same AST transformation and inlining kernel, maintaining C-level performance with high-level abstractions.
 
+### Features in Development
+
+These are actively being designed/implemented and may change:
+
+- **Effect system**: More like a compile-time injection system. Make side effects and global state explicit and manageable. Can also be used to address the symbol conflict issue.
+- **`cimport`**: Import C headers and auto-generate bindings (types, constants, function signatures).
+- **`defer`**: Scope-exit cleanup (e.g., `defer(free, p)`), lowered to explicit control flow.
+
 ## More Examples
+An under development pure pythoc C header parser in `pythoc/bindings` to implement the `cimport` feature.
 More examples can be found in the `test/` directory.
 - Full examples: `test/example/`
 - PythoC Integration tests: `test/integration/`
