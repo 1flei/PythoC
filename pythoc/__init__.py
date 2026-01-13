@@ -43,7 +43,7 @@ from . import libc
 import builtins as _py
 
 # Version information
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 __author__ = "PythoC Compiler Team"
 
 # Export public API
