@@ -66,26 +66,25 @@ def record_effect_usage(effect_name: str):
         _effect_usage_tracker.stack[-1].add(effect_name)
 
 
-def push_compilation_context(suffix: Optional[str], effect_overrides: Dict[str, Any], 
-                            caller_module: Optional[str] = None, group_key: Optional[tuple] = None):
+def push_compilation_context(compile_suffix: Optional[str], effect_suffix: Optional[str],
+                            effect_overrides: Dict[str, Any], group_key: Optional[tuple] = None):
     """Push a compilation context onto the stack.
 
     Called when starting to compile a function that has effect overrides.
-    This allows handle_call to know what suffix and effects to propagate.
+    This allows handle_call to know what suffixes and effects to propagate.
 
     Args:
-        suffix: The suffix for the current compilation (e.g., "mock")
+        compile_suffix: The compile_suffix for the current compilation (NOT contagious)
+        effect_suffix: The effect_suffix for the current compilation (contagious)
         effect_overrides: Dict of effect name -> implementation
-        caller_module: Optional caller module name (for import override)
-        group_key: Optional group key tuple - transitive functions should use this
-                   to be compiled into the same .so file as the caller
+        group_key: 4-tuple group key for dependency tracking
     """
     if not hasattr(_compilation_context, 'stack'):
         _compilation_context.stack = []
     _compilation_context.stack.append({
-        'suffix': suffix,
+        'compile_suffix': compile_suffix,
+        'effect_suffix': effect_suffix,
         'effect_overrides': effect_overrides,
-        'caller_module': caller_module,
         'group_key': group_key,
     })
 
@@ -103,34 +102,35 @@ def get_current_compilation_context() -> Optional[Dict[str, Any]]:
     return None
 
 
-def _create_effect_wrapped_function(original_func, suffix: str, caller_module: str):
+def _create_effect_wrapped_function(original_func, suffix: str):
     """
     Create a new @compile function with the current effect context.
 
     This re-invokes the compile decorator with the current effect bindings
-    captured, producing a new compiled version with the specified suffix.
+    captured, producing a new compiled version with the specified effect_suffix.
 
-    The new version is compiled into a separate .so file to avoid symbol conflicts.
-    The caller_module is used to group the compiled function with the caller's code.
+    The new version uses 4-tuple group_key: (source_file, scope, None, effect_suffix)
+    where source_file is the original function's definition file (NOT caller's file).
+    
+    Design principle: Same effect_suffix = same implementation = reused across callers.
+    If bindings differ but suffix is same, that is a user error.
     """
     # Get the original Python function from __wrapped__
     original_python_func = getattr(original_func, '__wrapped__', None)
     if original_python_func is None:
         return None
 
-    # Re-apply @compile decorator with the new suffix
+    # Re-apply @compile decorator with the new effect_suffix
     # The effect context is already set, so capture_effect_context() will
     # capture the current (overridden) effects
     from .decorators.compile import compile as compile_decorator
 
     try:
-        # Create new compiled version with suffix
-        # Pass _effect_caller_module to indicate this is an effect override import
-        # This ensures proper grouping and avoids symbol conflicts
+        # Create new compiled version with effect_suffix
+        # No _effect_caller_module - group by (source_file, scope, None, effect_suffix)
         new_wrapper = compile_decorator(
             original_python_func, 
-            suffix=suffix,
-            _effect_caller_module=caller_module
+            _effect_suffix=suffix
         )
         return new_wrapper
     except Exception:
@@ -146,11 +146,18 @@ class EffectImportHook:
 
     Uses builtins.__import__ to intercept all imports, including
     `from module import name` for already-cached modules.
+    
+    Design principle (from dependency_cache.md):
+    - Same effect_suffix = same implementation = reused across ALL callers
+    - Cache key is (module, attr, suffix), NOT including caller_module
+    - If bindings differ but suffix is same -> user error
     """
 
     def __init__(self, effect_context: 'EffectContext'):
         self._effect_context = effect_context
-        self._wrapped_attrs: Dict[Tuple[str, str, str], Any] = {}  # (module, attr, suffix) -> wrapped func
+        # Cache key: (module, attr, suffix) -> wrapped func
+        # NO caller_module in the key - same suffix reused across callers
+        self._wrapped_attrs: Dict[Tuple[str, str, str], Any] = {}
 
     def __call__(self, name, globals=None, locals=None, fromlist=(), level=0):
         """Custom __import__ that wraps @compile functions with effect context."""
@@ -160,9 +167,6 @@ class EffectImportHook:
         suffix = self._effect_context._suffix
         if suffix is None or not fromlist:
             return module
-
-        # Get caller module name from globals
-        caller_module = globals.get('__name__', '__main__') if globals else '__main__'
 
         # For `from module import name1, name2, ...`
         # We need to wrap @compile functions in the returned module
@@ -188,14 +192,14 @@ class EffectImportHook:
             if existing_mangled and f'_{suffix}' in existing_mangled:
                 continue
 
-            # Check cache first - key includes caller module to allow different callers
-            cache_key = (name, attr_name, suffix, caller_module)
+            # Cache key: (module, attr, suffix) - NO caller_module
+            # Same suffix means same implementation - reuse across callers
+            cache_key = (name, attr_name, suffix)
             if cache_key in self._wrapped_attrs:
                 wrapped = self._wrapped_attrs[cache_key]
             else:
                 # Create a new version with the current effect context
-                # Pass caller_module so the compiled function is grouped with caller's code
-                wrapped = _create_effect_wrapped_function(attr, suffix, caller_module)
+                wrapped = _create_effect_wrapped_function(attr, suffix)
                 if wrapped is not None:
                     self._wrapped_attrs[cache_key] = wrapped
 

@@ -1,10 +1,23 @@
 # -*- coding: utf-8 -*-
+"""
+@compile decorator: Compile Python functions to native code.
+
+Key design decisions (from dependency_cache.md):
+- Group Key: 4-tuple (source_file, scope, compile_suffix, effect_suffix)
+- compile_suffix: from @compile(suffix=T), NOT contagious
+- effect_suffix: from with effect(suffix=X), IS contagious to transitive calls
+- Mangled names: name_{compile_suffix}_{effect_suffix}
+- Same effect_suffix = same implementation = reused across all callers
+"""
 from functools import wraps
 import inspect
 import os
 import ast
 import sys
-from typing import Any, List
+from typing import Any, List, Optional
+
+# Sentinel value to distinguish "not provided" from "provided as None"
+_SCOPE_NOT_PROVIDED = object()
 
 from ..compiler import LLVMCompiler
 from ..registry import register_struct_from_class, _unified_registry
@@ -38,9 +51,16 @@ def _get_registry():
     return _unified_registry
 
 
-def get_compiler(source_file, user_globals, suffix=None):
+def get_compiler(source_file, user_globals, has_suffix=False):
+    """Get or create compiler instance for source file.
+    
+    Args:
+        source_file: Source file path
+        user_globals: User globals for compilation
+        has_suffix: If True, always create new compiler (suffix group)
+    """
     registry = _get_registry()
-    if suffix:
+    if has_suffix:
         # Suffix group: new compiler instance
         compiler = LLVMCompiler(user_globals=user_globals)
     else:
@@ -55,58 +75,85 @@ def get_compiler(source_file, user_globals, suffix=None):
     return compiler
 
 
-
-def compile(func_or_class=None, anonymous=False, suffix=None, _effect_caller_module=None, _effect_group_key=None):
+def compile(func_or_class=None, anonymous=False, suffix=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
     """
     Compile a Python function or class to native code.
     
     Args:
         func_or_class: Function or class to compile
         anonymous: If True, generate unique suffix for this function
-        suffix: Explicit suffix for function naming
-        _effect_caller_module: Internal parameter for effect override imports.
-            When set, the compiled function is grouped with the caller's module
-            instead of the original source file. This avoids symbol conflicts
-            when the same function is compiled with different effect contexts.
-        _effect_group_key: Internal parameter for transitive effect propagation.
-            When set, the compiled function is added to this specific group
-            (same .so file as the caller). Takes precedence over _effect_caller_module.
+        suffix: Explicit compile_suffix for function naming (from @compile(suffix=T))
+                This is NOT contagious - each function chooses its own compile_suffix.
+        _effect_suffix: Internal parameter for effect override (from with effect(suffix=X)).
+                This IS contagious - propagates to transitive calls that use effects.
+        _effect_scope: Internal parameter for transitive effect compilation.
+                When generating effect-specialized versions from within pythoc internals,
+                this preserves the original function's scope. Use _SCOPE_NOT_PROVIDED
+                sentinel to distinguish "not provided" from "provided as None" (module-level).
+                
+    Group Key Design (4-tuple):
+        (source_file, scope, compile_suffix, effect_suffix)
+        
+        - source_file: Always the file where the function is defined (NOT caller's file)
+        - scope: The enclosing factory function name with .<locals> suffix
+        - compile_suffix: From @compile(suffix=T), for generic instantiation
+        - effect_suffix: From with effect(suffix=X), for effect override versions
+        
+    Symbol Naming:
+        - name_{compile_suffix}_{effect_suffix} (compile_suffix first, then effect_suffix)
+        - e.g., add_i32_mock for @compile(suffix=i32) with effect(suffix="mock")
     """
     # Capture all visible symbols (globals + locals) at decoration time
-    # This is critical for resolving type annotation names that may not be
-    # in the function's __globals__ or closures
     from .visible import capture_caller_symbols
     captured_symbols = capture_caller_symbols(depth=1)
     
-    # Normalize suffix early
-    suffix = normalize_suffix(suffix)
+    # Normalize compile_suffix early
+    compile_suffix = normalize_suffix(suffix)
     
-    # If no explicit suffix, check effect context for suffix
-    if suffix is None:
+    # Get effect_suffix from context if not explicitly provided
+    if _effect_suffix is None:
         from ..effect import get_current_effect_suffix
         effect_suffix = get_current_effect_suffix()
-        if effect_suffix is not None:
-            suffix = effect_suffix
+    else:
+        effect_suffix = _effect_suffix
     
     if func_or_class is None:
         def decorator(f):
-            return _compile_impl(f, anonymous=anonymous, suffix=suffix, 
+            return _compile_impl(f, anonymous=anonymous, 
+                                compile_suffix=compile_suffix,
+                                effect_suffix=effect_suffix,
                                 captured_symbols=captured_symbols,
-                                _effect_caller_module=_effect_caller_module,
-                                _effect_group_key=_effect_group_key)
+                                effect_scope=_effect_scope)
         return decorator
 
-    return _compile_impl(func_or_class, anonymous=anonymous, suffix=suffix,
+    return _compile_impl(func_or_class, anonymous=anonymous, 
+                        compile_suffix=compile_suffix,
+                        effect_suffix=effect_suffix,
                         captured_symbols=captured_symbols,
-                        _effect_caller_module=_effect_caller_module,
-                        _effect_group_key=_effect_group_key)
+                        effect_scope=_effect_scope)
 
 
-def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=None,
-                  _effect_caller_module=None, _effect_group_key=None):
-    """Internal implementation of compile decorator."""
+def _compile_impl(func_or_class, anonymous=False, 
+                  compile_suffix: Optional[str] = None, 
+                  effect_suffix: Optional[str] = None,
+                  captured_symbols=None,
+                  effect_scope=_SCOPE_NOT_PROVIDED):
+    """Internal implementation of compile decorator.
+    
+    Uses 4-tuple group_key: (source_file, scope, compile_suffix, effect_suffix)
+    
+    Args:
+        func_or_class: Function or class to compile
+        anonymous: If True, generate unique suffix
+        compile_suffix: From @compile(suffix=T), NOT contagious
+        effect_suffix: From effect context, IS contagious to transitive calls
+        captured_symbols: Symbols captured at decoration time
+        effect_scope: Override scope for transitive effect compilation.
+                     _SCOPE_NOT_PROVIDED means use get_definition_scope().
+                     None means module-level scope.
+    """
     if inspect.isclass(func_or_class):
-        return _compile_dynamic_class(func_or_class, anonymous=anonymous, suffix=suffix)
+        return _compile_dynamic_class(func_or_class, anonymous=anonymous, suffix=compile_suffix)
 
     func = func_or_class
 
@@ -124,12 +171,9 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
     
     # Get function start line for accurate error messages
     start_line = get_function_start_line(func)
-    # Set logger context: line_offset = start_line - 1 because AST lineno starts from 1
     set_source_context(source_file, start_line - 1)
 
     registry = _get_registry()
-    # Use get_all_accessible_symbols to extract ALL accessible symbols
-    # This includes: closure variables and captured symbols from decorator call time
     from .visible import get_all_accessible_symbols
     user_globals = get_all_accessible_symbols(
         func, 
@@ -138,10 +182,11 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
         captured_symbols=captured_symbols
     )
 
-    compiler = get_compiler(source_file=source_file, user_globals=user_globals, suffix=suffix)
+    # Determine if we have any suffix (for compiler instance decision)
+    has_suffix = compile_suffix is not None or effect_suffix is not None
+    compiler = get_compiler(source_file=source_file, user_globals=user_globals, has_suffix=has_suffix)
 
     func_source = source_code
-
     registry.register_function_source(source_file, func.__name__, func_source)
 
     try:
@@ -156,11 +201,9 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
     yield_analyzer = analyze_yield_function(func_ast)
     
     if yield_analyzer:
-        # Save original AST before transformation (for inlining)
         import copy
         original_func_ast = copy.deepcopy(func_ast)
         
-        # Get accessible symbols for yield transform
         from .visible import get_all_accessible_symbols
         transform_globals = get_all_accessible_symbols(
             func, 
@@ -169,17 +212,13 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
             captured_symbols=captured_symbols
         )
         
-        # Transform yield function into inline continuation placeholder
-        # Yield functions MUST be inlined at call sites - no vtable generation
         from ..ast_visitor.yield_transform import create_yield_iterator_wrapper
         wrapper = create_yield_iterator_wrapper(
             func, func_ast, yield_analyzer, transform_globals, source_file, registry
         )
-        # Save original AST for inlining optimization
         wrapper._original_ast = original_func_ast
         return wrapper
 
-    # Track the actual function name (may be specialized for meta-programming or mangled)
     actual_func_name = func.__name__
 
     compiled_funcs = registry.list_compiled_functions(source_file).get(source_file, [])
@@ -198,27 +237,19 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
         from ..builtin_entities import BuiltinEntity
         from .annotation_resolver import build_annotation_namespace, resolve_annotations_dict
         
-        # Build namespace for resolving string annotations
-        eval_namespace = build_annotation_namespace(
-            user_globals, 
-            is_dynamic=is_dynamic
-        )
-        
-        # Resolve all annotations
+        eval_namespace = build_annotation_namespace(user_globals, is_dynamic=is_dynamic)
         resolved_annotations = resolve_annotations_dict(
             func.__annotations__, 
             eval_namespace, 
             type_resolver
         )
         
-        # Extract return type and parameter types
         for param_name, resolved_type in resolved_annotations.items():
             if param_name == 'return':
                 if isinstance(resolved_type, type) and issubclass(resolved_type, BuiltinEntity):
                     if resolved_type.can_be_type():
                         return_type_hint = resolved_type
                 elif isinstance(resolved_type, str):
-                    # Still a string - will be handled later (forward reference)
                     pass
                 else:
                     return_type_hint = resolved_type
@@ -227,7 +258,6 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                     if resolved_type.can_be_type():
                         param_type_hints[param_name] = resolved_type
                 elif not isinstance(resolved_type, str):
-                    # Accept non-BuiltinEntity types (e.g., struct classes)
                     param_type_hints[param_name] = resolved_type
         if return_type_hint is None:
             from ..builtin_entities.types import void
@@ -244,37 +274,31 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                 if param_type:
                     param_type_hints[arg.arg] = param_type
 
+    # Build mangled name: name_{compile_suffix}_{effect_suffix}
+    # compile_suffix comes first, then effect_suffix
     mangled_name = None
-    # Apply suffix or anonymous naming
-    # suffix: deterministic naming for deduplication (replaces anonymous in the future)
-    # anonymous: auto-generated unique naming (legacy, will be deprecated)
-    if suffix:
-        # suffix takes priority - use it for deterministic deduplication
-        name_suffix = f'_{suffix}'
-        if mangled_name:
-            mangled_name = mangled_name + name_suffix
-        else:
-            mangled_name = func.__name__ + name_suffix
+    suffix_parts = []
+    if compile_suffix:
+        suffix_parts.append(compile_suffix)
+    if effect_suffix:
+        suffix_parts.append(effect_suffix)
+    
+    if suffix_parts:
+        combined_suffix = '_'.join(suffix_parts)
+        mangled_name = func.__name__ + '_' + combined_suffix
     elif anonymous:
-        # Auto-generate unique suffix (legacy behavior)
         anonymous_suffix = get_anonymous_suffix()
-        if mangled_name:
-            mangled_name = mangled_name + anonymous_suffix
-        else:
-            mangled_name = func.__name__ + anonymous_suffix
+        mangled_name = func.__name__ + anonymous_suffix
 
     param_names = [arg.arg for arg in func_ast.args.args]
     
-    # Detect varargs expansion to include expanded params in FunctionInfo
+    # Detect varargs expansion
     from ..ast_visitor.varargs import detect_varargs
     varargs_kind, element_types, varargs_name = detect_varargs(func_ast, type_resolver)
     if varargs_kind == 'struct':
-        # For struct varargs, we need to expand the parameter names and types
-        # First, remove the varargs parameter itself from param_type_hints (if it was added from __annotations__)
         if varargs_name in param_type_hints:
             del param_type_hints[varargs_name]
         
-        # Parse element types if not already parsed
         element_pc_types = []
         if element_types:
             for elem_type in element_types:
@@ -284,7 +308,6 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                     elem_pc_type = type_resolver.parse_annotation(elem_type)
                     element_pc_types.append(elem_pc_type)
         else:
-            # Empty element_types means the varargs annotation is a @compile decorated struct class
             if func_ast.args.vararg and func_ast.args.vararg.annotation:
                 annotation = func_ast.args.vararg.annotation
                 parsed_type = type_resolver.parse_annotation(annotation)
@@ -294,7 +317,6 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                 elif hasattr(parsed_type, '_field_types'):
                     element_pc_types = parsed_type._field_types
         
-        # Add expanded parameter names and types
         for i in range(len(element_pc_types)):
             expanded_param_name = f'{varargs_name}_elem{i}'
             param_names.append(expanded_param_name)
@@ -306,86 +328,66 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
         import copy
         func_ast = copy.deepcopy(func_ast)
         func_ast.name = mangled_name
-        # Update actual_func_name to use the mangled name
         actual_func_name = mangled_name
 
-    # Varargs detection: all varargs types are now handled during IR generation
-    # No AST transformation needed - keeps original AST for debugging
-
-    # Set source file for better error messages
     from ..logger import set_source_file
     set_source_file(source_file)
     
     # Determine grouping key and output paths
+    # Design: group_key = (source_file, scope, compile_suffix, effect_suffix)
     output_manager = get_output_manager()
     
-    # Transitive effect propagation: use the caller's group key if provided
-    # This ensures transitive suffix versions are compiled into the same .so file
-    if _effect_group_key is not None:
-        group_key = _effect_group_key
-        logger.debug(f"Using _effect_group_key: {_effect_group_key}")
-        # Get existing group info to reuse paths
-        existing_group = output_manager.get_group(_effect_group_key)
-        if existing_group:
-            ir_file = existing_group.get('ir_file')
-            obj_file = existing_group.get('obj_file')
-            so_file = existing_group.get('so_file')
-            skip_codegen = existing_group.get('skip_codegen', False)
+    # Get scope name (e.g., "GenericType.<locals>" or None for module-level)
+    # If effect_scope is provided (not the sentinel), use it directly
+    # to avoid detecting pythoc internals as the scope during transitive compilation
+    if effect_scope is not _SCOPE_NOT_PROVIDED:
+        # effect_scope was explicitly provided (possibly as None for module-level)
+        scope_name = effect_scope
+    elif compile_suffix or effect_suffix:
+        scope_name = get_definition_scope()
+        if scope_name == 'module':
+            scope_name = None
+    else:
+        scope_name = None
+    
+    # Sanitize suffixes for filename
+    safe_compile_suffix = sanitize_filename(compile_suffix) if compile_suffix else None
+    safe_effect_suffix = sanitize_filename(effect_suffix) if effect_suffix else None
+    
+    # Build 4-tuple group key
+    group_key = (source_file, scope_name, safe_compile_suffix, safe_effect_suffix)
+    
+    # Build output file paths
+    if compile_suffix or effect_suffix:
+        cwd = os.getcwd()
+        if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
+            rel_path = os.path.relpath(source_file, cwd)
         else:
-            # Fallback: shouldn't happen, but handle gracefully
-            build_dir, ir_file, obj_file, so_file = get_build_paths(source_file)
-            skip_codegen = BuildCache.check_timestamp_skip(ir_file, obj_file, source_file)
-    elif suffix:
-        safe_suffix = sanitize_filename(suffix)
+            base_name = os.path.splitext(os.path.basename(source_file))[0]
+            rel_path = f"external/{base_name}"
+        build_dir = os.path.join('build', os.path.dirname(rel_path))
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
         
-        # Effect override imports: group by caller module to avoid symbol conflicts
-        if _effect_caller_module is not None:
-            # Use effect_override as scope to distinguish from regular suffix functions
-            scope_name = 'effect_override'
-            # Use caller module for grouping - all effect overrides from same caller
-            # with same suffix go to the same .so file
-            group_key = (_effect_caller_module, scope_name, safe_suffix)
-            
-            # Build file paths based on caller module
-            # Convert module name to path (e.g., 'test.integration.test_foo' -> 'test/integration/test_foo')
-            caller_path = _effect_caller_module.replace('.', os.sep)
-            build_dir = os.path.join('build', os.path.dirname(caller_path))
-            base_name = os.path.basename(caller_path)
-            file_base = f"{base_name}.{scope_name}.{safe_suffix}"
-        else:
-            # Regular suffix functions: group by (definition_file, scope, suffix)
-            definition_file = source_file
-            scope_name = get_definition_scope()
-            group_key = (definition_file, scope_name, safe_suffix)
-            
-            # Build file paths with scope and suffix
-            cwd = os.getcwd()
-            if definition_file.startswith(cwd + os.sep) or definition_file.startswith(cwd + '/'):
-                rel_path = os.path.relpath(definition_file, cwd)
-            else:
-                # For files outside cwd, use a safe relative path
-                base_name = os.path.splitext(os.path.basename(definition_file))[0]
-                rel_path = f"external/{base_name}"
-            build_dir = os.path.join('build', os.path.dirname(rel_path))
-            base_name = os.path.splitext(os.path.basename(definition_file))[0]
-            file_base = f"{base_name}.{scope_name}.{safe_suffix}"
+        # Build filename: base.scope.compile_suffix.effect_suffix.{ll,o,so}
+        file_parts = [base_name]
+        if scope_name:
+            file_parts.append(scope_name)
+        if safe_compile_suffix:
+            file_parts.append(safe_compile_suffix)
+        if safe_effect_suffix:
+            file_parts.append(safe_effect_suffix)
+        file_base = '.'.join(file_parts)
         
-        # Define output file paths
         os.makedirs(build_dir, exist_ok=True)
         ir_file = os.path.join(build_dir, f"{file_base}.ll")
         obj_file = os.path.join(build_dir, f"{file_base}.o")
         so_file = os.path.join(build_dir, f"{file_base}.so")
     else:
-        # No suffix: group by (source_file, None, None)
-        group_key = (source_file, None, None)
-        
-        # Build file paths without suffix
+        # No suffix: use standard paths
         build_dir, ir_file, obj_file, so_file = get_build_paths(source_file)
     
-    # Check timestamp before creating group
     skip_codegen = BuildCache.check_timestamp_skip(ir_file, obj_file, source_file)
     
-    # Register function info (now that we have so_file)
     func_info = FunctionInfo(
         name=func.__name__,
         source_file=source_file,
@@ -401,7 +403,6 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
     
     group_compiler = compiler
     
-    # Get or create group
     group = output_manager.get_or_create_group(
         group_key, group_compiler, ir_file, obj_file, so_file, 
         source_file, skip_codegen
@@ -409,21 +410,15 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
     compiler = group['compiler']
     skip_codegen = group['skip_codegen']
     
-    # Capture effect context at decoration time
-    # This ensures JIT compilation uses the effect bindings that were active
-    # when @compile was applied, not when the function is first called
     from ..effect import capture_effect_context, restore_effect_context
     from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
     _captured_effect_context = capture_effect_context()
-    _current_suffix = suffix  # Capture the suffix for this function
-    _caller_module = _effect_caller_module  # Capture caller module for grouping
-    _group_key = group_key  # Capture group key for transitive propagation
+    _compile_suffix = compile_suffix
+    _effect_suffix = effect_suffix
+    _group_key = group_key
     
-    # Queue compilation callback instead of compiling immediately
-    # This enables two-pass compilation for mutual recursion support
     if not skip_codegen:
-        # Capture variables for the callback closure
         _func_ast = func_ast
         _func_source = func_source
         _param_type_hints = param_type_hints
@@ -434,57 +429,47 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
         _registry = registry
         _start_line = start_line
         _func_info = func_info
-        _mangled_name = mangled_name  # Capture mangled name for deps tracking
+        _mangled_name = mangled_name
         
         def compile_callback(comp):
             """Deferred compilation callback"""
-            # Start tracking effect usage for this function
             start_effect_tracking()
             
-            # Push compilation context so handle_call knows the current suffix
-            # and effect overrides for transitive propagation
-            if _current_suffix:
-                push_compilation_context(_current_suffix, _captured_effect_context, _caller_module, _group_key)
+            if _effect_suffix:
+                push_compilation_context(_compile_suffix, _effect_suffix, _captured_effect_context, _group_key)
             
             try:
-                # Restore effect context that was captured at decoration time
-                # This ensures effect.xxx resolves to the correct implementation
                 with restore_effect_context(_captured_effect_context):
-                    # Set source context for accurate error messages during compilation
                     set_source_context(_source_file, _start_line - 1)
-                    # Compile the function into group's compiler
                     comp.compile_function_from_ast(
                         _func_ast,
                         _func_source,
-                        reset_module=False,  # Never reset since forward declarations exist
+                        reset_module=False,
                         param_type_hints=_param_type_hints,
                         return_type_hint=_return_type_hint,
                         user_globals=_user_globals,
                     )
             finally:
-                # Pop compilation context
-                if _current_suffix:
+                if _effect_suffix:
                     pop_compilation_context()
             
-            # Stop tracking and record effect dependencies
             effect_deps = stop_effect_tracking()
             if effect_deps:
                 _func_info.effect_dependencies = effect_deps
                 logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
             
-            # After compilation, scan for declared functions and record dependencies
-            # This populates imported_user_functions for dependency tracking
             if not hasattr(comp, 'imported_user_functions'):
                 comp.imported_user_functions = {}
             
-            # Track dependencies for the new deps system
             from ..build.deps import get_dependency_tracker, CallableDep, GroupKey
             dep_tracker = get_dependency_tracker()
             
-            # Ensure this callable is registered in deps
+            # Use mangled_name if available, otherwise original name
+            # This fixes the null key issue in .deps files
+            callable_name = _mangled_name if _mangled_name else func.__name__
             group_deps = dep_tracker.get_or_create_group_deps(_group_key)
-            if _mangled_name not in group_deps.callables:
-                group_deps.add_callable(_mangled_name)
+            if callable_name not in group_deps.callables:
+                group_deps.add_callable(callable_name)
             
             for name, value in comp.module.globals.items():
                 if hasattr(value, 'is_declaration') and value.is_declaration:
@@ -492,11 +477,9 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                     if not dep_func_info:
                         dep_func_info = _registry.get_function_info_by_mangled(name)
                     if dep_func_info and dep_func_info.source_file:
-                        # Record in legacy imported_user_functions for compatibility
                         if dep_func_info.source_file != _source_file:
                             comp.imported_user_functions[name] = dep_func_info.source_file
                         
-                        # Record in new deps system
                         is_extern = getattr(dep_func_info, 'is_extern', False)
                         if is_extern:
                             libraries = []
@@ -504,7 +487,6 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                                 libraries = [dep_func_info.library]
                             dep = CallableDep(name=name, extern=True, link_libraries=libraries)
                         else:
-                            # Get group key from wrapper if available
                             dep_group_key = None
                             if hasattr(dep_func_info, 'wrapper') and dep_func_info.wrapper:
                                 wrapper_ref = dep_func_info.wrapper
@@ -512,12 +494,10 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                                     dep_group_key = GroupKey.from_tuple(wrapper_ref._group_key)
                             dep = CallableDep(name=name, group_key=dep_group_key)
                         
-                        dep_tracker.record_dependency(_group_key, _mangled_name, dep)
+                        dep_tracker.record_dependency(_group_key, callable_name, dep)
         
-        # Queue the compilation callback for deferred two-pass compilation
         output_manager.queue_compilation(group_key, compile_callback, func_info)
     
-    # Setup wrapper attributes
     wrapper._compiler = compiler
     wrapper._so_file = so_file
     wrapper._source_file = source_file
@@ -526,35 +506,22 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
     wrapper._actual_func_name = actual_func_name
     wrapper._group_key = group_key
     wrapper._captured_effect_context = _captured_effect_context
+    wrapper._compile_suffix = compile_suffix
+    wrapper._effect_suffix = effect_suffix
     
-    # Store wrapper reference in func_info for on-demand suffix generation
     func_info.wrapper = wrapper
-    
-    # Add wrapper to group
     output_manager.add_wrapper_to_group(group_key, wrapper)
     
 
     def handle_call(visitor, func_ref, args, node):
-        """Handle calling a @compile function.
-        
-        This converts the wrapper to a func pointer via type_converter,
-        then delegates to func.handle_call to generate the call instruction.
-        """
+        """Handle calling a @compile function."""
         from ..valueref import wrap_value
         from ..builtin_entities import func as func_type_cls
         from ..builtin_entities.python_type import PythonType
         
-        # Wrap the wrapper as a Python value
         wrapper_ref = wrap_value(wrapper, kind="python", type_hint=PythonType.wrap(wrapper))
-        
-        # Convert wrapper to func pointer using type_converter
-        # This will call _convert_compile_wrapper_to_func internally
         converted_func_ref = visitor.type_converter.convert(wrapper_ref, func_type_cls, node)
-        
-        # Get the actual func type from the converted result
         func_type = converted_func_ref.type_hint
-        
-        # Delegate to func.handle_call to generate the call instruction
         return func_type.handle_call(visitor, converted_func_ref, args, node)
 
     wrapper.handle_call = handle_call

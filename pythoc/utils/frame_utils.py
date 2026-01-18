@@ -36,12 +36,18 @@ def get_definition_scope():
     Walk up stack to find first non-decorator frame outside pythoc/ package.
     
     Returns:
-        str: Function name or 'module' for module-level, 'unknown' if not found
+        str: Function name with .<locals> suffix (e.g., 'GenericType.<locals>'),
+             or 'module' for module-level, 'unknown' if not found
+             
+    The .<locals> suffix matches Python's __qualname__ convention and allows
+    distinguishing between functions with the same name in different scopes.
     """
     frame = inspect.currentframe()
     
     # Skip frames inside pythoc internals
     temp_frame = frame.f_back if frame else None
+    scope_parts = []
+    
     while temp_frame:
         code = temp_frame.f_code
         filename = code.co_filename
@@ -56,11 +62,19 @@ def get_definition_scope():
             temp_frame = temp_frame.f_back
             continue
         
-        # Found user code - return function name
+        # Found user code
         if func_name == '<module>':
+            # At module level - return collected scope or 'module'
+            if scope_parts:
+                return '.<locals>.'.join(reversed(scope_parts)) + '.<locals>'
             return 'module'
         
-        return func_name
+        # Collect this scope name
+        scope_parts.append(func_name)
+        
+        # Return the innermost user function with .<locals> suffix
+        # This matches Python's __qualname__ format: GenericType.<locals>
+        return func_name + '.<locals>'
     
     # Fallback
     return 'unknown'

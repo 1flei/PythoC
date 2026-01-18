@@ -159,6 +159,11 @@ def compile_to_executable(output_path: Optional[str] = None, source_file: Option
     3. Links object files together
     4. Generates a native executable binary
     
+    Object Collection:
+    - Collects obj_file directly from each group (NOT derived from source_file)
+    - This correctly handles suffix groups: base.scope.compile_suffix.effect_suffix.o
+    - All groups contribute their .o files, regardless of source_file
+    
     Args:
         output_path: Optional output path for the executable.
                     If not provided, defaults to build/<source_file_name>
@@ -198,18 +203,18 @@ def compile_to_executable(output_path: Optional[str] = None, source_file: Option
     # Determine output path
     output_path = determine_output_path(source_file, output_path)
     
-    # Get all source files that have been compiled from output manager
-    all_source_files = []
-    for group_key, group in output_manager._pending_groups.items():
-        src_file = group.get('source_file')
-        if src_file and src_file not in all_source_files:
-            all_source_files.append(src_file)
+    # Collect object files directly from all groups
+    # Each group has an obj_file field that contains the correct path
+    # including any scope and suffix variations
+    obj_files = []
+    for group_key, group in output_manager.get_all_groups().items():
+        obj_file = group.get('obj_file')
+        if obj_file and os.path.exists(obj_file):
+            if obj_file not in obj_files:
+                obj_files.append(obj_file)
     
-    if not all_source_files:
+    if not obj_files:
         raise RuntimeError("No @compile decorated functions found. Nothing to compile.")
-    
-    # Collect all object files
-    obj_files = collect_object_files(all_source_files)
     
     # Link to create executable
     return link_executable(obj_files, output_path)
