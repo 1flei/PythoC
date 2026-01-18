@@ -27,13 +27,16 @@ class MultiSOExecutor:
         
     def compile_source_to_so(self, obj_file: str, so_file: str) -> str:
         """
-        Compile object file(s) to shared library
+        Compile a single object file to a shared library.
         
-        This method will link the specified object file along with any related
-        object files (e.g., functions with suffix from the same source file).
+        Each compilation group (with its unique 4-tuple group_key) produces
+        its own .o file and .so file. We do NOT glob for related files because:
+        1. Each group is independent and self-contained
+        2. Stale cache files with similar names could cause duplicate symbols
+        3. Dependencies between groups are handled by load_library_with_dependencies
         
         Args:
-            obj_file: Path to main object file
+            obj_file: Path to object file
             so_file: Path for output shared library
             
         Returns:
@@ -42,25 +45,10 @@ class MultiSOExecutor:
         if not os.path.exists(obj_file):
             raise FileNotFoundError(f"Object file not found: {obj_file}")
         
-        # Find all related object files
-        # Pattern: base_name.*.o files in the same directory
-        obj_dir = os.path.dirname(obj_file)
-        base_name = os.path.basename(obj_file).replace('.o', '')
-        
-        # Collect all related .o files
-        obj_files = [obj_file]
-        if obj_dir:
-            # Look for files matching: base_name.*.o (e.g., test.func.suffix.o)
-            import glob
-            pattern = os.path.join(obj_dir, f"{base_name}.*.o")
-            related_files = glob.glob(pattern)
-            for f in related_files:
-                if f != obj_file and os.path.exists(f):
-                    obj_files.append(f)
-        
-        # Use unified linker
+        # Link only the specific object file for this group
+        # Dependencies are handled separately via RTLD_GLOBAL loading
         from .utils.link_utils import link_files
-        return link_files(obj_files, so_file, shared=True)
+        return link_files([obj_file], so_file, shared=True)
     
     def load_library_with_dependencies(self, source_file: str, so_file: str, 
                                       dependencies: List[str]) -> ctypes.CDLL:

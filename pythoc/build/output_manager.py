@@ -21,6 +21,9 @@ class OutputManager:
         # Value: dict with compiler, wrappers, file paths, etc.
         self._pending_groups = {}
         
+        # All groups (including completed ones) for compile_to_executable lookup
+        self._all_groups = {}
+        
         # Pending compilation callbacks: group_key -> [(callback, func_info), ...]
         # callback signature: (compiler) -> None
         self._pending_compilations = {}
@@ -46,6 +49,10 @@ class OutputManager:
             dict: Group info with keys: compiler, wrappers, ir_file, obj_file, so_file, 
                   skip_codegen, source_file
         """
+        # Check if already in _all_groups (including completed groups)
+        if group_key in self._all_groups:
+            return self._all_groups[group_key]
+        
         if group_key not in self._pending_groups:
             # If skipping codegen, try to load existing IR and deps
             if skip_codegen and os.path.exists(ir_file):
@@ -74,7 +81,7 @@ class OutputManager:
                     # If loading fails, force recompilation
                     skip_codegen = False
             
-            self._pending_groups[group_key] = {
+            group = {
                 'compiler': compiler,
                 'wrappers': [],
                 'source_file': source_file,
@@ -83,6 +90,8 @@ class OutputManager:
                 'so_file': so_file,
                 'skip_codegen': skip_codegen
             }
+            self._pending_groups[group_key] = group
+            self._all_groups[group_key] = group
         
         return self._pending_groups[group_key]
     
@@ -155,7 +164,7 @@ class OutputManager:
             param_llvm_types, return_type
         )
     
-    def _compile_pending_for_group(self, group_key):
+    def _compile_pending_for_group(self, group_key, group):
         """
         Compile all pending functions for a group using two-pass approach.
         
@@ -168,11 +177,11 @@ class OutputManager:
         
         Args:
             group_key: Group identifier
+            group: Group info dict
             
         Returns:
             bool: True if compilation succeeded, False if failed
         """
-        group = self._pending_groups.get(group_key)
         if not group:
             return True
         
@@ -243,12 +252,11 @@ class OutputManager:
                         f"All @compile decorators must be executed before calling any compiled functions."
                     )
         
-        # Copy keys to avoid "dictionary changed size during iteration"
-        group_keys = list(self._pending_groups.keys())
-        for group_key in group_keys:
-            group = self._pending_groups.get(group_key)
-            if not group:
-                continue
+        # Process groups iteratively until stable
+        # New groups may be added during compilation (transitive effect propagation)
+        while self._pending_groups:
+            group_key = next(iter(self._pending_groups))
+            group = self._pending_groups.pop(group_key)
             if group.get('skip_codegen', False):
                 # Already up-to-date
                 continue
@@ -263,7 +271,7 @@ class OutputManager:
             
             # Compile pending functions for this group (two-pass)
             try:
-                self._compile_pending_for_group(group_key)
+                self._compile_pending_for_group(group_key, group)
             except Exception:
                 # Mark this group as failed and re-raise
                 group['compilation_failed'] = True
@@ -403,11 +411,21 @@ class OutputManager:
         Returns:
             dict or None: Group info if exists
         """
-        return self._pending_groups.get(group_key)
+        return self._all_groups.get(group_key)
+    
+    def get_all_groups(self):
+        """
+        Get all groups (including completed ones).
+        
+        Returns:
+            dict: All groups mapping group_key -> group info
+        """
+        return self._all_groups
     
     def clear_all(self):
         """Clear all pending groups (for testing/reset)."""
         self._pending_groups.clear()
+        self._all_groups.clear()
         self._pending_compilations.clear()
         self._flushed_groups.clear()
     
@@ -420,6 +438,8 @@ class OutputManager:
         """
         if group_key in self._pending_groups:
             del self._pending_groups[group_key]
+        if group_key in self._all_groups:
+            del self._all_groups[group_key]
         if group_key in self._pending_compilations:
             del self._pending_compilations[group_key]
         if group_key in self._flushed_groups:
