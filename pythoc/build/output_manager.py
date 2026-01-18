@@ -1,6 +1,7 @@
 import os
 import atexit
 from ..utils.link_utils import file_lock
+from .deps import get_dependency_tracker, GroupKey
 
 
 class OutputManager:
@@ -8,14 +9,15 @@ class OutputManager:
     Manages compilation groups and output file generation.
     
     A compilation group represents a set of functions compiled into the same
-    .ll/.o/.so files. Functions are grouped by:
-    - (source_file, None, None) for normal functions
-    - (definition_file, scope, suffix) for suffix-specialized functions
+    .ll/.o/.so files. Functions are grouped by a 4-tuple:
+    - (source_file, scope, compile_suffix, effect_suffix)
+    
+    Supports both 3-tuple (legacy) and 4-tuple group keys for compatibility.
     """
     
     def __init__(self):
         """Initialize output manager with empty group registry."""
-        # Key: (source_file, scope_name, suffix) tuple
+        # Key: group_key tuple (3 or 4 elements)
         # Value: dict with compiler, wrappers, file paths, etc.
         self._pending_groups = {}
         
@@ -32,7 +34,7 @@ class OutputManager:
         Get existing group or create a new one.
         
         Args:
-            group_key: (source_file, scope, suffix) tuple identifying the group
+            group_key: Group key tuple (3 or 4 elements)
             compiler: LLVMCompiler instance for this group
             ir_file: Path to output .ll file
             obj_file: Path to output .o file
@@ -45,10 +47,29 @@ class OutputManager:
                   skip_codegen, source_file
         """
         if group_key not in self._pending_groups:
-            # If skipping codegen, try to load existing IR
+            # If skipping codegen, try to load existing IR and deps
             if skip_codegen and os.path.exists(ir_file):
                 try:
                     compiler.load_ir_from_file(ir_file)
+                    # Load deps from file for cache hit
+                    dep_tracker = get_dependency_tracker()
+                    deps = dep_tracker.load_deps(obj_file)
+                    if deps:
+                        # Restore imported_user_functions from deps
+                        if not hasattr(compiler, 'imported_user_functions'):
+                            compiler.imported_user_functions = {}
+                        for callable_name, callable_info in deps.callables.items():
+                            for dep in callable_info.deps:
+                                if not dep.extern and dep.group_key:
+                                    compiler.imported_user_functions[dep.name] = dep.group_key.file
+                        
+                        # Restore link libraries and objects to registry
+                        from ..registry import get_unified_registry
+                        registry = get_unified_registry()
+                        for lib in deps.link_libraries:
+                            registry.add_link_library(lib)
+                        for obj in deps.link_objects:
+                            registry.add_link_object(obj)
                 except Exception:
                     # If loading fails, force recompilation
                     skip_codegen = False
@@ -265,7 +286,6 @@ class OutputManager:
             with file_lock(lockfile_path):
                 # Verify module
                 if not compiler.verify_module():
-                    source_file, scope, suffix = group_key
                     raise RuntimeError(f"Module verification failed for group {group_key}")
                 
                 # Save unoptimized IR if requested
@@ -281,6 +301,9 @@ class OutputManager:
                 # Write files
                 compiler.save_ir_to_file(group['ir_file'])
                 compiler.compile_to_object(group['obj_file'])
+                
+                # Save dependency information
+                self._save_group_deps(group_key, compiler, obj_file)
             
             # Mark this group as flushed
             self._flushed_groups.add(group_key)
@@ -289,6 +312,86 @@ class OutputManager:
             group['wrappers'] = []
         
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
+    
+    def _save_group_deps(self, group_key, compiler, obj_file):
+        """
+        Save dependency information for a compiled group.
+        
+        Collects dependencies from compiler.imported_user_functions and
+        link libraries/objects, then persists to .deps file.
+        
+        Args:
+            group_key: Group key tuple
+            compiler: LLVMCompiler with compilation results
+            obj_file: Path to .o file
+        """
+        from .deps import get_dependency_tracker, CallableDep, GroupKey
+        from ..registry import get_unified_registry
+        
+        dep_tracker = get_dependency_tracker()
+        registry = get_unified_registry()
+        
+        # Get or create deps for this group
+        group_deps = dep_tracker.get_or_create_group_deps(group_key)
+        
+        # Set source mtime
+        group = self._pending_groups.get(group_key)
+        if group and group.get('source_file'):
+            source_file = group['source_file']
+            if os.path.exists(source_file):
+                group_deps.source_mtime = os.path.getmtime(source_file)
+        
+        # Collect dependencies from imported_user_functions
+        if hasattr(compiler, 'imported_user_functions'):
+            for dep_name, dep_source_file in compiler.imported_user_functions.items():
+                func_info = registry.get_function_info(dep_name)
+                if not func_info:
+                    func_info = registry.get_function_info_by_mangled(dep_name)
+                
+                if func_info:
+                    # Get the group key from wrapper if available
+                    dep_group_key = None
+                    if hasattr(func_info, 'wrapper') and func_info.wrapper:
+                        wrapper = func_info.wrapper
+                        if hasattr(wrapper, '_group_key'):
+                            dep_group_key = GroupKey.from_tuple(wrapper._group_key)
+                    
+                    # Check if it's an extern function
+                    is_extern = getattr(func_info, 'is_extern', False)
+                    
+                    if is_extern:
+                        # Get link libraries from the extern function
+                        libraries = []
+                        if hasattr(func_info, 'library') and func_info.library:
+                            libraries = [func_info.library]
+                        dep = CallableDep(
+                            name=dep_name,
+                            extern=True,
+                            link_libraries=libraries
+                        )
+                    else:
+                        dep = CallableDep(
+                            name=dep_name,
+                            group_key=dep_group_key
+                        )
+                    
+                    # Record for all callables in this group
+                    # (simplified: record at group level)
+                    for callable_name in group_deps.callables:
+                        dep_tracker.record_dependency(group_key, callable_name, dep)
+        
+        # Add link libraries from registry
+        for lib in registry.get_link_libraries():
+            if lib not in group_deps.link_libraries:
+                group_deps.link_libraries.append(lib)
+        
+        # Add link objects from registry
+        for obj in registry.get_link_objects():
+            if obj not in group_deps.link_objects:
+                group_deps.link_objects.append(obj)
+        
+        # Save to file
+        dep_tracker.save_deps(group_key, obj_file)
     
     def get_group(self, group_key):
         """

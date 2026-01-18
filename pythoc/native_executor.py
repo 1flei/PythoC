@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from llvmlite import ir
 
 from .utils.link_utils import get_shared_lib_extension
+from .build import BuildCache, get_dependency_tracker
 
 
 class MultiSOExecutor:
@@ -181,7 +182,10 @@ class MultiSOExecutor:
     
     def _get_library_dependencies(self, source_file: str, so_file: str) -> List[Tuple[str, str]]:
         """
-        Get dependencies for a library by inspecting its source file's compiler
+        Get dependencies for a library using the deps system.
+        
+        First tries to load from .deps file (persisted deps), then falls back
+        to imported_user_functions from compiler for compatibility.
         
         Args:
             source_file: Source file path
@@ -193,12 +197,40 @@ class MultiSOExecutor:
         from .registry import _unified_registry
         registry = _unified_registry
         
-        # Try to get compiler for this source file
+        dependencies = []
+        seen_so_files = set()
+        
+        # Try to load deps from .deps file first
+        lib_ext = get_shared_lib_extension()
+        obj_file = so_file.replace(lib_ext, '.o')
+        dep_tracker = get_dependency_tracker()
+        deps = dep_tracker.load_deps(obj_file)
+        
+        if deps:
+            # Use deps system - iterate through all callables' dependencies
+            for callable_info in deps.callables.values():
+                for dep in callable_info.deps:
+                    if dep.extern:
+                        # Extern functions don't have so_file deps (handled via -l flags)
+                        continue
+                    if dep.group_key:
+                        dep_source_file = dep.group_key.file
+                        # Get so_file from registry
+                        func_info = registry.get_function_info(dep.name)
+                        if not func_info:
+                            func_info = registry.get_function_info_by_mangled(dep.name)
+                        if func_info and func_info.so_file:
+                            dep_so_file = func_info.so_file
+                            if dep_so_file != so_file and dep_so_file not in seen_so_files:
+                                seen_so_files.add(dep_so_file)
+                                dependencies.append((dep_source_file, dep_so_file))
+            return dependencies
+        
+        # Fallback to legacy imported_user_functions
         compiler = registry.get_compiler(source_file)
         if not compiler:
             return []
         
-        dependencies = []
         if hasattr(compiler, 'imported_user_functions'):
             for dep_func_name, dep_source_file in compiler.imported_user_functions.items():
                 # Get function info to find its so_file
@@ -208,8 +240,9 @@ class MultiSOExecutor:
                 
                 if func_info and func_info.so_file:
                     dep_so_file = func_info.so_file
-                    # Avoid self-dependency
-                    if dep_so_file != so_file:
+                    # Avoid self-dependency and duplicates
+                    if dep_so_file != so_file and dep_so_file not in seen_so_files:
+                        seen_so_files.add(dep_so_file)
                         dependencies.append((dep_source_file, dep_so_file))
         
         return dependencies
@@ -525,30 +558,14 @@ class MultiSOExecutor:
         flush_all_pending_outputs()
         
         # Check if we need to compile shared library from .o
-        need_compile = False
         lib_ext = get_shared_lib_extension()
         obj_file = so_file.replace(lib_ext, '.o')
         
-        if not os.path.exists(so_file):
-            need_compile = True
-        elif not os.path.exists(obj_file):
-            # If shared library exists but .o doesn't, something is wrong
-            need_compile = False
-        else:
-            # Check both .ll and .o timestamps
-            ll_file = so_file.replace(lib_ext, '.ll')
-            so_mtime = os.path.getmtime(so_file)
-            
-            # If .ll is newer than .so, need to recompile
-            if os.path.exists(ll_file):
-                ll_mtime = os.path.getmtime(ll_file)
-                if ll_mtime > so_mtime:
-                    need_compile = True
-            
-            # If .o is newer than .so, also need to recompile
-            obj_mtime = os.path.getmtime(obj_file)
-            if obj_mtime > so_mtime:
-                need_compile = True
+        # Collect all object files this .so depends on
+        obj_files = self._collect_dependent_obj_files(so_file, source_file, set())
+        
+        # Use BuildCache to check if .so needs re-linking
+        need_compile = BuildCache.check_so_needs_relink(so_file, obj_files)
         
         if need_compile:
             if not os.path.exists(obj_file):
@@ -563,7 +580,7 @@ class MultiSOExecutor:
             self.compile_source_to_so(obj_file, so_file)
         
         # Collect dependencies from compiler
-        dependencies = self._get_dependencies(wrapper._compiler, source_file)
+        dependencies = self._get_dependencies(wrapper._compiler, source_file, so_file)
         
         # Compile dependencies recursively if needed
         self._compile_dependencies_recursive(dependencies, set())
@@ -574,6 +591,40 @@ class MultiSOExecutor:
         # Get and cache the native function
         native_func = self.get_function(actual_func_name, compiler, so_file)
         return native_func
+    
+    def _collect_dependent_obj_files(self, so_file: str, source_file: str, visited: Set[str]) -> List[str]:
+        """
+        Collect all object files that a .so depends on.
+        
+        This includes the main .o file and all transitive dependencies.
+        Used by BuildCache.check_so_needs_relink() to determine if re-linking is needed.
+        
+        Args:
+            so_file: Shared library path
+            source_file: Source file path
+            visited: Set of already visited so_files
+            
+        Returns:
+            List of .o file paths
+        """
+        lib_ext = get_shared_lib_extension()
+        obj_file = so_file.replace(lib_ext, '.o')
+        obj_files = [obj_file]
+        
+        if so_file in visited:
+            return obj_files
+        visited.add(so_file)
+        
+        # Get dependencies and add their .o files
+        dependencies = self._get_library_dependencies(source_file, so_file)
+        for dep_source_file, dep_so_file in dependencies:
+            dep_obj_file = dep_so_file.replace(lib_ext, '.o')
+            if os.path.exists(dep_obj_file) and dep_obj_file not in obj_files:
+                obj_files.append(dep_obj_file)
+            # Note: We don't recurse here because check_so_needs_relink only needs
+            # direct dependencies - transitive deps are handled by their own .so files
+        
+        return obj_files
     
     def _compile_dependencies_recursive(self, dependencies: List[Tuple[str, str]], visited: Set[str]):
         """
@@ -596,68 +647,29 @@ class MultiSOExecutor:
             if dep_deps:
                 self._compile_dependencies_recursive(dep_deps, visited)
             
-            # Now compile this dependency if needed
+            # Now compile this dependency if needed using BuildCache
             dep_obj_file = dep_so_file.replace(lib_ext, '.o')
             if os.path.exists(dep_obj_file):
-                need_compile = False
-                if not os.path.exists(dep_so_file):
-                    need_compile = True
-                else:
-                    # Check if .o is newer than shared library
-                    if os.path.getmtime(dep_obj_file) > os.path.getmtime(dep_so_file):
-                        need_compile = True
-                    # Also check .ll timestamp
-                    dep_ll_file = dep_so_file.replace(lib_ext, '.ll')
-                    if os.path.exists(dep_ll_file):
-                        if os.path.getmtime(dep_ll_file) > os.path.getmtime(dep_so_file):
-                            need_compile = True
-                
-                if need_compile:
+                dep_obj_files = [dep_obj_file]
+                if BuildCache.check_so_needs_relink(dep_so_file, dep_obj_files):
                     self.compile_source_to_so(dep_obj_file, dep_so_file)
     
-    def _get_dependencies(self, compiler, source_file: str) -> List[Tuple[str, str]]:
+    def _get_dependencies(self, compiler, source_file: str, so_file: str) -> List[Tuple[str, str]]:
         """
-        Collect dependencies for a compiled function
+        Collect dependencies for a compiled function.
+        
+        Uses the deps system if available, falls back to imported_user_functions.
         
         Args:
             compiler: LLVMCompiler instance
             source_file: Source file path
+            so_file: Shared library path
             
         Returns:
             List of (dep_source_file, dep_so_file) tuples
         """
-        dependencies = []
-        if hasattr(compiler, 'imported_user_functions'):
-            from .registry import _unified_registry
-            registry = _unified_registry
-            for dep_func_name, _dep_module in compiler.imported_user_functions.items():
-                # Try to get function info by original name first, then by mangled name
-                func_info = registry.get_function_info(dep_func_name)
-                if not func_info:
-                    func_info = registry.get_function_info_by_mangled(dep_func_name)
-                
-                if not func_info or not func_info.source_file:
-                    continue
-                
-                # Use the so_file from func_info if available, otherwise compute it
-                dep_source_file = func_info.source_file
-                if func_info.so_file:
-                    dep_so_file = func_info.so_file
-                else:
-                    # Fallback to old behavior for functions without so_file
-                    cwd = os.getcwd()
-                    if dep_source_file.startswith(cwd + os.sep) or dep_source_file.startswith(cwd + '/'):
-                        rel_path = os.path.relpath(dep_source_file, cwd)
-                    else:
-                        # For files outside cwd, use a safe relative path
-                        base_name = os.path.splitext(os.path.basename(dep_source_file))[0]
-                        rel_path = f"external/{base_name}"
-                    lib_ext = get_shared_lib_extension()
-                    dep_so_file = os.path.join('build', os.path.dirname(rel_path), os.path.splitext(os.path.basename(dep_source_file))[0] + lib_ext)
-                
-                # Always add dependency, will be compiled if needed
-                dependencies.append((dep_source_file, dep_so_file))
-        return dependencies
+        # Use the unified _get_library_dependencies which handles deps system
+        return self._get_library_dependencies(source_file, so_file)
 
 
 # Global executor instance
