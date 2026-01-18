@@ -434,6 +434,7 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
         _registry = registry
         _start_line = start_line
         _func_info = func_info
+        _mangled_name = mangled_name  # Capture mangled name for deps tracking
         
         def compile_callback(comp):
             """Deferred compilation callback"""
@@ -472,15 +473,46 @@ def _compile_impl(func_or_class, anonymous=False, suffix=None, captured_symbols=
                 logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
             
             # After compilation, scan for declared functions and record dependencies
+            # This populates imported_user_functions for dependency tracking
             if not hasattr(comp, 'imported_user_functions'):
                 comp.imported_user_functions = {}
+            
+            # Track dependencies for the new deps system
+            from ..build.deps import get_dependency_tracker, CallableDep, GroupKey
+            dep_tracker = get_dependency_tracker()
+            
+            # Ensure this callable is registered in deps
+            group_deps = dep_tracker.get_or_create_group_deps(_group_key)
+            if _mangled_name not in group_deps.callables:
+                group_deps.add_callable(_mangled_name)
+            
             for name, value in comp.module.globals.items():
                 if hasattr(value, 'is_declaration') and value.is_declaration:
                     dep_func_info = _registry.get_function_info(name)
                     if not dep_func_info:
                         dep_func_info = _registry.get_function_info_by_mangled(name)
-                    if dep_func_info and dep_func_info.source_file and dep_func_info.source_file != _source_file:
-                        comp.imported_user_functions[name] = dep_func_info.source_file
+                    if dep_func_info and dep_func_info.source_file:
+                        # Record in legacy imported_user_functions for compatibility
+                        if dep_func_info.source_file != _source_file:
+                            comp.imported_user_functions[name] = dep_func_info.source_file
+                        
+                        # Record in new deps system
+                        is_extern = getattr(dep_func_info, 'is_extern', False)
+                        if is_extern:
+                            libraries = []
+                            if hasattr(dep_func_info, 'library') and dep_func_info.library:
+                                libraries = [dep_func_info.library]
+                            dep = CallableDep(name=name, extern=True, link_libraries=libraries)
+                        else:
+                            # Get group key from wrapper if available
+                            dep_group_key = None
+                            if hasattr(dep_func_info, 'wrapper') and dep_func_info.wrapper:
+                                wrapper_ref = dep_func_info.wrapper
+                                if hasattr(wrapper_ref, '_group_key'):
+                                    dep_group_key = GroupKey.from_tuple(wrapper_ref._group_key)
+                            dep = CallableDep(name=name, group_key=dep_group_key)
+                        
+                        dep_tracker.record_dependency(_group_key, _mangled_name, dep)
         
         # Queue the compilation callback for deferred two-pass compilation
         output_manager.queue_compilation(group_key, compile_callback, func_info)
