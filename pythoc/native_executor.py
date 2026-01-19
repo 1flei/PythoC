@@ -168,6 +168,51 @@ class MultiSOExecutor:
         # Add current library after its dependencies (post-order)
         result.append(so_file)
     
+    def _derive_so_file_from_group_key(self, group_key) -> Optional[str]:
+        """
+        Derive .so file path from GroupKey without relying on registry.
+        
+        This allows cache hit to work even when dependent functions are not
+        registered in the current process.
+        
+        Args:
+            group_key: GroupKey object with file, scope, compile_suffix, effect_suffix
+            
+        Returns:
+            Path to .so file, or None if cannot derive
+        """
+        from .utils.link_utils import get_shared_lib_extension
+        
+        source_file = group_key.file
+        if not source_file:
+            return None
+        
+        cwd = os.getcwd()
+        
+        # Calculate relative path for build directory
+        if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
+            rel_path = os.path.relpath(source_file, cwd)
+        else:
+            # For files outside cwd, use a safe relative path based on filename
+            base_name = os.path.splitext(os.path.basename(source_file))[0]
+            rel_path = f"external/{base_name}.py"
+        
+        build_dir = os.path.join('build', os.path.dirname(rel_path))
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
+        
+        # Get file suffix from group_key (e.g., "scope.compile_suffix.effect_suffix")
+        file_suffix = group_key.get_file_suffix()
+        
+        if file_suffix:
+            file_base = f"{base_name}.{file_suffix}"
+        else:
+            file_base = base_name
+        
+        lib_ext = get_shared_lib_extension()
+        so_file = os.path.join(build_dir, file_base + lib_ext)
+        
+        return so_file
+    
     def _get_library_dependencies(self, source_file: str, so_file: str) -> List[Tuple[str, str]]:
         """
         Get dependencies for a library using the deps system.
@@ -203,15 +248,12 @@ class MultiSOExecutor:
                         continue
                     if dep.group_key:
                         dep_source_file = dep.group_key.file
-                        # Get so_file from registry
-                        func_info = registry.get_function_info(dep.name)
-                        if not func_info:
-                            func_info = registry.get_function_info_by_mangled(dep.name)
-                        if func_info and func_info.so_file:
-                            dep_so_file = func_info.so_file
-                            if dep_so_file != so_file and dep_so_file not in seen_so_files:
-                                seen_so_files.add(dep_so_file)
-                                dependencies.append((dep_source_file, dep_so_file))
+                        # Derive so_file from group_key directly (not from registry)
+                        # This ensures cache hit works even when dep function is not registered
+                        dep_so_file = self._derive_so_file_from_group_key(dep.group_key)
+                        if dep_so_file and dep_so_file != so_file and dep_so_file not in seen_so_files:
+                            seen_so_files.add(dep_so_file)
+                            dependencies.append((dep_source_file, dep_so_file))
             return dependencies
         
         # Fallback to legacy imported_user_functions

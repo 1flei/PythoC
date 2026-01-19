@@ -135,13 +135,20 @@ class CallableDep:
 class CallableInfo:
     """Dependency info for a single callable in a group."""
     deps: List[CallableDep] = field(default_factory=list)
+    effect_dependencies: List[str] = field(default_factory=list)  # Effects used by this callable
     
     def to_dict(self) -> Dict[str, Any]:
-        return {'deps': [d.to_dict() for d in self.deps]}
+        d = {'deps': [d.to_dict() for d in self.deps]}
+        if self.effect_dependencies:
+            d['effect_dependencies'] = self.effect_dependencies
+        return d
     
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> 'CallableInfo':
-        return cls(deps=[CallableDep.from_dict(dep) for dep in d.get('deps', [])])
+        return cls(
+            deps=[CallableDep.from_dict(dep) for dep in d.get('deps', [])],
+            effect_dependencies=d.get('effect_dependencies', [])
+        )
 
 
 @dataclass
