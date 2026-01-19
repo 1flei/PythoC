@@ -54,32 +54,28 @@ class OutputManager:
             return self._all_groups[group_key]
         
         if group_key not in self._pending_groups:
-            # If skipping codegen, try to load existing IR and deps
-            if skip_codegen and os.path.exists(ir_file):
-                try:
-                    compiler.load_ir_from_file(ir_file)
-                    # Load deps from file for cache hit
-                    dep_tracker = get_dependency_tracker()
-                    deps = dep_tracker.load_deps(obj_file)
-                    if deps:
-                        # Restore imported_user_functions from deps
-                        if not hasattr(compiler, 'imported_user_functions'):
-                            compiler.imported_user_functions = {}
-                        for callable_name, callable_info in deps.callables.items():
-                            for dep in callable_info.deps:
-                                if not dep.extern and dep.group_key:
-                                    compiler.imported_user_functions[dep.name] = dep.group_key.file
-                        
-                        # Restore link libraries and objects to registry
-                        from ..registry import get_unified_registry
-                        registry = get_unified_registry()
-                        for lib in deps.link_libraries:
-                            registry.add_link_library(lib)
-                        for obj in deps.link_objects:
-                            registry.add_link_object(obj)
-                except Exception:
-                    # If loading fails, force recompilation
-                    skip_codegen = False
+            # If skipping codegen, load deps from .deps file
+            # Note: We don't need to load IR - .ll is just intermediate artifact
+            # Cache is based on .o file, not .ll
+            if skip_codegen:
+                dep_tracker = get_dependency_tracker()
+                deps = dep_tracker.load_deps(obj_file)
+                if deps:
+                    # Restore imported_user_functions from deps
+                    if not hasattr(compiler, 'imported_user_functions'):
+                        compiler.imported_user_functions = {}
+                    for callable_name, callable_info in deps.callables.items():
+                        for dep in callable_info.deps:
+                            if not dep.extern and dep.group_key:
+                                compiler.imported_user_functions[dep.name] = dep.group_key.file
+                    
+                    # Restore link libraries and objects to registry
+                    from ..registry import get_unified_registry
+                    registry = get_unified_registry()
+                    for lib in deps.link_libraries:
+                        registry.add_link_library(lib)
+                    for obj in deps.link_objects:
+                        registry.add_link_object(obj)
             
             group = {
                 'compiler': compiler,

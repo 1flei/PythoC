@@ -394,7 +394,9 @@ int c3_negate(int x) {
 '''
 
 # Create temp files and compile to shared library
-_case3_temp_dir = tempfile.mkdtemp()
+# Use build directory for stable paths (cache-friendly)
+_case3_temp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'test', 'cimport_case3')
+os.makedirs(_case3_temp_dir, exist_ok=True)
 _case3_header_path = os.path.join(_case3_temp_dir, 'case3_shlib.h')
 _case3_source_path = os.path.join(_case3_temp_dir, 'case3_shlib.c')
 _case3_so_path = os.path.join(_case3_temp_dir, 'libcase3.so')
@@ -471,8 +473,10 @@ import atexit
 
 def _cleanup():
     import shutil
-    for d in [_case1_temp_dir, _case2_temp_dir, _case3_temp_dir]:
-        shutil.rmtree(d, ignore_errors=True)
+    # Only clean up truly temporary directories, not build directory paths
+    for d in [_case1_temp_dir, _case2_temp_dir]:
+        if d.startswith('/tmp') or d.startswith(tempfile.gettempdir()):
+            shutil.rmtree(d, ignore_errors=True)
 
 atexit.register(_cleanup)
 

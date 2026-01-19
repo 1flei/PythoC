@@ -263,8 +263,16 @@ class Poly:
         
         ArgTypesPack = struct[arg_types]
         
-        # Create new dynamic dispatch function
-        @compile(anonymous=True)
+        # Generate deterministic suffix based on argument types and enum classes
+        # This ensures cache hit works correctly across process restarts
+        from ..type_id import get_type_id
+        suffix_parts = ['dispatch']
+        for t in arg_types:
+            suffix_parts.append(str(get_type_id(t)).replace(' ', '').replace(',', '_'))
+        dispatch_suffix = '_'.join(suffix_parts)
+        
+        # Create new dynamic dispatch function with deterministic suffix
+        @compile(suffix=dispatch_suffix)
         def dynamic_dispatch(*args : ArgTypesPack) -> first_return_type:
             for tags in gen_tag_combinations(enum_classes):
                 all_match: i32 = 1

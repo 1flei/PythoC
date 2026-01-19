@@ -410,6 +410,19 @@ def _compile_impl(func_or_class, anonymous=False,
     compiler = group['compiler']
     skip_codegen = group['skip_codegen']
     
+    # Try to restore effect_dependencies from .deps file if available
+    # This is needed for transitive effect propagation on cache hit
+    from ..build.deps import get_dependency_tracker
+    dep_tracker = get_dependency_tracker()
+    deps = dep_tracker.get_deps(group_key, obj_file)
+    if deps:
+        callable_name = mangled_name if mangled_name else func.__name__
+        if callable_name in deps.callables:
+            effect_deps = deps.callables[callable_name].effect_dependencies
+            if effect_deps:
+                func_info.effect_dependencies = set(effect_deps)
+                logger.debug(f"Restored effect_dependencies for {callable_name}: {effect_deps}")
+    
     from ..effect import capture_effect_context, restore_effect_context
     from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
@@ -470,6 +483,10 @@ def _compile_impl(func_or_class, anonymous=False,
             group_deps = dep_tracker.get_or_create_group_deps(_group_key)
             if callable_name not in group_deps.callables:
                 group_deps.add_callable(callable_name)
+            
+            # Save effect_dependencies to deps for cache hit restoration
+            if effect_deps:
+                group_deps.callables[callable_name].effect_dependencies = list(effect_deps)
             
             for name, value in comp.module.globals.items():
                 if hasattr(value, 'is_declaration') and value.is_declaration:
