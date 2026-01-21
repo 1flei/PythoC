@@ -454,7 +454,15 @@ class TypeConverter:
             ctx_effects = compilation_ctx.get('effect_overrides', {})
             
             if ctx_effect_suffix and ctx_effects:
-                func_effect_deps = func_info.effect_dependencies if func_info else set()
+                # Get effect dependencies from group-level deps system
+                func_effect_deps = set()
+                if func_info and hasattr(func_info, 'wrapper') and func_info.wrapper:
+                    wrapper = func_info.wrapper
+                    if hasattr(wrapper, '_group_key'):
+                        from .build.deps import get_dependency_tracker
+                        dep_tracker = get_dependency_tracker()
+                        func_effect_deps = dep_tracker.get_effects_used(wrapper._group_key)
+                
                 overridden_effects = set(ctx_effects.keys())
                 
                 # Check if callee uses any of the overridden effects

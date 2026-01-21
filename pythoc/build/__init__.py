@@ -8,8 +8,6 @@ from .output_manager import (
 from .deps import (
     GroupKey,
     GroupDeps,
-    CallableDep,
-    CallableInfo,
     DependencyTracker,
     get_dependency_tracker,
 )
@@ -23,8 +21,6 @@ __all__ = [
     # Dependency tracking
     'GroupKey',
     'GroupDeps',
-    'CallableDep',
-    'CallableInfo',
     'DependencyTracker',
     'get_dependency_tracker',
 ]
