@@ -173,16 +173,27 @@ def get_default_linkers() -> List[str]:
     return candidates if candidates else ['cc', 'clang', 'gcc']
 
 
-def get_link_flags() -> List[str]:
-    """Get link flags from registry
-    
+def get_link_flags(link_libraries: Optional[List[str]] = None) -> List[str]:
+    """Get link flags.
+
+    By default, this reads link libraries from the unified registry.
+    Callers may optionally pass an explicit list to avoid relying on global
+    registry state.
+
+    Args:
+        link_libraries: Optional list of library names/paths.
+
     Returns:
         List of linker flags including -l options and direct library paths
     """
-    from ..registry import get_unified_registry
-    libs = get_unified_registry().get_link_libraries()
-    lib_flags = []
-    
+    if link_libraries is None:
+        from ..registry import get_unified_registry
+        libs = get_unified_registry().get_link_libraries()
+    else:
+        libs = link_libraries
+
+    lib_flags: List[str] = []
+
     for lib in libs:
         if sys.platform == 'win32' and lib in {'c', 'm'}:
             continue
@@ -192,13 +203,13 @@ def get_link_flags() -> List[str]:
         else:
             # Library name - use -l flag
             lib_flags.append(f'-l{lib}')
-    
+
     # Add --no-as-needed to ensure all libraries are linked
     # This is critical for libraries like libgcc_s that provide
     # soft-float support functions (e.g., for f16/bf16/f128)
     if lib_flags and sys.platform not in ('win32', 'darwin'):
         lib_flags = ['-Wl,--no-as-needed'] + lib_flags
-    
+
     return lib_flags
 
 
@@ -244,48 +255,64 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
             return []
 
 
-def build_link_command(obj_files: List[str], output_file: str,
-                       shared: bool = False, linker: str = 'gcc') -> List[str]:
-    """Build linker command
-    
+def build_link_command(
+    obj_files: List[str],
+    output_file: str,
+    shared: bool = False,
+    linker: str = 'gcc',
+    link_objects: Optional[List[str]] = None,
+    link_libraries: Optional[List[str]] = None,
+) -> List[str]:
+    """Build linker command.
+
     Args:
         obj_files: List of object file paths
         output_file: Output file path (.so/.dll or executable)
         shared: True for shared library, False for executable
         linker: Linker command (e.g., 'gcc', 'clang', 'python-zig cc')
-    
+        link_objects: Optional extra object files to link (defaults to registry)
+        link_libraries: Optional link libraries to use (defaults to registry)
+
     Returns:
         Link command as list of arguments
     """
     from ..registry import get_unified_registry
-    
+
     # Split linker command (handles 'python-zig cc' etc.)
     linker_cmd = linker.split()
-    
+
     platform_flags = get_platform_link_flags(shared, linker=linker)
-    lib_flags = get_link_flags()
-    
+    lib_flags = get_link_flags(link_libraries)
+
     # Include link objects from registry (from cimport compiled sources)
-    link_objects = get_unified_registry().get_link_objects()
-    all_obj_files = list(obj_files) + link_objects
-    
+    if link_objects is None:
+        link_objects = get_unified_registry().get_link_objects()
+    all_obj_files = list(obj_files) + list(link_objects)
+
     return linker_cmd + platform_flags + all_obj_files + ['-o', output_file] + lib_flags
 
 
-def try_link_with_linkers(obj_files: List[str], output_file: str, 
-                         shared: bool = False,
-                         linkers: Optional[List[str]] = None) -> str:
-    """Try linking with multiple linkers
-    
+def try_link_with_linkers(
+    obj_files: List[str],
+    output_file: str,
+    shared: bool = False,
+    linkers: Optional[List[str]] = None,
+    link_objects: Optional[List[str]] = None,
+    link_libraries: Optional[List[str]] = None,
+) -> str:
+    """Try linking with multiple linkers.
+
     Args:
         obj_files: List of object file paths
         output_file: Output file path
         shared: True for shared library, False for executable
         linkers: List of linkers to try (defaults to platform-specific list)
-    
+        link_objects: Optional extra object files to link
+        link_libraries: Optional link libraries to use
+
     Returns:
         Path to linked file
-    
+
     Raises:
         RuntimeError: If all linkers fail
     """
@@ -302,7 +329,14 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
             continue
         
         try:
-            link_cmd = build_link_command(obj_files, output_file, shared=shared, linker=linker)
+            link_cmd = build_link_command(
+                obj_files,
+                output_file,
+                shared=shared,
+                linker=linker,
+                link_objects=link_objects,
+                link_libraries=link_libraries,
+            )
             # Use stdin=DEVNULL to prevent subprocess from waiting for input
             # This is critical on Windows, especially in ProcessPoolExecutor workers
             subprocess.run(
@@ -323,8 +357,14 @@ def try_link_with_linkers(obj_files: List[str], output_file: str,
     )
 
 
-def link_files(obj_files: List[str], output_file: str, 
-               shared: bool = False, linker: Optional[str] = None) -> str:
+def link_files(
+    obj_files: List[str],
+    output_file: str,
+    shared: bool = False,
+    linker: Optional[str] = None,
+    link_objects: Optional[List[str]] = None,
+    link_libraries: Optional[List[str]] = None,
+) -> str:
     """Link object files to executable or shared library
     
     Args:
@@ -373,7 +413,14 @@ def link_files(obj_files: List[str], output_file: str,
             else:
                 linkers = get_default_linkers()
             
-            return try_link_with_linkers(obj_files, output_file, shared=shared, linkers=linkers)
+            return try_link_with_linkers(
+                obj_files,
+                output_file,
+                shared=shared,
+                linkers=linkers,
+                link_objects=link_objects,
+                link_libraries=link_libraries,
+            )
             
         finally:
             # Release all .o file locks in reverse order

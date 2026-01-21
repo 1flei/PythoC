@@ -7,6 +7,10 @@ This module provides the cimport() function to:
 3. Import the bindings as a Python module
 4. Optionally compile C sources and register for linking
 
+Architecture:
+- Uses compiled bindings from pythoc.bindings module (c_parser + pythoc_backend)
+- Compiled bindings provide better parsing accuracy for complex C headers
+
 Usage:
     from pythoc.cimport import cimport
     
@@ -29,6 +33,7 @@ from types import ModuleType
 
 from .registry import get_unified_registry
 from .utils.cc_utils import compile_c_to_object, compile_c_sources
+from .bindings.bindgen import generate_bindings_to_file
 
 
 def _compute_cache_key(path: str, lib: str, sources: Optional[List[str]] = None,
@@ -74,289 +79,6 @@ def _get_cache_dir(cache_key: str) -> str:
     cache_dir = os.path.join('build', 'cimport', cache_key)
     os.makedirs(cache_dir, exist_ok=True)
     return cache_dir
-
-
-def _read_file_content(path: str) -> str:
-    """Read file content as string."""
-    with open(path, 'r', encoding='utf-8') as f:
-        return f.read()
-
-
-def _generate_bindings_pure_python(source_text: str, lib: str, output_path: str) -> None:
-    """Generate bindings using pure Python code generation.
-    
-    This approach parses C declarations and generates pythoc bindings
-    without requiring the compiled bindgen (which has runtime constraints).
-    
-    Uses a simplified approach that generates valid pythoc code.
-    """
-    import re
-    
-    lines = []
-    lines.append('"""Auto-generated pythoc bindings"""\n')
-    lines.append('')
-    lines.append('from pythoc import (')
-    lines.append('    compile, extern, enum, i8, i16, i32, i64,')
-    lines.append('    u8, u16, u32, u64, f32, f64, ptr, array,')
-    lines.append('    void, char, nullptr, sizeof, struct, union')
-    lines.append(')')
-    lines.append('')
-    
-    # Simple C type to pythoc type mapping
-    type_map = {
-        'void': 'void',
-        'char': 'char',
-        'signed char': 'i8',
-        'unsigned char': 'u8',
-        'short': 'i16',
-        'short int': 'i16',
-        'unsigned short': 'u16',
-        'unsigned short int': 'u16',
-        'int': 'i32',
-        'unsigned': 'u32',
-        'unsigned int': 'u32',
-        'long': 'i64',
-        'long int': 'i64',
-        'unsigned long': 'u64',
-        'unsigned long int': 'u64',
-        'long long': 'i64',
-        'long long int': 'i64',
-        'unsigned long long': 'u64',
-        'unsigned long long int': 'u64',
-        'float': 'f32',
-        'double': 'f64',
-        'long double': 'f64',
-        'size_t': 'u64',
-        'ssize_t': 'i64',
-        'ptrdiff_t': 'i64',
-        'intptr_t': 'i64',
-        'uintptr_t': 'u64',
-    }
-    
-    def parse_c_type(type_str: str) -> str:
-        """Convert C type string to pythoc type."""
-        type_str = type_str.strip()
-        
-        # Remove const/volatile qualifiers
-        type_str = re.sub(r'\b(const|volatile)\b', '', type_str).strip()
-        type_str = re.sub(r'\s+', ' ', type_str)
-        
-        # Count and remove pointer stars
-        ptr_count = type_str.count('*')
-        type_str = type_str.replace('*', '').strip()
-        
-        # Look up base type
-        base_type = type_map.get(type_str, type_str)
-        
-        # Wrap in ptr[] for pointers
-        result = base_type
-        for _ in range(ptr_count):
-            result = f'ptr[{result}]'
-        
-        return result
-    
-    # Preprocess: remove preprocessor directives and comments
-    # Remove single-line comments
-    source_text = re.sub(r'//[^\n]*', '', source_text)
-    # Remove multi-line comments
-    source_text = re.sub(r'/\*.*?\*/', '', source_text, flags=re.DOTALL)
-    # Remove preprocessor directives
-    source_text = re.sub(r'^\s*#[^\n]*', '', source_text, flags=re.MULTILINE)
-    
-    # Remove function bodies (content between { and } after function signature)
-    # This is a simplified approach that handles nested braces
-    def remove_function_bodies(text: str) -> str:
-        result = []
-        depth = 0
-        i = 0
-        in_function = False
-        func_depth = 0  # Track depth when function body started
-        while i < len(text):
-            c = text[i]
-            if c == '{':
-                depth += 1
-                if not in_function:
-                    # Check if this is a function body (preceded by ')')
-                    # Look back for ')'
-                    j = i - 1
-                    while j >= 0 and text[j] in ' \t\n':
-                        j -= 1
-                    if j >= 0 and text[j] == ')':
-                        in_function = True
-                        func_depth = depth
-                        result.append(';')  # Replace function body with semicolon
-                        i += 1
-                        continue
-                if not in_function:
-                    result.append(c)
-            elif c == '}':
-                if in_function and depth == func_depth:
-                    in_function = False
-                    func_depth = 0
-                    depth -= 1
-                    i += 1
-                    continue
-                depth -= 1
-                if not in_function:
-                    result.append(c)
-            else:
-                if not in_function:
-                    result.append(c)
-            i += 1
-        return ''.join(result)
-    
-    source_text = remove_function_bodies(source_text)
-    
-    # Parse function declarations: return_type name(params);
-    func_pattern = re.compile(
-        r'^\s*(?:extern\s+)?(?:static\s+)?'
-        r'((?:const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+)*'
-        r'(?:void|char|int|float|double|long|short|unsigned|signed|[a-zA-Z_][a-zA-Z0-9_]*)'
-        r'(?:\s*\*)*)\s+'
-        r'([a-zA-Z_][a-zA-Z0-9_]*)\s*'
-        r'\(([^)]*)\)\s*;',
-        re.MULTILINE
-    )
-    
-    # Parse struct declarations
-    struct_pattern = re.compile(
-        r'(?:typedef\s+)?struct\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\{([^}]*)\}\s*'
-        r'(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*)?;',
-        re.MULTILINE | re.DOTALL
-    )
-    
-    # Parse typedef declarations
-    typedef_pattern = re.compile(
-        r'typedef\s+((?:const\s+|volatile\s+|unsigned\s+|signed\s+|long\s+|short\s+)*'
-        r'(?:void|char|int|float|double|long|short|unsigned|signed|[a-zA-Z_][a-zA-Z0-9_]*)'
-        r'(?:\s*\*)*)\s+'
-        r'([a-zA-Z_][a-zA-Z0-9_]*)\s*;',
-        re.MULTILINE
-    )
-    
-    # Parse enum declarations
-    enum_pattern = re.compile(
-        r'(?:typedef\s+)?enum\s+(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*)?\{([^}]*)\}\s*'
-        r'(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*)?;',
-        re.MULTILINE | re.DOTALL
-    )
-    
-    # Process structs
-    for match in struct_pattern.finditer(source_text):
-        struct_name = match.group(1) or match.group(3)
-        if not struct_name:
-            continue
-        fields_text = match.group(2)
-        
-        lines.append('')
-        lines.append('@compile')
-        lines.append(f'class {struct_name}:')
-        
-        # Parse fields
-        field_lines = fields_text.strip().split(';')
-        has_fields = False
-        for field_line in field_lines:
-            field_line = field_line.strip()
-            if not field_line:
-                continue
-            # Simple field parsing: type name
-            parts = field_line.rsplit(None, 1)
-            if len(parts) == 2:
-                field_type, field_name = parts
-                field_name = field_name.strip()
-                # Handle array notation
-                if '[' in field_name:
-                    field_name = field_name.split('[')[0]
-                pythoc_type = parse_c_type(field_type)
-                lines.append(f'    {field_name}: {pythoc_type}')
-                has_fields = True
-        
-        if not has_fields:
-            lines.append('    pass')
-        lines.append('')
-    
-    # Process enums
-    for match in enum_pattern.finditer(source_text):
-        enum_name = match.group(1) or match.group(3)
-        if not enum_name:
-            continue
-        values_text = match.group(2)
-        
-        lines.append('')
-        lines.append('@enum(i32)')
-        lines.append(f'class {enum_name}:')
-        
-        # Parse enum values
-        values = [v.strip() for v in values_text.split(',') if v.strip()]
-        if values:
-            for val in values:
-                if '=' in val:
-                    name, value = val.split('=', 1)
-                    lines.append(f'    {name.strip()} = {value.strip()}')
-                else:
-                    lines.append(f'    {val}: None')
-        else:
-            lines.append('    pass')
-        lines.append('')
-    
-    # Process typedefs
-    for match in typedef_pattern.finditer(source_text):
-        orig_type = match.group(1)
-        new_name = match.group(2)
-        pythoc_type = parse_c_type(orig_type)
-        lines.append(f'{new_name} = {pythoc_type}')
-        lines.append('')
-    
-    # Process functions
-    for match in func_pattern.finditer(source_text):
-        return_type = match.group(1)
-        func_name = match.group(2)
-        params_text = match.group(3).strip()
-        
-        pythoc_return = parse_c_type(return_type)
-        
-        # Parse parameters
-        params = []
-        if params_text and params_text != 'void':
-            param_list = params_text.split(',')
-            for i, param in enumerate(param_list):
-                param = param.strip()
-                if param == '...':
-                    params.append('*args')
-                elif param:
-                    # Parse param: type name or just type
-                    parts = param.rsplit(None, 1)
-                    if len(parts) == 2:
-                        param_type, param_name = parts
-                        # Handle array notation in param name
-                        if '[' in param_name:
-                            param_name = param_name.split('[')[0]
-                        param_name = param_name.strip('*')
-                    else:
-                        param_type = parts[0]
-                        param_name = f'arg{i}'
-                    pythoc_param_type = parse_c_type(param_type)
-                    params.append(f'{param_name}: {pythoc_param_type}')
-        
-        params_str = ', '.join(params)
-        
-        # Generate @extern decorator
-        # If lib is empty, omit the lib parameter (symbols from .o files)
-        if lib:
-            lines.append(f"@extern(lib='{lib}')")
-        else:
-            lines.append('@extern')
-        lines.append(f'def {func_name}({params_str}) -> {pythoc_return}:')
-        lines.append('    pass')
-        lines.append('')
-    
-    # Write output
-    output_dir = os.path.dirname(output_path)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
 
 
 def _import_module_from_file(module_name: str, file_path: str) -> ModuleType:
@@ -408,20 +130,23 @@ def cimport(path: str, *,
         FileNotFoundError: If input file doesn't exist
         RuntimeError: If parsing or compilation fails
     """
-    # Resolve path
+    # Resolve path - first try as-is (handles relative paths with ..)
     if not os.path.isabs(path):
-        # Try relative to caller's directory first
-        import inspect
-        frame = inspect.currentframe()
-        if frame and frame.f_back:
-            caller_file = frame.f_back.f_globals.get('__file__')
-            if caller_file:
-                caller_dir = os.path.dirname(os.path.abspath(caller_file))
-                candidate = os.path.join(caller_dir, path)
-                if os.path.exists(candidate):
-                    path = candidate
-    
-    path = os.path.abspath(path)
+        # First check if the path exists relative to cwd
+        if os.path.exists(path):
+            path = os.path.abspath(path)
+        else:
+            # Try relative to caller's directory
+            import inspect
+            frame = inspect.currentframe()
+            if frame and frame.f_back:
+                caller_file = frame.f_back.f_globals.get('__file__')
+                if caller_file:
+                    caller_dir = os.path.dirname(os.path.abspath(caller_file))
+                    candidate = os.path.join(caller_dir, path)
+                    if os.path.exists(candidate):
+                        path = candidate
+            path = os.path.abspath(path)
     
     if not os.path.exists(path):
         raise FileNotFoundError(f"C file not found: {path}")
@@ -456,16 +181,29 @@ def cimport(path: str, *,
         if path not in sources:
             sources.insert(0, path)
     
-    # Compute cache key
-    cache_key = _compute_cache_key(path, lib, sources, objects)
-    cache_dir = _get_cache_dir(cache_key)
+    # Create cache directory based on file path structure
+    # This ensures same files always use same cache location
+    base_cache_dir = os.path.join('build', 'cimport')
+    
+    # Convert absolute path to a cache-safe relative path
+    path_abs = os.path.abspath(path)
+    if os.name == 'nt' and ':' in path_abs:
+        # Windows: remove drive letter
+        path_rel = path_abs.split(':', 1)[1].lstrip(os.sep)
+    else:
+        # Unix: remove leading slash
+        path_rel = path_abs.lstrip('/')
+    
+    # Create cache directory preserving directory structure
+    cache_dir = os.path.join(base_cache_dir, os.path.dirname(path_rel))
+    os.makedirs(cache_dir, exist_ok=True)
     
     # Generate bindings module path
     basename = os.path.splitext(os.path.basename(path))[0]
     if prefix:
-        module_name = f"_cimport_{prefix}_{basename}_{cache_key}"
+        module_name = f"_cimport_{prefix}_{basename}"
     else:
-        module_name = f"_cimport_{basename}_{cache_key}"
+        module_name = f"_cimport_{basename}"
     bindings_path = os.path.join(cache_dir, f"bindings_{basename}.py")
     
     # Check if bindings need regeneration
@@ -478,22 +216,86 @@ def cimport(path: str, *,
     
     # Generate bindings if needed
     if needs_regen:
-        source_text = _read_file_content(path)
-        _generate_bindings_pure_python(source_text, lib, bindings_path)
+        # Read source file
+        with open(path, 'r', encoding='utf-8') as f:
+            source_text = f.read()
+        
+        # Use compiled bindgen
+        result = generate_bindings_to_file(
+            source_text.encode('utf-8') + b'\0',  # null-terminated
+            (lib or '').encode('utf-8') + b'\0',  # null-terminated
+            bindings_path.encode('utf-8') + b'\0'  # null-terminated
+        )
+        
+        if result != 0:
+            raise RuntimeError(f"Failed to generate bindings for {path}, error code: {result}")
     
     # Compile sources if requested
     if compile_sources and sources:
-        compiled_objects = compile_c_sources(
-            sources, cc=cc, cflags=cflags,
-            include_dirs=include_dirs, defines=defines,
-            cache_dir=cache_dir
-        )
+        compiled_objects = []
+        for src in sources:
+            # Create object file path in same cache directory structure
+            src_abs = os.path.abspath(src)
+            
+            # Convert to cache-safe path
+            if os.name == 'nt' and ':' in src_abs:
+                src_rel = src_abs.split(':', 1)[1].lstrip(os.sep)
+            else:
+                src_rel = src_abs.lstrip('/')
+            
+            # Place object file in same directory structure under cache
+            obj_cache_dir = os.path.join(base_cache_dir, os.path.dirname(src_rel))
+            os.makedirs(obj_cache_dir, exist_ok=True)
+            
+            obj_name = os.path.splitext(os.path.basename(src_rel))[0] + '.o'
+            obj_path = os.path.join(obj_cache_dir, obj_name)
+            
+            # Only compile if object doesn't exist or source is newer
+            needs_compile = True
+            if os.path.exists(obj_path) and os.path.exists(src):
+                obj_mtime = os.path.getmtime(obj_path)
+                src_mtime = os.path.getmtime(src)
+                if obj_mtime >= src_mtime:
+                    needs_compile = False
+            
+            if needs_compile:
+                from .utils.cc_utils import compile_c_to_object
+                compile_c_to_object(
+                    src, obj_path, cc=cc, cflags=cflags,
+                    include_dirs=include_dirs, defines=defines
+                )
+            
+            compiled_objects.append(obj_path)
+        
         objects.extend(compiled_objects)
     
     # Register objects for linking
     registry = get_unified_registry()
     for obj in objects:
-        registry.add_link_object(obj)
+        # Check if an object with the same content is already registered
+        # This prevents duplicate symbols from different temporary files with same content
+        should_register = True
+        if os.path.exists(obj):
+            obj_size = os.path.getsize(obj)
+            existing_objects = registry.get_link_objects()
+            
+            for existing_obj in existing_objects:
+                if os.path.exists(existing_obj):
+                    # Quick size check first
+                    if os.path.getsize(existing_obj) == obj_size:
+                        # Same size - compare content to detect duplicates
+                        try:
+                            with open(obj, 'rb') as f1, open(existing_obj, 'rb') as f2:
+                                if f1.read() == f2.read():
+                                    # Same content - skip registration
+                                    should_register = False
+                                    break
+                        except (IOError, OSError):
+                            # If we can't read files, assume they're different
+                            pass
+        
+        if should_register:
+            registry.add_link_object(obj)
     
     # Import the bindings module
     module = _import_module_from_file(module_name, bindings_path)
