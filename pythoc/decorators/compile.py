@@ -35,7 +35,6 @@ from ..utils import (
     sanitize_filename,
     get_build_paths,
     normalize_suffix,
-    get_anonymous_suffix,
     get_function_file_and_source,
     get_function_start_line,
 )
@@ -74,13 +73,12 @@ def get_compiler(source_file, user_globals, has_suffix=False):
     return compiler
 
 
-def compile(func_or_class=None, anonymous=False, suffix=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
+def compile(func_or_class=None, suffix=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
     """
     Compile a Python function or class to native code.
     
     Args:
         func_or_class: Function or class to compile
-        anonymous: If True, generate unique suffix for this function
         suffix: Explicit compile_suffix for function naming (from @compile(suffix=T))
                 This is NOT contagious - each function chooses its own compile_suffix.
         _effect_suffix: Internal parameter for effect override (from with effect(suffix=X)).
@@ -118,21 +116,21 @@ def compile(func_or_class=None, anonymous=False, suffix=None, _effect_suffix=Non
     
     if func_or_class is None:
         def decorator(f):
-            return _compile_impl(f, anonymous=anonymous, 
+            return _compile_impl(f, 
                                 compile_suffix=compile_suffix,
                                 effect_suffix=effect_suffix,
                                 captured_symbols=captured_symbols,
                                 effect_scope=_effect_scope)
         return decorator
 
-    return _compile_impl(func_or_class, anonymous=anonymous, 
+    return _compile_impl(func_or_class, 
                         compile_suffix=compile_suffix,
                         effect_suffix=effect_suffix,
                         captured_symbols=captured_symbols,
                         effect_scope=_effect_scope)
 
 
-def _compile_impl(func_or_class, anonymous=False, 
+def _compile_impl(func_or_class, 
                   compile_suffix: Optional[str] = None, 
                   effect_suffix: Optional[str] = None,
                   captured_symbols=None,
@@ -143,7 +141,6 @@ def _compile_impl(func_or_class, anonymous=False,
     
     Args:
         func_or_class: Function or class to compile
-        anonymous: If True, generate unique suffix
         compile_suffix: From @compile(suffix=T), NOT contagious
         effect_suffix: From effect context, IS contagious to transitive calls
         captured_symbols: Symbols captured at decoration time
@@ -152,7 +149,7 @@ def _compile_impl(func_or_class, anonymous=False,
                      None means module-level scope.
     """
     if inspect.isclass(func_or_class):
-        return _compile_dynamic_class(func_or_class, anonymous=anonymous, suffix=compile_suffix)
+        return _compile_dynamic_class(func_or_class, suffix=compile_suffix)
 
     func = func_or_class
 
@@ -285,9 +282,6 @@ def _compile_impl(func_or_class, anonymous=False,
     if suffix_parts:
         combined_suffix = '_'.join(suffix_parts)
         mangled_name = func.__name__ + '_' + combined_suffix
-    elif anonymous:
-        anonymous_suffix = get_anonymous_suffix()
-        mangled_name = func.__name__ + anonymous_suffix
 
     param_names = [arg.arg for arg in func_ast.args.args]
     

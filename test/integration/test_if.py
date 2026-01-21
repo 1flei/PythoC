@@ -29,8 +29,8 @@ if __name__ == "__main__":
     xs = [-5, 1, 10, 20, 100]
     expected = [0, 1, 100, 200, 10000]
     fs = []
-    for x in xs:
-        @compile(anonymous=True)
+    for i, x in enumerate(xs):
+        @compile(suffix=f"const_folding_{i}")
         def const_folding() -> i32:
             if x < 0:
                 return 0
@@ -48,7 +48,7 @@ if __name__ == "__main__":
         assert result == exp, f"test_if_else({x}) expected {exp}, got {result}"
         print(f"test_if_else({x}) = {result}")
 
-    # Test compiled anonymous functions
+    # Test compiled functions with different suffixes
     for f, x, exp in zip(fs, xs, expected):
         result = f(x)
         assert result == exp, f"const_folding({x}) expected {exp}, got {result}"

@@ -736,13 +736,13 @@ class struct(StructType):
         """Decorator application"""
         return self._apply_decorator(cls, self.suffix, self.anonymous)
     
-    def __new__(cls, target=None, suffix=None, anonymous=False):
+    def __new__(cls, target=None, suffix=None):
         """Support @struct decorator syntax with parameters
         
         Uses the common decorator pattern from CompositeType base class.
         """
         # Delegate to base class factory method
-        return cls.create_decorator_instance(target, suffix, anonymous)
+        return cls.create_decorator_instance(target, suffix)
     
     @classmethod
     def get_name(cls) -> str:

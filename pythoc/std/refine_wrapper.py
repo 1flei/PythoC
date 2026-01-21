@@ -29,7 +29,7 @@ from ..builtin_entities import refined, ptr, nullptr, bool
 
 def nonnull_wrap(T):
     """Generate non-null predicate for pointer type T"""
-    @compile(anonymous=True)
+    @compile(suffix=T)
     def pred(p: T) -> bool:
         return p != nullptr
     
@@ -38,7 +38,7 @@ def nonnull_wrap(T):
 
 def positive_wrap(T):
     """Generate positive predicate for numeric type T"""
-    @compile(anonymous=True)
+    @compile(suffix=T)
     def pred(x: T) -> bool:
         return x > 0
     
@@ -47,7 +47,7 @@ def positive_wrap(T):
 
 def nonnegative_wrap(T):
     """Generate non-negative predicate for numeric type T"""
-    @compile(anonymous=True)
+    @compile(suffix=T)
     def pred(x: T) -> bool:
         return x >= 0
     
@@ -56,7 +56,7 @@ def nonnegative_wrap(T):
 
 def nonzero_wrap(T):
     """Generate non-zero predicate for numeric type T"""
-    @compile(anonymous=True)
+    @compile(suffix=T)
     def pred(x: T) -> bool:
         return x != 0
     
@@ -65,7 +65,7 @@ def nonzero_wrap(T):
 
 def in_range_wrap(T, lower, upper):
     """Generate range predicate for numeric type T"""
-    @compile(anonymous=True)
+    @compile(suffix=(T, lower, upper))
     def pred(x: T) -> bool:
         return x >= lower and x < upper
     
