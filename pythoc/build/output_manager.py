@@ -32,7 +32,7 @@ class OutputManager:
         self._flushed_groups = set()
     
     def get_or_create_group(self, group_key, compiler, ir_file, obj_file, so_file, 
-                           source_file, skip_codegen=False):
+                           source_file):
         """
         Get existing group or create a new one.
         
@@ -43,40 +43,52 @@ class OutputManager:
             obj_file: Path to output .o file
             so_file: Path to output .so file
             source_file: Original source file path
-            skip_codegen: If True, skip code generation (files are up-to-date)
         
         Returns:
-            dict: Group info with keys: compiler, wrappers, ir_file, obj_file, so_file, 
-                  skip_codegen, source_file
+            dict: Group info with keys: compiler, wrappers, ir_file, obj_file, so_file, source_file
         """
         # Check if already in _all_groups (including completed groups)
         if group_key in self._all_groups:
-            return self._all_groups[group_key]
+            group = self._all_groups[group_key]
+            in_flushed = group_key in self._flushed_groups
+
+            # If the group was already flushed, it may still be safe to add more
+            # functions as long as the corresponding shared library has NOT been
+            # loaded yet. This is important for flows where internal native
+            # execution (e.g. bindgen) triggers a flush mid-import, but the user
+            # module continues to define more @compile functions afterwards.
+            if in_flushed:
+                from ..native_executor import get_multi_so_executor
+                executor = get_multi_so_executor()
+
+                existing_so_file = group.get('so_file')
+                if existing_so_file and existing_so_file in executor.loaded_libs:
+                    source_file_path = group_key[0] if group_key else 'unknown'
+                    from ..logger import logger
+                    logger.error(
+                        f"Cannot define new compiled function after native execution has started. "
+                        f"File '{source_file_path}' was already compiled and loaded. "
+                        f"Move all @compile decorated functions before any code that triggers execution."
+                    )
+                    raise RuntimeError(
+                        f"Cannot define new @compile function after module '{source_file_path}' "
+                        f"has started native execution. All @compile functions must be defined "
+                        f"before any compiled function is called."
+                    )
+
+                # Re-open the group for further compilation. We must also ensure
+                # it is considered pending again, otherwise wrappers won't be
+                # added. We also mark it as requiring recompilation, because the
+                # on-disk .o might now be newer than the source file (due to an
+                # earlier flush in the same process).
+                if group_key in self._flushed_groups:
+                    self._flushed_groups.remove(group_key)
+                self._pending_groups[group_key] = group
+                group['force_recompile'] = True
+
+            return group
         
         if group_key not in self._pending_groups:
-            # If skipping codegen, load deps from .deps file
-            # Note: We don't need to load IR - .ll is just intermediate artifact
-            # Cache is based on .o file, not .ll
-            if skip_codegen:
-                dep_tracker = get_dependency_tracker()
-                deps = dep_tracker.load_deps(obj_file)
-                if deps:
-                    # Restore imported_user_functions from deps
-                    if not hasattr(compiler, 'imported_user_functions'):
-                        compiler.imported_user_functions = {}
-                    for callable_name, callable_info in deps.callables.items():
-                        for dep in callable_info.deps:
-                            if not dep.extern and dep.group_key:
-                                compiler.imported_user_functions[dep.name] = dep.group_key.file
-                    
-                    # Restore link libraries and objects to registry
-                    from ..registry import get_unified_registry
-                    registry = get_unified_registry()
-                    for lib in deps.link_libraries:
-                        registry.add_link_library(lib)
-                    for obj in deps.link_objects:
-                        registry.add_link_object(obj)
-            
             group = {
                 'compiler': compiler,
                 'wrappers': [],
@@ -84,7 +96,6 @@ class OutputManager:
                 'ir_file': ir_file,
                 'obj_file': obj_file,
                 'so_file': so_file,
-                'skip_codegen': skip_codegen
             }
             self._pending_groups[group_key] = group
             self._all_groups[group_key] = group
@@ -101,8 +112,7 @@ class OutputManager:
         """
         if group_key in self._pending_groups:
             group = self._pending_groups[group_key]
-            if not group['skip_codegen']:
-                group['wrappers'].append(wrapper)
+            group['wrappers'].append(wrapper)
     
     def queue_compilation(self, group_key, callback, func_info):
         """
@@ -116,6 +126,8 @@ class OutputManager:
         if group_key not in self._pending_compilations:
             self._pending_compilations[group_key] = []
         self._pending_compilations[group_key].append((callback, func_info))
+        from ..logger import logger
+        logger.debug(f"queue_compilation: {func_info.name}, group_key={group_key}, total_pending={len(self._pending_compilations[group_key])}")
     
     def _forward_declare_function(self, compiler, func_info):
         """
@@ -182,6 +194,8 @@ class OutputManager:
             return True
         
         compiler = group['compiler']
+        from ..logger import logger
+        logger.debug(f"_compile_pending_for_group: group_key={group_key}, pending={len(self._pending_compilations.get(group_key, []))}")
         
         # Track all compiled func_infos to avoid re-compilation
         compiled_funcs = set()
@@ -230,7 +244,14 @@ class OutputManager:
         1. Forward declare all functions in each group
         2. Compile all function bodies
         3. Write .ll and .o files
+        
+        Cache check is done here, at flush time:
+        - If .o is up-to-date (newer than source), skip compilation
+        - Otherwise, compile and regenerate .o
         """
+        from ..logger import logger
+        from .cache import BuildCache
+        
         # Check if any group has already loaded its library
         from ..native_executor import get_multi_so_executor
         executor = get_multi_so_executor()
@@ -250,12 +271,11 @@ class OutputManager:
         
         # Process groups iteratively until stable
         # New groups may be added during compilation (transitive effect propagation)
+        logger.debug(f"flush_all: _pending_groups={list(self._pending_groups.keys())}")
+        logger.debug(f"flush_all: _pending_compilations={[(k, len(v)) for k,v in self._pending_compilations.items()]}")
         while self._pending_groups:
             group_key = next(iter(self._pending_groups))
             group = self._pending_groups.pop(group_key)
-            if group.get('skip_codegen', False):
-                # Already up-to-date
-                continue
             
             # Skip if already flushed
             if group_key in self._flushed_groups:
@@ -265,6 +285,30 @@ class OutputManager:
             if group.get('compilation_failed', False):
                 continue
             
+            # Check cache: is .o up-to-date?
+            # If the group was re-opened after an earlier flush in the same
+            # process, we must force recompilation even if timestamps suggest a
+            # cache hit.
+            obj_file = group['obj_file']
+            source_file = group.get('source_file')
+            force_recompile = bool(group.get('force_recompile', False))
+            if (not force_recompile) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
+                # Cache hit - .o is up-to-date, skip compilation
+                # But we still need to restore dependencies from .deps file
+                self._restore_deps_from_cache(group_key, group)
+                self._flushed_groups.add(group_key)
+
+                # Clear any newly-queued callbacks/wrappers for this group. The
+                # on-disk .o already contains the compiled definitions.
+                group['force_recompile'] = False
+                if group_key in self._pending_compilations:
+                    del self._pending_compilations[group_key]
+                group['wrappers'] = []
+
+                logger.debug(f"Cache hit for {group_key}, skipping compilation")
+                continue
+            
+            # Cache miss - need to compile
             # Compile pending functions for this group (two-pass)
             try:
                 self._compile_pending_for_group(group_key, group)
@@ -281,10 +325,6 @@ class OutputManager:
             
             # Use file lock to prevent concurrent compilation of the same module
             # This protects against parallel test runs compiling the same .o file
-            # Note: We don't skip compilation even if .o exists, because each process
-            # may generate different anonymous symbol names. The lock ensures only
-            # one process writes at a time.
-            obj_file = group['obj_file']
             lockfile_path = obj_file + '.lock'
             
             with file_lock(lockfile_path):
@@ -311,11 +351,45 @@ class OutputManager:
             
             # Mark this group as flushed
             self._flushed_groups.add(group_key)
+            group['force_recompile'] = False
             
             # Clear wrappers after flushing to mark this group as up-to-date
             group['wrappers'] = []
         
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
+    
+    def _restore_deps_from_cache(self, group_key, group):
+        """
+        Restore dependency information from .deps file on cache hit.
+        
+        This ensures that link libraries and objects are properly registered
+        even when we skip compilation.
+        
+        Args:
+            group_key: Group key tuple
+            group: Group info dict
+        """
+        obj_file = group['obj_file']
+        compiler = group['compiler']
+        
+        dep_tracker = get_dependency_tracker()
+        deps = dep_tracker.load_deps(obj_file)
+        if deps:
+            # Restore imported_user_functions from deps
+            if not hasattr(compiler, 'imported_user_functions'):
+                compiler.imported_user_functions = {}
+            for callable_name, callable_info in deps.callables.items():
+                for dep in callable_info.deps:
+                    if not dep.extern and dep.group_key:
+                        compiler.imported_user_functions[dep.name] = dep.group_key.file
+            
+            # Restore link libraries and objects to registry
+            from ..registry import get_unified_registry
+            registry = get_unified_registry()
+            for lib in deps.link_libraries:
+                registry.add_link_library(lib)
+            for obj in deps.link_objects:
+                registry.add_link_object(obj)
     
     def _save_group_deps(self, group_key, compiler, obj_file):
         """

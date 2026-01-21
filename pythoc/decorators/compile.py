@@ -40,7 +40,6 @@ from ..utils import (
     get_function_start_line,
 )
 from ..build import (
-    BuildCache,
     get_output_manager,
     flush_all_pending_outputs,
 )
@@ -386,7 +385,8 @@ def _compile_impl(func_or_class, anonymous=False,
         # No suffix: use standard paths
         build_dir, ir_file, obj_file, so_file = get_build_paths(source_file)
     
-    skip_codegen = BuildCache.check_timestamp_skip(ir_file, obj_file, source_file)
+    # Note: We do NOT check cache here. Cache is checked at flush time.
+    # This allows all @compile decorators to register before any flush happens.
     
     func_info = FunctionInfo(
         name=func.__name__,
@@ -405,23 +405,10 @@ def _compile_impl(func_or_class, anonymous=False,
     
     group = output_manager.get_or_create_group(
         group_key, group_compiler, ir_file, obj_file, so_file, 
-        source_file, skip_codegen
+        source_file
     )
     compiler = group['compiler']
-    skip_codegen = group['skip_codegen']
-    
-    # Try to restore effect_dependencies from .deps file if available
-    # This is needed for transitive effect propagation on cache hit
-    from ..build.deps import get_dependency_tracker
-    dep_tracker = get_dependency_tracker()
-    deps = dep_tracker.get_deps(group_key, obj_file)
-    if deps:
-        callable_name = mangled_name if mangled_name else func.__name__
-        if callable_name in deps.callables:
-            effect_deps = deps.callables[callable_name].effect_dependencies
-            if effect_deps:
-                func_info.effect_dependencies = set(effect_deps)
-                logger.debug(f"Restored effect_dependencies for {callable_name}: {effect_deps}")
+    logger.debug(f"@compile {func.__name__}: group_key={group_key}")
     
     from ..effect import capture_effect_context, restore_effect_context
     from ..effect import start_effect_tracking, stop_effect_tracking
@@ -431,89 +418,89 @@ def _compile_impl(func_or_class, anonymous=False,
     _effect_suffix = effect_suffix
     _group_key = group_key
     
-    if not skip_codegen:
-        _func_ast = func_ast
-        _func_source = func_source
-        _param_type_hints = param_type_hints
-        _return_type_hint = return_type_hint
-        _user_globals = user_globals
-        _is_dynamic = is_dynamic
-        _source_file = source_file
-        _registry = registry
-        _start_line = start_line
-        _func_info = func_info
-        _mangled_name = mangled_name
+    # Always queue compilation callback - cache check is done at flush time
+    _func_ast = func_ast
+    _func_source = func_source
+    _param_type_hints = param_type_hints
+    _return_type_hint = return_type_hint
+    _user_globals = user_globals
+    _is_dynamic = is_dynamic
+    _source_file = source_file
+    _registry = registry
+    _start_line = start_line
+    _func_info = func_info
+    _mangled_name = mangled_name
+    _obj_file = obj_file
+    
+    def compile_callback(comp):
+        """Deferred compilation callback"""
+        start_effect_tracking()
         
-        def compile_callback(comp):
-            """Deferred compilation callback"""
-            start_effect_tracking()
-            
+        if _effect_suffix:
+            push_compilation_context(_compile_suffix, _effect_suffix, _captured_effect_context, _group_key)
+        
+        try:
+            with restore_effect_context(_captured_effect_context):
+                set_source_context(_source_file, _start_line - 1)
+                comp.compile_function_from_ast(
+                    _func_ast,
+                    _func_source,
+                    reset_module=False,
+                    param_type_hints=_param_type_hints,
+                    return_type_hint=_return_type_hint,
+                    user_globals=_user_globals,
+                )
+        finally:
             if _effect_suffix:
-                push_compilation_context(_compile_suffix, _effect_suffix, _captured_effect_context, _group_key)
-            
-            try:
-                with restore_effect_context(_captured_effect_context):
-                    set_source_context(_source_file, _start_line - 1)
-                    comp.compile_function_from_ast(
-                        _func_ast,
-                        _func_source,
-                        reset_module=False,
-                        param_type_hints=_param_type_hints,
-                        return_type_hint=_return_type_hint,
-                        user_globals=_user_globals,
-                    )
-            finally:
-                if _effect_suffix:
-                    pop_compilation_context()
-            
-            effect_deps = stop_effect_tracking()
-            if effect_deps:
-                _func_info.effect_dependencies = effect_deps
-                logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
-            
-            if not hasattr(comp, 'imported_user_functions'):
-                comp.imported_user_functions = {}
-            
-            from ..build.deps import get_dependency_tracker, CallableDep, GroupKey
-            dep_tracker = get_dependency_tracker()
-            
-            # Use mangled_name if available, otherwise original name
-            # This fixes the null key issue in .deps files
-            callable_name = _mangled_name if _mangled_name else func.__name__
-            group_deps = dep_tracker.get_or_create_group_deps(_group_key)
-            if callable_name not in group_deps.callables:
-                group_deps.add_callable(callable_name)
-            
-            # Save effect_dependencies to deps for cache hit restoration
-            if effect_deps:
-                group_deps.callables[callable_name].effect_dependencies = list(effect_deps)
-            
-            for name, value in comp.module.globals.items():
-                if hasattr(value, 'is_declaration') and value.is_declaration:
-                    dep_func_info = _registry.get_function_info(name)
-                    if not dep_func_info:
-                        dep_func_info = _registry.get_function_info_by_mangled(name)
-                    if dep_func_info and dep_func_info.source_file:
-                        if dep_func_info.source_file != _source_file:
-                            comp.imported_user_functions[name] = dep_func_info.source_file
-                        
-                        is_extern = getattr(dep_func_info, 'is_extern', False)
-                        if is_extern:
-                            libraries = []
-                            if hasattr(dep_func_info, 'library') and dep_func_info.library:
-                                libraries = [dep_func_info.library]
-                            dep = CallableDep(name=name, extern=True, link_libraries=libraries)
-                        else:
-                            dep_group_key = None
-                            if hasattr(dep_func_info, 'wrapper') and dep_func_info.wrapper:
-                                wrapper_ref = dep_func_info.wrapper
-                                if hasattr(wrapper_ref, '_group_key'):
-                                    dep_group_key = GroupKey.from_tuple(wrapper_ref._group_key)
-                            dep = CallableDep(name=name, group_key=dep_group_key)
-                        
-                        dep_tracker.record_dependency(_group_key, callable_name, dep)
+                pop_compilation_context()
         
-        output_manager.queue_compilation(group_key, compile_callback, func_info)
+        effect_deps = stop_effect_tracking()
+        if effect_deps:
+            _func_info.effect_dependencies = effect_deps
+            logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
+        
+        if not hasattr(comp, 'imported_user_functions'):
+            comp.imported_user_functions = {}
+        
+        from ..build.deps import get_dependency_tracker, CallableDep, GroupKey
+        dep_tracker = get_dependency_tracker()
+        
+        # Use mangled_name if available, otherwise original name
+        callable_name = _mangled_name if _mangled_name else func.__name__
+        group_deps = dep_tracker.get_or_create_group_deps(_group_key)
+        if callable_name not in group_deps.callables:
+            group_deps.add_callable(callable_name)
+        
+        # Save effect_dependencies to deps for cache hit restoration
+        if effect_deps:
+            group_deps.callables[callable_name].effect_dependencies = list(effect_deps)
+        
+        for name, value in comp.module.globals.items():
+            if hasattr(value, 'is_declaration') and value.is_declaration:
+                dep_func_info = _registry.get_function_info(name)
+                if not dep_func_info:
+                    dep_func_info = _registry.get_function_info_by_mangled(name)
+                if dep_func_info and dep_func_info.source_file:
+                    if dep_func_info.source_file != _source_file:
+                        comp.imported_user_functions[name] = dep_func_info.source_file
+                    
+                    is_extern = getattr(dep_func_info, 'is_extern', False)
+                    if is_extern:
+                        libraries = []
+                        if hasattr(dep_func_info, 'library') and dep_func_info.library:
+                            libraries = [dep_func_info.library]
+                        dep = CallableDep(name=name, extern=True, link_libraries=libraries)
+                    else:
+                        dep_group_key = None
+                        if hasattr(dep_func_info, 'wrapper') and dep_func_info.wrapper:
+                            wrapper_ref = dep_func_info.wrapper
+                            if hasattr(wrapper_ref, '_group_key'):
+                                dep_group_key = GroupKey.from_tuple(wrapper_ref._group_key)
+                        dep = CallableDep(name=name, group_key=dep_group_key)
+                    
+                    dep_tracker.record_dependency(_group_key, callable_name, dep)
+    
+    output_manager.queue_compilation(group_key, compile_callback, func_info)
     
     wrapper._compiler = compiler
     wrapper._so_file = so_file
