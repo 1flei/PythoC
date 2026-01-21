@@ -240,20 +240,16 @@ class MultiSOExecutor:
         deps = dep_tracker.load_deps(obj_file)
         
         if deps:
-            # Use deps system - iterate through all callables' dependencies
-            for callable_info in deps.callables.values():
-                for dep in callable_info.deps:
-                    if dep.extern:
-                        # Extern functions don't have so_file deps (handled via -l flags)
-                        continue
-                    if dep.group_key:
-                        dep_source_file = dep.group_key.file
-                        # Derive so_file from group_key directly (not from registry)
-                        # This ensures cache hit works even when dep function is not registered
-                        dep_so_file = self._derive_so_file_from_group_key(dep.group_key)
-                        if dep_so_file and dep_so_file != so_file and dep_so_file not in seen_so_files:
-                            seen_so_files.add(dep_so_file)
-                            dependencies.append((dep_source_file, dep_so_file))
+            # Use group-level deps system
+            for group_dep in deps.group_dependencies:
+                if group_dep.target_group:
+                    dep_source_file = group_dep.target_group.file
+                    # Derive so_file from group_key directly (not from registry)
+                    # This ensures cache hit works even when dep function is not registered
+                    dep_so_file = self._derive_so_file_from_group_key(group_dep.target_group)
+                    if dep_so_file and dep_so_file != so_file and dep_so_file not in seen_so_files:
+                        seen_so_files.add(dep_so_file)
+                        dependencies.append((dep_source_file, dep_so_file))
             return dependencies
         
         # Fallback to legacy imported_user_functions

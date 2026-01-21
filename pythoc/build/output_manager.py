@@ -375,13 +375,17 @@ class OutputManager:
         dep_tracker = get_dependency_tracker()
         deps = dep_tracker.load_deps(obj_file)
         if deps:
-            # Restore imported_user_functions from deps
+            # Restore imported_user_functions from group-level deps
             if not hasattr(compiler, 'imported_user_functions'):
                 compiler.imported_user_functions = {}
-            for callable_name, callable_info in deps.callables.items():
-                for dep in callable_info.deps:
-                    if not dep.extern and dep.group_key:
-                        compiler.imported_user_functions[dep.name] = dep.group_key.file
+            for group_dep in deps.group_dependencies:
+                if group_dep.target_group:
+                    # For group-level deps, we can't restore the exact function name
+                    # but we can restore the file dependency
+                    target_file = group_dep.target_group.file
+                    # Use a placeholder name based on the group key
+                    placeholder_name = f"group_{hash(group_dep.target_group.to_tuple()) & 0xFFFFFF:06x}"
+                    compiler.imported_user_functions[placeholder_name] = target_file
             
             # Restore link libraries and objects to registry
             from ..registry import get_unified_registry
@@ -403,7 +407,7 @@ class OutputManager:
             compiler: LLVMCompiler with compilation results
             obj_file: Path to .o file
         """
-        from .deps import get_dependency_tracker, CallableDep, GroupKey
+        from .deps import get_dependency_tracker, GroupKey
         from ..registry import get_unified_registry
         
         dep_tracker = get_dependency_tracker()
@@ -438,25 +442,15 @@ class OutputManager:
                     is_extern = getattr(func_info, 'is_extern', False)
                     
                     if is_extern:
-                        # Get link libraries from the extern function
+                        # Record external library dependency at group level
                         libraries = []
                         if hasattr(func_info, 'library') and func_info.library:
                             libraries = [func_info.library]
-                        dep = CallableDep(
-                            name=dep_name,
-                            extern=True,
-                            link_libraries=libraries
-                        )
+                        dep_tracker.record_extern_dependency(group_key, libraries)
                     else:
-                        dep = CallableDep(
-                            name=dep_name,
-                            group_key=dep_group_key
-                        )
-                    
-                    # Record for all callables in this group
-                    # (simplified: record at group level)
-                    for callable_name in group_deps.callables:
-                        dep_tracker.record_dependency(group_key, callable_name, dep)
+                        # Record group dependency
+                        if dep_group_key:
+                            dep_tracker.record_group_dependency(group_key, dep_group_key.to_tuple(), "function_call")
         
         # Add link libraries from registry
         for lib in registry.get_link_libraries():

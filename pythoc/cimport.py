@@ -33,7 +33,11 @@ from types import ModuleType
 
 from .registry import get_unified_registry
 from .utils.cc_utils import compile_c_to_object, compile_c_sources
-from .bindings.bindgen import generate_bindings_to_file
+
+# Delay import to avoid circular dependency
+def _get_bindgen():
+    from .bindings.bindgen import generate_bindings_to_file
+    return generate_bindings_to_file
 
 
 def _compute_cache_key(path: str, lib: str, sources: Optional[List[str]] = None,
@@ -221,6 +225,7 @@ def cimport(path: str, *,
             source_text = f.read()
         
         # Use compiled bindgen
+        generate_bindings_to_file = _get_bindgen()
         result = generate_bindings_to_file(
             source_text.encode('utf-8') + b'\0',  # null-terminated
             (lib or '').encode('utf-8') + b'\0',  # null-terminated

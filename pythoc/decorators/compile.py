@@ -452,22 +452,22 @@ def _compile_impl(func_or_class,
         if effect_deps:
             _func_info.effect_dependencies = effect_deps
             logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
+            
+            # Record effect dependencies at group level immediately
+            from ..build.deps import get_dependency_tracker
+            dep_tracker = get_dependency_tracker()
+            for effect in effect_deps:
+                dep_tracker.record_effect_usage(_group_key, effect)
         
         if not hasattr(comp, 'imported_user_functions'):
             comp.imported_user_functions = {}
         
-        from ..build.deps import get_dependency_tracker, CallableDep, GroupKey
+        from ..build.deps import get_dependency_tracker, GroupKey
         dep_tracker = get_dependency_tracker()
         
         # Use mangled_name if available, otherwise original name
         callable_name = _mangled_name if _mangled_name else func.__name__
         group_deps = dep_tracker.get_or_create_group_deps(_group_key)
-        if callable_name not in group_deps.callables:
-            group_deps.add_callable(callable_name)
-        
-        # Save effect_dependencies to deps for cache hit restoration
-        if effect_deps:
-            group_deps.callables[callable_name].effect_dependencies = list(effect_deps)
         
         for name, value in comp.module.globals.items():
             if hasattr(value, 'is_declaration') and value.is_declaration:
@@ -480,19 +480,20 @@ def _compile_impl(func_or_class,
                     
                     is_extern = getattr(dep_func_info, 'is_extern', False)
                     if is_extern:
+                        # Record external library dependency at group level
                         libraries = []
                         if hasattr(dep_func_info, 'library') and dep_func_info.library:
                             libraries = [dep_func_info.library]
-                        dep = CallableDep(name=name, extern=True, link_libraries=libraries)
+                        dep_tracker.record_extern_dependency(_group_key, libraries)
                     else:
+                        # Record group dependency
                         dep_group_key = None
                         if hasattr(dep_func_info, 'wrapper') and dep_func_info.wrapper:
                             wrapper_ref = dep_func_info.wrapper
                             if hasattr(wrapper_ref, '_group_key'):
-                                dep_group_key = GroupKey.from_tuple(wrapper_ref._group_key)
-                        dep = CallableDep(name=name, group_key=dep_group_key)
-                    
-                    dep_tracker.record_dependency(_group_key, callable_name, dep)
+                                dep_group_key = wrapper_ref._group_key
+                        if dep_group_key:
+                            dep_tracker.record_group_dependency(_group_key, dep_group_key, "function_call")
     
     output_manager.queue_compilation(group_key, compile_callback, func_info)
     
