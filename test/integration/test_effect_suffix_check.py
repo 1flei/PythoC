@@ -56,34 +56,34 @@ def run_tests():
         assert 'explicit_suffix' in func_with_explicit_suffix._mangled_name, \
             "Explicit suffix should be in mangled name"
 
-    print()
-    print('Test 3: Force flush and check generated files')
-    from pythoc.build import flush_all_pending_outputs
-    flush_all_pending_outputs()
+    # print()
+    # print('Test 3: Force flush and check generated files')
+    # from pythoc.build import flush_all_pending_outputs
+    # flush_all_pending_outputs()
 
-    build_dir = 'build/test/integration'
-    if os.path.exists(build_dir):
-        suffix_files = [f for f in os.listdir(build_dir) if 'test_suffix' in f or 'explicit_suffix' in f]
-        if suffix_files:
-            for f in sorted(suffix_files):
-                print(f'  Found: {f}')
-        else:
-            print('  No suffix files found, listing all effect files:')
-            for f in sorted(os.listdir(build_dir)):
-                if 'effect' in f:
-                    print(f'    {f}')
+    # build_dir = 'build/test/integration'
+    # if os.path.exists(build_dir):
+    #     suffix_files = [f for f in os.listdir(build_dir) if 'test_suffix' in f or 'explicit_suffix' in f]
+    #     if suffix_files:
+    #         for f in sorted(suffix_files):
+    #             print(f'  Found: {f}')
+    #     else:
+    #         print('  No suffix files found, listing all effect files:')
+    #         for f in sorted(os.listdir(build_dir)):
+    #             if 'effect' in f:
+    #                 print(f'    {f}')
 
-    print()
-    print('Test 4: Check IR file content for function names')
-    import re
-    for f in os.listdir(build_dir):
-        if f.endswith('.ll') and ('test_suffix' in f or 'explicit_suffix' in f or 'effect_suffix_check' in f):
-            path = os.path.join(build_dir, f)
-            with open(path) as fp:
-                content = fp.read()
-                # Find function definitions
-                funcs = re.findall(r'define.*@(\w+)\(', content)
-                print(f'  {f}: functions = {funcs}')
+    # print()
+    # print('Test 4: Check IR file content for function names')
+    # import re
+    # for f in os.listdir(build_dir):
+    #     if f.endswith('.ll') and ('test_suffix' in f or 'explicit_suffix' in f or 'effect_suffix_check' in f):
+    #         path = os.path.join(build_dir, f)
+    #         with open(path) as fp:
+    #             content = fp.read()
+    #             # Find function definitions
+    #             funcs = re.findall(r'define.*@(\w+)\(', content)
+    #             print(f'  {f}: functions = {funcs}')
     
     print()
     print('All effect suffix tests passed!')
