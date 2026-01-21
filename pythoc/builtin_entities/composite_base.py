@@ -452,16 +452,14 @@ class CompositeType(BuiltinType):
                     )
     
     @classmethod
-    def _link_class_to_type(cls, target_cls, unified_type, suffix=None, anonymous=False):
+    def _link_class_to_type(cls, target_cls, unified_type, suffix=None):
         """Link Python class to unified type and setup common attributes
         
         Args:
             target_cls: Original decorated class
             unified_type: The created type (StructType/UnionType subclass)
             suffix: Optional suffix for naming
-            anonymous: Whether to use anonymous naming
         """
-        from ..utils import get_anonymous_suffix
         from ..registry import register_struct_from_class
         from ..forward_ref import mark_type_defined
         
@@ -482,9 +480,6 @@ class CompositeType(BuiltinType):
         if suffix:
             target_cls._anonymous_suffix = f'_{suffix}'
             target_cls._compile_suffix = suffix
-        elif anonymous:
-            target_cls._anonymous_suffix = get_anonymous_suffix()
-            target_cls._compile_suffix = None
         else:
             target_cls._anonymous_suffix = None
             target_cls._compile_suffix = None
@@ -508,16 +503,15 @@ class CompositeType(BuiltinType):
         mark_type_defined(target_cls.__name__, target_cls)
     
     @classmethod
-    def create_decorator_instance(cls, target=None, suffix=None, anonymous=False, **kwargs):
+    def create_decorator_instance(cls, target=None, suffix=None, **kwargs):
         """Factory method to create decorator instance with common parameters
         
         This provides a unified interface for struct/union/enum decorators to accept
-        common compilation parameters (suffix, anonymous, etc.)
+        common compilation parameters (suffix, etc.)
         
         Args:
             target: The class being decorated (if used without parens)
             suffix: Optional suffix for compilation output naming
-            anonymous: Whether to generate anonymous/unique names
             **kwargs: Additional decorator-specific parameters
         
         Returns:
@@ -527,27 +521,25 @@ class CompositeType(BuiltinType):
         class DecoratorInstance:
             def __init__(self):
                 self.suffix = suffix
-                self.anonymous = anonymous
                 self.kwargs = kwargs
             
             def __call__(self, target_cls):
-                return cls._apply_decorator(target_cls, suffix, anonymous, **kwargs)
+                return cls._apply_decorator(target_cls, suffix, **kwargs)
         
         # If target is provided, apply directly
         if target is not None and isinstance(target, type):
-            return cls._apply_decorator(target, suffix, anonymous, **kwargs)
+            return cls._apply_decorator(target, suffix, **kwargs)
         
         # Otherwise return decorator instance
         return DecoratorInstance()
     
     @classmethod
-    def _apply_decorator(cls, target_cls, suffix=None, anonymous=False, **kwargs):
+    def _apply_decorator(cls, target_cls, suffix=None, **kwargs):
         """Apply decorator to target class - to be overridden by subclasses
         
         Args:
             target_cls: The class being decorated
             suffix: Optional suffix for compilation
-            anonymous: Whether to use anonymous naming
             **kwargs: Additional parameters
         
         Returns:
@@ -555,7 +547,7 @@ class CompositeType(BuiltinType):
         """
         # Default implementation: delegate to compile_dynamic_class
         from ..decorators.structs import compile_dynamic_class
-        return compile_dynamic_class(target_cls, suffix=suffix, anonymous=anonymous)
+        return compile_dynamic_class(target_cls, suffix=suffix)
 
 
 __all__ = ['CompositeType']

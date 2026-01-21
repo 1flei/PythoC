@@ -136,7 +136,7 @@ def add_struct_handle_call(cls):
     return cls
 
 
-def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
+def compile_dynamic_class(cls, suffix=None, type_factory=None):
     """Compile a @compile decorated class into a unified struct/union type
     
     This function now uses the unified struct type system with structural typing.
@@ -144,7 +144,6 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
     
     Args:
         cls: The class to compile
-        anonymous: If True, append a unique suffix to the class name in LLVM IR
         suffix: If provided, use this as custom suffix for output files (e.g., "int" for Vector(int))
         type_factory: Optional factory function to create the type (default: create_struct_type)
                       For union, pass create_union_type
@@ -271,17 +270,10 @@ def compile_dynamic_class(cls, anonymous=False, suffix=None, type_factory=None):
     cls._field_names = unified_type._field_names
     
     # Store suffix for deduplication and output file control
-    # suffix: deterministic naming for deduplication (replaces anonymous in the future)
-    # anonymous: auto-generated unique naming (legacy, will be deprecated)
     if suffix:
-        # suffix takes priority - use it for deterministic deduplication
+        # Use suffix for deterministic deduplication
         cls._anonymous_suffix = f'_{suffix}'
         cls._compile_suffix = suffix
-    elif anonymous:
-        # Auto-generate unique suffix (legacy behavior)
-        from ..utils import get_anonymous_suffix
-        cls._anonymous_suffix = get_anonymous_suffix()
-        cls._compile_suffix = None
     else:
         cls._anonymous_suffix = None
         cls._compile_suffix = None

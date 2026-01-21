@@ -312,16 +312,16 @@ class union(UnionType):
         """Decorator application"""
         return self._apply_decorator(cls, self.suffix, self.anonymous)
     
-    def __new__(cls, target=None, suffix=None, anonymous=False):
+    def __new__(cls, target=None, suffix=None):
         """Support @union decorator syntax with parameters
         
         Uses the common decorator pattern from CompositeType base class.
         """
         # Delegate to base class factory method
-        return cls.create_decorator_instance(target, suffix, anonymous)
+        return cls.create_decorator_instance(target, suffix)
     
     @classmethod
-    def _apply_decorator(cls, target_cls, suffix=None, anonymous=False, **kwargs):
+    def _apply_decorator(cls, target_cls, suffix=None, **kwargs):
         """Apply union decorator to target class
         
         Uses common field parsing from CompositeType base class.
@@ -329,7 +329,6 @@ class union(UnionType):
         Args:
             target_cls: The class being decorated
             suffix: Optional suffix for compilation
-            anonymous: Whether to use anonymous naming
             **kwargs: Additional parameters
         
         Returns:
@@ -359,7 +358,7 @@ class union(UnionType):
             )
         
         # Link class to type and register
-        cls._link_class_to_type(target_cls, unified_type, suffix, anonymous)
+        cls._link_class_to_type(target_cls, unified_type, suffix)
         
         return target_cls
     

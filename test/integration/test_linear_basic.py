@@ -66,7 +66,7 @@ def run_error_reassignment():
 
 @expect_error(["undefined", "cannot consume", "consumed"], suffix="bad_undefined_consume")
 def run_error_undefined_consume():
-    @compile(suffix="bad_undefined_consume", anonymous=True)
+    @compile(suffix="bad_undefined_consume")
     def bad() -> void:
         t: linear
         consume(t)
