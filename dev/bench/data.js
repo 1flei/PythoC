@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1768295054609,
+  "lastUpdate": 1769233926827,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -321,6 +321,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.694,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "a12f2c54b17eccd3f41b4d508a6854fd9e72c70f",
+          "message": "Group level deps",
+          "timestamp": "2026-01-21T23:56:32+08:00",
+          "tree_id": "74c2e11c89a935069e987032df761da1d0bdd31c",
+          "url": "https://github.com/1flei/PythoC/commit/a12f2c54b17eccd3f41b4d508a6854fd9e72c70f"
+        },
+        "date": 1769233926539,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.81,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.619,
             "unit": "seconds/test"
           }
         ]
