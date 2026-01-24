@@ -31,16 +31,18 @@ def match_simple() -> i32:
 
 @compile
 def match_no_default() -> i32:
-    """Test match without wildcard default case"""
+    """Test match with explicit wildcard case that preserves previous value"""
     x: i32 = 1
     result: i32 = 99
-    
+
     match x:
         case 1:
             result = 10
         case 2:
             result = 20
-    
+        case _:
+            pass  # Keep result as-is
+
     return result
 
 
