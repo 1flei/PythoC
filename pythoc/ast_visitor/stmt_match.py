@@ -20,16 +20,16 @@ class MatchStatementMixin:
     
     def visit_Match(self, node: ast.Match):
         """Handle match/case statements (Python 3.10+)
-        
+
         Translates match/case to if-elif-else chain for complex patterns,
         or optimized switch for simple integer literal patterns.
-        
+
         Currently supports:
         - Single and multiple subjects: match x, y:
         - Literal patterns (integers, strings via hash)
         - Wildcard pattern (_)
         - Or patterns (|)
-        
+
         Example:
             match x:
                 case 1:
@@ -40,11 +40,11 @@ class MatchStatementMixin:
                     return 0
         """
         cf = self._get_cf_builder()
-        
+
         # Note: We do NOT skip processing when terminated because the match body
         # may contain label definitions that need to be registered for forward
         # goto resolution.
-        
+
         # Handle multiple subjects: match x, y, z:
         # In Python AST, this becomes a Tuple node
         if isinstance(node.subject, ast.Tuple):
@@ -53,28 +53,34 @@ class MatchStatementMixin:
         else:
             # Single subject
             subjects = [self.visit_expression(node.subject)]
-        
+
+        # Get subject types for exhaustiveness checking
+        subject_types = [s.type_hint for s in subjects]
+
+        # Check exhaustiveness before code generation
+        is_exhaustive = self._check_match_exhaustiveness(node, subject_types)
+
         # For single subject, try switch optimization
         if len(subjects) == 1:
             subject_ir = ensure_ir(subjects[0])
             can_use_switch = self._can_use_switch_for_match(node)
-            
+
             if can_use_switch:
-                self._visit_match_as_switch(node, subject_ir)
+                self._visit_match_as_switch(node, subjects[0], subject_ir, is_exhaustive)
                 return
-        
+
         # Multiple subjects or complex patterns - use if-chain
-        self._visit_match_as_if_chain(node, subjects)
+        self._visit_match_as_if_chain(node, subjects, is_exhaustive)
     
     def _can_use_switch_for_match(self, node: ast.Match) -> bool:
         """Check if match can be compiled to LLVM switch instruction"""
         for case in node.cases:
             pattern = case.pattern
-            
+
             # Any guard clause disables switch optimization
             if case.guard is not None:
                 return False
-            
+
             # Wildcard is OK (becomes default)
             if isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
                 continue
@@ -96,10 +102,36 @@ class MatchStatementMixin:
             # Any other pattern type requires if-chain
             return False
         return True
+
+    def _check_match_exhaustiveness(self, node: ast.Match, subject_types: list) -> bool:
+        """Check if match statement covers all possible cases.
+
+        Returns True if the match is proven exhaustive, False otherwise.
+        Raises CompileError for non-exhaustive matches.
+        """
+        from ..match_exhaustive import check_match_exhaustiveness
+
+        # Skip check if any subject type is None (can't check without type info)
+        if any(t is None for t in subject_types):
+            return False
+
+        try:
+            check_match_exhaustiveness(node, subject_types, self)
+            return True
+        except Exception:
+            # Error already logged by check_match_exhaustiveness
+            # Re-raise to stop compilation
+            raise
     
-    def _visit_match_as_switch(self, node: ast.Match, subject_ir):
+    def _visit_match_as_switch(self, node: ast.Match, subject_ref, subject_ir, is_exhaustive: bool = False):
         """Compile match to LLVM switch instruction (optimized path)
-        
+
+        Args:
+            node: ast.Match node
+            subject_ref: ValueRef for the subject (for variable bindings)
+            subject_ir: LLVM IR value for the subject
+            is_exhaustive: If True, no implicit fallthrough edge needed
+
         Linear state tracking is done by the AST visitor during execution.
         CFG-based linear checking is done at function end via CFG linear checker.
         """
@@ -119,10 +151,13 @@ class MatchStatementMixin:
                 break
         
         has_wildcard = default_case_idx is not None
-        
+
         # Create default block
         if has_wildcard:
             default_block = cf.create_block("case_default")
+        elif is_exhaustive:
+            # Exhaustive without wildcard - default is unreachable
+            default_block = cf.create_block("match_unreachable")
         else:
             # No default case - just jump to merge
             default_block = merge_block
@@ -158,36 +193,50 @@ class MatchStatementMixin:
         # Generate code for each case
         for idx, case in enumerate(node.cases):
             cf.position_at_end(case_blocks[idx])
-            
+
             # Reset linear states to before match for this case
             cf.restore_linear_snapshot(linear_states_before)
-            
+
             # Enter scope for case body
             self.ctx.var_registry.enter_scope()
             try:
+                # Handle variable binding for MatchAs patterns (case x: or case _:)
+                pattern = case.pattern
+                if isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
+                    if pattern.name is not None:
+                        # case x: - bind the subject to variable x
+                        self._bind_match_variable(pattern.name, subject_ref)
+
                 # Execute case body
                 self._visit_stmt_list(case.body, add_to_cfg=True)
             finally:
                 self.ctx.var_registry.exit_scope()
-            
+
             # Branch to merge if not terminated
             if not cf.is_terminated():
                 cf.branch(merge_block)
-        
+
+        # Handle unreachable default block for exhaustive matches
+        if is_exhaustive and not has_wildcard and default_block != merge_block:
+            cf.position_at_end(default_block)
+            # Emit LLVM unreachable instruction - this path should never be taken
+            self.builder.unreachable()
+
         # Linear state validation is done by CFG checker at function end
-        
+
         # Continue at merge block
         cf.position_at_end(merge_block)
     
-    def _visit_match_as_if_chain(self, node: ast.Match, subjects):
+    def _visit_match_as_if_chain(self, node: ast.Match, subjects, is_exhaustive: bool = False):
         """Compile match to if-chain (general path)
-        
+
         Args:
             subjects: list of ValueRef - one or more subject values
-        
+            is_exhaustive: If True, no implicit fallthrough edge needed
+
         Uses process_condition to reuse if statement logic for each case.
         All control flow is delegated to process_condition - no direct builder calls.
-        
+
         Linear state handling:
         - Capture linear state before each case
         - Restore linear state when pattern fails (else branch)
@@ -294,17 +343,21 @@ class MatchStatementMixin:
             
             # Position at next case block for the next iteration
             cf.position_at_end(next_case_block)
-        
+
         # If we reach here, no case matched (and no wildcard)
         if not cf.is_terminated():
-            cf.branch(merge_block)
-        
+            if is_exhaustive:
+                # Exhaustive - this path is unreachable
+                self.builder.unreachable()
+            else:
+                cf.branch(merge_block)
+
         # Continue at merge block
         cf.position_at_end(merge_block)
     
     def _generate_match_pattern(self, pattern, subject):
         """Generate condition and bindings for a match pattern
-        
+
         Returns:
             tuple: (condition_ir, bindings)
                 condition_ir: LLVM IR value (i1) for pattern match condition

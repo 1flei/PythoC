@@ -33,7 +33,6 @@ def test_guard_with_arithmetic(x: i32) -> i32:
             return n + 10
         case n:
             return n
-    return 0
 
 
 @compile
@@ -58,7 +57,8 @@ def test_guard_mixed_with_literal(x: i32) -> i32:
             return n
         case n if n < 0:
             return -n
-    return 0
+        case _:
+            return 0
 
 
 @compile
