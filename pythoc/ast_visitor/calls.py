@@ -171,7 +171,7 @@ class CallsMixin:
         return expanded_args
     
 
-    def _perform_call(self, node: ast.Call, func_callable, param_types, return_type_hint=None, evaluated_args=None):
+    def _perform_call(self, node: ast.Call, func_callable, param_types, return_type_hint=None, evaluated_args=None, param_pc_types=None):
         """Unified function call handler
         
         Args:
@@ -180,6 +180,7 @@ class CallsMixin:
             param_types: List of expected parameter types (LLVM types)
             return_type_hint: Optional PC type hint for return value
             evaluated_args: Optional pre-evaluated arguments (for overloading)
+            param_pc_types: Optional list of PC types for parameters (for type conversion)
         
         Returns:
             ValueRef with call result
@@ -192,30 +193,19 @@ class CallsMixin:
         else:
             args = [self.visit_expression(arg) for arg in node.args]
         
-        # Type conversion for arguments using PC type hints when available
+        # Type conversion for arguments using PC type hints
         converted_args = []
         for idx, (arg, expected_type) in enumerate(zip(args, param_types)):
-            # Try to get PC type hint for this parameter from function registry
+            # Get PC type hint from param_pc_types if provided
             target_pc_type = None
-            try:
-                func_name = getattr(func_callable, 'name', None)
-                func_info = None
-                if func_name:
-                    # Prefer lookup by mangled name to preserve specialization
-                    func_info = get_unified_registry().get_function_info_by_mangled(func_name) or get_unified_registry().get_function_info(func_name)
-                if func_info and func_info.param_type_hints:
-                    # param_types order follows function definition
-                    param_names = list(func_info.param_type_hints.keys())
-                    if idx < len(param_names):
-                        target_pc_type = func_info.param_type_hints[param_names[idx]]
-            except Exception:
-                pass
+            if param_pc_types and idx < len(param_pc_types):
+                target_pc_type = param_pc_types[idx]
             
             if target_pc_type is not None:
                 converted = self.type_converter.convert(arg, target_pc_type)
                 converted_args.append(ensure_ir(converted))
             else:
-                # No PC hint: do not attempt LLVM-driven conversion; pass-through only if already matching
+                # No PC hint: pass-through only if already matching
                 if ensure_ir(arg).type == expected_type:
                     converted_args.append(ensure_ir(arg))
                 else:
@@ -230,14 +220,6 @@ class CallsMixin:
         if expected_param_count != actual_arg_count:
             logger.error(f"Function '{func_name}' expects {expected_param_count} arguments, got {actual_arg_count}",
                         node=node, exc_type=TypeError)
-        
-        # Try to get return type from FunctionInfo if not provided
-        if return_type_hint is None:
-            func_name = getattr(func_callable, 'name', None)
-            if func_name:
-                func_info = get_unified_registry().get_function_info(func_name)
-                if func_info and func_info.return_type_hint:
-                    return_type_hint = func_info.return_type_hint
         
         # Return type must be available
         if return_type_hint is None:

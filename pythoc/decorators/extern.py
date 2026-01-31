@@ -18,13 +18,14 @@ class ExternFunctionWrapper:
     def handle_call(self, visitor, func_ref, args, node):
         from ..valueref import ensure_ir, wrap_value, get_type
         from llvmlite import ir
-        try:
-            func = visitor.module.get_global(self.func_name)
-        except KeyError:
-            if hasattr(visitor, 'compiler') and visitor.compiler:
-                func = visitor.compiler._declare_extern_function(self.func_name)
-            else:
-                raise NameError(f"Extern function '{self.func_name}' not declared in module")
+        
+        # Get or declare the extern function
+        # We must always go through _declare_extern_function to handle name conflicts
+        # (e.g., when user defines a local @compile function with same name)
+        if hasattr(visitor, 'compiler') and visitor.compiler:
+            func = visitor.compiler._declare_extern_function(self.func_name)
+        else:
+            raise RuntimeError(f"Visitor does not have a compiler")
         # args are already pre-evaluated by visit_Call
         has_varargs = any(param_name == 'args' for param_name, _ in self.param_types)
         converted_args = []

@@ -33,19 +33,13 @@ def _extract_function_info(func):
         return_type = func.return_type
         return func_name, param_types, return_type
     
-    # Handle @compile functions through registry
+    # Handle @compile functions - get func_info directly from wrapper
+    func_info = getattr(func, '_func_info', None)
+    if not func_info:
+        func_name = getattr(func, '__name__', str(func))
+        raise NameError(f"Function '{func_name}' not found - missing _func_info attribute")
+    
     func_name = getattr(func, '__name__', str(func))
-    registry = get_unified_registry()
-    
-    func_info = registry.get_function_info(func_name)
-    if not func_info:
-        lookup = getattr(func, '_mangled_name', None)
-        if lookup:
-            func_info = registry.get_function_info_by_mangled(lookup)
-    
-    if not func_info:
-        raise NameError(f"Function '{func_name}' not found in registry")
-    
     param_types = [
         func_info.param_type_hints[name] 
         for name in func_info.param_names

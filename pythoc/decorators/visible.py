@@ -110,6 +110,7 @@ def get_all_accessible_symbols(
         symbols.update(get_closure_variables(func))
     
     # Add captured symbols (HIGHEST priority)
+    # This captures locals from decoration time that may not be available later
     if captured_symbols:
         symbols.update(captured_symbols)
     

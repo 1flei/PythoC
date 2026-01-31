@@ -106,6 +106,10 @@ class FunctionInfo:
     effect_dependencies: Set[str] = field(default_factory=set)
     # The wrapper object for this function (used for on-demand suffix generation)
     wrapper: Optional[Any] = None
+    # Compilation globals: user_globals dict used during compilation
+    # This is a mutable reference that gets augmented with group scope at flush time
+    # to support self/mutual recursion without name-based registry lookup
+    compilation_globals: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -435,14 +439,6 @@ class UnifiedCompilationRegistry:
         # Compiled functions: source_file -> list of function names
         self._compiled_functions: Dict[str, List[str]] = {}
         
-        # Function details: name -> FunctionInfo (original name)
-        self._function_info: Dict[str, FunctionInfo] = {}
-        # Function details by mangled name (for overloads)
-        self._function_info_by_mangled: Dict[str, FunctionInfo] = {}
-        
-        # Function type hints: func_name -> {'return': type, 'params': {...}}
-        self._function_type_hints: Dict[str, Dict[str, Any]] = {}
-        
         # ===== Extern Functions =====
         self._extern_functions: Dict[str, ExternFunctionInfo] = {}
         
@@ -509,44 +505,6 @@ class UnifiedCompilationRegistry:
             self._compiled_functions[func_info.source_file] = []
         if func_info.name not in self._compiled_functions[func_info.source_file]:
             self._compiled_functions[func_info.source_file].append(func_info.name)
-        
-        # Store function info under original name
-        # IMPORTANT: Only store under original name if this is the base version (no suffix)
-        # or if no base version exists yet. This prevents suffix versions from
-        # overwriting the base version in the registry.
-        if func_info.mangled_name:
-            # This is a suffix/overload version
-            # Only store under original name if no base version exists
-            if func_info.name not in self._function_info:
-                self._function_info[func_info.name] = func_info
-            # Always store by mangled name
-            self._function_info_by_mangled[func_info.mangled_name] = func_info
-        else:
-            # This is the base version (no suffix)
-            self._function_info[func_info.name] = func_info
-        
-        # Store type hints if available
-        if func_info.return_type_hint or func_info.param_type_hints:
-            type_hints = {
-                'return': func_info.return_type_hint,
-                'params': func_info.param_type_hints
-            }
-            self._function_type_hints[func_info.name] = type_hints
-            # If has mangled name (overload), also store type hints by mangled name
-            if func_info.mangled_name:
-                self._function_type_hints[func_info.mangled_name] = type_hints
-    
-    def get_function_info(self, func_name: str) -> Optional[FunctionInfo]:
-        """Get function information by original name"""
-        return self._function_info.get(func_name)
-    
-    def get_function_info_by_mangled(self, mangled_name: str) -> Optional[FunctionInfo]:
-        """Get function information by mangled name (for overloads)"""
-        return self._function_info_by_mangled.get(mangled_name)
-    
-    def get_function_type_hints(self, func_name: str) -> Optional[Dict[str, Any]]:
-        """Get function type hints"""
-        return self._function_type_hints.get(func_name)
     
     def list_compiled_functions(self, source_file: Optional[str] = None) -> Dict[str, List[str]]:
         """List compiled functions
@@ -560,20 +518,6 @@ class UnifiedCompilationRegistry:
         if source_file:
             return {source_file: self._compiled_functions.get(source_file, [])}
         return self._compiled_functions.copy()
-    
-    def find_function_source_file(self, func_name: str) -> Optional[str]:
-        """Find which source file contains a function"""
-        # First check original names
-        for source_file, func_list in self._compiled_functions.items():
-            if func_name in func_list:
-                return source_file
-        
-        # Then check mangled names
-        func_info = self._function_info_by_mangled.get(func_name)
-        if func_info:
-            return func_info.source_file
-        
-        return None
     
     # ========== Extern Function Methods ==========
     
@@ -899,9 +843,6 @@ class UnifiedCompilationRegistry:
         """Clear all registries (useful for testing)"""
         self._variable_registries.clear()
         self._compiled_functions.clear()
-        self._function_info.clear()
-        self._function_info_by_mangled.clear()
-        self._function_type_hints.clear()
         self._extern_functions.clear()
         self._runtime_functions.clear()
         self._runtime_function_counter = 0
@@ -917,9 +858,6 @@ class UnifiedCompilationRegistry:
     def clear_functions(self):
         """Clear only function-related registries"""
         self._compiled_functions.clear()
-        self._function_info.clear()
-        self._function_info_by_mangled.clear()
-        self._function_type_hints.clear()
         self._extern_functions.clear()
         self._runtime_functions.clear()
         self._function_sources.clear()
@@ -939,13 +877,14 @@ class UnifiedCompilationRegistry:
                 for name, info in visible.items():
                     print(f"    - {name}: {info.type_hint}")
         
-        print(f"\n[Functions] {len(self._function_info)} total")
+        print(f"\n[Functions]")
         print(f"  Compiled: {sum(len(funcs) for funcs in self._compiled_functions.values())}")
         print(f"  Extern: {len(self._extern_functions)}")
         print(f"  Runtime: {len(self._runtime_functions)}")
         if verbose:
-            for name, info in self._function_info.items():
-                print(f"    - {name} ({info.source_file})")
+            for source_file, func_list in self._compiled_functions.items():
+                for func_name in func_list:
+                    print(f"    - {func_name} ({source_file})")
         
         print(f"\n[Source Files] {len(self._source_files)}")
         for source_file in self._source_files.keys():

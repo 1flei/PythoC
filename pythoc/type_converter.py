@@ -423,26 +423,20 @@ class TypeConverter:
         Returns:
             ValueRef with func pointer type_hint
         """
-        from .registry import get_unified_registry
         from .effect import get_current_compilation_context
         from .builtin_entities import func as func_type_cls
         from llvmlite import ir
         
-        registry = get_unified_registry()
         func_name = wrapper._original_name
         
-        # Check if this wrapper has a specific mangled name
+        # Get func_info directly from wrapper (not from registry lookup)
+        func_info = getattr(wrapper, '_func_info', None)
+        if not func_info:
+            raise NameError(f"Function '{func_name}' missing _func_info attribute")
+        
+        # Determine actual function name
         lookup_mangled = getattr(wrapper, '_mangled_name', None)
-        if lookup_mangled:
-            func_info = registry.get_function_info_by_mangled(lookup_mangled)
-            if not func_info:
-                raise NameError(f"Function '{func_name}' with mangled '{lookup_mangled}' not found in registry")
-            actual_func_name = func_info.mangled_name
-        else:
-            func_info = registry.get_function_info(func_name)
-            if not func_info:
-                raise NameError(f"Function '{func_name}' not found in registry")
-            actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
+        actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
         
         # Handle transitive effect propagation
         # Effect suffix is contagious: if caller has effect_suffix and callee uses overridden effects,
@@ -456,60 +450,33 @@ class TypeConverter:
             if ctx_effect_suffix and ctx_effects:
                 # Get effect dependencies from group-level deps system
                 func_effect_deps = set()
-                if func_info and hasattr(func_info, 'wrapper') and func_info.wrapper:
-                    wrapper = func_info.wrapper
-                    if hasattr(wrapper, '_group_key'):
-                        from .build.deps import get_dependency_tracker
-                        dep_tracker = get_dependency_tracker()
-                        func_effect_deps = dep_tracker.get_effects_used(wrapper._group_key)
+                original_wrapper = func_info.wrapper if func_info else None
+                if original_wrapper and hasattr(original_wrapper, '_group_key'):
+                    from .build.deps import get_dependency_tracker
+                    dep_tracker = get_dependency_tracker()
+                    func_effect_deps = dep_tracker.get_effects_used(original_wrapper._group_key)
                 
                 overridden_effects = set(ctx_effects.keys())
                 
                 # Check if callee uses any of the overridden effects
                 if func_effect_deps & overridden_effects:
-                    # Build the mangled name for effect-specialized version
-                    # If callee has its own compile_suffix, preserve it
-                    callee_compile_suffix = getattr(wrapper, '_compile_suffix', None)
-                    suffix_parts = []
-                    if callee_compile_suffix:
-                        suffix_parts.append(callee_compile_suffix)
-                    suffix_parts.append(ctx_effect_suffix)
-                    suffix_mangled_name = func_name + '_' + '_'.join(suffix_parts)
-                    
-                    suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
-                    
-                    if not suffix_info:
-                        logger.debug(f"Generating transitive effect version: {suffix_mangled_name}")
-                        original_wrapper = func_info.wrapper if func_info else None
-                        
-                        if original_wrapper and hasattr(original_wrapper, '__wrapped__'):
-                            from .effect import restore_effect_context
-                            from .decorators.compile import compile as compile_decorator
-                            
-                            # Get original scope from wrapper's group_key
-                            # group_key = (source_file, scope, compile_suffix, effect_suffix)
-                            original_scope = None
-                            if hasattr(original_wrapper, '_group_key') and original_wrapper._group_key:
-                                original_scope = original_wrapper._group_key[1]  # scope is element [1]
-                            logger.debug(f"Transitive compile: func={func_name}, original_scope={original_scope}, group_key={getattr(original_wrapper, '_group_key', None)}")
-                            
-                            with restore_effect_context(ctx_effects):
-                                # Compile with effect_suffix - group_key will be callee's file/scope
-                                # NOT the caller's group_key (preserving group boundaries)
-                                # Pass _effect_scope to preserve the original scope and avoid
-                                # detecting pythoc internals as the scope
-                                compile_decorator(
-                                    original_wrapper.__wrapped__,
-                                    suffix=callee_compile_suffix,  # Preserve callee's compile_suffix
-                                    _effect_suffix=ctx_effect_suffix,  # Propagate effect_suffix
-                                    _effect_scope=original_scope  # Preserve original scope
-                                )
-                            suffix_info = registry.get_function_info_by_mangled(suffix_mangled_name)
-                    
-                    if suffix_info:
-                        func_info = suffix_info
-                        actual_func_name = suffix_mangled_name
+                    # Use wrapper's get_effect_specialized method to get/create specialized version
+                    if original_wrapper and hasattr(original_wrapper, 'get_effect_specialized'):
+                        specialized_wrapper = original_wrapper.get_effect_specialized(
+                            ctx_effect_suffix, ctx_effects
+                        )
+                        func_info = specialized_wrapper._func_info
+                        actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
                         logger.debug(f"Using transitive effect version: {actual_func_name}")
+                        
+                        # Record dependency: caller_group -> specialized_wrapper_group
+                        # This is critical for proper .so loading order
+                        caller_group_key = getattr(self._visitor, 'current_group_key', None)
+                        callee_group_key = getattr(specialized_wrapper, '_group_key', None)
+                        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
+                            dep_tracker.record_group_dependency(
+                                caller_group_key, callee_group_key, "effect_specialized_call"
+                            )
         
         # Get or declare the function in the module
         module = self._visitor.module
