@@ -393,6 +393,16 @@ def _compile_impl(func_or_class,
         overload_enabled=False,
         so_file=so_file,
     )
+    
+    # Associate wrapper with func_info early (before registration)
+    # This ensures mutual recursion can find the wrapper via func_info
+    func_info.wrapper = wrapper
+    wrapper._func_info = func_info
+    
+    # Store user_globals as a mutable dict on func_info
+    # This will be augmented with group scope at flush time for recursion support
+    func_info.compilation_globals = dict(user_globals)
+    
     registry.register_function(func_info)
     
     group_compiler = compiler
@@ -417,8 +427,6 @@ def _compile_impl(func_or_class,
     _func_source = func_source
     _param_type_hints = param_type_hints
     _return_type_hint = return_type_hint
-    _user_globals = user_globals
-    _is_dynamic = is_dynamic
     _source_file = source_file
     _registry = registry
     _start_line = start_line
@@ -436,13 +444,16 @@ def _compile_impl(func_or_class,
         try:
             with restore_effect_context(_captured_effect_context):
                 set_source_context(_source_file, _start_line - 1)
+                # Use func_info.compilation_globals which has been augmented
+                # with group scope at flush time for recursion support
                 comp.compile_function_from_ast(
                     _func_ast,
                     _func_source,
                     reset_module=False,
                     param_type_hints=_param_type_hints,
                     return_type_hint=_return_type_hint,
-                    user_globals=_user_globals,
+                    user_globals=_func_info.compilation_globals,
+                    group_key=_group_key,
                 )
         finally:
             if _effect_suffix:
@@ -458,42 +469,6 @@ def _compile_impl(func_or_class,
             dep_tracker = get_dependency_tracker()
             for effect in effect_deps:
                 dep_tracker.record_effect_usage(_group_key, effect)
-        
-        if not hasattr(comp, 'imported_user_functions'):
-            comp.imported_user_functions = {}
-        
-        from ..build.deps import get_dependency_tracker, GroupKey
-        dep_tracker = get_dependency_tracker()
-        
-        # Use mangled_name if available, otherwise original name
-        callable_name = _mangled_name if _mangled_name else func.__name__
-        group_deps = dep_tracker.get_or_create_group_deps(_group_key)
-        
-        for name, value in comp.module.globals.items():
-            if hasattr(value, 'is_declaration') and value.is_declaration:
-                dep_func_info = _registry.get_function_info(name)
-                if not dep_func_info:
-                    dep_func_info = _registry.get_function_info_by_mangled(name)
-                if dep_func_info and dep_func_info.source_file:
-                    if dep_func_info.source_file != _source_file:
-                        comp.imported_user_functions[name] = dep_func_info.source_file
-                    
-                    is_extern = getattr(dep_func_info, 'is_extern', False)
-                    if is_extern:
-                        # Record external library dependency at group level
-                        libraries = []
-                        if hasattr(dep_func_info, 'library') and dep_func_info.library:
-                            libraries = [dep_func_info.library]
-                        dep_tracker.record_extern_dependency(_group_key, libraries)
-                    else:
-                        # Record group dependency
-                        dep_group_key = None
-                        if hasattr(dep_func_info, 'wrapper') and dep_func_info.wrapper:
-                            wrapper_ref = dep_func_info.wrapper
-                            if hasattr(wrapper_ref, '_group_key'):
-                                dep_group_key = wrapper_ref._group_key
-                        if dep_group_key:
-                            dep_tracker.record_group_dependency(_group_key, dep_group_key, "function_call")
     
     output_manager.queue_compilation(group_key, compile_callback, func_info)
     
@@ -507,16 +482,64 @@ def _compile_impl(func_or_class,
     wrapper._captured_effect_context = _captured_effect_context
     wrapper._compile_suffix = compile_suffix
     wrapper._effect_suffix = effect_suffix
+    wrapper._effect_specialized_cache = {}  # Cache for effect-specialized versions
+    # Note: wrapper._func_info and func_info.wrapper are set earlier (before registration)
     
-    func_info.wrapper = wrapper
     output_manager.add_wrapper_to_group(group_key, wrapper)
     
+    def get_effect_specialized(target_effect_suffix, effect_overrides):
+        """
+        Get or create an effect-specialized version of this wrapper.
+        
+        Args:
+            target_effect_suffix: Effect suffix string (e.g., "MyEffect")
+            effect_overrides: Dict of effect overrides from context
+        
+        Returns:
+            Specialized wrapper with the given effect_suffix
+        """
+        # If this wrapper already has the target effect_suffix, return self
+        if wrapper._effect_suffix == target_effect_suffix:
+            return wrapper
+        
+        # Check cache
+        if target_effect_suffix in wrapper._effect_specialized_cache:
+            return wrapper._effect_specialized_cache[target_effect_suffix]
+        
+        # Create new specialized version
+        from ..effect import restore_effect_context
+        
+        original_scope = wrapper._group_key[1] if wrapper._group_key else None
+        
+        logger.debug(f"Creating effect-specialized version: {wrapper._original_name}_{target_effect_suffix}")
+        
+        with restore_effect_context(effect_overrides):
+            specialized_wrapper = compile(
+                wrapper.__wrapped__,
+                suffix=wrapper._compile_suffix,
+                _effect_suffix=target_effect_suffix,
+                _effect_scope=original_scope
+            )
+        
+        # Cache the specialized wrapper
+        wrapper._effect_specialized_cache[target_effect_suffix] = specialized_wrapper
+        return specialized_wrapper
+    
+    wrapper.get_effect_specialized = get_effect_specialized
 
     def handle_call(visitor, func_ref, args, node):
         """Handle calling a @compile function."""
         from ..valueref import wrap_value
         from ..builtin_entities import func as func_type_cls
         from ..builtin_entities.python_type import PythonType
+        from ..build.deps import get_dependency_tracker
+        
+        # Record dependency: caller -> callee (at call time, not from LLVM IR)
+        caller_group_key = getattr(visitor, 'current_group_key', None)
+        callee_group_key = wrapper._group_key
+        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
+            dep_tracker = get_dependency_tracker()
+            dep_tracker.record_group_dependency(caller_group_key, callee_group_key, "function_call")
         
         wrapper_ref = wrap_value(wrapper, kind="python", type_hint=PythonType.wrap(wrapper))
         converted_func_ref = visitor.type_converter.convert(wrapper_ref, func_type_cls, node)

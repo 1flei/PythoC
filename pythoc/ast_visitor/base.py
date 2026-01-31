@@ -300,79 +300,11 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 is_mutable=False,
             )
         
-        # 4. Check unified registry for @compile functions (supports mutual recursion)
-        # This handles the case where function B calls function A, but A's wrapper
-        # is not yet in user_globals when B's decorator runs (deferred compilation)
-        from ..registry import get_unified_registry
-        registry = get_unified_registry()
-        func_info = registry.get_function_info(name)
-        if func_info:
-            # Create a callable wrapper that uses registry info
-            class RegistryFunctionWrapper:
-                def __init__(self, func_name, func_info):
-                    self.func_name = func_name
-                    self.func_info = func_info
-                
-                def handle_call(self, visitor, func_ref, args, node):
-                    """Handle calls to functions registered in unified registry"""
-                    from llvmlite import ir as llvm_ir
-                    
-                    actual_func_name = self.func_info.mangled_name or self.func_name
-                    
-                    # Get or declare the function in the module
-                    try:
-                        ir_func = visitor.module.get_global(actual_func_name)
-                    except KeyError:
-                        # Declare the function with proper ABI handling
-                        param_llvm_types = []
-                        for param_name in self.func_info.param_names:
-                            pc_param_type = self.func_info.param_type_hints.get(param_name)
-                            if pc_param_type and hasattr(pc_param_type, 'get_llvm_type'):
-                                param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
-                            else:
-                                logger.error(f"Invalid parameter type hint for '{param_name}' in function '{actual_func_name}'",
-                                            node=node, exc_type=TypeError)
-                        
-                        if self.func_info.return_type_hint and hasattr(self.func_info.return_type_hint, 'get_llvm_type'):
-                            return_llvm_type = self.func_info.return_type_hint.get_llvm_type(visitor.module.context)
-                        else:
-                            return_llvm_type = llvm_ir.VoidType()
-                        
-                        # Use LLVMBuilder to declare function with C ABI
-                        from ..builder import LLVMBuilder
-                        temp_builder = LLVMBuilder()
-                        func_wrapper = temp_builder.declare_function(
-                            visitor.module, actual_func_name,
-                            param_llvm_types, return_llvm_type
-                        )
-                        ir_func = func_wrapper.ir_function
-                    
-                    # Build parameter LLVM types
-                    param_llvm_types = []
-                    for p in self.func_info.param_names:
-                        param_type = self.func_info.param_type_hints[p]
-                        param_llvm_types.append(param_type.get_llvm_type(visitor.module.context))
-                    
-                    return visitor._perform_call(
-                        node, ir_func, param_llvm_types,
-                        self.func_info.return_type_hint,
-                        evaluated_args=args
-                    )
-            
-            wrapper = RegistryFunctionWrapper(name, func_info)
-            from ..valueref import wrap_value
-            return VariableInfo(
-                name=name,
-                value_ref=wrap_value(
-                    kind='python',
-                    value=wrapper,
-                    type_hint=func_info,
-                ),
-                alloca=None,
-                source="registry_function",
-                is_global=True,
-                is_mutable=False,
-            )
+        # Note: Self/mutual recursion is now handled via group scope injection
+        # in output_manager._compile_pending_for_group(). All functions in the
+        # same compilation group have their wrappers injected into each other's
+        # compilation_globals before compilation starts. This eliminates the need
+        # for name-based registry lookup here.
         
         return None
     

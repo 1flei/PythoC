@@ -41,7 +41,6 @@ class LLVMCompiler:
         self.module.data_layout = target_machine.target_data
         self.extern_functions = {}  # Reset extern functions for new module
         self._declare_extern_functions()
-        self._declare_imported_user_functions()
         return self.module
     
     
@@ -50,41 +49,6 @@ class LLVMCompiler:
         # This method is now called after compilation to only declare used functions
         # The actual declaration happens in _declare_extern_function when needed
         pass
-    
-    def _declare_imported_user_functions(self):
-        """Declare user functions imported from other modules"""
-        if not hasattr(self, 'imported_user_functions'):
-            return
-        
-        from .registry import get_unified_registry
-        
-        for func_name, module_path in self.imported_user_functions.items():
-            # Get function type hints from registry
-            func_info = get_unified_registry().get_function_info(func_name)
-            if not func_info:
-                continue
-            
-            # Re-parse type annotations using current module's context
-            # This ensures struct types use the current module's type IDs
-            param_types = []
-            if func_info.param_type_hints:
-                for param_name, pc_type in func_info.param_type_hints.items():
-                    llvm_type = self._recreate_type_in_context(pc_type)
-                    param_types.append(llvm_type)
-            
-            # Get return type
-            # return_type = ir.IntType(32)  # default
-            if func_info.return_type_hint:
-                return_type = self._recreate_type_in_context(func_info.return_type_hint)
-            
-            # Declare function with proper ABI handling
-            if func_name not in self.module.globals:
-                from .builder import LLVMBuilder
-                temp_builder = LLVMBuilder()
-                func_wrapper = temp_builder.declare_function(
-                    self.module, func_name,
-                    param_types, return_type
-                )
     
     def _recreate_type_in_context(self, pc_type):
         """Recreate a PC type's LLVM representation in current module's context"""
@@ -119,6 +83,25 @@ class LLVMCompiler:
         """Declare a specific extern function when it's actually called"""
         if func_name in self.extern_functions:
             return self.extern_functions[func_name]
+        
+        # Check if a global with this name already exists in the module
+        # If it's a local definition (not a declaration), we have a name conflict
+        try:
+            existing = self.module.get_global(func_name)
+            if existing.is_declaration:
+                # It's already an extern declaration, reuse it
+                self.extern_functions[func_name] = existing
+                return existing
+            else:
+                # It's a local definition - name conflict!
+                raise NameError(
+                    f"Cannot call extern function '{func_name}': "
+                    f"a local function with the same name is already defined. "
+                    f"Please rename your local function to avoid conflict with the extern symbol."
+                )
+        except KeyError:
+            # No existing global, proceed to create declaration
+            pass
             
         # Import here to avoid circular import
         from .decorators import get_extern_function_info
@@ -127,13 +110,6 @@ class LLVMCompiler:
         func_info = get_extern_function_info(func_name)
         if not func_info:
             raise NameError(f"Extern function '{func_name}' not registered")
-        
-        # Check if this function was imported (if we have import tracking)
-        if hasattr(self, 'imported_externs') and self.imported_externs:
-            if func_name not in self.imported_externs:
-                # Function not imported, but we'll still allow it if it's being called
-                # This handles cases where functions are called without explicit import
-                pass
         
         # Convert PC types to LLVM types
         param_types = []
@@ -170,7 +146,7 @@ class LLVMCompiler:
         self.extern_functions[func_name] = extern_func
         return extern_func
     
-    def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None) -> ir.Function:
+    def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None) -> ir.Function:
         """
         Compile a function directly from an AST node (meta-programming support)
         
@@ -335,6 +311,7 @@ class LLVMCompiler:
         visitor = LLVMIRVisitor(self.module, None, func_type_hints, None, compiler=self, user_globals=user_globals)
         
         visitor.current_function = llvm_function
+        visitor.current_group_key = group_key  # For dependency tracking at call time
         
         # Store varargs information for this function (using results from earlier detection)
         visitor.current_varargs_info = None

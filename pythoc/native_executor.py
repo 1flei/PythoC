@@ -252,25 +252,7 @@ class MultiSOExecutor:
                         dependencies.append((dep_source_file, dep_so_file))
             return dependencies
         
-        # Fallback to legacy imported_user_functions
-        compiler = registry.get_compiler(source_file)
-        if not compiler:
-            return []
-        
-        if hasattr(compiler, 'imported_user_functions'):
-            for dep_func_name, dep_source_file in compiler.imported_user_functions.items():
-                # Get function info to find its so_file
-                func_info = registry.get_function_info(dep_func_name)
-                if not func_info:
-                    func_info = registry.get_function_info_by_mangled(dep_func_name)
-                
-                if func_info and func_info.so_file:
-                    dep_so_file = func_info.so_file
-                    # Avoid self-dependency and duplicates
-                    if dep_so_file != so_file and dep_so_file not in seen_so_files:
-                        seen_so_files.add(dep_so_file)
-                        dependencies.append((dep_source_file, dep_so_file))
-        
+        # No deps file found - return empty (deps system is the only source of truth)
         return dependencies
     
     def _load_library_macos_lazy(self, so_file: str) -> ctypes.CDLL:
@@ -395,7 +377,7 @@ class MultiSOExecutor:
             except Exception as e:
                 raise RuntimeError(f"Failed to load library {so_file}: {e}")
     
-    def get_function(self, func_name: str, compiler, so_file: str) -> Callable:
+    def get_function(self, func_name: str, compiler, so_file: str, wrapper=None) -> Callable:
         """
         Get a function from loaded libraries
         
@@ -403,6 +385,7 @@ class MultiSOExecutor:
             func_name: Function name
             compiler: LLVMCompiler instance (for signature info)
             so_file: SO file containing the function
+            wrapper: Optional @compile wrapper with _func_info attribute
             
         Returns:
             Python callable wrapper
@@ -417,8 +400,8 @@ class MultiSOExecutor:
         if lib is None:
             raise RuntimeError(f"Library {so_file} not loaded")
         
-        # Get function signature from compiler
-        signature = self._get_function_signature(func_name, compiler)
+        # Get function signature - prefer wrapper's func_info over registry lookup
+        signature = self._get_function_signature(func_name, compiler, wrapper=wrapper)
         if signature is None:
             raise RuntimeError(f"Function {func_name} not found in module")
         
@@ -484,17 +467,21 @@ class MultiSOExecutor:
         self.function_cache[cache_key] = wrapper
         return wrapper
     
-    def _get_function_signature(self, func_name: str, compiler) -> Optional[Tuple]:
-        """Get function signature from registry using pythoc types.
+    def _get_function_signature(self, func_name: str, compiler, wrapper=None) -> Optional[Tuple]:
+        """Get function signature from wrapper or registry using pythoc types.
         
-        Uses pythoc types from registry to get correct ctypes mapping,
+        Uses pythoc types for correct ctypes mapping,
         especially for signed/unsigned distinction that LLVM IR doesn't preserve.
+        
+        Args:
+            func_name: Function name (for error messages)
+            compiler: LLVMCompiler instance
+            wrapper: Optional @compile wrapper with _func_info attribute
         """
-        from .registry import get_unified_registry
-        registry = get_unified_registry()
-        func_info = registry.get_function_info(func_name)
-        if not func_info:
-            func_info = registry.get_function_info_by_mangled(func_name)
+        # Prefer getting func_info directly from wrapper
+        func_info = None
+        if wrapper is not None:
+            func_info = getattr(wrapper, '_func_info', None)
         
         if func_info:
             # Use pythoc types for accurate ctypes mapping
@@ -614,8 +601,8 @@ class MultiSOExecutor:
         # Load library with dependencies
         self.load_library_with_dependencies(source_file, so_file, dependencies)
         
-        # Get and cache the native function
-        native_func = self.get_function(actual_func_name, compiler, so_file)
+        # Get and cache the native function - pass wrapper for direct func_info access
+        native_func = self.get_function(actual_func_name, compiler, so_file, wrapper=wrapper)
         return native_func
     
     def _collect_dependent_obj_files(self, so_file: str, source_file: str, visited: Set[str]) -> List[str]:

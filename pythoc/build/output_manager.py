@@ -179,6 +179,9 @@ class OutputManager:
         Phase 1: Forward declare all functions
         Phase 2: Compile all function bodies
         
+        Before compilation, injects group scope into each function's compilation_globals
+        to support self/mutual recursion without name-based registry lookup.
+        
         Supports transitive effect propagation: if compiling a function body
         triggers generation of new suffix versions (e.g., b_get_value_mock),
         those new functions are also compiled in subsequent iterations.
@@ -221,6 +224,25 @@ class OutputManager:
             
             if not new_pending:
                 break
+            
+            # Build group scope from all pending functions' wrappers
+            # This enables self/mutual recursion by making all group functions
+            # available in each function's compilation_globals
+            group_scope = {}
+            for callback, func_info in new_pending:
+                if func_info.wrapper is not None:
+                    group_scope[func_info.name] = func_info.wrapper
+            
+            # Inject group scope into each function's compilation_globals
+            for callback, func_info in new_pending:
+                if func_info.compilation_globals is not None:
+                    # Update with group scope (existing entries take precedence
+                    # for non-function entries, but function wrappers are added)
+                    for name, wrapper in group_scope.items():
+                        if name not in func_info.compilation_globals:
+                            func_info.compilation_globals[name] = wrapper
+            
+            logger.debug(f"Injected group scope with {len(group_scope)} functions: {list(group_scope.keys())}")
             
             # Phase 1: Forward declare all new functions
             for callback, func_info in new_pending:

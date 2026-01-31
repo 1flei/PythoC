@@ -363,7 +363,25 @@ class MatchStatementMixin:
                 condition_ir: LLVM IR value (i1) for pattern match condition
                 bindings: list of (var_name, var_value) tuples for variable bindings
         """
-        if isinstance(pattern, ast.MatchValue):
+        if isinstance(pattern, ast.MatchSingleton):
+            # Singleton pattern: True, False, None
+            # pattern.value is directly Python True/False/None, not an AST node
+            from ..builtin_entities import bool as bool_type
+            from ..valueref import wrap_value
+            singleton_val = pattern.value
+            if singleton_val is True:
+                value = wrap_value(ir.Constant(ir.IntType(1), 1), kind="value", type_hint=bool_type)
+            elif singleton_val is False:
+                value = wrap_value(ir.Constant(ir.IntType(1), 0), kind="value", type_hint=bool_type)
+            elif singleton_val is None:
+                logger.error("None singleton pattern not supported in pythoc", node=pattern, exc_type=NotImplementedError)
+            else:
+                logger.error(f"Unknown singleton value: {singleton_val}", node=pattern, exc_type=NotImplementedError)
+            
+            condition = self._compare_values(subject, value, ast.Eq())
+            return condition, []
+        
+        elif isinstance(pattern, ast.MatchValue):
             # Literal value pattern: compare subject with literal
             value = self.visit_expression(pattern.value)
             

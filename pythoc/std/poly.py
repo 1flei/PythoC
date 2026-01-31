@@ -44,14 +44,10 @@ class Poly:
     
     def _register_function(self, f):
         """Extract function signature and register in map"""
-        registry = get_unified_registry()
-        func_info = registry.get_function_info(f.__name__)
+        # Get func_info directly from wrapper instead of registry lookup
+        func_info = getattr(f, '_func_info', None)
         if not func_info:
-            lookup = getattr(f, '_mangled_name', None)
-            if lookup:
-                func_info = registry.get_function_info_by_mangled(lookup)
-        if not func_info:
-            raise NameError(f"Function '{getattr(f, '__name__', f)}' not found in registry")
+            raise NameError(f"Function '{getattr(f, '__name__', f)}' not found - missing _func_info attribute")
         
         param_types = tuple(
             func_info.param_type_hints[name] 
@@ -170,15 +166,9 @@ class Poly:
                 missing_combinations.append((variant_names, expected_types))
             else:
                 variant_combos.append((combo, expected_types, target_info))
-                # Get return type from function info
+                # Get return type from function info directly from wrapper
                 target_func, _ = target_info
-                from ..registry import get_unified_registry
-                registry = get_unified_registry()
-                func_info = registry.get_function_info(target_func.__name__)
-                if not func_info:
-                    lookup = getattr(target_func, '_mangled_name', None)
-                    if lookup:
-                        func_info = registry.get_function_info_by_mangled(lookup)
+                func_info = getattr(target_func, '_func_info', None)
                 if func_info and func_info.return_type_hint:
                     return_types.append(func_info.return_type_hint)
         
