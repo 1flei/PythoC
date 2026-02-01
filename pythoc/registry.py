@@ -113,30 +113,6 @@ class FunctionInfo:
 
 
 @dataclass
-class ExternFunctionInfo:
-    """Information about an external function"""
-    name: str
-    lib: str = "c"
-    calling_convention: str = "cdecl"
-    return_type: Optional[Any] = None
-    param_types: List[Any] = field(default_factory=list)
-    llvm_function: Optional[ir.Function] = None
-    signature: Optional[Any] = None  # inspect.Signature
-    function: Optional[Any] = None  # Python function object
-
-
-@dataclass
-class RuntimeFunctionInfo:
-    """Information about a runtime-generated function"""
-    name: str
-    ast_node: Optional[ast.FunctionDef] = None
-    compiler: Optional[Any] = None  # LLVMCompiler instance
-    source_code: Optional[str] = None
-    parent_function: Optional[str] = None
-    function: Optional[Any] = None  # Python function object
-
-
-@dataclass
 class StructInfo:
     """Information about a struct type
     
@@ -434,44 +410,33 @@ class UnifiedCompilationRegistry:
         # ===== Variable Registry =====
         # Per-compiler variable registry (each compiler has its own scope)
         self._variable_registries: Dict[str, VariableRegistry] = {}
-        
-        # ===== Function Registry =====
-        # Compiled functions: source_file -> list of function names
-        self._compiled_functions: Dict[str, List[str]] = {}
-        
-        # ===== Extern Functions =====
-        self._extern_functions: Dict[str, ExternFunctionInfo] = {}
-        
-        # ===== Runtime Functions =====
-        self._runtime_functions: Dict[str, RuntimeFunctionInfo] = {}
-        self._runtime_function_counter: int = 0
-        
+
         # ===== Source Code Registry =====
         # Source files: source_file -> full source code
         self._source_files: Dict[str, str] = {}
-        
+
         # Individual function sources: "source_file:func_name" -> source code
         self._function_sources: Dict[str, str] = {}
-        
+
         # ===== Compiler Registry =====
         # Compilers: source_file -> LLVMCompiler instance
         self._compilers: Dict[str, Any] = {}
-        
+
         # Shared libraries: source_file -> .so file path
         self._shared_libraries: Dict[str, str] = {}
-        
+
         # ===== Type Registry =====
         # Struct types: struct_name -> StructInfo
         self._structs: Dict[str, StructInfo] = {}
-        
+
         # ===== Builtin Entity Registry =====
         # Builtin entities (types, functions): name -> entity class
         self._builtin_entities: Dict[str, type] = {}
-        
+
         # ===== Link Libraries Registry =====
         # Libraries to link against (collected from extern functions)
         self._link_libraries: Set[str] = set()
-        
+
         # ===== Link Objects Registry =====
         # Object files to link (from cimport compiled sources)
         self._link_objects: Set[str] = set()
@@ -495,72 +460,7 @@ class UnifiedCompilationRegistry:
         """Clear variable registry for a specific compiler"""
         if compiler_id in self._variable_registries:
             self._variable_registries[compiler_id].clear()
-    
-    # ========== Function Registry Methods ==========
-    
-    def register_function(self, func_info: FunctionInfo):
-        """Register a compiled function"""
-        # Add to compiled functions list (by original name)
-        if func_info.source_file not in self._compiled_functions:
-            self._compiled_functions[func_info.source_file] = []
-        if func_info.name not in self._compiled_functions[func_info.source_file]:
-            self._compiled_functions[func_info.source_file].append(func_info.name)
-    
-    def list_compiled_functions(self, source_file: Optional[str] = None) -> Dict[str, List[str]]:
-        """List compiled functions
-        
-        Args:
-            source_file: If provided, return only functions from this file
-        
-        Returns:
-            Dict mapping source files to function name lists
-        """
-        if source_file:
-            return {source_file: self._compiled_functions.get(source_file, [])}
-        return self._compiled_functions.copy()
-    
-    # ========== Extern Function Methods ==========
-    
-    def register_extern_function(self, extern_info: ExternFunctionInfo):
-        """Register an external function"""
-        self._extern_functions[extern_info.name] = extern_info
-    
-    def get_extern_function(self, func_name: str) -> Optional[ExternFunctionInfo]:
-        """Get extern function information"""
-        return self._extern_functions.get(func_name)
-    
-    def is_extern_function(self, func_name: str) -> bool:
-        """Check if a function is registered as extern"""
-        return func_name in self._extern_functions
-    
-    def list_extern_functions(self) -> List[str]:
-        """List all extern function names"""
-        return list(self._extern_functions.keys())
-    
-    # ========== Runtime Function Methods ==========
-    
-    def register_runtime_function(self, runtime_info: RuntimeFunctionInfo) -> str:
-        """Register a runtime-generated function
-        
-        Returns:
-            The function name (may be auto-generated)
-        """
-        if not runtime_info.name:
-            # Generate unique name
-            self._runtime_function_counter += 1
-            runtime_info.name = f"_runtime_func_{self._runtime_function_counter}"
-        
-        self._runtime_functions[runtime_info.name] = runtime_info
-        return runtime_info.name
-    
-    def get_runtime_function(self, func_name: str) -> Optional[RuntimeFunctionInfo]:
-        """Get runtime function information"""
-        return self._runtime_functions.get(func_name)
-    
-    def list_runtime_functions(self) -> List[str]:
-        """List all runtime function names"""
-        return list(self._runtime_functions.keys())
-    
+
     # ========== Source Code Methods ==========
     
     def register_source_file(self, source_file: str, source_code: str):
@@ -798,22 +698,13 @@ class UnifiedCompilationRegistry:
     
     def get_link_libraries(self) -> List[str]:
         """Get all libraries to link against
-        
-        Collects from:
-        1. Explicitly added via add_link_library()
-        2. Automatically from extern functions
-        
+
+        Returns libraries explicitly added via add_link_library().
+
         Returns:
             Sorted list of library names
         """
-        libs = set(self._link_libraries)
-        
-        # Collect from extern functions
-        for extern_info in self._extern_functions.values():
-            if extern_info.lib:
-                libs.add(extern_info.lib)
-        
-        return sorted(libs)
+        return sorted(self._link_libraries)
     
     # ========== Link Objects Methods ==========
     
@@ -838,14 +729,10 @@ class UnifiedCompilationRegistry:
         self._link_objects.clear()
     
     # ========== Utility Methods ==========
-    
+
     def clear_all(self):
         """Clear all registries (useful for testing)"""
         self._variable_registries.clear()
-        self._compiled_functions.clear()
-        self._extern_functions.clear()
-        self._runtime_functions.clear()
-        self._runtime_function_counter = 0
         self._source_files.clear()
         self._function_sources.clear()
         self._compilers.clear()
@@ -854,21 +741,13 @@ class UnifiedCompilationRegistry:
         self._builtin_entities.clear()
         self._link_libraries.clear()
         self._link_objects.clear()
-    
-    def clear_functions(self):
-        """Clear only function-related registries"""
-        self._compiled_functions.clear()
-        self._extern_functions.clear()
-        self._runtime_functions.clear()
-        self._function_sources.clear()
-        self._link_libraries.clear()
-    
+
     def dump_state(self, verbose: bool = False):
         """Debug: dump registry state"""
         print("=" * 60)
         print("UNIFIED COMPILATION REGISTRY STATE")
         print("=" * 60)
-        
+
         print(f"\n[Variables] {len(self._variable_registries)} registries")
         for compiler_id, var_reg in self._variable_registries.items():
             visible = var_reg.list_all_visible()
@@ -876,38 +755,28 @@ class UnifiedCompilationRegistry:
             if verbose:
                 for name, info in visible.items():
                     print(f"    - {name}: {info.type_hint}")
-        
-        print(f"\n[Functions]")
-        print(f"  Compiled: {sum(len(funcs) for funcs in self._compiled_functions.values())}")
-        print(f"  Extern: {len(self._extern_functions)}")
-        print(f"  Runtime: {len(self._runtime_functions)}")
-        if verbose:
-            for source_file, func_list in self._compiled_functions.items():
-                for func_name in func_list:
-                    print(f"    - {func_name} ({source_file})")
-        
+
         print(f"\n[Source Files] {len(self._source_files)}")
         for source_file in self._source_files.keys():
-            funcs = self._compiled_functions.get(source_file, [])
-            print(f"  {source_file}: {len(funcs)} functions")
-        
+            print(f"  {source_file}")
+
         print(f"\n[Compilers] {len(self._compilers)}")
         for source_file in self._compilers.keys():
             lib = self._shared_libraries.get(source_file, "not compiled")
             print(f"  {source_file} -> {lib}")
-        
+
         print(f"\n[Structs] {len(self._structs)}")
         if verbose:
             for name, info in self._structs.items():
                 print(f"  {name}: {len(info.fields)} fields")
-        
+
         print(f"\n[Builtin Entities] {len(self._builtin_entities)}")
         if verbose:
             types = self.list_builtin_types()
             funcs = self.list_builtin_functions()
             print(f"  Types: {', '.join(types)}")
             print(f"  Functions: {', '.join(funcs)}")
-        
+
         print("=" * 60)
 
 
@@ -918,32 +787,6 @@ _unified_registry = UnifiedCompilationRegistry()
 def get_unified_registry() -> UnifiedCompilationRegistry:
     """Get the global unified registry instance"""
     return _unified_registry
-
-
-# ============================================================================
-# Backward Compatibility Functions
-# ============================================================================
-
-def register_extern_function(name: str, return_type: Any = None, 
-                            param_types: List[Any] = None, 
-                            lib: str = "c", 
-                            calling_convention: str = "cdecl",
-                            **kwargs) -> None:
-    """Register an external function (backward compatibility)
-    
-    DEPRECATED: This is kept for backward compatibility with old code.
-    New code should use UnifiedCompilationRegistry.register_extern_function()
-    
-    Note: Extra kwargs (like 'signature', 'function') are ignored in the new system.
-    """
-    extern_info = ExternFunctionInfo(
-        name=name,
-        lib=lib,
-        calling_convention=calling_convention,
-        return_type=return_type,
-        param_types=param_types or []
-    )
-    _unified_registry.register_extern_function(extern_info)
 
 
 # ============================================================================

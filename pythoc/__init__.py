@@ -22,7 +22,7 @@ from .builtin_entities import (
 )
 
 # Provide lowercase alias for convenience
-from .decorators import compile, jit, extern, inline, get_compiler, list_compiled_functions, clear_registry
+from .decorators import compile, jit, extern, inline, get_compiler, clear_registry
 from .effect import effect
 from .decorators.compile import flush_all_pending_outputs
 from .compiler import LLVMCompiler
@@ -89,7 +89,6 @@ __all__ = [
     'disassemble_to_native',
     'create_build_info',
     'get_compiler',
-    'list_compiled_functions',
     'clear_registry',
     'nullptr',
     'sizeof',

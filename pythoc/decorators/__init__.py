@@ -20,9 +20,6 @@ from .structs import (
 from .extern import (
     extern,
     ExternFunctionWrapper,
-    get_extern_functions,
-    is_extern_function,
-    get_extern_function_info,
 )
 from .inline import inline
 from .jit import jit
@@ -37,10 +34,6 @@ def _get_registry():
 # registry helpers
 def get_compiler(source_file):
     return _get_registry().get_compiler(source_file)
-
-
-def list_compiled_functions():
-    return _get_registry().list_compiled_functions()
 
 
 def clear_registry():

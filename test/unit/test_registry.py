@@ -7,8 +7,7 @@ from llvmlite import ir
 import ast
 
 from pythoc.registry import (
-    VariableInfo, FunctionInfo, ExternFunctionInfo,
-    RuntimeFunctionInfo, StructInfo, UnifiedCompilationRegistry,
+    VariableInfo, FunctionInfo, StructInfo, UnifiedCompilationRegistry,
     get_unified_registry
 )
 
@@ -177,38 +176,13 @@ class TestUnifiedRegistry(unittest.TestCase):
         retrieved = self.registry.get_struct("Point")
         self.assertEqual(retrieved, struct_info)
     
-    def test_function_registration(self):
-        """Test function registration
-        
-        Note: get_function_info by name is deprecated.
-        In new design, func_info is accessed via wrapper._func_info.
-        This test only verifies registration doesn't fail.
-        """
-        func_info = FunctionInfo(
-            name="test_func",
-            source_file="test.py",
-            is_compiled=True
-        )
-        
-        # Registration should succeed
-        self.registry.register_function(func_info)
-        
-        # Verify it's in the internal storage (for debugging only)
-        # Normal code should use wrapper._func_info instead
-        self.assertIn("test_func", self.registry._function_info)
-    
     def test_extern_function_registration(self):
-        """Test extern function registration"""
-        extern_info = ExternFunctionInfo(
-            name="printf",
-            lib="libc"
-        )
-        
-        self.registry.register_extern_function(extern_info)
-        
-        retrieved = self.registry.get_extern_function("printf")
-        self.assertEqual(retrieved, extern_info)
-    
+        """Test extern function registration - deprecated, extern info now stored on wrapper"""
+        # This test is kept for documentation purposes
+        # In the new design, extern function info is stored on the wrapper object
+        # (wrapper._extern_config) and passed directly to compiler._declare_extern_function
+        pass
+
     def test_global_registry_singleton(self):
         """Test global registry singleton"""
         registry1 = get_unified_registry()

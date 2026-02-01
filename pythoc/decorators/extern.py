@@ -18,12 +18,19 @@ class ExternFunctionWrapper:
     def handle_call(self, visitor, func_ref, args, node):
         from ..valueref import ensure_ir, wrap_value, get_type
         from llvmlite import ir
-        
+
         # Get or declare the extern function
         # We must always go through _declare_extern_function to handle name conflicts
         # (e.g., when user defines a local @compile function with same name)
         if hasattr(visitor, 'compiler') and visitor.compiler:
-            func = visitor.compiler._declare_extern_function(self.func_name)
+            # Pass extern info directly to avoid registry lookup
+            extern_info = {
+                'lib': self.lib,
+                'calling_convention': self.calling_convention,
+                'return_type': self.return_type,
+                'param_types': self.param_types,
+            }
+            func = visitor.compiler._declare_extern_function(self.func_name, extern_info)
         else:
             raise RuntimeError(f"Visitor does not have a compiler")
         # args are already pre-evaluated by visit_Call
@@ -169,17 +176,7 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
         sig = inspect.signature(f)
         return_type = sig.return_annotation if sig.return_annotation != inspect.Signature.empty else None
         param_types = [(name, param.annotation) for name, param in sig.parameters.items()]
-        from ..registry import register_extern_function
-        register_extern_function(
-            name=f.__name__,
-            return_type=return_type,
-            param_types=param_types,
-            lib=lib or 'c',
-            calling_convention=calling_convention,
-            signature=sig,
-            function=f,
-            **kwargs
-        )
+        # Note: No longer registering in registry - info is stored on wrapper
         wrapper = ExternFunctionWrapper(
             func=f,
             lib=lib or 'c',
@@ -200,40 +197,3 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
         }
         return wrapper
     return decorator(func) if func else decorator
-
-
-def get_extern_functions():
-    registry = __import__('pythoc.registry', fromlist=['get_unified_registry']).get_unified_registry()
-    result = {}
-    for func_name in registry.list_extern_functions():
-        extern_info = registry.get_extern_function(func_name)
-        if extern_info:
-            result[func_name] = {
-                'lib': extern_info.lib,
-                'calling_convention': extern_info.calling_convention,
-                'return_type': extern_info.return_type,
-                'param_types': extern_info.param_types,
-                'signature': extern_info.signature,
-                'function': extern_info.function
-            }
-    return result
-
-
-def is_extern_function(func_name):
-    registry = __import__('pythoc.registry', fromlist=['get_unified_registry']).get_unified_registry()
-    return registry.is_extern_function(func_name)
-
-
-def get_extern_function_info(func_name):
-    registry = __import__('pythoc.registry', fromlist=['get_unified_registry']).get_unified_registry()
-    extern_info = registry.get_extern_function(func_name)
-    if extern_info:
-        return {
-            'lib': extern_info.lib,
-            'calling_convention': extern_info.calling_convention,
-            'return_type': extern_info.return_type,
-            'param_types': extern_info.param_types,
-            'signature': extern_info.signature,
-            'function': extern_info.function
-        }
-    return None

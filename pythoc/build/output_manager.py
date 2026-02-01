@@ -20,14 +20,19 @@ class OutputManager:
         # Key: group_key tuple (3 or 4 elements)
         # Value: dict with compiler, wrappers, file paths, etc.
         self._pending_groups = {}
-        
+
         # All groups (including completed ones) for compile_to_executable lookup
         self._all_groups = {}
-        
+
         # Pending compilation callbacks: group_key -> [(callback, func_info), ...]
         # callback signature: (compiler) -> None
         self._pending_compilations = {}
-        
+
+        # Cached compilation callbacks: group_key -> [(callback, func_info), ...]
+        # These are compilations that were skipped due to cache hit but may need
+        # to be restored if the group is reopened for new functions.
+        self._cached_compilations = {}
+
         # Track if flush has been called (to avoid double compilation)
         self._flushed_groups = set()
     
@@ -85,6 +90,15 @@ class OutputManager:
                     self._flushed_groups.remove(group_key)
                 self._pending_groups[group_key] = group
                 group['force_recompile'] = True
+
+                # Restore cached compilations back to pending. These are functions
+                # that were skipped due to cache hit but now need to be recompiled
+                # together with the new functions to create a complete .o file.
+                if group_key in self._cached_compilations:
+                    cached = self._cached_compilations.pop(group_key)
+                    if group_key not in self._pending_compilations:
+                        self._pending_compilations[group_key] = []
+                    self._pending_compilations[group_key].extend(cached)
 
             return group
         
@@ -315,25 +329,18 @@ class OutputManager:
             source_file = group.get('source_file')
             force_recompile = bool(group.get('force_recompile', False))
             
-            # Also force recompile if there are pending compilations for this group.
-            # This handles the case where the source file hasn't changed but new
-            # @compile functions have been defined that aren't in the cached .o file.
-            has_pending_compilations = (
-                group_key in self._pending_compilations and 
-                self._pending_compilations[group_key]
-            )
-            
-            if (not force_recompile) and (not has_pending_compilations) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
+            if (not force_recompile) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
                 # Cache hit - .o is up-to-date, skip compilation
                 # But we still need to restore dependencies from .deps file
                 self._restore_deps_from_cache(group_key, group)
                 self._flushed_groups.add(group_key)
 
-                # Clear any newly-queued callbacks/wrappers for this group. The
-                # on-disk .o already contains the compiled definitions.
+                # Save pending compilations to cache in case the group is reopened
+                # for new functions later. We'll need to restore them to ensure all
+                # functions are compiled together.
                 group['force_recompile'] = False
                 if group_key in self._pending_compilations:
-                    del self._pending_compilations[group_key]
+                    self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
                 group['wrappers'] = []
 
                 logger.debug(f"Cache hit for {group_key}, skipping compilation")
@@ -429,18 +436,18 @@ class OutputManager:
     def _save_group_deps(self, group_key, compiler, obj_file):
         """
         Save dependency information for a compiled group.
-        
-        Collects dependencies from compiler.imported_user_functions and
-        link libraries/objects, then persists to .deps file.
-        
+
+        Persists link libraries/objects to .deps file. Group dependencies
+        are recorded at call time in compile.py and type_converter.py.
+
         Args:
             group_key: Group key tuple
             compiler: LLVMCompiler with compilation results
             obj_file: Path to .o file
         """
-        from .deps import get_dependency_tracker, GroupKey
+        from .deps import get_dependency_tracker
         from ..registry import get_unified_registry
-        
+
         dep_tracker = get_dependency_tracker()
         registry = get_unified_registry()
         
@@ -454,35 +461,10 @@ class OutputManager:
             if os.path.exists(source_file):
                 group_deps.source_mtime = os.path.getmtime(source_file)
         
-        # Collect dependencies from imported_user_functions
-        if hasattr(compiler, 'imported_user_functions'):
-            for dep_name, dep_source_file in compiler.imported_user_functions.items():
-                func_info = registry.get_function_info(dep_name)
-                if not func_info:
-                    func_info = registry.get_function_info_by_mangled(dep_name)
-                
-                if func_info:
-                    # Get the group key from wrapper if available
-                    dep_group_key = None
-                    if hasattr(func_info, 'wrapper') and func_info.wrapper:
-                        wrapper = func_info.wrapper
-                        if hasattr(wrapper, '_group_key'):
-                            dep_group_key = GroupKey.from_tuple(wrapper._group_key)
-                    
-                    # Check if it's an extern function
-                    is_extern = getattr(func_info, 'is_extern', False)
-                    
-                    if is_extern:
-                        # Record external library dependency at group level
-                        libraries = []
-                        if hasattr(func_info, 'library') and func_info.library:
-                            libraries = [func_info.library]
-                        dep_tracker.record_extern_dependency(group_key, libraries)
-                    else:
-                        # Record group dependency
-                        if dep_group_key:
-                            dep_tracker.record_group_dependency(group_key, dep_group_key.to_tuple(), "function_call")
-        
+        # Note: Group dependencies are now recorded at call time in compile.py
+        # and type_converter.py, not here. The imported_user_functions approach
+        # has been removed.
+
         # Add link libraries from registry
         for lib in registry.get_link_libraries():
             if lib not in group_deps.link_libraries:
@@ -522,6 +504,7 @@ class OutputManager:
         self._pending_groups.clear()
         self._all_groups.clear()
         self._pending_compilations.clear()
+        self._cached_compilations.clear()
         self._flushed_groups.clear()
     
     def clear_failed_group(self, group_key):
