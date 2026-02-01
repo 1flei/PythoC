@@ -217,12 +217,9 @@ def _compile_impl(func_or_class,
 
     actual_func_name = func.__name__
 
-    compiled_funcs = registry.list_compiled_functions(source_file).get(source_file, [])
-    compiled_funcs.append(func.__name__)
-
     from ..type_resolver import TypeResolver
     from ..registry import FunctionInfo
-    
+
     type_resolver = TypeResolver(compiler.module.context, user_globals=user_globals)
     return_type_hint = None
     param_type_hints = {}
@@ -314,8 +311,6 @@ def _compile_impl(func_or_class,
             expanded_param_name = f'{varargs_name}_elem{i}'
             param_names.append(expanded_param_name)
             param_type_hints[expanded_param_name] = element_pc_types[i]
-    
-    reset_module = len(compiled_funcs) == 1 and not is_dynamic
 
     if mangled_name:
         import copy
@@ -398,13 +393,11 @@ def _compile_impl(func_or_class,
     # This ensures mutual recursion can find the wrapper via func_info
     func_info.wrapper = wrapper
     wrapper._func_info = func_info
-    
+
     # Store user_globals as a mutable dict on func_info
     # This will be augmented with group scope at flush time for recursion support
     func_info.compilation_globals = dict(user_globals)
-    
-    registry.register_function(func_info)
-    
+
     group_compiler = compiler
     
     group = output_manager.get_or_create_group(

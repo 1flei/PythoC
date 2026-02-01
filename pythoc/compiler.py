@@ -79,11 +79,17 @@ class LLVMCompiler:
         # Handle basic types with get_llvm_type method
         return pc_type.get_llvm_type(self.module.context)
     
-    def _declare_extern_function(self, func_name):
-        """Declare a specific extern function when it's actually called"""
+    def _declare_extern_function(self, func_name, extern_info=None):
+        """Declare a specific extern function when it's actually called
+
+        Args:
+            func_name: Name of the extern function
+            extern_info: Dict with extern function info (lib, param_types, return_type, etc.)
+                         If not provided, will be looked up from registry (deprecated path)
+        """
         if func_name in self.extern_functions:
             return self.extern_functions[func_name]
-        
+
         # Check if a global with this name already exists in the module
         # If it's a local definition (not a declaration), we have a name conflict
         try:
@@ -102,47 +108,50 @@ class LLVMCompiler:
         except KeyError:
             # No existing global, proceed to create declaration
             pass
-            
-        # Import here to avoid circular import
-        from .decorators import get_extern_function_info
+
+        # extern_info must be provided
+        if extern_info is None:
+            raise NameError(f"Extern function '{func_name}' info not provided")
+
         from .builder import LLVMBuilder
-        
-        func_info = get_extern_function_info(func_name)
-        if not func_info:
-            raise NameError(f"Extern function '{func_name}' not registered")
-        
+
         # Convert PC types to LLVM types
         param_types = []
-        for param_name, param_type in func_info['param_types']:
+        for param_name, param_type in extern_info['param_types']:
             if param_name == 'args':  # Handle *args (varargs)
                 continue  # Skip varargs in type list
             if param_type is None:
                 raise TypeError(f"Extern function '{func_name}': parameter '{param_name}' has no type annotation")
             llvm_type = param_type.get_llvm_type(self.module.context)
             param_types.append(llvm_type)
-        
+
         # Convert return type from pythoc type to LLVM type
-        if func_info['return_type'] is None:
+        if extern_info['return_type'] is None:
             return_type = ir.VoidType()
         else:
-            return_type = func_info['return_type'].get_llvm_type(self.module.context)
-        
+            return_type = extern_info['return_type'].get_llvm_type(self.module.context)
+
         # Handle varargs (printf-style functions)
-        has_varargs = any(param_name == 'args' for param_name, _ in func_info['param_types'])
-        
+        has_varargs = any(param_name == 'args' for param_name, _ in extern_info['param_types'])
+
         # Use builder to declare function with ABI handling
         temp_builder = LLVMBuilder()
         func_wrapper = temp_builder.declare_function(
             self.module, func_name, param_types, return_type, var_arg=has_varargs
         )
         extern_func = func_wrapper.ir_function
-        
+
         # Set calling convention if specified
-        if func_info.get('calling_convention') == 'stdcall':
+        if extern_info.get('calling_convention') == 'stdcall':
             extern_func.calling_convention = 'x86_stdcallcc'
         else:
             extern_func.calling_convention = 'ccc'  # Default C calling convention
-        
+
+        # Add library to link libraries
+        lib = extern_info.get('lib')
+        if lib:
+            get_unified_registry().add_link_library(lib)
+
         self.extern_functions[func_name] = extern_func
         return extern_func
     
