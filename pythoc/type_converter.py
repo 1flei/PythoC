@@ -439,44 +439,46 @@ class TypeConverter:
         actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
         
         # Handle transitive effect propagation
-        # Effect suffix is contagious: if caller has effect_suffix and callee uses overridden effects,
-        # callee also gets that effect_suffix
+        # Effect suffix is contagious: if caller is compiled under an effect_suffix,
+        # propagate the same effect_suffix to any @compile callee reference.
+        #
+        # Note: we intentionally do NOT try to predict whether the callee "uses" the
+        # overridden effects here. Conditional propagation would require a separate,
+        # authoritative dependency analysis API. The current rule is simple and
+        # deterministic: propagate whenever we are in an effect compilation context.
         compilation_ctx = get_current_compilation_context()
-        
-        if compilation_ctx and not lookup_mangled:
+
+        callee_effect_suffix = getattr(wrapper, '_effect_suffix', None)
+
+        # Only propagate when the callee itself is not already effect-specialized.
+        if compilation_ctx and callee_effect_suffix is None:
             ctx_effect_suffix = compilation_ctx.get('effect_suffix')
             ctx_effects = compilation_ctx.get('effect_overrides', {})
-            
+
             if ctx_effect_suffix and ctx_effects:
-                # Get effect dependencies from group-level deps system
-                func_effect_deps = set()
                 original_wrapper = func_info.wrapper if func_info else None
-                if original_wrapper and hasattr(original_wrapper, '_group_key'):
-                    from .build.deps import get_dependency_tracker
-                    dep_tracker = get_dependency_tracker()
-                    func_effect_deps = dep_tracker.get_effects_used(original_wrapper._group_key)
-                
-                overridden_effects = set(ctx_effects.keys())
-                
-                # Check if callee uses any of the overridden effects
-                if func_effect_deps & overridden_effects:
-                    # Use wrapper's get_effect_specialized method to get/create specialized version
-                    if original_wrapper and hasattr(original_wrapper, 'get_effect_specialized'):
-                        specialized_wrapper = original_wrapper.get_effect_specialized(
-                            ctx_effect_suffix, ctx_effects
+
+                # Do NOT propagate effect suffix into effect-implementation callables.
+                # Effect implementations are marked by the effect system.
+                if original_wrapper and getattr(original_wrapper, '_pc_effect_impl', False):
+                    pass
+                elif original_wrapper and hasattr(original_wrapper, 'get_effect_specialized'):
+                    specialized_wrapper = original_wrapper.get_effect_specialized(
+                        ctx_effect_suffix, ctx_effects
+                    )
+                    func_info = specialized_wrapper._func_info
+                    actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
+                    logger.debug(f"Using transitive effect version: {actual_func_name}")
+
+                    # Record dependency: caller_group -> specialized_wrapper_group
+                    caller_group_key = getattr(self._visitor, 'current_group_key', None)
+                    callee_group_key = getattr(specialized_wrapper, '_group_key', None)
+                    if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
+                        from .build.deps import get_dependency_tracker
+                        dep_tracker = get_dependency_tracker()
+                        dep_tracker.record_group_dependency(
+                            caller_group_key, callee_group_key, "effect_specialized_call"
                         )
-                        func_info = specialized_wrapper._func_info
-                        actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
-                        logger.debug(f"Using transitive effect version: {actual_func_name}")
-                        
-                        # Record dependency: caller_group -> specialized_wrapper_group
-                        # This is critical for proper .so loading order
-                        caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                        callee_group_key = getattr(specialized_wrapper, '_group_key', None)
-                        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
-                            dep_tracker.record_group_dependency(
-                                caller_group_key, callee_group_key, "effect_specialized_call"
-                            )
         
         # Get or declare the function in the module
         module = self._visitor.module

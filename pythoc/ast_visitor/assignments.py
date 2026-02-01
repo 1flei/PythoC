@@ -8,7 +8,7 @@ from typing import Optional, Any
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..logger import logger
-from ..ir_helpers import safe_store, safe_load, is_const, is_volatile
+from ..ir_helpers import safe_store, safe_load, is_const, is_volatile, is_static
 from ..builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -263,37 +263,63 @@ class AssignmentsMixin:
                     self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
     
     def _store_to_new_lvalue(self, node, var_name, pc_type, rvalue: ValueRef):
-        """Create new lvalue for assignment"""
-        # Create alloca
-        llvm_type = pc_type.get_llvm_type(self.module.context)
-        alloca = self._create_alloca_in_entry(llvm_type, f"{var_name}_addr")
+        """Create new lvalue for assignment
         
-        # Declare variable
+        For static variables, creates a global variable with internal linkage
+        and compile-time constant initialization (like C static local variables).
+        For regular variables, creates a stack allocation (alloca).
+        """
+        llvm_type = pc_type.get_llvm_type(self.module.context)
+        rvalue_ir = ensure_ir(rvalue)
+        
+        # Check if this is a static variable
+        if is_static(pc_type):
+            # Create unique global variable name based on function name and variable name
+            func_name = self.current_function.name if self.current_function else "global"
+            global_name = f"{func_name}.{var_name}"
+            
+            # Static variable with compile-time constant initialization (like C)
+            # rvalue_ir must be an ir.Constant
+            if not isinstance(rvalue_ir, ir.Constant):
+                logger.error(
+                    f"Static variable '{var_name}' requires compile-time constant initializer",
+                    node=node
+                )
+            
+            global_var = ir.GlobalVariable(self.module, llvm_type, global_name)
+            global_var.linkage = 'internal'  # Internal linkage = static in C
+            global_var.initializer = rvalue_ir
+            global_var.global_constant = False
+            
+            var_addr = global_var
+        else:
+            # Regular variable: create stack allocation
+            var_addr = self._create_alloca_in_entry(llvm_type, f"{var_name}_addr")
+            
+            # Store value for non-static variables
+            # Special handling for arrays: if rvalue is already a pointer to array,
+            # we need to copy the array contents (load + store), not store the pointer
+            if isinstance(rvalue_ir.type, ir.PointerType) and isinstance(rvalue_ir.type.pointee, ir.ArrayType):
+                # Array literal case: rvalue is pointer to array, need to copy contents
+                if isinstance(llvm_type, ir.ArrayType):
+                    # Load the array value and store to new alloca
+                    array_value = self.builder.load(rvalue_ir)
+                    self.builder.store(array_value, var_addr)
+                else:
+                    # Non-array target type, just store normally
+                    self.builder.store(rvalue_ir, var_addr)
+            else:
+                # Normal case: store value directly
+                self.builder.store(rvalue_ir, var_addr)
+        
+        # Declare variable (for both static and non-static)
         self.declare_variable(
             name=var_name,
             type_hint=pc_type,
-            alloca=alloca,
+            alloca=var_addr,
             source="annotation",
             line_number=node.lineno
         )
-        
-        # Store value
-        rvalue_ir = ensure_ir(rvalue)
-        
-        # Special handling for arrays: if rvalue is already a pointer to array,
-        # we need to copy the array contents (load + store), not store the pointer
-        if isinstance(rvalue_ir.type, ir.PointerType) and isinstance(rvalue_ir.type.pointee, ir.ArrayType):
-            # Array literal case: rvalue is pointer to array, need to copy contents
-            if isinstance(llvm_type, ir.ArrayType):
-                # Load the array value and store to new alloca
-                array_value = self.builder.load(rvalue_ir)
-                self.builder.store(array_value, alloca)
-            else:
-                # Non-array target type, just store normally
-                self.builder.store(rvalue_ir, alloca)
-        else:
-            # Normal case: store value directly
-            self.builder.store(rvalue_ir, alloca)
     
     def visit_Assign(self, node: ast.Assign):
         """Handle assignment statements with automatic type inference"""

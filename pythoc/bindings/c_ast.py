@@ -22,11 +22,11 @@ See docs/c_ast_review.md for design rationale.
 
 from pythoc import (
     compile, i32, i64, i8, ptr, enum, sizeof, void, nullptr, bool, char,
-    struct, linear, consume, assume, refined
+    struct, linear, consume, assume, refined, effect
 )
 from pythoc.std.refine_wrapper import nonnull_wrap
 from pythoc.std.linear_wrapper import linear_wrap
-from pythoc.libc.stdlib import malloc, free
+from pythoc.std import mem  # Sets up default mem effect
 
 
 # =============================================================================
@@ -346,67 +346,67 @@ decl_nonnull, DeclRef = nonnull_wrap(ptr[Decl])
 
 @compile
 def _ctype_alloc_raw() -> ptr[CType]:
-    return ptr[CType](malloc(sizeof(CType)))
+    return ptr[CType](effect.mem.malloc(sizeof(CType)))
 
 @compile
 def _ctype_free_raw(p: ptr[CType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _qualtype_alloc_raw() -> ptr[QualType]:
-    return ptr[QualType](malloc(sizeof(QualType)))
+    return ptr[QualType](effect.mem.malloc(sizeof(QualType)))
 
 @compile
 def _qualtype_free_raw(p: ptr[QualType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _ptrtype_alloc_raw() -> ptr[PtrType]:
-    return ptr[PtrType](malloc(sizeof(PtrType)))
+    return ptr[PtrType](effect.mem.malloc(sizeof(PtrType)))
 
 @compile
 def _ptrtype_free_raw(p: ptr[PtrType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _arraytype_alloc_raw() -> ptr[ArrayType]:
-    return ptr[ArrayType](malloc(sizeof(ArrayType)))
+    return ptr[ArrayType](effect.mem.malloc(sizeof(ArrayType)))
 
 @compile
 def _arraytype_free_raw(p: ptr[ArrayType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _functype_alloc_raw() -> ptr[FuncType]:
-    return ptr[FuncType](malloc(sizeof(FuncType)))
+    return ptr[FuncType](effect.mem.malloc(sizeof(FuncType)))
 
 @compile
 def _functype_free_raw(p: ptr[FuncType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _structtype_alloc_raw() -> ptr[StructType]:
-    return ptr[StructType](malloc(sizeof(StructType)))
+    return ptr[StructType](effect.mem.malloc(sizeof(StructType)))
 
 @compile
 def _structtype_free_raw(p: ptr[StructType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _enumtype_alloc_raw() -> ptr[EnumType]:
-    return ptr[EnumType](malloc(sizeof(EnumType)))
+    return ptr[EnumType](effect.mem.malloc(sizeof(EnumType)))
 
 @compile
 def _enumtype_free_raw(p: ptr[EnumType]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 @compile
 def _decl_alloc_raw() -> ptr[Decl]:
-    return ptr[Decl](malloc(sizeof(Decl)))
+    return ptr[Decl](effect.mem.malloc(sizeof(Decl)))
 
 @compile
 def _decl_free_raw(p: ptr[Decl]) -> void:
-    free(p)
+    effect.mem.free(p)
 
 
 # =============================================================================
@@ -444,15 +444,15 @@ DeclProof, decl_alloc, decl_free_linear = linear_wrap(
 
 @compile
 def paraminfo_alloc(count: i32) -> ptr[ParamInfo]:
-    return ptr[ParamInfo](malloc(sizeof(ParamInfo) * count))
+    return ptr[ParamInfo](effect.mem.malloc(sizeof(ParamInfo) * count))
 
 @compile
 def fieldinfo_alloc(count: i32) -> ptr[FieldInfo]:
-    return ptr[FieldInfo](malloc(sizeof(FieldInfo) * count))
+    return ptr[FieldInfo](effect.mem.malloc(sizeof(FieldInfo) * count))
 
 @compile
 def enumvalue_alloc(count: i32) -> ptr[EnumValue]:
-    return ptr[EnumValue](malloc(sizeof(EnumValue) * count))
+    return ptr[EnumValue](effect.mem.malloc(sizeof(EnumValue) * count))
 
 
 # =============================================================================
@@ -679,7 +679,7 @@ def free_fields(fields: ptr[FieldInfo], count: i32) -> void:
             # so we use raw free. The parent proof covers this.
             _qualtype_free_deep(fields[i].type)
         i = i + 1
-    free(fields)
+    effect.mem.free(fields)
 
 
 @compile
@@ -690,7 +690,7 @@ def free_params(params: ptr[ParamInfo], count: i32) -> void:
         if params[i].type != nullptr:
             _qualtype_free_deep(params[i].type)
         i = i + 1
-    free(params)
+    effect.mem.free(params)
 
 
 @compile
@@ -707,39 +707,39 @@ def _ctype_free_deep(ty: ptr[CType]) -> void:
             if pt != nullptr:
                 if pt.pointee != nullptr:
                     _qualtype_free_deep(pt.pointee)
-                free(pt)
+                effect.mem.free(pt)
         case (CType.Array, at):
             if at != nullptr:
                 if at.elem != nullptr:
                     _qualtype_free_deep(at.elem)
-                free(at)
+                effect.mem.free(at)
         case (CType.Func, ft):
             if ft != nullptr:
                 if ft.ret != nullptr:
                     _qualtype_free_deep(ft.ret)
                 if ft.params != nullptr:
                     free_params(ft.params, ft.param_count)
-                free(ft)
+                effect.mem.free(ft)
         case (CType.Struct, st):
             if st != nullptr:
                 if st.fields != nullptr:
                     free_fields(st.fields, st.field_count)
-                free(st)
+                effect.mem.free(st)
         case (CType.Union, st):
             if st != nullptr:
                 if st.fields != nullptr:
                     free_fields(st.fields, st.field_count)
-                free(st)
+                effect.mem.free(st)
         case (CType.Enum, et):
             if et != nullptr:
                 if et.values != nullptr:
-                    free(et.values)
-                free(et)
+                    effect.mem.free(et.values)
+                effect.mem.free(et)
         case _:
             # Typedef and primitives have no heap-allocated payload
             pass
 
-    free(ty)
+    effect.mem.free(ty)
 
 
 @compile
@@ -748,7 +748,7 @@ def _qualtype_free_deep(qt: ptr[QualType]) -> void:
     if qt == nullptr:
         return
     _ctype_free_deep(qt.type)
-    free(qt)
+    effect.mem.free(qt)
 
 
 @compile
@@ -773,5 +773,5 @@ def decl_free(prf: DeclProof, d: ptr[Decl]) -> void:
     """Free a declaration and its type, consuming proof."""
     if d != nullptr:
         _qualtype_free_deep(d.type)
-        free(d)
+        effect.mem.free(d)
     consume(prf)

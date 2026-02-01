@@ -17,9 +17,9 @@ Design:
 
 from pythoc import (
     compile, inline, i32, i64, i8, bool, ptr, array, nullptr, sizeof, void,
-    char, refine, assume, struct, consume, linear, defer
+    char, refine, assume, struct, consume, linear, defer, effect
 )
-from pythoc.libc.stdlib import malloc, free
+from pythoc.std import mem  # Sets up default mem effect
 from pythoc.libc.string import memcpy
 from pythoc.std.refine_wrapper import nonnull_wrap
 

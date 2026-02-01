@@ -3,8 +3,8 @@
 Integration test for pythoc.std.mem effect-based memory library.
 
 Tests:
-1. Default libc implementation works (effect.mem.alloc/free)
-2. Linear allocation tracking works (effect.mem.lalloc/lfree)
+1. Default libc implementation works (effect.mem.malloc/free)
+2. Linear allocation tracking works (effect.mem.lmalloc/lfree)
 3. User can override with custom allocator via effect
 """
 
@@ -25,9 +25,9 @@ from types import SimpleNamespace
 # ============================================================================
 
 @compile
-def test_alloc_free_fn() -> u64:
-    """Test basic alloc/free with default implementation"""
-    p = effect.mem.alloc(u64(64))
+def test_malloc_free_fn() -> u64:
+    """Test basic malloc/free with default implementation"""
+    p = effect.mem.malloc(u64(64))
     p[0] = u8(42)
     result = u64(p[0])
     effect.mem.free(p)
@@ -35,9 +35,9 @@ def test_alloc_free_fn() -> u64:
 
 
 @compile
-def test_array_alloc_fn() -> u64:
+def test_array_malloc_fn() -> u64:
     """Test array allocation helper"""
-    p = effect.mem.alloc(u64(10) * u64(8))
+    p = effect.mem.malloc(u64(10) * u64(8))
     p_u64 = ptr[u64](p)
     p_u64[0] = u64(100)
     p_u64[9] = u64(200)
@@ -47,9 +47,9 @@ def test_array_alloc_fn() -> u64:
 
 
 @compile
-def test_lalloc_lfree_fn() -> u64:
-    """Test lalloc/lfree with linear token tracking"""
-    p, t = effect.mem.lalloc(u64(32))
+def test_lmalloc_lfree_fn() -> u64:
+    """Test lmalloc/lfree with linear token tracking"""
+    p, t = effect.mem.lmalloc(u64(32))
     p[0] = u8(77)
     result = u64(p[0])
     effect.mem.lfree(p, t)
@@ -57,9 +57,9 @@ def test_lalloc_lfree_fn() -> u64:
 
 
 @compile
-def test_lalloc_array_fn() -> u64:
+def test_lmalloc_array_fn() -> u64:
     """Test linear array allocation"""
-    p, t = effect.mem.lalloc(u64(5) * u64(8))
+    p, t = effect.mem.lmalloc(u64(5) * u64(8))
     p_u64 = ptr[u64](p)
     p_u64[0] = u64(10)
     p_u64[4] = u64(20)
@@ -71,7 +71,7 @@ def test_lalloc_array_fn() -> u64:
 @compile
 def lib_create_buffer(size: u64) -> ptr[u8]:
     """Library function using effect.mem"""
-    return effect.mem.alloc(size)
+    return effect.mem.malloc(size)
 
 
 @compile
@@ -93,7 +93,7 @@ def test_lib_usage_fn() -> u64:
 @compile
 def lib_create_tracked(size: u64) -> struct[ptr[u8], MemProof]:
     """Library with linear-tracked memory"""
-    return effect.mem.lalloc(size)
+    return effect.mem.lmalloc(size)
 
 
 @compile
@@ -117,7 +117,7 @@ def test_lib_linear_usage_fn() -> u64:
 # ============================================================================
 
 @compile
-def _custom_alloc(size: u64) -> ptr[u8]:
+def _custom_malloc(size: u64) -> ptr[u8]:
     """Custom allocator: writes magic number 0xAB at start to prove it was used"""
     p = ptr[u8](libc_malloc(size))
     p[0] = u8(0xAB)  # Write magic marker
@@ -131,8 +131,8 @@ def _custom_free(p: ptr[u8]) -> void:
 
 
 @compile
-def _custom_lalloc(size: u64) -> struct[ptr[u8], linear]:
-    """Custom linear alloc"""
+def _custom_lmalloc(size: u64) -> struct[ptr[u8], linear]:
+    """Custom linear malloc"""
     return ptr[u8](libc_malloc(size)), linear()
 
 
@@ -144,9 +144,9 @@ def _custom_lfree(p: ptr[u8], t: linear) -> void:
 
 
 CustomMem = SimpleNamespace(
-    alloc=_custom_alloc,
+    malloc=_custom_malloc,
     free=_custom_free,
-    lalloc=_custom_lalloc,
+    lmalloc=_custom_lmalloc,
     lfree=_custom_lfree,
 )
 
@@ -157,7 +157,7 @@ with effect(mem=CustomMem, suffix="custom"):
     @compile
     def use_custom_allocator() -> u64:
         """Use custom allocator via effect override"""
-        p = effect.mem.alloc(u64(32))
+        p = effect.mem.malloc(u64(32))
         # Custom allocator writes 0xAB at start, so p[0] should be 0xAB (171)
         # If default allocator was used, p[0] would be uninitialized (not 0xAB)
         result = u64(p[0])  # Should be 171 (0xAB) if custom was used
@@ -169,32 +169,32 @@ with effect(mem=CustomMem, suffix="custom"):
 # Test runner
 # ============================================================================
 
-def test_alloc_and_free():
-    """Test basic alloc/free with default implementation"""
-    result = test_alloc_free_fn()
+def test_malloc_and_free():
+    """Test basic malloc/free with default implementation"""
+    result = test_malloc_free_fn()
     assert result == 42, f"Expected 42, got {result}"
-    print("OK test_alloc_and_free")
+    print("OK test_malloc_and_free")
 
 
-def test_alloc_array():
+def test_malloc_array():
     """Test array allocation helper"""
-    result = test_array_alloc_fn()
+    result = test_array_malloc_fn()
     assert result == 300, f"Expected 300, got {result}"
-    print("OK test_alloc_array")
+    print("OK test_malloc_array")
 
 
-def test_lalloc_and_lfree():
-    """Test lalloc/lfree with linear token tracking"""
-    result = test_lalloc_lfree_fn()
+def test_lmalloc_and_lfree():
+    """Test lmalloc/lfree with linear token tracking"""
+    result = test_lmalloc_lfree_fn()
     assert result == 77, f"Expected 77, got {result}"
-    print("OK test_lalloc_and_lfree")
+    print("OK test_lmalloc_and_lfree")
 
 
-def test_lalloc_array():
+def test_lmalloc_array():
     """Test linear array allocation"""
-    result = test_lalloc_array_fn()
+    result = test_lmalloc_array_fn()
     assert result == 30, f"Expected 30, got {result}"
-    print("OK test_lalloc_array")
+    print("OK test_lmalloc_array")
 
 
 def test_library_uses_default():
@@ -222,13 +222,13 @@ def test_effect_override():
 
 if __name__ == '__main__':
     print("=== std.mem default tests ===")
-    test_alloc_and_free()
-    test_alloc_array()
+    test_malloc_and_free()
+    test_malloc_array()
     print()
 
     print("=== std.mem linear tests ===")
-    test_lalloc_and_lfree()
-    test_lalloc_array()
+    test_lmalloc_and_lfree()
+    test_lmalloc_array()
     print()
 
     print("=== std.mem library usage tests ===")
