@@ -29,10 +29,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Run tests
+      - name: Run tests (first run - no cache)
         env:
           PYTHONPATH: .
-        run: python test/run_all_tests.py
+        run: |
+          echo "=== First run: clean build (no cache) ==="
+          rm -rf build/
+          python test/run_all_tests.py
+
+      - name: Run tests (second run - with cache)
+        env:
+          PYTHONPATH: .
+        run: |
+          echo "=== Second run: with cache ==="
+          python test/run_all_tests.py
 
   # TODO(me): Fix windows CI someday
   # test-windows:
@@ -83,10 +93,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Run tests
+      - name: Run tests (first run - no cache)
         env:
           PYTHONPATH: .
-        run: python test/run_all_tests.py
+        run: |
+          echo "=== First run: clean build (no cache) ==="
+          rm -rf build/
+          python test/run_all_tests.py
+
+      - name: Run tests (second run - with cache)
+        env:
+          PYTHONPATH: .
+        run: |
+          echo "=== Second run: with cache ==="
+          python test/run_all_tests.py
 
   lint:
     name: Lint Check
