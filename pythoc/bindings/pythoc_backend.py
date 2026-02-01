@@ -41,8 +41,6 @@ from pythoc import (
     compile, inline, i32, i64, i8, bool, ptr, array, nullptr, sizeof, void,
     char, refine, assume, struct, consume, linear
 )
-from pythoc.libc.stdlib import malloc, free, realloc
-from pythoc.libc.string import memcpy, strlen, strcpy, strcat
 from pythoc.std.vector import Vector
 
 from pythoc.bindings.c_ast import (

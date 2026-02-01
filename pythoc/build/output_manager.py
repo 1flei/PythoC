@@ -314,7 +314,16 @@ class OutputManager:
             obj_file = group['obj_file']
             source_file = group.get('source_file')
             force_recompile = bool(group.get('force_recompile', False))
-            if (not force_recompile) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
+            
+            # Also force recompile if there are pending compilations for this group.
+            # This handles the case where the source file hasn't changed but new
+            # @compile functions have been defined that aren't in the cached .o file.
+            has_pending_compilations = (
+                group_key in self._pending_compilations and 
+                self._pending_compilations[group_key]
+            )
+            
+            if (not force_recompile) and (not has_pending_compilations) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
                 # Cache hit - .o is up-to-date, skip compilation
                 # But we still need to restore dependencies from .deps file
                 self._restore_deps_from_cache(group_key, group)

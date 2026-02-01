@@ -364,6 +364,24 @@ class EffectContext:
             # Note: The actual check happens during compilation when resolving effects
             self._effect._set_effect(name, impl, is_caller_override=True)
 
+            # Mark effect-implementation callables so the compiler can avoid
+            # effect-specializing the implementation itself.
+            try:
+                def _mark_impl(obj):
+                    if obj is None:
+                        return
+                    if callable(obj) and getattr(obj, '_is_compiled', False):
+                        setattr(obj, '_pc_effect_impl', True)
+                    d = getattr(obj, '__dict__', None)
+                    if isinstance(d, dict):
+                        for v in d.values():
+                            if callable(v) and getattr(v, '_is_compiled', False):
+                                setattr(v, '_pc_effect_impl', True)
+
+                _mark_impl(impl)
+            except Exception:
+                pass
+
         # Push suffix to stack
         if self._suffix is not None:
             self._effect._suffix_stack.append(self._suffix)
@@ -492,8 +510,21 @@ class Effect:
                 # Store as module default
                 self._defaults[caller_module][name] = impl
 
-                # Also set as current effect if not already set by direct assignment
+                # Also set as current effect if not already set by:
+                # 1. Direct assignment (effect.xxx = impl)
+                # 2. Active caller override (with effect(xxx=...) context)
+                # 
+                # This ensures that when code inside a `with effect()` block imports
+                # a module that calls effect.default(), the caller's override is preserved.
                 if name not in self._direct_assignments:
+                    # Check if there's an active caller override for this effect
+                    # If suffix_stack is non-empty and this effect is already set,
+                    # don't override it - the caller's override takes precedence
+                    if self._suffix_stack and name in self._effects:
+                        current_impl = self._effects[name]._get_impl()
+                        if current_impl is not None:
+                            # Caller override exists, don't replace it
+                            continue
                     self._set_effect(name, impl, is_default=True)
 
     def _set_effect(self, name: str, impl: Any, 

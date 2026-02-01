@@ -9,10 +9,10 @@ Design: Uses linear types to ensure token lifetime is within lexer lifetime.
 - lexer_destroy(lex_prf, lex) - consumes lexer_prf
 """
 
-from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refine, refined, linear, struct, consume, assume
+from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refine, refined, linear, struct, consume, assume, effect
 from pythoc.std.linear_wrapper import linear_wrap
 from pythoc.std.refine_wrapper import nonnull_wrap
-from pythoc.libc.stdlib import malloc, free
+from pythoc.std import mem  # Sets up default mem effect
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
 
@@ -32,7 +32,7 @@ class Lexer:
 @compile
 def lexer_create_raw(source: ptr[i8]) -> ptr[Lexer]:
     """Create and initialize a new lexer"""
-    lex: ptr[Lexer] = ptr[Lexer](malloc(sizeof(Lexer)))
+    lex: ptr[Lexer] = ptr[Lexer](effect.mem.malloc(sizeof(Lexer)))
     lex.source = source
     lex.pos = 0
     lex.line = 1
@@ -44,7 +44,7 @@ def lexer_create_raw(source: ptr[i8]) -> ptr[Lexer]:
 @compile
 def lexer_destroy_raw(lex: ptr[Lexer]) -> void:
     """Free lexer memory"""
-    free(lex)
+    effect.mem.free(lex)
 
 
 # Define proof types using linear_wrap

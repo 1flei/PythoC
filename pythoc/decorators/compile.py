@@ -480,6 +480,7 @@ def _compile_impl(func_or_class,
     wrapper._actual_func_name = actual_func_name
     wrapper._group_key = group_key
     wrapper._captured_effect_context = _captured_effect_context
+    wrapper._captured_symbols = captured_symbols
     wrapper._compile_suffix = compile_suffix
     wrapper._effect_suffix = effect_suffix
     wrapper._effect_specialized_cache = {}  # Cache for effect-specialized versions
@@ -514,11 +515,15 @@ def _compile_impl(func_or_class,
         logger.debug(f"Creating effect-specialized version: {wrapper._original_name}_{target_effect_suffix}")
         
         with restore_effect_context(effect_overrides):
-            specialized_wrapper = compile(
+            # IMPORTANT: reuse captured symbols from the original wrapper.
+            # This is required for metaprogrammed functions (e.g., linear_wrap)
+            # whose annotations reference locals (not in closure).
+            specialized_wrapper = _compile_impl(
                 wrapper.__wrapped__,
-                suffix=wrapper._compile_suffix,
-                _effect_suffix=target_effect_suffix,
-                _effect_scope=original_scope
+                compile_suffix=wrapper._compile_suffix,
+                effect_suffix=target_effect_suffix,
+                captured_symbols=getattr(wrapper, '_captured_symbols', None),
+                effect_scope=original_scope
             )
         
         # Cache the specialized wrapper
