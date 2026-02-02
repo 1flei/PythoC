@@ -10,8 +10,9 @@ from pythoc import compile, i32, i8, ptr, void, struct, consume, refine
 from pythoc.libc.stdio import printf
 
 from pythoc.bindings.c_ast import (
-    CType, QualType, Decl, DeclKind,
+    CType, QualType, FieldInfo, Decl, DeclKind,
     qualtype_nonnull, QualTypeRef, ctype_nonnull, CTypeRef,
+    span_is_empty,
     QUAL_NONE, QUAL_CONST, QUAL_VOLATILE,
 )
 from pythoc.bindings.c_parser import parse_declarations, decl_free
@@ -302,6 +303,53 @@ def test_parse_const_char_ptr() -> i32:
     return 0
 
 
+@compile
+def test_parse_struct_multi_declarator_fields() -> i32:
+    """Regression: struct field list with multiple declarators must free safely."""
+    src = "struct S { int a, b; };"
+
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Struct:
+                for qt in refine(decl.type, qualtype_nonnull):
+                    match qt.type[0]:
+                        case (CType.Struct, st):
+                            if st == nullptr or st.field_count != 2 or st.fields == nullptr:
+                                decl_free(decl_prf, decl)
+                                return 0
+
+                            f0: ptr[FieldInfo] = ptr(st.fields[0])
+                            f1: ptr[FieldInfo] = ptr(st.fields[1])
+
+                            if span_is_empty(f0.name) or span_is_empty(f1.name):
+                                decl_free(decl_prf, decl)
+                                return 0
+
+                            for f0_qt in refine(f0.type, qualtype_nonnull):
+                                if get_base_type_tag(f0_qt) != CType.Int:
+                                    decl_free(decl_prf, decl)
+                                    return 0
+
+                            for f1_qt in refine(f1.type, qualtype_nonnull):
+                                if get_base_type_tag(f1_qt) != CType.Int:
+                                    decl_free(decl_prf, decl)
+                                    return 0
+
+                            decl_free(decl_prf, decl)
+                            return 1
+                        case _:
+                            pass
+
+                decl_free(decl_prf, decl)
+                return 0
+            case _:
+                pass
+
+        decl_free(decl_prf, decl)
+
+    return 0
+
+
 # =============================================================================
 # Complex file parsing test
 # =============================================================================
@@ -420,6 +468,11 @@ def main() -> i32:
     
     result = test_parse_const_char_ptr()
     printf("parse_const_char_ptr: %d (expected 1)\n", result)
+    if result != 1:
+        return 1
+
+    result = test_parse_struct_multi_declarator_fields()
+    printf("parse_struct_multi_declarator_fields: %d (expected 1)\n", result)
     if result != 1:
         return 1
     
