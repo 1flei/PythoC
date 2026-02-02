@@ -775,3 +775,166 @@ def decl_free(prf: DeclProof, d: ptr[Decl]) -> void:
         _qualtype_free_deep(d.type)
         effect.mem.free(d)
     consume(prf)
+
+
+# =============================================================================
+# Shallow clone for simple types (primitives, typedef)
+# =============================================================================
+
+@compile
+def qualtype_clone_shallow(qt: ptr[QualType]) -> struct[QualTypeProof, ptr[QualType]]:
+    """Clone a QualType with shallow copy of CType.
+
+    This is safe for:
+    - Primitive types (no payload to share)
+    - Typedef (Span is a view, not owned)
+
+    NOT safe for Ptr/Array/Func/Struct/Union/Enum with heap payloads.
+    Use this only when you know the underlying CType has no heap children.
+
+    Returns (proof, cloned_ptr). Caller takes ownership via proof.
+    """
+    new_qt_prf, new_qt = qualtype_alloc()
+    new_qt.quals = qt.quals
+
+    # Allocate new CType and copy the tag (shallow)
+    new_ty_prf, new_ty = ctype_alloc()
+    new_ty[0] = qt.type[0]  # Copy enum tag + payload
+    consume(new_ty_prf)
+
+    new_qt.type = new_ty
+    return new_qt_prf, new_qt
+
+
+# =============================================================================
+# Deep clone for ownership safety
+# =============================================================================
+
+@compile
+def _clone_params_deep(params: ptr[ParamInfo], count: i32) -> ptr[ParamInfo]:
+    """Deep clone ParamInfo array (names + deep-cloned types)."""
+    if params == nullptr or count <= 0:
+        return nullptr
+
+    out: ptr[ParamInfo] = paraminfo_alloc(count)
+    i: i32 = 0
+    while i < count:
+        out[i].name = params[i].name
+        if params[i].type != nullptr:
+            qt_prf, qt = qualtype_clone_deep(params[i].type)
+            out[i].type = qt
+            consume(qt_prf)
+        else:
+            out[i].type = nullptr
+        i = i + 1
+
+    return out
+
+
+@compile
+def _clone_fields_deep(fields: ptr[FieldInfo], count: i32) -> ptr[FieldInfo]:
+    """Deep clone FieldInfo array (names/bit_width + deep-cloned types)."""
+    if fields == nullptr or count <= 0:
+        return nullptr
+
+    out: ptr[FieldInfo] = fieldinfo_alloc(count)
+    i: i32 = 0
+    while i < count:
+        out[i].name = fields[i].name
+        out[i].bit_width = fields[i].bit_width
+        if fields[i].type != nullptr:
+            qt_prf, qt = qualtype_clone_deep(fields[i].type)
+            out[i].type = qt
+            consume(qt_prf)
+        else:
+            out[i].type = nullptr
+        i = i + 1
+
+    return out
+
+
+@compile
+def ctype_clone_deep(ty: ptr[CType]) -> struct[CTypeProof, ptr[CType]]:
+    """Deep clone a CType tree.
+
+    The returned CType has independent ownership and can be deep-freed safely.
+    """
+    if ty == nullptr:
+        return prim.void()
+
+    match ty[0]:
+        case (CType.Ptr, pt):
+            if pt != nullptr and pt.pointee != nullptr:
+                pointee_prf, pointee = qualtype_clone_deep(pt.pointee)
+                return make_ptr_type(pointee_prf, pointee, pt.quals)
+            base_prf, base_ty = prim.void()
+            base_qt_prf, base_qt = make_qualtype(base_prf, base_ty, QUAL_NONE)
+            return make_ptr_type(base_qt_prf, base_qt, QUAL_NONE)
+
+        case (CType.Array, at):
+            if at != nullptr and at.elem != nullptr:
+                elem_prf, elem = qualtype_clone_deep(at.elem)
+                return make_array_type(elem_prf, elem, at.size)
+            base_prf, base_ty = prim.void()
+            base_qt_prf, base_qt = make_qualtype(base_prf, base_ty, QUAL_NONE)
+            return make_array_type(base_qt_prf, base_qt, -1)
+
+        case (CType.Func, ft):
+            ret_prf: QualTypeProof
+            ret: ptr[QualType]
+            if ft != nullptr and ft.ret != nullptr:
+                ret_prf, ret = qualtype_clone_deep(ft.ret)
+            else:
+                base_prf, base_ty = prim.void()
+                ret_prf, ret = make_qualtype(base_prf, base_ty, QUAL_NONE)
+
+            new_params: ptr[ParamInfo] = nullptr
+            param_count: i32 = 0
+            is_variadic: i8 = 0
+            if ft != nullptr:
+                param_count = ft.param_count
+                is_variadic = ft.is_variadic
+                if ft.params != nullptr and ft.param_count > 0:
+                    new_params = _clone_params_deep(ft.params, ft.param_count)
+
+            return make_func_type(ret_prf, ret, new_params, param_count, is_variadic)
+
+        case (CType.Struct, st):
+            if st != nullptr:
+                new_fields: ptr[FieldInfo] = _clone_fields_deep(st.fields, st.field_count)
+                return make_struct_type(st.name, new_fields, st.field_count, st.is_complete)
+            return make_struct_type(span_empty(), nullptr, 0, 0)
+
+        case (CType.Union, st):
+            if st != nullptr:
+                new_fields: ptr[FieldInfo] = _clone_fields_deep(st.fields, st.field_count)
+                return make_union_type(st.name, new_fields, st.field_count, st.is_complete)
+            return make_union_type(span_empty(), nullptr, 0, 0)
+
+        case (CType.Enum, et):
+            if et != nullptr and et.values != nullptr and et.value_count > 0:
+                out_vals: ptr[EnumValue] = enumvalue_alloc(et.value_count)
+                i: i32 = 0
+                while i < et.value_count:
+                    out_vals[i].name = et.values[i].name
+                    out_vals[i].value = et.values[i].value
+                    out_vals[i].has_explicit_value = et.values[i].has_explicit_value
+                    i = i + 1
+                return make_enum_type(et.name, out_vals, et.value_count, et.is_complete)
+            return make_enum_type(span_empty(), nullptr, 0, 0)
+
+        case _:
+            prf, out = ctype_alloc()
+            out[0] = ty[0]
+            return prf, out
+
+
+@compile
+def qualtype_clone_deep(qt: ptr[QualType]) -> struct[QualTypeProof, ptr[QualType]]:
+    """Deep clone a QualType and its owned CType tree."""
+    if qt == nullptr:
+        base_prf, base_ty = prim.void()
+        return make_qualtype(base_prf, base_ty, QUAL_NONE)
+
+    ty_prf, ty = ctype_clone_deep(qt.type)
+    return make_qualtype(ty_prf, ty, qt.quals)
