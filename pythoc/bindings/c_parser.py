@@ -17,7 +17,7 @@ Design:
 
 from pythoc import (
     compile, inline, i32, i64, i8, bool, ptr, array, nullptr, sizeof, void,
-    char, refine, assume, struct, consume, linear, defer, effect
+    char, refine, assume, struct, consume, linear, defer, effect, enum
 )
 from pythoc.std import mem  # Sets up default mem effect
 from pythoc.libc.string import memcpy
@@ -62,25 +62,27 @@ from pythoc.bindings.c_ast import (
 # Parse Error Types
 # =============================================================================
 
+@enum(i32)
+class ParseErrorCode:
+    """Error codes for programmatic handling"""
+    NONE: None
+    UNEXPECTED_TOKEN: None
+    EXPECTED_IDENTIFIER: None
+    EXPECTED_SEMICOLON: None
+    EXPECTED_RBRACE: None
+    EXPECTED_RPAREN: None
+    MAX_PARAMS_EXCEEDED: None
+    MAX_FIELDS_EXCEEDED: None
+    MAX_ENUM_VALUES_EXCEEDED: None
+    NULL_LEXER: None
+
+
 @compile
 class ParseError:
     """Parse error information"""
     line: i32
     col: i32
-    error_code: i32  # Error code for programmatic handling
-
-
-# Error codes
-ERR_NONE: i32 = 0
-ERR_UNEXPECTED_TOKEN: i32 = 1
-ERR_EXPECTED_IDENTIFIER: i32 = 2
-ERR_EXPECTED_SEMICOLON: i32 = 3
-ERR_EXPECTED_RBRACE: i32 = 4
-ERR_EXPECTED_RPAREN: i32 = 5
-ERR_MAX_PARAMS_EXCEEDED: i32 = 6
-ERR_MAX_FIELDS_EXCEEDED: i32 = 7
-ERR_MAX_ENUM_VALUES_EXCEEDED: i32 = 8
-ERR_NULL_LEXER: i32 = 9
+    error_code: ParseErrorCode
 
 
 # =============================================================================
@@ -136,7 +138,7 @@ def span_from_token(tok: Token) -> Span:
 # =============================================================================
 
 @compile
-def parser_add_error(p: ParserRef, error_code: i32) -> void:
+def parser_add_error(p: ParserRef, error_code: ParseErrorCode) -> void:
     """Record a parse error"""
     if p.error_count < MAX_ERRORS:
         p.errors[p.error_count].line = p.current.line
@@ -189,15 +191,15 @@ def parser_expect(p: ParserRef, prfs: ParserProofs, tok_type: i32) -> struct[boo
     if p.current.type != tok_type:
         match tok_type:
             case TokenType.SEMICOLON:
-                parser_add_error(p, ERR_EXPECTED_SEMICOLON)
+                parser_add_error(p, ParseErrorCode.EXPECTED_SEMICOLON)
             case TokenType.RBRACE:
-                parser_add_error(p, ERR_EXPECTED_RBRACE)
+                parser_add_error(p, ParseErrorCode.EXPECTED_RBRACE)
             case TokenType.RPAREN:
-                parser_add_error(p, ERR_EXPECTED_RPAREN)
+                parser_add_error(p, ParseErrorCode.EXPECTED_RPAREN)
             case TokenType.IDENTIFIER:
-                parser_add_error(p, ERR_EXPECTED_IDENTIFIER)
+                parser_add_error(p, ParseErrorCode.EXPECTED_IDENTIFIER)
             case _:
-                parser_add_error(p, ERR_UNEXPECTED_TOKEN)
+                parser_add_error(p, ParseErrorCode.UNEXPECTED_TOKEN)
         return False, prfs
     prfs = parser_advance(p, prfs)
     return True, prfs
@@ -601,7 +603,7 @@ def parse_func_params(p: ParserRef, prfs: ParserProofs, param_count: ptr[i32], i
             break
 
         if param_count[0] >= MAX_PARAMS:
-            parser_add_error(p, ERR_MAX_PARAMS_EXCEEDED)
+            parser_add_error(p, ParseErrorCode.MAX_PARAMS_EXCEEDED)
             break
 
         # Parse parameter type - ptr(ts) for stack variable is always non-null
@@ -675,7 +677,7 @@ def parse_struct_fields(p: ParserRef, prfs: ParserProofs, field_count: ptr[i32])
     
     while not parser_match(p, TokenType.RBRACE) and not parser_match(p, TokenType.EOF):
         if field_count[0] >= MAX_FIELDS:
-            parser_add_error(p, ERR_MAX_FIELDS_EXCEEDED)
+            parser_add_error(p, ParseErrorCode.MAX_FIELDS_EXCEEDED)
             prfs = parser_skip_until_semicolon(p, prfs)
             prfs = parser_advance(p, prfs)
             continue
@@ -711,7 +713,7 @@ def parse_struct_fields(p: ParserRef, prfs: ParserProofs, field_count: ptr[i32])
         while parser_match(p, TokenType.COMMA):
             prfs = parser_advance(p, prfs)
             if field_count[0] >= MAX_FIELDS:
-                parser_add_error(p, ERR_MAX_FIELDS_EXCEEDED)
+                parser_add_error(p, ParseErrorCode.MAX_FIELDS_EXCEEDED)
                 break
 
             # Deep clone type from previous field to avoid double-free
@@ -786,7 +788,7 @@ def parse_enum_values(p: ParserRef, prfs: ParserProofs, value_count: ptr[i32]) -
 
     while not parser_match(p, TokenType.RBRACE) and not parser_match(p, TokenType.EOF):
         if value_count[0] >= MAX_ENUM_VALUES:
-            parser_add_error(p, ERR_MAX_ENUM_VALUES_EXCEEDED)
+            parser_add_error(p, ParseErrorCode.MAX_ENUM_VALUES_EXCEEDED)
             break
 
         match p.current.type:
