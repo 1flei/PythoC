@@ -155,8 +155,8 @@ def lexer_skip_whitespace(lex: LexerRef) -> void:
 
 
 @compile
-def is_keyword(start: ptr[i8], length: i32) -> TokenType:
-    """Check if token text is a C keyword, return token type or ERROR"""
+def is_keyword(start: ptr[i8], length: i32) -> i32:
+    """Check if token text is a C keyword, return token type tag or ERROR"""
     # Use Python metaprogramming to generate keyword checks at compile time
     for token_id, token_str in g_token_id_to_string.items():
         kw_len = len(token_str)
@@ -177,22 +177,22 @@ def lexer_read_identifier(lex: LexerRef, token: TokenRef) -> void:
     """Read identifier or keyword (zero-copy)"""
     token.start = lex.source + lex.pos
     start_pos: i32 = lex.pos
-    
+
     c: i8 = lexer_current(lex)
     while lex.pos < lex.length:
         c = lexer_current(lex)
         if not (isalnum(c) or c == char("_")):
             break
         lexer_advance(lex)
-    
+
     token.length = lex.pos - start_pos
-    
+
     # Check if it's a keyword
     kw_type: i32 = is_keyword(token.start, token.length)
-    if kw_type != TokenType.ERROR:
-        token.type = kw_type
-    else:
+    if kw_type == TokenType.ERROR:
         token.type = TokenType.IDENTIFIER
+    else:
+        token.type = kw_type
 
 
 @compile

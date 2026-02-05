@@ -112,7 +112,7 @@ class TokenType:
 @compile
 class Token:
     """Represents a single token from the lexer"""
-    type: i32                    # Token type (one of TokenType enum values)
+    type: i32                    # Token type tag (one of TokenType enum values)
     start: ptr[i8]               # Pointer to token text in source (zero-copy)
     length: i32                  # Length of token text
     line: i32                    # Source line number (1-based)

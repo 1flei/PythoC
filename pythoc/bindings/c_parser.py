@@ -181,7 +181,7 @@ def parser_advance(p: ParserRef, prfs: ParserProofs) -> ParserProofs:
 
 @compile
 def parser_match(p: ParserRef, tok_type: i32) -> bool:
-    """Check if current token matches type"""
+    """Check if current token matches type (tok_type is enum tag constant)"""
     return p.current.type == tok_type
 
 
@@ -221,13 +221,10 @@ def parser_skip_balanced(p: ParserRef, prfs: ParserProofs, open_tok: i32, close_
     depth: i32 = 1
     prfs = parser_advance(p, prfs)
     while depth > 0 and p.current.type != TokenType.EOF:
-        match p.current.type:
-            case _ if p.current.type == open_tok:
-                depth = depth + 1
-            case _ if p.current.type == close_tok:
-                depth = depth - 1
-            case _:
-                pass
+        if p.current.type == open_tok:
+            depth = depth + 1
+        elif p.current.type == close_tok:
+            depth = depth - 1
         prfs = parser_advance(p, prfs)
     return prfs
 
@@ -262,7 +259,7 @@ def is_type_specifier(tok_type: i32) -> bool:
 @compile
 class TypeParseState:
     """Intermediate state during type parsing"""
-    base_token: i32         # TokenType of base type (INT, CHAR, etc.)
+    base_token: i32             # TokenType tag of base type (INT, CHAR, etc.)
     is_signed: i8           # 1 = signed, 0 = default, -1 = unsigned
     is_const: i8            # 1 if const
     is_volatile: i8         # 1 if volatile
@@ -277,7 +274,7 @@ typeparse_nonnull, TypeParseStateRef = nonnull_wrap(ptr[TypeParseState])
 @compile
 def typeparse_init(ts: TypeParseStateRef) -> void:
     """Initialize type parse state"""
-    ts.base_token = 0
+    ts.base_token = TokenType.ERROR
     ts.is_signed = 0
     ts.is_const = 0
     ts.is_volatile = 0
@@ -333,7 +330,7 @@ def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRe
                 prfs = parser_advance(p, prfs)
             case TokenType.LONG:
                 ts.long_count = ts.long_count + 1
-                if ts.base_token == 0:
+                if ts.base_token == TokenType.ERROR:
                     ts.base_token = TokenType.LONG
                 prfs = parser_advance(p, prfs)
             case TokenType.FLOAT:
@@ -372,7 +369,7 @@ def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRe
                 break
             # Identifier (typedef name) - only if no base type yet AND no sign specifier
             case TokenType.IDENTIFIER:
-                if ts.base_token == 0 and ts.is_signed == 0:
+                if ts.base_token == TokenType.ERROR and ts.is_signed == 0:
                     ts.base_token = TokenType.IDENTIFIER
                     ts.name = span_from_token(p.current)
                     prfs = parser_advance(p, prfs)
@@ -398,8 +395,9 @@ def build_base_ctype(ts: TypeParseStateRef) -> struct[CTypeProof, ptr[CType]]:
     Returns (proof, ptr) for linear ownership tracking.
     """
     # Default to int if no base type specified but signed/unsigned present
+    # Extract tag as i32 for comparison with enum constants
     base: i32 = ts.base_token
-    if base == 0:
+    if base == TokenType.ERROR:
         base = TokenType.INT
     
     # Handle long long
