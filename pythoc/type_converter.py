@@ -195,16 +195,14 @@ class TypeConverter:
         # For actual conversion operations, use base types (strip refined types too)
         base_target = get_base_type(target_type)
         base_source = get_base_type(value.type_hint) if value.type_hint else None
-        
-        # Step 2: Handle enum to integer conversion (extract tag field)
+
+        # Step 2: Disallow implicit enum -> int conversion
         if is_enum_type(base_source) and hasattr(base_target, 'is_signed'):
-            # Converting enum to integer - extract the tag field
-            # Enum is struct { tag, payload }, extract field 0 (tag)
-            enum_val = ensure_ir(value)
-            tag_val = self.builder.extract_value(enum_val, 0, name="enum_tag")
-            tag_ref = wrap_value(tag_val, kind="value", type_hint=base_source._tag_type)
-            # Convert tag to target integer type
-            return self.convert(tag_ref, target_type)
+            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
+            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
+            logger.error(
+                f"Cannot implicitly convert enum '{source_name}' to integer type '{target_name}'. "
+                f"Use explicit tag extraction: value[0]", node)
 
         # Step 3: Handle struct to enum conversion
         # struct[pyconst[Tag], payload] -> EnumType
