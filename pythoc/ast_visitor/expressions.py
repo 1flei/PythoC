@@ -286,16 +286,23 @@ class ExpressionsMixin:
     def _unary_plus(self, operand: ValueRef) -> ValueRef:
         """Unary plus: no-op"""
         return operand
-    
+
     def _unary_minus(self, operand: ValueRef) -> ValueRef:
-        """Unary minus: negate value"""
+        """Unary minus: negate value
+
+        Result type forgets refinement since -x does not preserve predicates.
+        """
+        from ..type_converter import forget_refinement
+
         operand_type = get_type(operand)
         if isinstance(operand_type, (ir.FloatType, ir.DoubleType)):
             result = self.builder.fsub(ir.Constant(operand_type, 0.0), ensure_ir(operand))
         else:
             result = self.builder.sub(ir.Constant(operand_type, 0), ensure_ir(operand))
-        return wrap_value(result, kind="value", type_hint=operand.type_hint)
-    
+        # Forget refinement for operation result
+        result_type = forget_refinement(operand.type_hint)
+        return wrap_value(result, kind="value", type_hint=result_type)
+
     def _unary_not(self, operand: ValueRef) -> ValueRef:
         """Logical not: boolean negation"""
         from ..builtin_entities import bool as bool_type
@@ -308,11 +315,18 @@ class ExpressionsMixin:
             bool_val = self._to_boolean(operand)
             result = self.builder.xor(ensure_ir(bool_val), ir.Constant(ir.IntType(1), 1))
         return wrap_value(result, kind="value", type_hint=bool_type)
-    
+
     def _unary_invert(self, operand: ValueRef) -> ValueRef:
-        """Bitwise not: invert all bits"""
+        """Bitwise not: invert all bits
+
+        Result type forgets refinement since ~x does not preserve predicates.
+        """
+        from ..type_converter import forget_refinement
+
         result = self.builder.xor(ensure_ir(operand), ir.Constant(get_type(operand), -1))
-        return wrap_value(result, kind="value", type_hint=operand.type_hint)
+        # Forget refinement for operation result
+        result_type = forget_refinement(operand.type_hint)
+        return wrap_value(result, kind="value", type_hint=result_type)
     
 
     def visit_Compare(self, node: ast.Compare):
@@ -824,16 +838,21 @@ class ExpressionsMixin:
     def _perform_binary_operation(self, op: ast.operator, left: ValueRef, right: ValueRef,
                                    node: ast.AST = None) -> ValueRef:
         """Unified binary operation handler with table-driven dispatch
-        
+
         This method handles all binary operations with automatic type promotion
         and unified dispatch logic, eliminating isinstance chains.
+
+        Note: Result types have refinement forgotten - operations do not preserve
+        refinement predicates since predicates are not closed under most operations.
         """
+        from ..type_converter import forget_refinement
+
         # Check for pointer arithmetic (before type promotion)
         # Only check if values are not Python values (Python values can't be pointers)
         if not (left.is_python_value() or right.is_python_value()):
             left_type = get_type(left)
             right_type = get_type(right)
-            
+
             if isinstance(op, ast.Add):
                 if isinstance(left_type, ir.PointerType) and isinstance(right_type, ir.IntType):
                     left_ir = ensure_ir(left)
@@ -852,11 +871,11 @@ class ExpressionsMixin:
                     neg_right = self.builder.sub(ir.Constant(right_type, 0), right_ir)
                     gep_result = self.builder.gep(left_ir, [neg_right])
                     return wrap_value(gep_result, kind="value", type_hint=left.type_hint)
-        
+
         # Unified type promotion for numeric operations
         # (Python values are auto-promoted by TypeConverter)
         left, right, is_float_op = self.type_converter.unify_binop_types(left, right)
-        
+
         # Operation dispatch table: maps (op_type, is_float) to builder method
         # This eliminates the long isinstance chain
         op_dispatch = {
@@ -878,28 +897,32 @@ class ExpressionsMixin:
             (ast.BitXor, False): ('xor', False),
             (ast.BitAnd, False): ('and_', False),
         }
-        
+
         # Special handling for power
         if isinstance(op, ast.Pow):
             result = self.builder.call(
                 self._get_pow_intrinsic(get_type(ensure_ir(left))),
                 [ensure_ir(left), ensure_ir(right)]
             )
-            return wrap_value(result, kind="value", type_hint=left.type_hint)
-        
+            # Forget refinement for operation result
+            result_type = forget_refinement(left.type_hint)
+            return wrap_value(result, kind="value", type_hint=result_type)
+
         # Lookup and execute operation
         op_key = (type(op), is_float_op)
         if op_key not in op_dispatch:
             logger.error(f"Binary operator {type(op).__name__} not supported", node=node,
                         exc_type=NotImplementedError)
-        
+
         method_name, needs_intrinsic = op_dispatch[op_key]
         builder_method = getattr(self.builder, method_name)
         result = builder_method(ensure_ir(left), ensure_ir(right))
-        
+
         # Special handling for floor division with floats
         if needs_intrinsic and isinstance(op, ast.FloorDiv):
             result = self.builder.call(self._get_floor_intrinsic(get_type(result)), [result])
-        
-        # Result type is the unified type (left after type promotion)
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+
+        # Forget refinement - result type should not retain refinement
+        # since predicates are not closed under most operations
+        result_type = forget_refinement(left.type_hint)
+        return wrap_value(result, kind="value", type_hint=result_type)
