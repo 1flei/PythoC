@@ -1457,6 +1457,16 @@ class ImplicitCoercer:
         source_is_ptr = base_source is not None and hasattr(base_source, '_is_pointer') and base_source._is_pointer
         target_is_ptr = base_target is not None and hasattr(base_target, '_is_pointer') and base_target._is_pointer
 
+        # Reject implicit Python int -> pointer (prefer nullptr; allow explicit cast only).
+        if target_is_ptr and value.is_python_value():
+            py_val = value.get_python_value()
+            if isinstance(py_val, int) and not isinstance(py_val, bool):
+                target_name = base_target.get_name() if base_target and hasattr(base_target, 'get_name') else str(base_target)
+                logger.error(
+                    f"Cannot implicitly convert Python int constant to pointer type '{target_name}'. "
+                    f"Use nullptr or an explicit cast: {target_name}(value)",
+                    node, exc_type=TypeError)
+
         if source_is_ptr and target_is_ptr:
             # Null pointer constant -> any pointer: allowed
             if self.is_null_pointer_constant(value):
@@ -1478,14 +1488,11 @@ class ImplicitCoercer:
         # int -> ptr: rejected
         if (base_source is not None and hasattr(base_source, '_is_integer') and base_source._is_integer
                 and target_is_ptr):
-            # Allow Python zero constant (0 -> null pointer) as special case
-            if value.is_python_value() and value.get_python_value() == 0:
-                return self._tc.convert(value, target_type, node)
             source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
             target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
             logger.error(
                 f"Cannot implicitly convert integer '{source_name}' to pointer type '{target_name}'. "
-                f"Use explicit cast: {target_name}(value)",
+                f"Use nullptr or an explicit cast: {target_name}(value)",
                 node, exc_type=TypeError)
 
         # enum -> int: rejected (moved from TypeConverter.convert)
@@ -1504,13 +1511,24 @@ class ImplicitCoercer:
 
     @staticmethod
     def is_void_pointer(pc_type) -> bool:
-        """True if pc_type is ptr[void] (pointee_type is void)."""
+        """True if pc_type is a void pointer.
+
+        Void pointer canonicalization:
+
+        - User-facing: ptr[void]
+        - Implementation detail: ptr[void] is currently canonicalized to an unspecialized ptr
+          (pointee_type is None). Both lower to i8*.
+        """
         base = get_base_type(pc_type)
         if base is None:
             return False
+        if not (hasattr(base, '_is_pointer') and base._is_pointer):
+            return False
+        pointee = getattr(base, 'pointee_type', ...)
+        if pointee is None:
+            return True
         from .builtin_entities.types import void
-        return (hasattr(base, '_is_pointer') and base._is_pointer
-                and getattr(base, 'pointee_type', ...) is void)
+        return pointee is void
 
     @staticmethod
     def is_null_pointer_constant(value: ValueRef) -> bool:

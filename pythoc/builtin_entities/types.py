@@ -128,7 +128,8 @@ class ptr(BuiltinType):
         if cls.pointee_type is not None:
             pointee_name = cls.pointee_type.get_name() if hasattr(cls.pointee_type, 'get_name') else str(cls.pointee_type)
             return f'ptr[{pointee_name}]'
-        return 'ptr'
+        # Canonical user-facing spelling for void pointer.
+        return 'ptr[void]'
     
     @classmethod
     def get_type_id(cls) -> str:

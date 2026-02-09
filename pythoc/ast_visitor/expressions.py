@@ -469,6 +469,10 @@ class ExpressionsMixin:
                 left_ir, right_ir = self._align_pointer_comparison(left, right, left_ir, right_ir, node)
 
             use_unsigned = (is_unsigned_int(left_hint) or is_unsigned_int(right_hint))
+            # For pointer ordering comparisons, prefer unsigned predicates.
+            if isinstance(left_ir.type, ir.PointerType) and isinstance(right_ir.type, ir.PointerType):
+                if predicate in ('<', '<=', '>', '>='):
+                    use_unsigned = True
             icmp = self.builder.icmp_unsigned if use_unsigned else self.builder.icmp_signed
             result = icmp(predicate, left_ir, right_ir)
             return wrap_value(result, kind="value", type_hint=bool_type)
