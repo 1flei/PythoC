@@ -3,7 +3,6 @@ build
 *.pyc
 __pycache__
 .codebuddy
-docs
 backup
 .pytest_cache
 .vscode
