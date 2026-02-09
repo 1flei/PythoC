@@ -486,6 +486,10 @@ More examples can be found in the `test/` directory.
 - Full examples: `test/example/`
 - PythoC Integration tests: `test/integration/`
 
+## Documentation
+
+See [docs/](docs/) for detailed documentation.
+
 ## License
 
 MIT License - see LICENSE file for details
