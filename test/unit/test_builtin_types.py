@@ -101,7 +101,8 @@ class TestPointerType(unittest.TestCase):
     
     def test_ptr_basic_properties(self):
         """Test basic ptr properties"""
-        self.assertEqual(ptr.get_name(), "ptr")
+        # Void pointer canonical spelling.
+        self.assertEqual(ptr.get_name(), "ptr[void]")
         self.assertTrue(ptr.can_be_type())
     
     def test_ptr_specialization(self):
