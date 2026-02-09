@@ -131,7 +131,7 @@ class ControlFlowMixin:
                 
                 # convert to expected_pc_type is specified
                 if expected_pc_type is not None:
-                    value = self.type_converter.convert(value, expected_pc_type)
+                    value = self.implicit_coercer.coerce(value, expected_pc_type, node)
             
             # Execute all deferred calls after return value is evaluated (Zig/Go semantics)
             self._execute_deferred_calls_for_return()

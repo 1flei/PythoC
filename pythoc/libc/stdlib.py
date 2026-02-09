@@ -3,26 +3,26 @@ Standard Library Functions (stdlib.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64, f64
+from ..builtin_entities import ptr, i8, i32, i64, f64, void
 
 # Memory management
 @extern(lib='c')
-def malloc(size: i64) -> ptr[i8]:
+def malloc(size: i64) -> ptr[void]:
     """Allocate memory"""
     pass
 
 @extern(lib='c')
-def free(ptr: ptr[i8]) -> None:
+def free(ptr: ptr[void]) -> None:
     """Free allocated memory"""
     pass
 
 @extern(lib='c')
-def calloc(count: i64, size: i64) -> ptr[i8]:
+def calloc(count: i64, size: i64) -> ptr[void]:
     """Allocate and zero-initialize memory"""
     pass
 
 @extern(lib='c')
-def realloc(ptr: ptr[i8], size: i64) -> ptr[i8]:
+def realloc(ptr: ptr[void], size: i64) -> ptr[void]:
     """Reallocate memory"""
     pass
 
@@ -87,13 +87,13 @@ def getenv(name: ptr[i8]) -> ptr[i8]:
     pass
 
 @extern(lib='c')
-def qsort(base: ptr[i8], nmemb: i64, size: i64, compar: ptr[i8]) -> None:
-    """Sort array with comparator (function pointer approximated as ptr[i8])"""
+def qsort(base: ptr[void], nmemb: i64, size: i64, compar: ptr[void]) -> None:
+    """Sort array with comparator (function pointer approximated as ptr[void])"""
     pass
 
 @extern(lib='c')
-def bsearch(key: ptr[i8], base: ptr[i8], nmemb: i64, size: i64, compar: ptr[i8]) -> ptr[i8]:
-    """Binary search in array (function pointer approximated as ptr[i8])"""
+def bsearch(key: ptr[void], base: ptr[void], nmemb: i64, size: i64, compar: ptr[void]) -> ptr[void]:
+    """Binary search in array (function pointer approximated as ptr[void])"""
     pass
 
 @extern(lib='c')

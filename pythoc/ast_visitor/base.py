@@ -7,7 +7,7 @@ import builtins
 from typing import Optional, Any, List, Tuple, TYPE_CHECKING
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
-from ..type_converter import TypeConverter
+from ..type_converter import TypeConverter, ImplicitCoercer
 from ..context import (
     VariableInfo, VariableRegistry,
     CompilationContext, PC_TYPE_MAP
@@ -76,6 +76,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         
         # Type converter for centralized type conversion
         self.type_converter = TypeConverter(self)
+
+        # Implicit coercer for policy-checked implicit conversions
+        self.implicit_coercer = ImplicitCoercer(self.type_converter)
         
         # Unified scope manager for defer, linear types, and variable lifetime
         self.scope_manager = ScopeManager(self.ctx.var_registry)

@@ -45,7 +45,7 @@ class ExternFunctionWrapper:
                 target_pc_type = self.param_types[i][1] if i < len(self.param_types) else None
                 if target_pc_type is None:
                     raise TypeError(f"Extern call '{self.func_name}': missing PC type hint for fixed parameter {i}")
-                converted = visitor.type_converter.convert(arg, target_pc_type)
+                converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
                 converted_args.append(ensure_ir(converted))
             # Handle varargs: apply C default promotions
             for i in range(fixed_param_count, len(args)):
@@ -102,7 +102,7 @@ class ExternFunctionWrapper:
                 target_pc_type = self.param_types[i][1] if i < len(self.param_types) else None
                 if target_pc_type is None:
                     raise TypeError(f"Extern call '{self.func_name}': missing PC type hint for parameter {i}")
-                converted = visitor.type_converter.convert(arg, target_pc_type)
+                converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
                 converted_args.append(ensure_ir(converted))
         
         # Build arg_type_hints for ABI coercion

@@ -167,8 +167,8 @@ class AssignmentsMixin:
             # pyconst fields are zero-sized, assignment is a no-op after type check
             return
         
-        # Convert value to target type (type_converter will handle Python value promotion)
-        rvalue = self.type_converter.convert(rvalue, target_pc_type)
+        # Convert value to target type (implicit coercer checks pointer policy)
+        rvalue = self.implicit_coercer.coerce(rvalue, target_pc_type, node)
         
         # Use safe_store for qualifier-aware storage (handles const check + volatile)
         safe_store(self.builder, ensure_ir(rvalue), ensure_ir(lvalue), target_pc_type, node=node)
@@ -445,7 +445,7 @@ class AssignmentsMixin:
 
             # If the type of RHS does not match pc_type, convert it
             if rvalue.type_hint != pc_type:
-                rvalue = self.type_converter.convert(rvalue, pc_type)
+                rvalue = self.implicit_coercer.coerce(rvalue, pc_type, node)
             
         # Store the value
         self._store_to_new_lvalue(node, var_name, pc_type, rvalue)

@@ -156,7 +156,7 @@ class ptr(BuiltinType):
         """Get LLVM pointer type"""
         if cls.pointee_type is not None:
             pointee = cls.pointee_type
-            
+
             # Resolve forward reference if pointee_type is a string
             if isinstance(pointee, str):
                 from ..forward_ref import get_defined_type
@@ -165,7 +165,11 @@ class ptr(BuiltinType):
                     logger.error(f"ptr.get_llvm_type: unresolved forward reference '{pointee}'", node=None, exc_type=TypeError)
                 pointee = resolved
                 pointee = resolved
-            
+
+            # ptr[void] -> i8* (same as unspecialized ptr)
+            if pointee is void:
+                return ir.PointerType(ir.IntType(8))
+
             # Determine pointee LLVM type from either PC type or direct LLVM type
             if hasattr(pointee, 'get_llvm_type'):
                 pointee_llvm = None
@@ -373,9 +377,15 @@ class ptr(BuiltinType):
         pointee_type_hint = None
         if base.type_hint and hasattr(base.type_hint, 'pointee_type'):
             pointee_type_hint = base.type_hint.pointee_type
-        
+
         if pointee_type_hint is None:
             logger.error(f"Cannot infer pointee type for pointer subscript {base}", node=node, exc_type=TypeError)
+
+        # ptr[void] cannot be dereferenced (like C: must cast to concrete type first)
+        if pointee_type_hint is void:
+            logger.error(
+                "Cannot dereference ptr[void]. Cast to a concrete pointer type first, e.g. ptr[u8](p)[0]",
+                node=node, exc_type=TypeError)
 
         # Propagate qualifiers from pointer type to pointee type
         # If we have const[ptr[i32]], accessing it should give const[i32]

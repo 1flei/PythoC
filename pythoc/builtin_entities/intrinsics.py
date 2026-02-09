@@ -1,5 +1,5 @@
 from llvmlite import ir
-from .types import ptr, i8
+from .types import ptr, i8, void
 from ..valueref import wrap_value
 
 from .typeof import typeof
@@ -12,7 +12,7 @@ from .refine import refine
 from .defer import defer
 from .scoped_label import label, goto, goto_begin, goto_end
 
-nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="value", type_hint=ptr[i8])
+nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="value", type_hint=ptr[void])
 
 __all__ = [
     'typeof',

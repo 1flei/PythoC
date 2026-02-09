@@ -250,13 +250,7 @@ class TypeConverter:
         base_target = get_base_type(target_type)
         base_source = get_base_type(value.type_hint) if value.type_hint else None
 
-        # Step 2: Disallow implicit enum -> int conversion
-        if is_enum_type(base_source) and hasattr(base_target, 'is_signed'):
-            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
-            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
-            logger.error(
-                f"Cannot implicitly convert enum '{source_name}' to integer type '{target_name}'. "
-                f"Use explicit tag extraction: value[0]", node)
+        # Step 2: (enum→int restriction moved to ImplicitCoercer)
 
         # Step 3: Handle struct to enum conversion
         # struct[pyconst[Tag], payload] -> EnumType
@@ -1414,3 +1408,146 @@ class TypeConverter:
             return left, right, True
         left, right = self.unify_integer_types(left, right)
         return left, right, False
+
+
+class ImplicitCoercer:
+    """Single entry point for all *implicit* conversions.
+
+    Implicit conversions happen at:
+    - assignment (x: T = value)
+    - function argument binding
+    - return statements
+
+    Explicit casts (ptr[T](x), i32(x)) bypass this and call TypeConverter.convert() directly.
+
+    Policy:
+    - Same type (after strip_qualifiers) -> delegate to convert()
+    - ptr -> ptr: only if null constant, either side is void ptr, or same pointee
+    - int -> ptr: rejected (must use explicit cast)
+    - enum -> int: rejected (must use tag extraction)
+    - All other cases: delegate to convert() (int->int, float, etc.)
+    """
+
+    def __init__(self, type_converter: TypeConverter):
+        self._tc = type_converter
+
+    def coerce(self, value: ValueRef, target_type, node=None) -> ValueRef:
+        """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""
+        source_type = value.type_hint
+
+        # Early exit: same type after stripping qualifiers
+        stripped_source = strip_qualifiers(source_type) if source_type else None
+        stripped_target = strip_qualifiers(target_type)
+        if stripped_source is not None and stripped_source == stripped_target:
+            return self._tc.convert(value, target_type, node)
+
+        # Early exit: same type_id (handles SpecializedPtr identity issues)
+        if stripped_source is not None and stripped_source is not stripped_target:
+            try:
+                from .type_id import get_type_id
+                if get_type_id(stripped_source) == get_type_id(stripped_target):
+                    return self._tc.convert(value, target_type, node)
+            except BaseException:
+                pass
+
+        base_source = get_base_type(source_type) if source_type else None
+        base_target = get_base_type(target_type)
+
+        # --- Pointer policy ---
+        source_is_ptr = base_source is not None and hasattr(base_source, '_is_pointer') and base_source._is_pointer
+        target_is_ptr = base_target is not None and hasattr(base_target, '_is_pointer') and base_target._is_pointer
+
+        if source_is_ptr and target_is_ptr:
+            # Null pointer constant -> any pointer: allowed
+            if self.is_null_pointer_constant(value):
+                return self._tc.convert(value, target_type, node)
+            # Either side is void pointer: allowed
+            if self.is_void_pointer(base_source) or self.is_void_pointer(base_target):
+                return self._tc.convert(value, target_type, node)
+            # Same pointee type: allowed
+            if self.are_compatible_pointers(base_source, base_target):
+                return self._tc.convert(value, target_type, node)
+            # Incompatible pointers
+            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
+            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
+            logger.error(
+                f"Cannot implicitly convert '{source_name}' to '{target_name}'. "
+                f"Use explicit cast: {target_name}(value)",
+                node, exc_type=TypeError)
+
+        # int -> ptr: rejected
+        if (base_source is not None and hasattr(base_source, '_is_integer') and base_source._is_integer
+                and target_is_ptr):
+            # Allow Python zero constant (0 -> null pointer) as special case
+            if value.is_python_value() and value.get_python_value() == 0:
+                return self._tc.convert(value, target_type, node)
+            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
+            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
+            logger.error(
+                f"Cannot implicitly convert integer '{source_name}' to pointer type '{target_name}'. "
+                f"Use explicit cast: {target_name}(value)",
+                node, exc_type=TypeError)
+
+        # enum -> int: rejected (moved from TypeConverter.convert)
+        if is_enum_type(base_source) and base_target is not None and hasattr(base_target, 'is_signed'):
+            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
+            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
+            logger.error(
+                f"Cannot implicitly convert enum '{source_name}' to integer type '{target_name}'. "
+                f"Use explicit tag extraction: value[0]",
+                node, exc_type=TypeError)
+
+        # All other cases: delegate to convert()
+        return self._tc.convert(value, target_type, node)
+
+    # --- Policy predicates ---
+
+    @staticmethod
+    def is_void_pointer(pc_type) -> bool:
+        """True if pc_type is ptr[void] (pointee_type is void)."""
+        base = get_base_type(pc_type)
+        if base is None:
+            return False
+        from .builtin_entities.types import void
+        return (hasattr(base, '_is_pointer') and base._is_pointer
+                and getattr(base, 'pointee_type', ...) is void)
+
+    @staticmethod
+    def is_null_pointer_constant(value: ValueRef) -> bool:
+        """True if value is a null pointer constant (ir.Constant with None)."""
+        from llvmlite import ir as llvm_ir
+        if isinstance(value, ValueRef):
+            ir_val = value.ir_value
+            if isinstance(ir_val, llvm_ir.Constant) and isinstance(ir_val.type, llvm_ir.PointerType):
+                return ir_val.constant is None
+        return False
+
+    @staticmethod
+    def are_compatible_pointers(source_type, target_type) -> bool:
+        """True if two pointer types have the same pointee (by identity or type_id)."""
+        src_pointee = getattr(source_type, 'pointee_type', None)
+        tgt_pointee = getattr(target_type, 'pointee_type', None)
+        if src_pointee is None or tgt_pointee is None:
+            return False
+        # Identity check
+        if src_pointee is tgt_pointee:
+            return True
+        # String forward ref equality
+        if isinstance(src_pointee, str) and isinstance(tgt_pointee, str):
+            return src_pointee == tgt_pointee
+        # Mixed: one resolved, one string forward ref
+        if isinstance(src_pointee, str) and hasattr(tgt_pointee, 'get_name'):
+            return src_pointee == tgt_pointee.get_name()
+        if isinstance(tgt_pointee, str) and hasattr(src_pointee, 'get_name'):
+            return tgt_pointee == src_pointee.get_name()
+        # Name check (handles different SpecializedPtr classes for same user type)
+        src_name = src_pointee.get_name() if hasattr(src_pointee, 'get_name') else None
+        tgt_name = tgt_pointee.get_name() if hasattr(tgt_pointee, 'get_name') else None
+        if src_name is not None and src_name == tgt_name:
+            return True
+        # type_id check (handles forward refs etc.)
+        from .type_id import get_type_id
+        try:
+            return get_type_id(src_pointee) == get_type_id(tgt_pointee)
+        except BaseException:
+            return False

@@ -4,26 +4,26 @@ Additional memory management functions and helpers
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64
+from ..builtin_entities import ptr, i8, i32, i64, void
 
 # Additional memory utilities
-def memalloc(size: i64) -> ptr[i8]:
+def memalloc(size: i64) -> ptr[void]:
     """Convenient wrapper for malloc"""
     from .stdlib import malloc
     return malloc(size)
 
-def memfree(ptr: ptr[i8]) -> None:
+def memfree(ptr: ptr[void]) -> None:
     """Convenient wrapper for free"""
     from .stdlib import free
     return free(ptr)
 
-def memzero(ptr: ptr[i8], size: i64) -> ptr[i8]:
+def memzero(ptr: ptr[void], size: i64) -> ptr[void]:
     """Zero out memory block"""
     from .string import memset
     return memset(ptr, 0, size)
 
 # Memory debugging helpers (could be extended)
 @extern(lib='c')
-def memcheck(ptr: ptr[i8]) -> i32:
+def memcheck(ptr: ptr[void]) -> i32:
     """Check if memory is valid (placeholder)"""
     pass

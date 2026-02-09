@@ -16,23 +16,23 @@ MAGIC = 0xDEADBEEF
 
 # Marker allocator
 @compile
-def _marker_malloc(size: u64) -> ptr[u8]:
+def _marker_malloc(size: u64) -> ptr[void]:
     raw_p = ptr[u8](libc_malloc(size + u64(8)))
     marker_p = ptr[u64](raw_p)
     marker_p[0] = u64(MAGIC)
     return ptr[u8](ptr[u64](raw_p) + 1)
 
 @compile
-def _marker_free(p: ptr[u8]) -> void:
+def _marker_free(p: ptr[void]) -> void:
     raw_p = ptr[u8](ptr[u64](p) - 1)
     libc_free(raw_p)
 
 @compile
-def _marker_lmalloc(size: u64) -> struct[ptr[u8], linear]:
+def _marker_lmalloc(size: u64) -> struct[ptr[void], linear]:
     return _marker_malloc(size), linear()
 
 @compile
-def _marker_lfree(p: ptr[u8], t: linear) -> void:
+def _marker_lfree(p: ptr[void], t: linear) -> void:
     _marker_free(p)
     consume(t)
 

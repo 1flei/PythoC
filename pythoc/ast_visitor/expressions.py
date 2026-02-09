@@ -24,6 +24,7 @@ from ..builtin_entities import (
 from ..builtin_entities import bool as pc_bool
 from ..registry import get_unified_registry, infer_struct_from_access
 from ..logger import logger
+from ..type_converter import ImplicitCoercer, get_base_type
 
 
 class ExpressionsMixin:
@@ -462,6 +463,11 @@ class ExpressionsMixin:
             # Choose signed or unsigned based on operand type hints
             left_hint = get_type_hint(left)
             right_hint = get_type_hint(right)
+
+            # Align pointer types if needed (null retargeting, void bridging)
+            if isinstance(left_ir.type, ir.PointerType) and isinstance(right_ir.type, ir.PointerType):
+                left_ir, right_ir = self._align_pointer_comparison(left, right, left_ir, right_ir, node)
+
             use_unsigned = (is_unsigned_int(left_hint) or is_unsigned_int(right_hint))
             icmp = self.builder.icmp_unsigned if use_unsigned else self.builder.icmp_signed
             result = icmp(predicate, left_ir, right_ir)
@@ -835,6 +841,45 @@ class ExpressionsMixin:
             logger.error(f"Cannot convert {vtype} to boolean", node=node, exc_type=TypeError)
 
     
+    def _align_pointer_comparison(self, left, right, left_ir, right_ir, node):
+        """Align pointer types for comparison (null retargeting, void bridging).
+
+        Returns (left_ir, right_ir) with matching LLVM pointer types.
+        """
+        IC = ImplicitCoercer
+
+        # Fast path: same LLVM type
+        if left_ir.type == right_ir.type:
+            return left_ir, right_ir
+
+        left_type = get_base_type(left.type_hint)
+        right_type = get_base_type(right.type_hint)
+
+        # Null constant: retarget to other side's type
+        if IC.is_null_pointer_constant(left):
+            return ir.Constant(right_ir.type, None), right_ir
+        if IC.is_null_pointer_constant(right):
+            return left_ir, ir.Constant(left_ir.type, None)
+
+        # Void pointer bridging: bitcast both to i8*
+        void_ptr = ir.PointerType(ir.IntType(8))
+        if IC.is_void_pointer(left_type) or IC.is_void_pointer(right_type):
+            l = self.builder.bitcast(left_ir, void_ptr) if left_ir.type != void_ptr else left_ir
+            r = self.builder.bitcast(right_ir, void_ptr) if right_ir.type != void_ptr else right_ir
+            return l, r
+
+        # Same pointee type but different LLVM repr
+        if IC.are_compatible_pointers(left_type, right_type):
+            right_ir = self.builder.bitcast(right_ir, left_ir.type)
+            return left_ir, right_ir
+
+        # Reject incompatible pointers
+        left_name = left_type.get_name() if hasattr(left_type, 'get_name') else str(left_type)
+        right_name = right_type.get_name() if hasattr(right_type, 'get_name') else str(right_type)
+        logger.error(
+            f"Cannot compare incompatible pointer types '{left_name}' and '{right_name}'",
+            node=node, exc_type=TypeError)
+
     def _perform_binary_operation(self, op: ast.operator, left: ValueRef, right: ValueRef,
                                    node: ast.AST = None) -> ValueRef:
         """Unified binary operation handler with table-driven dispatch

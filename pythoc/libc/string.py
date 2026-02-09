@@ -3,7 +3,7 @@ String Manipulation Functions (string.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64
+from ..builtin_entities import ptr, i8, i32, i64, void
 
 # String length
 @extern(lib='c')
@@ -57,22 +57,22 @@ def strstr(haystack: ptr[i8], needle: ptr[i8]) -> ptr[i8]:
 
 # Memory operations
 @extern(lib='c')
-def memcpy(dest: ptr[i8], src: ptr[i8], n: i64) -> ptr[i8]:
+def memcpy(dest: ptr[void], src: ptr[void], n: i64) -> ptr[void]:
     """Copy memory block"""
     pass
 
 @extern(lib='c')
-def memset(s: ptr[i8], c: i32, n: i64) -> ptr[i8]:
+def memset(s: ptr[void], c: i32, n: i64) -> ptr[void]:
     """Fill memory with constant byte"""
     pass
 
 @extern(lib='c')
-def memcmp(s1: ptr[i8], s2: ptr[i8], n: i64) -> i32:
+def memcmp(s1: ptr[void], s2: ptr[void], n: i64) -> i32:
     """Compare memory blocks"""
     pass
 
 @extern(lib='c')
-def memmove(dest: ptr[i8], src: ptr[i8], n: i64) -> ptr[i8]:
+def memmove(dest: ptr[void], src: ptr[void], n: i64) -> ptr[void]:
     """Move memory block (handles overlap)"""
     pass
 
