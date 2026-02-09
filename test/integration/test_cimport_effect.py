@@ -86,28 +86,28 @@ def get_free_count() -> u64:
 # ============================================================================
 
 @compile
-def _counting_malloc(size: u64) -> ptr[u8]:
+def _counting_malloc(size: u64) -> ptr[void]:
     """Counting allocator: increments counter and calls libc malloc"""
     malloc_counter(i64(1))
-    return ptr[u8](libc_malloc(size))
+    return libc_malloc(size)
 
 
 @compile
-def _counting_free(p: ptr[u8]) -> void:
+def _counting_free(p: ptr[void]) -> void:
     """Counting free: increments counter and calls libc free"""
     free_counter(i64(1))
     libc_free(p)
 
 
 @compile
-def _counting_lmalloc(size: u64) -> struct[ptr[u8], linear]:
+def _counting_lmalloc(size: u64) -> struct[ptr[void], linear]:
     """Counting linear malloc"""
     malloc_counter(i64(1))
-    return ptr[u8](libc_malloc(size)), linear()
+    return libc_malloc(size), linear()
 
 
 @compile
-def _counting_lfree(p: ptr[u8], t: linear) -> void:
+def _counting_lfree(p: ptr[void], t: linear) -> void:
     """Counting linear free"""
     free_counter(i64(1))
     libc_free(p)

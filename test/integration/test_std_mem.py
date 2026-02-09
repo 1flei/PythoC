@@ -28,8 +28,9 @@ from types import SimpleNamespace
 def test_malloc_free_fn() -> u64:
     """Test basic malloc/free with default implementation"""
     p = effect.mem.malloc(u64(64))
-    p[0] = u8(42)
-    result = u64(p[0])
+    pb = ptr[u8](p)
+    pb[0] = u8(42)
+    result = u64(pb[0])
     effect.mem.free(p)
     return result
 
@@ -50,8 +51,9 @@ def test_array_malloc_fn() -> u64:
 def test_lmalloc_lfree_fn() -> u64:
     """Test lmalloc/lfree with linear token tracking"""
     p, t = effect.mem.lmalloc(u64(32))
-    p[0] = u8(77)
-    result = u64(p[0])
+    pb = ptr[u8](p)
+    pb[0] = u8(77)
+    result = u64(pb[0])
     effect.mem.lfree(p, t)
     return result
 
@@ -71,7 +73,7 @@ def test_lmalloc_array_fn() -> u64:
 @compile
 def lib_create_buffer(size: u64) -> ptr[u8]:
     """Library function using effect.mem"""
-    return effect.mem.malloc(size)
+    return ptr[u8](effect.mem.malloc(size))
 
 
 @compile
@@ -93,7 +95,8 @@ def test_lib_usage_fn() -> u64:
 @compile
 def lib_create_tracked(size: u64) -> struct[ptr[u8], MemProof]:
     """Library with linear-tracked memory"""
-    return effect.mem.lmalloc(size)
+    p, t = effect.mem.lmalloc(size)
+    return ptr[u8](p), t
 
 
 @compile
@@ -160,7 +163,8 @@ with effect(mem=CustomMem, suffix="custom"):
         p = effect.mem.malloc(u64(32))
         # Custom allocator writes 0xAB at start, so p[0] should be 0xAB (171)
         # If default allocator was used, p[0] would be uninitialized (not 0xAB)
-        result = u64(p[0])  # Should be 171 (0xAB) if custom was used
+        pb = ptr[u8](p)
+        result = u64(pb[0])  # Should be 171 (0xAB) if custom was used
         effect.mem.free(p)
         return result
 

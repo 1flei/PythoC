@@ -202,7 +202,7 @@ class CallsMixin:
                 target_pc_type = param_pc_types[idx]
             
             if target_pc_type is not None:
-                converted = self.type_converter.convert(arg, target_pc_type)
+                converted = self.implicit_coercer.coerce(arg, target_pc_type, node)
                 converted_args.append(ensure_ir(converted))
             else:
                 # No PC hint: pass-through only if already matching

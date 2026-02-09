@@ -4,10 +4,10 @@ Standard Memory Effect Library
 Provides effect-based memory allocation with default libc implementation.
 
 Effect API (via effect.mem):
-- effect.mem.malloc(size: u64) -> ptr[u8]                        : Allocate heap memory
-- effect.mem.free(p: ptr[u8]) -> void                            : Free heap memory
-- effect.mem.lmalloc(size: u64) -> struct[ptr[u8], MemProof]     : Allocate with linear token
-- effect.mem.lfree(p: ptr[u8], t: MemProof) -> void              : Free and consume linear token
+- effect.mem.malloc(size: u64) -> ptr[void]                        : Allocate heap memory
+- effect.mem.free(p: ptr[void]) -> void                            : Free heap memory
+- effect.mem.lmalloc(size: u64) -> struct[ptr[void], MemProof]     : Allocate with linear token
+- effect.mem.lfree(p: ptr[void], t: MemProof) -> void              : Free and consume linear token
 
 Types:
 - MemProof: refined[linear, "MemProof"] - linear token for memory tracking
@@ -25,21 +25,21 @@ Usage:
     from pythoc.std import mem  # Sets up default mem effect
 
     @compile
-    def create_buffer(n: u64) -> ptr[u8]:
+    def create_buffer(n: u64) -> ptr[void]:
         return effect.mem.malloc(n)
 
     @compile
-    def safe_alloc(n: u64) -> struct[ptr[u8], mem.MemProof]:
+    def safe_alloc(n: u64) -> struct[ptr[void], mem.MemProof]:
         return effect.mem.lmalloc(n)
 
     @compile
-    def safe_free(p: ptr[u8], t: mem.MemProof) -> void:
+    def safe_free(p: ptr[void], t: mem.MemProof) -> void:
         effect.mem.lfree(p, t)
 """
 
 from types import SimpleNamespace
 
-from pythoc import compile, effect, u64, u8, ptr, void, linear, struct, consume, refined, assume
+from pythoc import compile, effect, u64, ptr, void, linear, struct, consume, refined, assume
 from pythoc.libc.stdlib import malloc as libc_malloc, free as libc_free
 
 
@@ -55,25 +55,25 @@ MemProof = refined[linear, "MemProof"]
 # ============================================================
 
 @compile
-def _mem_malloc(size: u64) -> ptr[u8]:
+def _mem_malloc(size: u64) -> ptr[void]:
     """Default heap allocator using libc malloc"""
-    return ptr[u8](libc_malloc(size))
+    return libc_malloc(size)
 
 
 @compile
-def _mem_free(p: ptr[u8]) -> void:
+def _mem_free(p: ptr[void]) -> void:
     """Default heap deallocator using libc free"""
     libc_free(p)
 
 
 @compile
-def _mem_lmalloc(size: u64) -> struct[ptr[u8], MemProof]:
+def _mem_lmalloc(size: u64) -> struct[ptr[void], MemProof]:
     """Default linear allocator - returns ptr + MemProof for tracking"""
-    return ptr[u8](libc_malloc(size)), assume(linear(), "MemProof")
+    return libc_malloc(size), assume(linear(), "MemProof")
 
 
 @compile
-def _mem_lfree(p: ptr[u8], t: MemProof) -> void:
+def _mem_lfree(p: ptr[void], t: MemProof) -> void:
     """Default linear deallocator - frees memory and consumes MemProof"""
     libc_free(p)
     consume(t)
