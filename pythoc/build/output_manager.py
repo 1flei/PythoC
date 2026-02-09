@@ -1,4 +1,5 @@
 import os
+import sys
 import atexit
 from ..utils.link_utils import file_lock
 from .deps import get_dependency_tracker, GroupKey
@@ -532,15 +533,27 @@ _atexit_registered = False
 
 
 def _atexit_flush():
-    """
-    Atexit handler to ensure all pending compilations are flushed.
-    
-    This guarantees that running a Python file with @compile decorators
-    will always generate .ll and .o files, even if no compiled function
-    is ever called.
+    """Flush all pending compilations at interpreter shutdown.
+
+    NOTE: If compilation fails here, `logger.error()` may call `sys.exit(1)`.
+    A `SystemExit` escaping an atexit callback is printed as
+    "Exception ignored in atexit callback" with a traceback, which is noisy.
+
+    We therefore intercept `SystemExit`, flush stdio, and terminate with the
+    same exit code via `os._exit()` to keep output clean.
     """
     try:
         _output_manager.flush_all()
+    except SystemExit as e:
+        # Preserve exit status without triggering atexit traceback printing.
+        try:
+            sys.stderr.flush()
+            sys.stdout.flush()
+        finally:
+            code = e.code
+            if isinstance(code, int):
+                os._exit(code)
+            os._exit(1)
     except Exception:
         # Silently ignore errors during atexit
         # (e.g., if program is terminating due to another error)
