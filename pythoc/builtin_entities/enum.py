@@ -32,14 +32,16 @@ from ..logger import logger
 
 def _create_enum_type(variants, tag_type, class_name=None):
     """Unified factory function to create enum types
-    
+
     Args:
         variants: List of (name, payload_type, tag) tuples
         tag_type: Type for the tag field (e.g., i8, i32)
         class_name: Optional name for the enum class
-    
+
     Returns:
         New EnumType subclass
+
+    Also stores valid tag values for discriminant type semantics.
     """
     # Build union for payloads (use variant names as field names)
     payload_items = []
@@ -48,19 +50,21 @@ def _create_enum_type(variants, tag_type, class_name=None):
             payload_items.append((var_name, ptype))
         else:
             payload_items.append((var_name, void))
-    
+
     # Create union with all payload types using variant names as field names
     union_payload = union_type.handle_type_subscript(tuple(payload_items))
-    
-    # Build tag constants dict
+
+    # Build tag constants dict and collect valid tags
     tag_values = {}
+    valid_tag_set = set()
     for var_name, _ptype, tag in variants:
         tag_values[var_name] = tag
-    
+        valid_tag_set.add(tag)
+
     # Create enum class name
     if class_name is None:
         class_name = f"enum[{', '.join(name for name, _, _ in variants)}]"
-    
+
     # Create new enum class that inherits from EnumType
     enum_cls = type(
         class_name,
@@ -71,16 +75,19 @@ def _create_enum_type(variants, tag_type, class_name=None):
             '_variant_names': [name for name, _, _ in variants],
             '_variant_types': [ptype for _, ptype, _ in variants],
             '_tag_values': tag_values,
+            # Store valid tag values for discriminant type semantics
+            '_valid_tag_values': valid_tag_set,
+            '_discriminant_type': tag_type,  # The underlying integer type
         }
     )
-    
+
     # Setup field types for CompositeType base class
     enum_cls._setup_field_types()
-    
+
     # Set tag constants as class attributes
     for var_name, tag in tag_values.items():
         setattr(enum_cls, var_name, tag)
-    
+
     return enum_cls
 
 
@@ -92,19 +99,32 @@ def _create_enum_type(variants, tag_type, class_name=None):
 
 class EnumType(CompositeType):
     """Base class for enum types created via subscript or decorator
-    
+
     This is the type returned by enum[...] subscript syntax.
-    
+
     Enum is represented as a composite type with 2 fields:
     - Field 0: tag (integer discriminant)
     - Field 1: payload (union of variant types)
-    
+
     Additional enum-specific attributes:
     - _tag_type: Type of the tag field
     - _variant_names: List of variant names
     - _variant_types: List of variant payload types
     - _tag_values: Dict[str, int] mapping variant names to tag values
     - _union_payload: Union type for all variant payloads
+
+    Discriminant type semantics:
+    - _valid_tag_values: Set of valid discriminant values
+    - _discriminant_type: The underlying integer type for discriminants
+
+    Conceptually, the discriminant type is:
+        refined[_discriminant_type, is_valid_discriminant, "EnumDiscriminant"]
+
+    This means:
+    - Tag constants (Enum.Variant) are conceptually refined discriminant values
+    - e[0] extracts the discriminant (tag field)
+    - Comparisons e[0] == Enum.Variant compare discriminants
+    - Comparing e == Enum.Variant is an error (struct vs int)
     """
     _is_enum = True
     _tag_type = None
@@ -112,6 +132,9 @@ class EnumType(CompositeType):
     _variant_types = None
     _tag_values = None
     _union_payload = None
+    # Discriminant type attributes
+    _valid_tag_values = None
+    _discriminant_type = None
     
     @classmethod
     def is_enum_type(cls) -> bool:
@@ -335,27 +358,40 @@ class EnumType(CompositeType):
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
         """Handle attribute access on enum type (for constants like EnumType.VARIANT)
-        
+
         Args:
             visitor: AST visitor
             base: Pre-evaluated base (should be the enum class itself)
             attr_name: Attribute name (variant name)
             node: ast.Attribute node
-            
+
         Returns:
             ValueRef with tag constant value (as Python constant for consistency)
+
+        Tag constants are conceptually discriminant values.
+        - Enum.Variant returns a pyconst[N] where N is the tag value
+        - This can be used in discriminant comparisons: e[0] == Enum.Variant
+        - The pyconst carries metadata indicating it's a valid discriminant
+
+        The value is compile-time known and can only be promoted to the
+        enum's discriminant type (tag_type), not to arbitrary integers.
         """
         from ..valueref import wrap_value
         from ..builtin_entities.python_type import PythonType
-        
+
         # Check if this is a variant name
         if hasattr(cls, attr_name):
             tag_value = getattr(cls, attr_name)
             if isinstance(tag_value, int):
                 # Return tag as Python constant (follows PC convention)
+                # Mark this as a discriminant constant by storing enum info
                 python_type_inst = PythonType.wrap(tag_value, is_constant=True)
+                # Store discriminant metadata for type checking
+                python_type_inst._is_discriminant = True
+                python_type_inst._enum_type = cls
+                python_type_inst._variant_name = attr_name
                 return wrap_value(tag_value, kind="python", type_hint=python_type_inst)
-        
+
         logger.error(f"Enum type {cls.get_name()} has no attribute '{attr_name}'",
                     node=node, exc_type=AttributeError)
     
