@@ -1,6 +1,7 @@
 from .base import BuiltinFunction
 from ..valueref import wrap_value, ValueRef
 from ..logger import logger
+from .._pc_intrinsics import _intrinsic_name
 import ast
 
 
@@ -128,7 +129,7 @@ class refine(BuiltinFunction):
             )
             
             assume_call = ast.Call(
-                func=ast.Name(id='assume', ctx=ast.Load()),
+                func=_intrinsic_name('assume'),
                 args=[copy.deepcopy(arg) for arg in call_node.args],
                 keywords=[]
             )
@@ -174,7 +175,7 @@ class refine(BuiltinFunction):
             
             if len(predicate_nodes) == 0:
                 assume_call = ast.Call(
-                    func=ast.Name(id='assume', ctx=ast.Load()),
+                    func=_intrinsic_name('assume'),
                     args=[copy.deepcopy(arg) for arg in call_node.args],
                     keywords=[]
                 )
@@ -217,7 +218,7 @@ class refine(BuiltinFunction):
                     )
                 
                 assume_call = ast.Call(
-                    func=ast.Name(id='assume', ctx=ast.Load()),
+                    func=_intrinsic_name('assume'),
                     args=[copy.deepcopy(arg) for arg in call_node.args],
                     keywords=[]
                 )

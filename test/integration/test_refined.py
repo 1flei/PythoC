@@ -9,7 +9,7 @@ Tests the refined type system including:
 - Field access on refined types
 """
 
-from pythoc import compile, i32, bool, refined, assume, refine
+from pythoc import compile, i32, bool, refined, refine
 
 
 # Basic single-parameter refined type
@@ -19,6 +19,8 @@ def is_positive(x: i32) -> bool:
 
 PositiveInt = refined[is_positive]
 
+
+from pythoc import assume
 
 @compile
 def test_assume_positive() -> i32:

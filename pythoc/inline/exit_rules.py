@@ -10,6 +10,8 @@ import copy
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
+from ._intrinsics import _intrinsic_name
+
 if TYPE_CHECKING:
     from .transformers import InlineContext
 
@@ -113,7 +115,7 @@ class ReturnExitRule(ExitPointRule):
             renamed_value = self._rename(exit_node.value, context)
             # Wrap in move() for linear type ownership transfer
             moved_value = ast.Call(
-                func=ast.Name(id='move', ctx=ast.Load()),
+                func=_intrinsic_name('move'),
                 args=[renamed_value],
                 keywords=[]
             )
@@ -126,7 +128,7 @@ class ReturnExitRule(ExitPointRule):
         # Jump to exit label using scoped goto_end: goto_end("_inline_exit_{id}")
         if self.exit_label:
             goto_call = ast.Expr(value=ast.Call(
-                func=ast.Name(id='goto_end', ctx=ast.Load()),
+                func=_intrinsic_name('goto_end'),
                 args=[ast.Constant(value=self.exit_label)],
                 keywords=[]
             ))
@@ -255,7 +257,7 @@ class YieldExitRule(ExitPointRule):
             
             # Wrap in move() for ownership transfer
             moved_value = ast.Call(
-                func=ast.Name(id='move', ctx=ast.Load()),
+                func=_intrinsic_name('move'),
                 args=[renamed_value],
                 keywords=[]
             )
@@ -289,7 +291,7 @@ class YieldExitRule(ExitPointRule):
         if yield_label:
             # Create: with label("_yield_{id}"): <inner_stmts>
             label_call = ast.Call(
-                func=ast.Name(id='label', ctx=ast.Load()),
+                func=_intrinsic_name('label'),
                 args=[ast.Constant(value=yield_label)],
                 keywords=[]
             )
@@ -479,7 +481,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         
         # Create: goto_begin("_for_after_else_{id}")
         goto_call = ast.Expr(value=ast.Call(
-            func=ast.Name(id='goto_begin', ctx=ast.Load()),
+            func=_intrinsic_name('goto_begin'),
             args=[ast.Constant(value=self.after_else_label)],
             keywords=[]
         ))
@@ -497,7 +499,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         # Create: goto_end("_yield_{id}")
         # This exits the current yield scope, moving to the next yield
         goto_call = ast.Expr(value=ast.Call(
-            func=ast.Name(id='goto_end', ctx=ast.Load()),
+            func=_intrinsic_name('goto_end'),
             args=[ast.Constant(value=self.yield_label)],
             keywords=[]
         ))

@@ -12,6 +12,7 @@ from typing import List, Set, Dict, Optional, Any, TYPE_CHECKING
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
 from .transformers import InlineBodyTransformer
 from ..utils import get_next_id
+from ._intrinsics import _IntrinsicNamespace, _PC_INTRINSICS, _intrinsic_name
 
 if TYPE_CHECKING:
     from .exit_rules import ExitPointRule
@@ -243,7 +244,7 @@ class InlineKernel:
             # Create: with label("_inline_exit_{id}"): <body>
             exit_label = op.exit_rule.exit_label
             label_call = ast.Call(
-                func=ast.Name(id='label', ctx=ast.Load()),
+                func=_intrinsic_name('label'),
                 args=[ast.Constant(value=exit_label)],
                 keywords=[]
             )
@@ -281,45 +282,26 @@ class InlineKernel:
     def _build_required_globals(self, op: InlineOp) -> Dict[str, Any]:
         """
         Build the globals dict that must be merged into caller's user_globals
-        
+
         This includes:
         1. Callee's __globals__ (for name resolution in inlined code)
-        2. Intrinsics needed by the transformation (e.g., 'move' for linear types)
-        3. Scoped label intrinsics for control flow (label, goto_begin, goto_end)
-        
-        IMPORTANT: Intrinsics are stored with a special key prefix '_pc_intrinsic_'
-        to avoid being overwritten during merge. The adapter should apply them last.
-        
+        2. The __pc_intrinsics namespace (for compiler-generated AST references)
+
         Args:
             op: InlineOp with callee_globals
-            
+
         Returns:
             Dict of globals to merge
         """
         required = {}
-        
+
         # Start with callee's globals
         if op.callee_globals:
             required.update(op.callee_globals)
-        
-        # Add 'move' intrinsic for linear type ownership transfer
-        # This is needed because yield/inline transformations wrap values in move()
-        # CRITICAL: This must take precedence over any user-defined 'move'
-        from ..builtin_entities import move, bool as pc_bool
-        # Import scoped label intrinsics
-        from ..builtin_entities import label, goto_begin, goto_end
-        required['move'] = move
-        
-        # Add 'bool' type for flag variable declarations
-        # This is needed because kernel generates: _is_return: bool = False
-        required['bool'] = pc_bool
-        
-        # Add scoped label intrinsics for control flow
-        # These are used by ReturnExitRule for multi-return handling
-        required['label'] = label
-        required['goto_begin'] = goto_begin
-        required['goto_end'] = goto_end
-        
+
+        # Inject the intrinsic namespace for compiler-generated AST
+        required['__pc_intrinsics'] = _PC_INTRINSICS
+
         return required
     
     def _create_rename_map(self, op: InlineOp) -> Dict[str, str]:
@@ -430,7 +412,7 @@ class InlineKernel:
                 
                 # Wrap in move() for ownership transfer (essential for linear types)
                 moved_value = ast.Call(
-                    func=ast.Name(id='move', ctx=ast.Load()),
+                    func=_intrinsic_name('move'),
                     args=[arg_value],
                     keywords=[]
                 )
@@ -444,7 +426,7 @@ class InlineKernel:
             else:
                 # Wrap in move() for ownership transfer
                 moved_value = ast.Call(
-                    func=ast.Name(id='move', ctx=ast.Load()),
+                    func=_intrinsic_name('move'),
                     args=[arg_value],
                     keywords=[]
                 )

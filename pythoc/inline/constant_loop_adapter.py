@@ -37,6 +37,7 @@ from ..utils import get_next_id
 from ..logger import logger
 from ..valueref import ValueRef, wrap_value
 from ..context import VariableInfo
+from ._intrinsics import _intrinsic_name
 
 if TYPE_CHECKING:
     from ..ast_visitor.visitor_impl import LLVMIRVisitor
@@ -309,7 +310,7 @@ class ConstantLoopAdapter:
     ) -> ast.With:
         """Create a scoped label block: with label("name"): body"""
         label_call = ast.Call(
-            func=ast.Name(id='label', ctx=ast.Load()),
+            func=_intrinsic_name('label'),
             args=[ast.Constant(value=label_name)],
             keywords=[]
         )
@@ -365,7 +366,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
             return node
         
         goto_call = ast.Expr(value=ast.Call(
-            func=ast.Name(id='goto_begin', ctx=ast.Load()),
+            func=_intrinsic_name('goto_begin'),
             args=[ast.Constant(value=self.break_target)],
             keywords=[]
         ))
@@ -378,7 +379,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
             return node
         
         goto_call = ast.Expr(value=ast.Call(
-            func=ast.Name(id='goto_end', ctx=ast.Load()),
+            func=_intrinsic_name('goto_end'),
             args=[ast.Constant(value=self.continue_target)],
             keywords=[]
         ))

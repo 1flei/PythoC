@@ -289,7 +289,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             
             # 2e. Generic Python object
             from ..builtin_entities.python_type import PythonType
-            python_type = PythonType.wrap(python_obj)
+            python_type = PythonType.wrap(python_obj, is_constant=True)
             return VariableInfo(
                 name=name,
                 value_ref=wrap_value(
