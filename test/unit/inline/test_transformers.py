@@ -12,11 +12,20 @@ from pythoc.inline.exit_rules import ReturnExitRule, YieldExitRule
 
 class TestInlineBodyTransformer(unittest.TestCase):
     """Test body transformation"""
-    
+
     def _parse_body(self, code: str):
         """Helper: Parse function and extract body"""
         tree = ast.parse(code)
         return tree.body[0].body
+
+    def _assert_intrinsic_call(self, call_node: ast.Call, intrinsic_name: str):
+        """Assert that call_node.func is __pc_intrinsics.<intrinsic_name>"""
+        func = call_node.func
+        self.assertIsInstance(func, ast.Attribute,
+                              f"Expected Attribute node for intrinsic '{intrinsic_name}', got {type(func).__name__}")
+        self.assertEqual(func.attr, intrinsic_name)
+        self.assertIsInstance(func.value, ast.Name)
+        self.assertEqual(func.value.id, '__pc_intrinsics')
     
     def test_simple_renaming(self):
         """
@@ -47,7 +56,7 @@ def f():
         self.assertEqual(result_assign.targets[0].id, 'result')
         # Value is wrapped in move() for linear type support
         self.assertIsInstance(result_assign.value, ast.Call)
-        self.assertEqual(result_assign.value.func.id, 'move')
+        self._assert_intrinsic_call(result_assign.value, 'move')
         self.assertEqual(result_assign.value.args[0].id, 'x_inline_1')
     
     def test_no_renaming_for_params(self):
@@ -70,7 +79,7 @@ def f():
         assign = new_body[0]
         # Value is wrapped in move() for linear type support
         self.assertIsInstance(assign.value, ast.Call)
-        self.assertEqual(assign.value.func.id, 'move')
+        self._assert_intrinsic_call(assign.value, 'move')
         # The argument to move() is the BinOp
         binop = assign.value.args[0]
         self.assertIsInstance(binop, ast.BinOp)
@@ -100,7 +109,7 @@ def f():
         assign = new_body[0]
         # Value is wrapped in move() for linear type support
         self.assertIsInstance(assign.value, ast.Call)
-        self.assertEqual(assign.value.func.id, 'move')
+        self._assert_intrinsic_call(assign.value, 'move')
         # The argument to move() is the BinOp
         binop = assign.value.args[0]
         self.assertEqual(binop.left.id, 'a')  # Not renamed
@@ -228,7 +237,7 @@ def f():
         goto_expr = new_body[1]
         self.assertIsInstance(goto_expr, ast.Expr)
         self.assertIsInstance(goto_expr.value, ast.Call)
-        self.assertEqual(goto_expr.value.func.id, 'goto_end')
+        self._assert_intrinsic_call(goto_expr.value, 'goto_end')
         self.assertEqual(goto_expr.value.args[0].value, '_inline_exit_test')
     
     def test_yield_exit_transformation(self):
@@ -261,7 +270,7 @@ def f():
         self.assertEqual(assign.targets[0].id, 'loop_var')
         # Value is now wrapped in move() for linear type support
         self.assertIsInstance(assign.value, ast.Call)
-        self.assertEqual(assign.value.func.id, 'move')
+        self._assert_intrinsic_call(assign.value, 'move')
         self.assertEqual(assign.value.args[0].id, 'i')
         
         # Second: x = x + 1 (from loop body)
@@ -300,15 +309,15 @@ def f():
         self.assertEqual(then_assign.targets[0].id, 'result')
         # Value is wrapped in move() for linear type support
         self.assertIsInstance(then_assign.value, ast.Call)
-        self.assertEqual(then_assign.value.func.id, 'move')
+        self._assert_intrinsic_call(then_assign.value, 'move')
         self.assertEqual(then_assign.value.args[0].id, 'a')
-        
+
         # Else: result = move(b)
         else_assign = if_stmt.orelse[0]
         self.assertEqual(else_assign.targets[0].id, 'result')
         # Value is wrapped in move() for linear type support
         self.assertIsInstance(else_assign.value, ast.Call)
-        self.assertEqual(else_assign.value.func.id, 'move')
+        self._assert_intrinsic_call(else_assign.value, 'move')
         self.assertEqual(else_assign.value.args[0].id, 'b')
     
     def test_nested_structures(self):

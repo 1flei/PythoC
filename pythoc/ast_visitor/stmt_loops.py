@@ -371,8 +371,9 @@ class LoopsMixin:
             # Place the after_else label as a scoped label (break jumps here to skip else)
             if after_else_label:
                 # Create: with label("_for_after_else_{id}"): pass
+                from ..inline._intrinsics import _intrinsic_name
                 label_call = ast.Call(
-                    func=ast.Name(id='label', ctx=ast.Load()),
+                    func=_intrinsic_name('label'),
                     args=[ast.Constant(value=after_else_label)],
                     keywords=[]
                 )
@@ -426,14 +427,14 @@ class LoopsMixin:
         - continue transforms to goto_end(iter_label)
         """
         from ..inline.constant_loop_adapter import ConstantLoopAdapter
-        from ..builtin_entities import label, goto_begin, goto_end
-        
+        from ..inline._intrinsics import _PC_INTRINSICS
+
         cf = self._get_cf_builder()
-        
+
         # Use AST transformation
         adapter = ConstantLoopAdapter(self)
         result = adapter.transform_constant_loop(node, py_iterable)
-        
+
         # Debug: output transformed AST if enabled
         from ..utils.ast_debug import ast_debugger
         ast_debugger.capture(
@@ -442,20 +443,18 @@ class LoopsMixin:
             original=ast.unparse(node) if hasattr(ast, 'unparse') else str(node),
             exit_label=result.exit_label
         )
-        
+
         # Fix locations for all transformed statements
         for stmt in result.stmts:
             ast.copy_location(stmt, node)
             ast.fix_missing_locations(stmt)
-        
-        # Ensure scoped label intrinsics are available in user_globals
+
+        # Ensure intrinsic namespace is available in user_globals
         old_user_globals = self.ctx.user_globals
         merged_globals = {}
         if old_user_globals:
             merged_globals.update(old_user_globals)
-        merged_globals['label'] = label
-        merged_globals['goto_begin'] = goto_begin
-        merged_globals['goto_end'] = goto_end
+        merged_globals['__pc_intrinsics'] = _PC_INTRINSICS
         self.ctx.user_globals = merged_globals
         
         try:
