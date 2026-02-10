@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1770640034565,
+  "lastUpdate": 1770719244823,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -477,6 +477,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.717,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "b33a384282d6e93e1043ce78f9ecfe016ccd622a",
+          "message": "Add more docs and refactor intrinsic global name",
+          "timestamp": "2026-02-10T18:22:39+08:00",
+          "tree_id": "0c189117f54978960da326af4a24099a1846c2da",
+          "url": "https://github.com/1flei/PythoC/commit/b33a384282d6e93e1043ce78f9ecfe016ccd622a"
+        },
+        "date": 1770719243887,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.71,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.704,
             "unit": "seconds/test"
           }
         ]
