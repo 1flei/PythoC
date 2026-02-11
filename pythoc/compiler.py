@@ -4,6 +4,7 @@ Enhanced version with modular architecture and comprehensive functionality
 """
 
 import ast
+import sys
 from typing import List
 from llvmlite import ir, binding
 from .ast_visitor import LLVMIRVisitor
@@ -34,7 +35,12 @@ class LLVMCompiler:
     def create_module(self, name: str = "main"):
         """Create a new LLVM module"""
         self.module = ir.Module(name=name)
-        self.module.triple = binding.get_default_triple()
+        # On Windows, use windows-gnu triple so that generated .o files are
+        # compatible with zig's GNU linker (the only supported linker on Windows).
+        triple = binding.get_default_triple()
+        if sys.platform == 'win32':
+            triple = triple.replace('-windows-msvc', '-windows-gnu')
+        self.module.triple = triple
         # Set data layout for correct struct size calculation
         target = binding.Target.from_triple(self.module.triple)
         target_machine = target.create_target_machine()

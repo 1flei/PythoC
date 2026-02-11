@@ -485,13 +485,14 @@ class TypeConverter:
         actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
         
         # Handle transitive effect propagation
-        # Effect suffix is contagious: if caller is compiled under an effect_suffix,
-        # propagate the same effect_suffix to any @compile callee reference.
         #
-        # Note: we intentionally do NOT try to predict whether the callee "uses" the
-        # overridden effects here. Conditional propagation would require a separate,
-        # authoritative dependency analysis API. The current rule is simple and
-        # deterministic: propagate whenever we are in an effect compilation context.
+        # Policy (group/file-level): only propagate the caller's effect suffix to a
+        # callee when the *callee group* uses at least one of the overridden effects.
+        #
+        # Rationale: this avoids the worst-case explosion of specialized variants
+        # (and Windows DLL-local `static` duplication) without persisting per-function
+        # effect dependency maps to disk.
+
         compilation_ctx = get_current_compilation_context()
 
         callee_effect_suffix = getattr(wrapper, '_effect_suffix', None)
@@ -508,23 +509,60 @@ class TypeConverter:
                 # Effect implementations are marked by the effect system.
                 if original_wrapper and getattr(original_wrapper, '_pc_effect_impl', False):
                     pass
-                elif original_wrapper and hasattr(original_wrapper, 'get_effect_specialized'):
-                    specialized_wrapper = original_wrapper.get_effect_specialized(
-                        ctx_effect_suffix, ctx_effects
-                    )
-                    func_info = specialized_wrapper._func_info
-                    actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
-                    logger.debug(f"Using transitive effect version: {actual_func_name}")
+                else:
+                    # Decide based on callee *group-level* `effects_used`.
+                    #
+                    # - If we have deps info for the callee group, specialize only when
+                    #   there is an intersection.
+                    # - If we don't know yet (callee not compiled / deps not loaded), be
+                    #   conservative and specialize.
+                    should_specialize = True
+                    callee_group_key = getattr(original_wrapper, '_group_key', None) or getattr(wrapper, '_group_key', None)
+                    if callee_group_key:
+                        try:
+                            from .build.deps import get_dependency_tracker
+                            dep_tracker = get_dependency_tracker()
+                            callee_deps = dep_tracker.get_deps(callee_group_key)
+                            if callee_deps is not None:
+                                should_specialize = bool(set(callee_deps.effects_used) & set(ctx_effects.keys()))
+                        except Exception:
+                            should_specialize = True
 
-                    # Record dependency: caller_group -> specialized_wrapper_group
-                    caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                    callee_group_key = getattr(specialized_wrapper, '_group_key', None)
-                    if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
-                        from .build.deps import get_dependency_tracker
-                        dep_tracker = get_dependency_tracker()
-                        dep_tracker.record_group_dependency(
-                            caller_group_key, callee_group_key, "effect_specialized_call"
+                    if should_specialize and original_wrapper and hasattr(original_wrapper, 'get_effect_specialized'):
+
+                        specialized_wrapper = original_wrapper.get_effect_specialized(
+                            ctx_effect_suffix, ctx_effects
                         )
+                        func_info = specialized_wrapper._func_info
+                        actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
+                        logger.debug(f"Using transitive effect version: {actual_func_name}")
+
+                        # Record dependency: caller_group -> specialized_wrapper_group
+                        caller_group_key = getattr(self._visitor, 'current_group_key', None)
+                        callee_group_key = getattr(specialized_wrapper, '_group_key', None)
+                        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
+                            from .build.deps import get_dependency_tracker
+                            dep_tracker = get_dependency_tracker()
+                            dep_tracker.record_group_dependency(
+                                caller_group_key, callee_group_key, "effect_specialized_call"
+                            )
+
+
+        # Always record a dependency for the referenced wrapper.
+        #
+        # This is important on Windows where we must link dependency groups at
+        # DLL link-time (via import libraries). Even when we intentionally skip
+        # effect-specializing an effect-implementation callable (marked with
+        # `_pc_effect_impl`), we still need the group-level dependency recorded
+        # so the linker sees the correct provider.
+        caller_group_key = getattr(self._visitor, 'current_group_key', None)
+        callee_wrapper = getattr(func_info, 'wrapper', None) if func_info else None
+        callee_group_key = getattr(callee_wrapper, '_group_key', None) or getattr(wrapper, '_group_key', None)
+        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
+            from .build.deps import get_dependency_tracker
+            get_dependency_tracker().record_group_dependency(
+                caller_group_key, callee_group_key, "function_ref"
+            )
         
         # Get or declare the function in the module
         module = self._visitor.module

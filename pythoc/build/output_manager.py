@@ -141,6 +141,38 @@ class OutputManager:
         if group_key not in self._pending_compilations:
             self._pending_compilations[group_key] = []
         self._pending_compilations[group_key].append((callback, func_info))
+
+        # If this group already exists but was previously flushed, it might not
+        # currently be in `_pending_groups`. In that case, pending compilations
+        # would never be processed. Ensure the group is marked pending again.
+        if group_key in self._all_groups and group_key not in self._pending_groups:
+            group = self._all_groups[group_key]
+
+            # If the group's shared library has already been loaded, we must not
+            # allow new compilations into it (same rule as in `get_or_create_group`).
+            from ..native_executor import get_multi_so_executor
+            executor = get_multi_so_executor()
+            so_file = group.get('so_file')
+            if so_file and so_file in executor.loaded_libs:
+                source_file_path = group_key[0] if group_key else 'unknown'
+                raise RuntimeError(
+                    f"Cannot define new @compile function after module '{source_file_path}' "
+                    f"has started native execution. All @compile functions must be defined "
+                    f"before any compiled function is called."
+                )
+
+            if group_key in self._flushed_groups:
+                self._flushed_groups.remove(group_key)
+
+            self._pending_groups[group_key] = group
+            group['force_recompile'] = True
+
+            # If we previously cached skipped compilations for this group (cache hit),
+            # restore them so we rebuild a complete object file.
+            if group_key in self._cached_compilations:
+                cached = self._cached_compilations.pop(group_key)
+                self._pending_compilations[group_key].extend(cached)
+
         from ..logger import logger
         logger.debug(f"queue_compilation: {func_info.name}, group_key={group_key}, total_pending={len(self._pending_compilations[group_key])}")
     
@@ -386,7 +418,7 @@ class OutputManager:
                 compiler.compile_to_object(group['obj_file'])
                 
                 # Save dependency information
-                self._save_group_deps(group_key, compiler, obj_file)
+                self._save_group_deps(group_key, compiler, obj_file, group)
             
             # Mark this group as flushed
             self._flushed_groups.add(group_key)
@@ -401,8 +433,9 @@ class OutputManager:
         """
         Restore dependency information from .deps file on cache hit.
         
-        This ensures that link libraries and objects are properly registered
+        This ensures that link libraries/objects are properly registered
         even when we skip compilation.
+
         
         Args:
             group_key: Group key tuple
@@ -433,18 +466,22 @@ class OutputManager:
                 registry.add_link_library(lib)
             for obj in deps.link_objects:
                 registry.add_link_object(obj)
+
+
     
-    def _save_group_deps(self, group_key, compiler, obj_file):
+    def _save_group_deps(self, group_key, compiler, obj_file, group=None):
         """
         Save dependency information for a compiled group.
 
-        Persists link libraries/objects to .deps file. Group dependencies
-        are recorded at call time in compile.py and type_converter.py.
+        Persists link libraries/objects to `.deps` file. Group dependencies
+        are recorded at call time in `compile.py` and `type_converter.py`.
+
 
         Args:
             group_key: Group key tuple
             compiler: LLVMCompiler with compilation results
             obj_file: Path to .o file
+            group: Optional group info dict (for accessing wrappers)
         """
         from .deps import get_dependency_tracker
         from ..registry import get_unified_registry
@@ -456,17 +493,15 @@ class OutputManager:
         group_deps = dep_tracker.get_or_create_group_deps(group_key)
         
         # Set source mtime
-        group = self._pending_groups.get(group_key)
+        if group is None:
+            group = self._all_groups.get(group_key)
         if group and group.get('source_file'):
             source_file = group['source_file']
             if os.path.exists(source_file):
                 group_deps.source_mtime = os.path.getmtime(source_file)
         
-        # Note: Group dependencies are now recorded at call time in compile.py
-        # and type_converter.py, not here. The imported_user_functions approach
-        # has been removed.
-
         # Add link libraries from registry
+
         for lib in registry.get_link_libraries():
             if lib not in group_deps.link_libraries:
                 group_deps.link_libraries.append(lib)
@@ -475,6 +510,16 @@ class OutputManager:
         for obj in registry.get_link_objects():
             if obj not in group_deps.link_objects:
                 group_deps.link_objects.append(obj)
+        
+        # Propagate transitive effects from dependent groups.
+        # If this group calls functions in groups that use effects (e.g., c_ast uses
+        # effect.mem), those effects should be reflected in this group's effects_used
+        # so that the effect specialization check in type_converter.py works correctly
+        # for callers that reference this group.
+        for dep in group_deps.group_dependencies:
+            dep_group_deps = dep_tracker.get_deps(dep.target_group.to_tuple())
+            if dep_group_deps and dep_group_deps.effects_used:
+                group_deps.effects_used |= dep_group_deps.effects_used
         
         # Save to file
         dep_tracker.save_deps(group_key, obj_file)

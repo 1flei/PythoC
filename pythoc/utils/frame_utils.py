@@ -20,9 +20,11 @@ def find_caller_frame(skip_packages=None):
     
     while temp_frame:
         filename = temp_frame.f_code.co_filename
+        filename_norm = filename.replace('\\', '/')
+        filename_norm_lower = filename_norm.lower()
         
-        # Check if this frame is in any skip package
-        if not any(pkg in filename for pkg in skip_packages):
+        # Check if this frame is in any skip package (case-insensitive for Windows)
+        if not any(pkg in filename_norm_lower for pkg in skip_packages):
             return temp_frame
         
         temp_frame = temp_frame.f_back
@@ -51,14 +53,25 @@ def get_definition_scope():
     while temp_frame:
         code = temp_frame.f_code
         filename = code.co_filename
+        filename_norm = filename.replace('\\', '/')
+        filename_norm_lower = filename_norm.lower()
         func_name = code.co_name
         
         # Skip pythoc package internals (support both /pythoc/ and /pc/ paths)
-        if ('/pythoc/decorators/' in filename or 
-            '/pythoc/builtin_entities/' in filename or
-            '/pythoc/ast_visitor/' in filename or
-            '/pythoc/std/' in filename or
-            '/pythoc/effect.py' in filename):
+        if ('/pythoc/decorators/' in filename_norm_lower or 
+            '/pythoc/builtin_entities/' in filename_norm_lower or
+            '/pythoc/ast_visitor/' in filename_norm_lower or
+            '/pythoc/std/' in filename_norm_lower or
+            '/pythoc/effect.py' in filename_norm_lower):
+            temp_frame = temp_frame.f_back
+            continue
+        
+        # Skip Python import machinery frames (importlib, frozen importlib, etc.)
+        # These appear in the stack when @compile is triggered during import
+        # and would incorrectly set scope to e.g. '_call_with_frames_removed.<locals>'
+        if (filename_norm_lower.startswith('<frozen') or
+            'importlib' in filename_norm_lower or
+            func_name == '_call_with_frames_removed'):
             temp_frame = temp_frame.f_back
             continue
         

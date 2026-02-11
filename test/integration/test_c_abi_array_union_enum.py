@@ -29,6 +29,12 @@ C_SOURCE = """
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT
+#endif
+
 // ============================================================================
 // Array types - fixed size arrays
 // ============================================================================
@@ -110,41 +116,41 @@ typedef struct {
 // ============================================================================
 
 // Return arrays
-Array2_i32 c_return_array2_i32(void) {
+EXPORT Array2_i32 c_return_array2_i32(void) {
     Array2_i32 arr = {{10, 20}};
     return arr;
 }
 
-Array4_i32 c_return_array4_i32(void) {
+EXPORT Array4_i32 c_return_array4_i32(void) {
     Array4_i32 arr = {{1, 2, 3, 4}};
     return arr;
 }
 
-Array4_i64 c_return_array4_i64(void) {
+EXPORT Array4_i64 c_return_array4_i64(void) {
     Array4_i64 arr = {{100, 200, 300, 400}};
     return arr;
 }
 
 // Take array params
-int32_t c_sum_array2_i32(Array2_i32 arr) {
+EXPORT int32_t c_sum_array2_i32(Array2_i32 arr) {
     return arr.data[0] + arr.data[1];
 }
 
-int32_t c_sum_array4_i32(Array4_i32 arr) {
+EXPORT int32_t c_sum_array4_i32(Array4_i32 arr) {
     return arr.data[0] + arr.data[1] + arr.data[2] + arr.data[3];
 }
 
-int64_t c_sum_array4_i64(Array4_i64 arr) {
+EXPORT int64_t c_sum_array4_i64(Array4_i64 arr) {
     return arr.data[0] + arr.data[1] + arr.data[2] + arr.data[3];
 }
 
 // Take and return arrays
-Array2_i32 c_double_array2_i32(Array2_i32 arr) {
+EXPORT Array2_i32 c_double_array2_i32(Array2_i32 arr) {
     Array2_i32 result = {{arr.data[0] * 2, arr.data[1] * 2}};
     return result;
 }
 
-Array4_i64 c_increment_array4_i64(Array4_i64 arr) {
+EXPORT Array4_i64 c_increment_array4_i64(Array4_i64 arr) {
     Array4_i64 result = {{arr.data[0] + 1, arr.data[1] + 1, arr.data[2] + 1, arr.data[3] + 1}};
     return result;
 }
@@ -154,19 +160,19 @@ Array4_i64 c_increment_array4_i64(Array4_i64 arr) {
 // ============================================================================
 
 // Return unions
-Union_i32_f32 c_return_union_int(void) {
+EXPORT Union_i32_f32 c_return_union_int(void) {
     Union_i32_f32 u;
     u.int_val = 42;
     return u;
 }
 
-Union_i64_f64 c_return_union_double(void) {
+EXPORT Union_i64_f64 c_return_union_double(void) {
     Union_i64_f64 u;
     u.double_val = 3.14159;
     return u;
 }
 
-Union_Large32 c_return_union_large(void) {
+EXPORT Union_Large32 c_return_union_large(void) {
     Union_Large32 u;
     u.arr[0] = 10;
     u.arr[1] = 20;
@@ -176,26 +182,26 @@ Union_Large32 c_return_union_large(void) {
 }
 
 // Take union params
-int32_t c_get_union_int(Union_i32_f32 u) {
+EXPORT int32_t c_get_union_int(Union_i32_f32 u) {
     return u.int_val;
 }
 
-double c_get_union_double(Union_i64_f64 u) {
+EXPORT double c_get_union_double(Union_i64_f64 u) {
     return u.double_val;
 }
 
-int64_t c_sum_union_large(Union_Large32 u) {
+EXPORT int64_t c_sum_union_large(Union_Large32 u) {
     return u.arr[0] + u.arr[1] + u.arr[2] + u.arr[3];
 }
 
 // Take and return unions
-Union_i32_f32 c_double_union_int(Union_i32_f32 u) {
+EXPORT Union_i32_f32 c_double_union_int(Union_i32_f32 u) {
     Union_i32_f32 result;
     result.int_val = u.int_val * 2;
     return result;
 }
 
-Union_Large32 c_increment_union_large(Union_Large32 u) {
+EXPORT Union_Large32 c_increment_union_large(Union_Large32 u) {
     Union_Large32 result;
     result.arr[0] = u.arr[0] + 1;
     result.arr[1] = u.arr[1] + 1;
@@ -209,47 +215,47 @@ Union_Large32 c_increment_union_large(Union_Large32 u) {
 // ============================================================================
 
 // Return enums
-SimpleEnum c_return_simple_enum(int8_t tag) {
+EXPORT SimpleEnum c_return_simple_enum(int8_t tag) {
     SimpleEnum e = {tag};
     return e;
 }
 
-Result_i32 c_return_result_ok(int32_t val) {
+EXPORT Result_i32 c_return_result_ok(int32_t val) {
     Result_i32 r;
     r.tag = 0;  // Ok
     r.payload.ok_val = val;
     return r;
 }
 
-Result_i32 c_return_result_err(int32_t code) {
+EXPORT Result_i32 c_return_result_err(int32_t code) {
     Result_i32 r;
     r.tag = 1;  // Err
     r.payload.err_val = code;
     return r;
 }
 
-Value_Enum c_return_value_int(int32_t val) {
+EXPORT Value_Enum c_return_value_int(int32_t val) {
     Value_Enum v;
     v.tag = 0;  // Int
     v.payload.int_val = val;
     return v;
 }
 
-Value_Enum c_return_value_float(double val) {
+EXPORT Value_Enum c_return_value_float(double val) {
     Value_Enum v;
     v.tag = 1;  // Float
     v.payload.float_val = val;
     return v;
 }
 
-Expression_Enum c_return_expr_const(int32_t val) {
+EXPORT Expression_Enum c_return_expr_const(int32_t val) {
     Expression_Enum e;
     e.tag = 0;  // Const
     e.payload.const_val = val;
     return e;
 }
 
-Expression_Enum c_return_expr_add(int64_t a, int64_t b) {
+EXPORT Expression_Enum c_return_expr_add(int64_t a, int64_t b) {
     Expression_Enum e;
     e.tag = 1;  // Add
     e.payload.binop.a = a;
@@ -258,11 +264,11 @@ Expression_Enum c_return_expr_add(int64_t a, int64_t b) {
 }
 
 // Take enum params
-int8_t c_get_simple_enum_tag(SimpleEnum e) {
+EXPORT int8_t c_get_simple_enum_tag(SimpleEnum e) {
     return e.tag;
 }
 
-int32_t c_get_result_value(Result_i32 r) {
+EXPORT int32_t c_get_result_value(Result_i32 r) {
     if (r.tag == 0) {
         return r.payload.ok_val;
     } else {
@@ -270,7 +276,7 @@ int32_t c_get_result_value(Result_i32 r) {
     }
 }
 
-int64_t c_eval_expression(Expression_Enum e) {
+EXPORT int64_t c_eval_expression(Expression_Enum e) {
     switch (e.tag) {
         case 0: return e.payload.const_val;
         case 1: return e.payload.binop.a + e.payload.binop.b;
@@ -280,7 +286,7 @@ int64_t c_eval_expression(Expression_Enum e) {
 }
 
 // Take and return enums
-Result_i32 c_double_result(Result_i32 r) {
+EXPORT Result_i32 c_double_result(Result_i32 r) {
     Result_i32 result;
     result.tag = r.tag;
     if (r.tag == 0) {
@@ -291,7 +297,7 @@ Result_i32 c_double_result(Result_i32 r) {
     return result;
 }
 
-Expression_Enum c_negate_expr(Expression_Enum e) {
+EXPORT Expression_Enum c_negate_expr(Expression_Enum e) {
     Expression_Enum result;
     result.tag = e.tag;
     if (e.tag == 0) {
@@ -315,33 +321,33 @@ typedef int64_t (*fn_sum_array4_i64_t)(Array4_i64);
 typedef Array2_i32 (*fn_double_array2_i32_t)(Array2_i32);
 typedef Array4_i64 (*fn_increment_array4_i64_t)(Array4_i64);
 
-int32_t c_call_fn_return_array2_i32(fn_return_array2_i32_t fn) {
+EXPORT int32_t c_call_fn_return_array2_i32(fn_return_array2_i32_t fn) {
     Array2_i32 arr = fn();
     return arr.data[0] + arr.data[1];
 }
 
-int64_t c_call_fn_return_array4_i64(fn_return_array4_i64_t fn) {
+EXPORT int64_t c_call_fn_return_array4_i64(fn_return_array4_i64_t fn) {
     Array4_i64 arr = fn();
     return arr.data[0] + arr.data[1] + arr.data[2] + arr.data[3];
 }
 
-int32_t c_call_fn_sum_array2_i32(fn_sum_array2_i32_t fn) {
+EXPORT int32_t c_call_fn_sum_array2_i32(fn_sum_array2_i32_t fn) {
     Array2_i32 arr = {{25, 75}};
     return fn(arr);
 }
 
-int64_t c_call_fn_sum_array4_i64(fn_sum_array4_i64_t fn) {
+EXPORT int64_t c_call_fn_sum_array4_i64(fn_sum_array4_i64_t fn) {
     Array4_i64 arr = {{100, 200, 300, 400}};
     return fn(arr);
 }
 
-int32_t c_call_fn_double_array2_i32(fn_double_array2_i32_t fn) {
+EXPORT int32_t c_call_fn_double_array2_i32(fn_double_array2_i32_t fn) {
     Array2_i32 arr = {{10, 20}};
     Array2_i32 result = fn(arr);
     return result.data[0] + result.data[1];
 }
 
-int64_t c_call_fn_increment_array4_i64(fn_increment_array4_i64_t fn) {
+EXPORT int64_t c_call_fn_increment_array4_i64(fn_increment_array4_i64_t fn) {
     Array4_i64 arr = {{10, 20, 30, 40}};
     Array4_i64 result = fn(arr);
     return result.data[0] + result.data[1] + result.data[2] + result.data[3];
@@ -355,23 +361,23 @@ typedef int64_t (*fn_sum_union_large_t)(Union_Large32);
 typedef Union_i32_f32 (*fn_double_union_int_t)(Union_i32_f32);
 typedef Union_Large32 (*fn_increment_union_large_t)(Union_Large32);
 
-int32_t c_call_fn_return_union_i32_f32(fn_return_union_i32_f32_t fn) {
+EXPORT int32_t c_call_fn_return_union_i32_f32(fn_return_union_i32_f32_t fn) {
     Union_i32_f32 u = fn();
     return u.int_val;
 }
 
-int64_t c_call_fn_return_union_large(fn_return_union_large_t fn) {
+EXPORT int64_t c_call_fn_return_union_large(fn_return_union_large_t fn) {
     Union_Large32 u = fn();
     return u.arr[0] + u.arr[1] + u.arr[2] + u.arr[3];
 }
 
-int32_t c_call_fn_get_union_int(fn_get_union_int_t fn) {
+EXPORT int32_t c_call_fn_get_union_int(fn_get_union_int_t fn) {
     Union_i32_f32 u;
     u.int_val = 123;
     return fn(u);
 }
 
-int64_t c_call_fn_sum_union_large(fn_sum_union_large_t fn) {
+EXPORT int64_t c_call_fn_sum_union_large(fn_sum_union_large_t fn) {
     Union_Large32 u;
     u.arr[0] = 10;
     u.arr[1] = 20;
@@ -380,14 +386,14 @@ int64_t c_call_fn_sum_union_large(fn_sum_union_large_t fn) {
     return fn(u);
 }
 
-int32_t c_call_fn_double_union_int(fn_double_union_int_t fn) {
+EXPORT int32_t c_call_fn_double_union_int(fn_double_union_int_t fn) {
     Union_i32_f32 u;
     u.int_val = 50;
     Union_i32_f32 result = fn(u);
     return result.int_val;
 }
 
-int64_t c_call_fn_increment_union_large(fn_increment_union_large_t fn) {
+EXPORT int64_t c_call_fn_increment_union_large(fn_increment_union_large_t fn) {
     Union_Large32 u;
     u.arr[0] = 10;
     u.arr[1] = 20;
@@ -405,12 +411,12 @@ typedef int64_t (*fn_eval_expr_t)(Expression_Enum);
 typedef Result_i32 (*fn_double_result_t)(Result_i32);
 typedef Expression_Enum (*fn_negate_expr_t)(Expression_Enum);
 
-int32_t c_call_fn_return_result(fn_return_result_t fn) {
+EXPORT int32_t c_call_fn_return_result(fn_return_result_t fn) {
     Result_i32 r = fn();
     return r.tag == 0 ? r.payload.ok_val : -r.payload.err_val;
 }
 
-int64_t c_call_fn_return_expr(fn_return_expr_t fn) {
+EXPORT int64_t c_call_fn_return_expr(fn_return_expr_t fn) {
     Expression_Enum e = fn();
     switch (e.tag) {
         case 0: return e.payload.const_val;
@@ -420,14 +426,14 @@ int64_t c_call_fn_return_expr(fn_return_expr_t fn) {
     }
 }
 
-int32_t c_call_fn_get_result(fn_get_result_t fn) {
+EXPORT int32_t c_call_fn_get_result(fn_get_result_t fn) {
     Result_i32 r;
     r.tag = 0;
     r.payload.ok_val = 77;
     return fn(r);
 }
 
-int64_t c_call_fn_eval_expr(fn_eval_expr_t fn) {
+EXPORT int64_t c_call_fn_eval_expr(fn_eval_expr_t fn) {
     Expression_Enum e;
     e.tag = 1;  // Add
     e.payload.binop.a = 100;
@@ -435,7 +441,7 @@ int64_t c_call_fn_eval_expr(fn_eval_expr_t fn) {
     return fn(e);
 }
 
-int32_t c_call_fn_double_result(fn_double_result_t fn) {
+EXPORT int32_t c_call_fn_double_result(fn_double_result_t fn) {
     Result_i32 r;
     r.tag = 0;
     r.payload.ok_val = 25;
@@ -443,7 +449,7 @@ int32_t c_call_fn_double_result(fn_double_result_t fn) {
     return result.payload.ok_val;
 }
 
-int64_t c_call_fn_negate_expr(fn_negate_expr_t fn) {
+EXPORT int64_t c_call_fn_negate_expr(fn_negate_expr_t fn) {
     Expression_Enum e;
     e.tag = 1;  // Add
     e.payload.binop.a = 10;
@@ -461,27 +467,53 @@ _c_lib = None
 _c_lib_path = None
 
 def _compile_c_library():
-    """Compile C library and return path"""
+    """Compile C library and return path.
+    
+    Reuses pythoc's cc_utils/link_utils for compiler detection and compilation.
+    """
     global _c_lib, _c_lib_path
     
     if _c_lib_path is not None:
         return _c_lib_path
-    
-    c_file = os.path.join(tempfile.gettempdir(), 'test_c_abi_aue.c')
-    so_file = os.path.join(tempfile.gettempdir(), 'libtest_c_abi_aue.so')
-    
+
+    from pythoc.utils.cc_utils import compile_c_to_object
+    from pythoc.utils.link_utils import (
+        get_shared_lib_extension, find_available_linker,
+        get_platform_link_flags,
+    )
+
+    build_dir = os.path.join(tempfile.gettempdir(), 'pythoc_test_c_abi_aue')
+    os.makedirs(build_dir, exist_ok=True)
+
+    c_file = os.path.join(build_dir, 'test_c_abi_aue.c')
     with open(c_file, 'w') as f:
         f.write(C_SOURCE)
-    
+
+    # .c -> .o
+    obj_file = os.path.join(build_dir, 'test_c_abi_aue.o')
+    compile_c_to_object(c_file, output_path=obj_file)
+
+    # .o -> shared library
+    ext = get_shared_lib_extension()
+    dll_file = os.path.join(build_dir, f'test_c_abi_aue{ext}')
+
+    linker = find_available_linker()
+    linker_cmd = linker.split()
+    platform_flags = get_platform_link_flags(shared=True, linker=linker)
+
+    cmd = linker_cmd + platform_flags + [os.path.abspath(obj_file), '-o', os.path.abspath(dll_file)]
+
     result = subprocess.run(
-        ['gcc', '-shared', '-fPIC', '-O2', '-o', so_file, c_file],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL
+        cmd, capture_output=True, text=True,
+        timeout=120, stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"C compilation failed: {result.stderr}")
-    
-    _c_lib_path = so_file
-    return so_file
+        raise RuntimeError(
+            f"C library linking failed:\n{result.stderr}\ncmd={cmd}"
+        )
+
+    _c_lib_path = dll_file
+    return dll_file
 
 def get_c_library():
     """Get loaded C library"""
