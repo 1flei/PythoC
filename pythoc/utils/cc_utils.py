@@ -17,16 +17,23 @@ def get_cc_candidates() -> List[str]:
     """Get C compiler candidates based on availability.
     
     Returns list of compiler commands in priority order.
+    On Windows, only zig (via python-zig) is supported — it targets
+    windows-gnu, which behaves consistently with Linux and avoids
+    MSVC-specific quirks entirely.
     """
     candidates = []
-    
-    for cc in ['cc', 'clang', 'gcc']:
-        if shutil.which(cc):
-            candidates.append(cc)
-    
-    # zig cc via pip install ziglang
-    if shutil.which('python-zig'):
-        candidates.append('python-zig cc')
+
+    if sys.platform == 'win32':
+        # Windows: only zig is supported
+        if shutil.which('python-zig'):
+            candidates.append('python-zig cc')
+    else:
+        for cc in ['cc', 'clang', 'gcc']:
+            if shutil.which(cc):
+                candidates.append(cc)
+        # zig as fallback on non-Windows
+        if shutil.which('python-zig'):
+            candidates.append('python-zig cc')
     
     return candidates
 
@@ -44,6 +51,11 @@ def find_available_cc() -> str:
     if candidates:
         return candidates[0]
     
+    if sys.platform == 'win32':
+        raise RuntimeError(
+            "No C compiler found. On Windows, zig is required.\n"
+            "Install via pip: pip install ziglang"
+        )
     raise RuntimeError(
         "No C compiler found. Please install one of: cc, gcc, clang, or zig.\n"
         "Tip: Install zig via pip: pip install ziglang"
@@ -148,7 +160,14 @@ def compile_c_to_object(source_path: str, output_path: Optional[str] = None,
     cmd = cc.split()  # Handle 'python-zig cc'
     
     # Add compilation flags
+    # -fPIC is required on ELF/Mach-O; on Windows we use zig (windows-gnu target)
+    # which accepts -fPIC harmlessly, so we always pass it for simplicity.
     cmd.extend(['-c', '-fPIC', '-O2'])
+    
+    # On Windows, zig must target windows-gnu for consistency with the rest of
+    # the toolchain (llvmlite generates GNU-format .o files).
+    if sys.platform == 'win32' and 'zig' in cc:
+        cmd.extend(['-target', 'x86_64-windows-gnu'])
     
     # Add include directories
     for inc in include_dirs:
@@ -162,7 +181,9 @@ def compile_c_to_object(source_path: str, output_path: Optional[str] = None,
     cmd.extend(cflags)
     
     # Add source and output
-    cmd.extend([source_path, '-o', output_path])
+    # python-zig changes its working directory internally, so relative paths
+    # break. Normalise to absolute paths for robustness.
+    cmd.extend([os.path.abspath(source_path), '-o', os.path.abspath(output_path)])
     
     # Run compilation
     try:

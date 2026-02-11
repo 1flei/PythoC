@@ -13,8 +13,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import compile, linear, consume, void, i32, struct, ptr, i8
-from pythoc.std.utility import move
+from pythoc import compile, linear, consume, move, void, i32, struct, ptr, i8
 from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.stdio import fopen, fclose
 from pythoc.logger import set_raise_on_error

@@ -28,7 +28,14 @@ C_SOURCE = """
 #include <stdint.h>
 #include <stdio.h>
 
+#ifdef _WIN32
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT
+#endif
+
 // Struct definitions matching pythoc
+
 typedef struct { int8_t a; } Small1;
 typedef struct { int16_t a; } Small2;
 typedef struct { int32_t a; } Small4;
@@ -47,91 +54,91 @@ typedef struct { int64_t a; int64_t b; int64_t c; int64_t d; int64_t e; int64_t 
 
 // ============ C functions that return structs ============
 
-Small1 c_return_small1(void) {
+EXPORT Small1 c_return_small1(void) {
     Small1 s = {42};
     return s;
 }
 
-Small4 c_return_small4(void) {
+EXPORT Small4 c_return_small4(void) {
     Small4 s = {12345};
     return s;
 }
 
-Small8 c_return_small8(void) {
+EXPORT Small8 c_return_small8(void) {
     Small8 s = {100, 200};
     return s;
 }
 
-Medium12 c_return_medium12(void) {
+EXPORT Medium12 c_return_medium12(void) {
     Medium12 s = {10, 20, 30};
     return s;
 }
 
-Medium16 c_return_medium16(void) {
+EXPORT Medium16 c_return_medium16(void) {
     Medium16 s = {1000, 2000};
     return s;
 }
 
-Large24 c_return_large24(void) {
+EXPORT Large24 c_return_large24(void) {
     Large24 s = {111, 222, 333};
     return s;
 }
 
-Large32 c_return_large32(void) {
+EXPORT Large32 c_return_large32(void) {
     Large32 s = {1, 2, 3, 4};
     return s;
 }
 
-Large48 c_return_large48(void) {
+EXPORT Large48 c_return_large48(void) {
     Large48 s = {10, 20, 30, 40, 50, 60};
     return s;
 }
 
-Large64 c_return_large64(void) {
+EXPORT Large64 c_return_large64(void) {
     Large64 s = {1, 2, 3, 4, 5, 6, 7, 8};
     return s;
 }
 
 // ============ C functions that take struct parameters ============
 
-int32_t c_sum_small8(Small8 s) {
+EXPORT int32_t c_sum_small8(Small8 s) {
     return s.a + s.b;
 }
 
-int64_t c_sum_medium16(Medium16 s) {
+EXPORT int64_t c_sum_medium16(Medium16 s) {
     return s.a + s.b;
 }
 
-int64_t c_sum_large24(Large24 s) {
+EXPORT int64_t c_sum_large24(Large24 s) {
     return s.a + s.b + s.c;
 }
 
-int64_t c_sum_large48(Large48 s) {
+EXPORT int64_t c_sum_large48(Large48 s) {
     return s.a + s.b + s.c + s.d + s.e + s.f;
 }
 
-int64_t c_sum_large64(Large64 s) {
+EXPORT int64_t c_sum_large64(Large64 s) {
     return s.a + s.b + s.c + s.d + s.e + s.f + s.g + s.h;
 }
 
 // ============ C functions that take and return structs ============
 
-Small8 c_double_small8(Small8 s) {
+EXPORT Small8 c_double_small8(Small8 s) {
     Small8 r = {s.a * 2, s.b * 2};
     return r;
 }
 
-Large24 c_increment_large24(Large24 s) {
+EXPORT Large24 c_increment_large24(Large24 s) {
     Large24 r = {s.a + 1, s.b + 1, s.c + 1};
     return r;
 }
 
-Large48 c_increment_large48(Large48 s) {
+EXPORT Large48 c_increment_large48(Large48 s) {
     Large48 r = {s.a + 1, s.b + 1, s.c + 1, s.d + 1, s.e + 1, s.f + 1};
     return r;
 }
 
-Large64 c_increment_large64(Large64 s) {
+EXPORT Large64 c_increment_large64(Large64 s) {
     Large64 r = {s.a + 1, s.b + 1, s.c + 1, s.d + 1, s.e + 1, s.f + 1, s.g + 1, s.h + 1};
     return r;
 }
@@ -147,33 +154,33 @@ typedef Small8 (*fn_double_small8_t)(Small8);
 typedef Large24 (*fn_increment_large24_t)(Large24);
 
 // C functions that call pythoc functions via function pointers
-int32_t c_call_fn_return_small8(fn_return_small8_t fn) {
+EXPORT int32_t c_call_fn_return_small8(fn_return_small8_t fn) {
     Small8 s = fn();
     return s.a + s.b;
 }
 
-int64_t c_call_fn_return_large24(fn_return_large24_t fn) {
+EXPORT int64_t c_call_fn_return_large24(fn_return_large24_t fn) {
     Large24 s = fn();
     return s.a + s.b + s.c;
 }
 
-int32_t c_call_fn_sum_small8(fn_sum_small8_t fn) {
+EXPORT int32_t c_call_fn_sum_small8(fn_sum_small8_t fn) {
     Small8 s = {25, 75};
     return fn(s);
 }
 
-int64_t c_call_fn_sum_large24(fn_sum_large24_t fn) {
+EXPORT int64_t c_call_fn_sum_large24(fn_sum_large24_t fn) {
     Large24 s = {100, 200, 300};
     return fn(s);
 }
 
-int32_t c_call_fn_double_small8(fn_double_small8_t fn) {
+EXPORT int32_t c_call_fn_double_small8(fn_double_small8_t fn) {
     Small8 s = {10, 20};
     Small8 r = fn(s);
     return r.a + r.b;
 }
 
-int64_t c_call_fn_increment_large24(fn_increment_large24_t fn) {
+EXPORT int64_t c_call_fn_increment_large24(fn_increment_large24_t fn) {
     Large24 s = {100, 200, 300};
     Large24 r = fn(s);
     return r.a + r.b + r.c;
@@ -187,37 +194,38 @@ typedef int64_t (*fn_sum_large64_t)(Large64);
 typedef Large48 (*fn_increment_large48_t)(Large48);
 typedef Large64 (*fn_increment_large64_t)(Large64);
 
-int64_t c_call_fn_return_large48(fn_return_large48_t fn) {
+EXPORT int64_t c_call_fn_return_large48(fn_return_large48_t fn) {
     Large48 s = fn();
     return s.a + s.b + s.c + s.d + s.e + s.f;
 }
 
-int64_t c_call_fn_return_large64(fn_return_large64_t fn) {
+EXPORT int64_t c_call_fn_return_large64(fn_return_large64_t fn) {
     Large64 s = fn();
     return s.a + s.b + s.c + s.d + s.e + s.f + s.g + s.h;
 }
 
-int64_t c_call_fn_sum_large48(fn_sum_large48_t fn) {
+EXPORT int64_t c_call_fn_sum_large48(fn_sum_large48_t fn) {
     Large48 s = {10, 20, 30, 40, 50, 60};
     return fn(s);
 }
 
-int64_t c_call_fn_sum_large64(fn_sum_large64_t fn) {
+EXPORT int64_t c_call_fn_sum_large64(fn_sum_large64_t fn) {
     Large64 s = {1, 2, 3, 4, 5, 6, 7, 8};
     return fn(s);
 }
 
-int64_t c_call_fn_increment_large48(fn_increment_large48_t fn) {
+EXPORT int64_t c_call_fn_increment_large48(fn_increment_large48_t fn) {
     Large48 s = {10, 20, 30, 40, 50, 60};
     Large48 r = fn(s);
     return r.a + r.b + r.c + r.d + r.e + r.f;
 }
 
-int64_t c_call_fn_increment_large64(fn_increment_large64_t fn) {
+EXPORT int64_t c_call_fn_increment_large64(fn_increment_large64_t fn) {
     Large64 s = {1, 2, 3, 4, 5, 6, 7, 8};
     Large64 r = fn(s);
     return r.a + r.b + r.c + r.d + r.e + r.f + r.g + r.h;
 }
+
 """
 
 # =============================================================================
@@ -225,39 +233,65 @@ int64_t c_call_fn_increment_large64(fn_increment_large64_t fn) {
 # =============================================================================
 
 _c_lib = None
-_c_lib_path = None
+_c_dll_path = None
 
 def _compile_c_library():
-    """Compile C library and return path"""
-    global _c_lib, _c_lib_path
+    """Compile C library and return path for @extern and ctypes.
     
-    if _c_lib_path is not None:
-        return _c_lib_path
-    
+    Reuses pythoc's cc_utils for compiler detection and C compilation,
+    and link_utils for platform-aware linking.
+    """
+    global _c_lib, _c_dll_path
+
+    if _c_dll_path is not None:
+        return _c_dll_path
+
+    from pythoc.utils.cc_utils import compile_c_to_object
+    from pythoc.utils.link_utils import (
+        get_shared_lib_extension, find_available_linker,
+        get_platform_link_flags,
+    )
+
+    build_dir = os.path.join(tempfile.gettempdir(), 'pythoc_test_c_abi')
+    os.makedirs(build_dir, exist_ok=True)
+
     # Write C source to temp file
-    c_file = os.path.join(tempfile.gettempdir(), 'test_c_abi.c')
-    so_file = os.path.join(tempfile.gettempdir(), 'libtest_c_abi.so')
-    
+    c_file = os.path.join(build_dir, 'test_c_abi.c')
     with open(c_file, 'w') as f:
         f.write(C_SOURCE)
-    
-    # Compile to shared library
+
+    # Step 1: .c -> .o
+    obj_file = os.path.join(build_dir, 'test_c_abi.o')
+    compile_c_to_object(c_file, output_path=obj_file)
+
+    # Step 2: .o -> shared library
+    ext = get_shared_lib_extension()
+    dll_file = os.path.join(build_dir, f'test_c_abi{ext}')
+
+    linker = find_available_linker()
+    linker_cmd = linker.split()
+    platform_flags = get_platform_link_flags(shared=True, linker=linker)
+
+    cmd = linker_cmd + platform_flags + [os.path.abspath(obj_file), '-o', os.path.abspath(dll_file)]
+
     result = subprocess.run(
-        ['gcc', '-shared', '-fPIC', '-O2', '-o', so_file, c_file],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL
+        cmd, capture_output=True, text=True,
+        timeout=120, stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"C compilation failed: {result.stderr}")
-    
-    _c_lib_path = so_file
-    return so_file
+        raise RuntimeError(
+            f"C library linking failed:\n{result.stderr}\ncmd={cmd}"
+        )
+
+    _c_dll_path = dll_file
+    return dll_file
 
 def get_c_library():
     """Get loaded C library (compile if needed)"""
     global _c_lib
     if _c_lib is None:
         _compile_c_library()
-        _c_lib = ctypes.CDLL(_c_lib_path)
+        _c_lib = ctypes.CDLL(_c_dll_path)
     return _c_lib
 
 # Compile C library NOW before @extern declarations

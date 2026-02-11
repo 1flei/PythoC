@@ -25,26 +25,15 @@ class BuildCache:
     
     @staticmethod
     def check_obj_uptodate(obj_file: str, source_file: str) -> bool:
-        """
-        Check if .o file is up-to-date based on source timestamp.
-        
-        Args:
-            obj_file: Path to .o file
-            source_file: Path to source .py file
-        
-        Returns:
-            bool: True if .o is up-to-date, False if must recompile
-        """
+        """Check if `.o` file is up-to-date."""
         if not os.path.exists(source_file):
             return False
-        
         if not os.path.exists(obj_file):
             return False
-        
         source_mtime = os.path.getmtime(source_file)
         obj_mtime = os.path.getmtime(obj_file)
-        
         return obj_mtime >= source_mtime
+
     
     @staticmethod
     def check_so_needs_relink(so_file: str, obj_files: List[str]) -> bool:
@@ -60,9 +49,21 @@ class BuildCache:
         """
         if not os.path.exists(so_file):
             return True
-        
+
+        # Windows-specific: after linker changes, older DLLs may lack a generated
+        # exports definition and therefore end up with an empty export table.
+        # This breaks downstream links that rely on the import library (`.lib`).
+        # Treat missing sidecar artifacts as requiring a relink.
+        if so_file.lower().endswith('.dll'):
+            exports_def = os.path.splitext(so_file)[0] + '.exports.def'
+            implib = os.path.splitext(so_file)[0] + '.lib'
+            if not os.path.exists(exports_def):
+                return True
+            if not os.path.exists(implib):
+                return True
+
         so_mtime = os.path.getmtime(so_file)
-        
+
         for obj_file in obj_files:
             if not os.path.exists(obj_file):
                 return True
@@ -70,6 +71,7 @@ class BuildCache:
                 return True
         
         return False
+
     
     @staticmethod
     def _delete_files(*files):

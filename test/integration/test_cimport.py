@@ -10,9 +10,11 @@ Test cases:
 """
 from __future__ import annotations
 import os
+import sys
 import tempfile
 import unittest
 import subprocess
+
 
 from pythoc import compile, i32, i64, ptr, void, struct
 from pythoc.libc.stdio import printf
@@ -383,27 +385,34 @@ int c3_mul(int a, int b);
 int c3_negate(int x);
 '''
 
-_CASE3_SOURCE = '''
-int c3_add(int a, int b) {
+_CASE3_SOURCE = r'''
+#if defined(_WIN32) || defined(__CYGWIN__)
+#define EXPORT __declspec(dllexport)
+#else
+#define EXPORT
+#endif
+
+EXPORT int c3_add(int a, int b) {
     return a + b;
 }
 
-int c3_mul(int a, int b) {
+EXPORT int c3_mul(int a, int b) {
     return a * b;
 }
 
-int c3_negate(int x) {
+EXPORT int c3_negate(int x) {
     return -x;
 }
 '''
 
 # Create temp files and compile to shared library
 # Use build directory for stable paths (cache-friendly)
-_case3_temp_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'test', 'cimport_case3')
+_case3_temp_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'test', 'cimport_case3'))
 os.makedirs(_case3_temp_dir, exist_ok=True)
 _case3_header_path = os.path.join(_case3_temp_dir, 'case3_shlib.h')
 _case3_source_path = os.path.join(_case3_temp_dir, 'case3_shlib.c')
-_case3_so_path = os.path.join(_case3_temp_dir, 'libcase3.so')
+_case3_lib_ext = '.dll' if sys.platform == 'win32' else '.so'
+_case3_so_path = os.path.join(_case3_temp_dir, 'libcase3' + _case3_lib_ext)
 
 with open(_case3_header_path, 'w') as _f:
     _f.write(_CASE3_HEADER)
@@ -411,15 +420,35 @@ with open(_case3_source_path, 'w') as _f:
     _f.write(_CASE3_SOURCE)
 
 # Compile to shared library
+from pythoc.utils.cc_utils import find_available_cc
+_case3_cc = find_available_cc()
+_case3_cmd = _case3_cc.split()  # e.g. "python-zig cc"
+_case3_cmd.extend(['-shared', '-fPIC', '-O2'])
+if sys.platform == 'win32' and 'zig' in _case3_cc:
+    _case3_cmd.extend(['-target', 'x86_64-windows-gnu'])
+_case3_cmd.extend([os.path.abspath(_case3_source_path), '-o', os.path.abspath(_case3_so_path)])
+
 _result = subprocess.run(
-    ['gcc', '-shared', '-fPIC', '-O2', '-o', _case3_so_path, _case3_source_path],
+    _case3_cmd,
     capture_output=True, text=True, stdin=subprocess.DEVNULL
 )
 if _result.returncode != 0:
-    raise RuntimeError(f"Failed to compile shared library: {_result.stderr}")
+    raise RuntimeError(f"Failed to compile shared library: {_result.stderr}\nCMD: {_case3_cmd}")
+
+# Ensure the shared library directory is on the search path (Windows)
+if sys.platform == 'win32':
+    dll_dir = os.path.dirname(os.path.abspath(_case3_so_path))
+    try:
+        if hasattr(os, 'add_dll_directory') and dll_dir:
+            os.add_dll_directory(dll_dir)
+    except Exception:
+        pass
+    if dll_dir and dll_dir not in os.environ.get('PATH', ''):
+        os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
 
 # Import with shared library path (don't clear registry)
 _case3_mod = cimport(_case3_header_path, lib=_case3_so_path)
+
 
 c3_add = _case3_mod.c3_add
 c3_mul = _case3_mod.c3_mul

@@ -125,17 +125,22 @@ def get_executable_extension() -> str:
 def _get_linker_candidates() -> List[str]:
     """Get linker candidates based on availability.
     
-    Returns list of linker commands. For zig, returns 'python-zig cc' if available.
+    On Windows, only zig (python-zig cc) is supported — it targets windows-gnu
+    which behaves consistently with Linux.
     """
     candidates = []
-    
-    for linker in ['cc', 'clang', 'gcc']:
-        if shutil.which(linker):
-            candidates.append(linker)
-    
-    # zig via pip install ziglang (provides python-zig command)
-    if shutil.which('python-zig'):
-        candidates.append('python-zig cc')
+
+    if sys.platform == 'win32':
+        # Windows: only zig is supported
+        if shutil.which('python-zig'):
+            candidates.append('python-zig cc')
+    else:
+        for linker in ['cc', 'clang', 'gcc']:
+            if shutil.which(linker):
+                candidates.append(linker)
+        # zig as fallback on non-Windows
+        if shutil.which('python-zig'):
+            candidates.append('python-zig cc')
     
     return candidates
 
@@ -143,7 +148,7 @@ def _get_linker_candidates() -> List[str]:
 def find_available_linker() -> str:
     """Find an available linker on the system.
     
-    Priority order (all platforms): cc, clang, gcc, python-zig cc
+    On Windows only zig is supported. On other platforms: cc, clang, gcc, python-zig cc.
     
     Returns:
         Linker command string
@@ -155,6 +160,11 @@ def find_available_linker() -> str:
     if candidates:
         return candidates[0]
     
+    if sys.platform == 'win32':
+        raise RuntimeError(
+            "No linker found. On Windows, zig is required.\n"
+            "Install via pip: pip install ziglang"
+        )
     raise RuntimeError(
         "No linker found. Please install one of: cc, gcc, clang, or zig.\n"
         "Tip: Install zig via pip: pip install ziglang"
@@ -163,8 +173,6 @@ def find_available_linker() -> str:
 
 def get_default_linkers() -> List[str]:
     """Get list of linkers to try in order of preference.
-    
-    Priority order (all platforms): cc, clang, gcc, python-zig cc
     
     Returns:
         List of available linker command strings
@@ -197,12 +205,32 @@ def get_link_flags(link_libraries: Optional[List[str]] = None) -> List[str]:
     for lib in libs:
         if sys.platform == 'win32' and lib in {'c', 'm'}:
             continue
-        if os.path.isabs(lib) or '/' in lib:
-            # Full path to library - pass directly to linker
-            lib_flags.append(lib)
+
+        # On Windows many paths come in with backslashes and are often relative
+        # (e.g. "build\\...\\foo.dll"). If we incorrectly treat these as bare
+        # library names and add `-l`, zig/clang will try to search for a system
+        # library literally named "build\\...\\foo.dll" and fail.
+        is_path_like = os.path.isabs(lib) or ('/' in lib) or (os.sep in lib)
+        has_lib_ext = os.path.splitext(lib)[1].lower() in {'.a', '.so', '.dll', '.lib'}
+
+        if is_path_like or has_lib_ext:
+            # Library file path (absolute or relative) - pass directly to linker.
+            # On Windows, prefer the import library (`.lib`) when a `.dll` path
+            # is provided, because the COFF linker resolves symbols via the
+            # import library at link time.
+            if sys.platform == 'win32' and lib.lower().endswith('.dll'):
+                implib = os.path.splitext(lib)[0] + '.lib'
+                if os.path.exists(implib):
+                    lib_flags.append(implib)
+                else:
+                    lib_flags.append(lib)
+            else:
+                lib_flags.append(lib)
         else:
             # Library name - use -l flag
             lib_flags.append(f'-l{lib}')
+
+
 
     # Add --no-as-needed to ensure all libraries are linked
     # This is critical for libraries like libgcc_s that provide
@@ -226,15 +254,12 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
     is_zig = 'zig' in linker
     
     if sys.platform == 'win32':
-        if is_zig:
-            # Use GNU target for zig on Windows
-            flags = ['-target', 'x86_64-windows-gnu']
-            if shared:
-                flags.append('-shared')
-            return flags
-        else:
-            # mingw gcc/clang
-            return ['-shared'] if shared else []
+        # Windows: only zig is supported (targets x86_64-windows-gnu).
+        # --export-all-symbols makes all functions visible to ctypes.
+        flags = ['-target', 'x86_64-windows-gnu']
+        if shared:
+            flags += ['-shared', '-Wl,--export-all-symbols']
+        return flags
     elif sys.platform == 'darwin':
         # Explicitly specify architecture to avoid x86_64/arm64 mismatch issues
         import platform
@@ -255,7 +280,122 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
             return []
 
 
+
+
+
+
+def _write_exports_def(def_file: str, dll_name: str, obj_files: List[str]) -> bool:
+    """Write a Windows `.def` file exporting global symbols from `obj_files`.
+
+    We pass the generated `.def` as a regular linker input file. This is
+    accepted by zig on windows-gnu, and it ensures the DLL export table (and the
+    resulting import library) contains the symbols needed by downstream links.
+
+    Returns True if a file was written and should be passed to the linker.
+    """
+    if sys.platform != 'win32':
+        return False
+
+    nm_exe = shutil.which('llvm-nm')
+    if not nm_exe:
+        return False
+
+    exports = set()
+    for obj in obj_files:
+        if not obj:
+            continue
+        low = obj.lower()
+        if not (low.endswith('.o') or low.endswith('.obj')):
+            continue
+
+        try:
+            proc = subprocess.run(
+                [nm_exe, '-g', '--defined-only', obj],
+                check=True,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception:
+            continue
+
+        for line in (proc.stdout or '').splitlines():
+            parts = line.strip().split()
+            if len(parts) < 3:
+                continue
+            sym_type = parts[-2]
+            sym = parts[-1]
+            if not sym or sym.startswith('.') or sym.startswith('$'):
+                continue
+            if sym_type.upper() in {'T', 'D', 'B', 'R', 'S', 'V', 'W'}:
+                exports.add(sym)
+
+    if not exports:
+        return False
+
+    try:
+        os.makedirs(os.path.dirname(def_file) or '.', exist_ok=True)
+        with open(def_file, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(f'LIBRARY "{dll_name}"\n')
+            f.write('EXPORTS\n')
+            for sym in sorted(exports):
+                f.write(f'    {sym}\n')
+        return True
+    except Exception:
+        return False
+
+
+
+def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> bool:
+    """Generate a stub import library (`.lib`) from an object file's exports.
+
+    On Windows, DLL linking requires all referenced symbols to be resolved at
+    link time. When two DLLs have circular dependencies (A imports from B and B
+    imports from A), neither can be linked first. We break this deadlock by
+    generating *stub* import libraries from `.o` files: the `.def` describes
+    what the eventual DLL will export, and `dlltool` creates a minimal `.lib`
+    that satisfies the linker without needing the actual `.dll`.
+
+    Returns True if a usable `.lib` was generated.
+    """
+    if sys.platform != 'win32':
+        return False
+
+    # We need both llvm-nm (to read exports) and dlltool (to create .lib)
+    nm_exe = shutil.which('llvm-nm')
+    dlltool_exe = shutil.which('llvm-dlltool')
+    if not dlltool_exe:
+        # python-zig ships its own dlltool
+        if shutil.which('python-zig'):
+            dlltool_exe = 'python-zig'
+        else:
+            return False
+    if not nm_exe:
+        return False
+
+    # Reuse _write_exports_def to create the .def file
+    def_file = os.path.splitext(implib_path)[0] + '.exports.def'
+    if not _write_exports_def(def_file, dll_name, [obj_file]):
+        return False
+
+    try:
+        if dlltool_exe == 'python-zig':
+            cmd = ['python-zig', 'dlltool', '-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
+        else:
+            cmd = [dlltool_exe, '-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
+
+        subprocess.run(
+            cmd, check=True, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+        return os.path.exists(implib_path)
+    except Exception:
+        return False
+
+
 def build_link_command(
+
+
     obj_files: List[str],
     output_file: str,
     shared: bool = False,
@@ -289,6 +429,21 @@ def build_link_command(
         link_objects = get_unified_registry().get_link_objects()
     all_obj_files = list(obj_files) + list(link_objects)
 
+    # python-zig changes its working directory internally, so relative paths
+    # break.  Normalise everything to absolute paths for robustness.
+    all_obj_files = [os.path.abspath(p) for p in all_obj_files]
+    output_file = os.path.abspath(output_file)
+
+
+
+
+    # Also normalise library paths (entries that are file paths, not -l flags)
+
+    lib_flags = [
+        os.path.abspath(f) if not f.startswith('-') and (os.path.isabs(f) or os.sep in f or '/' in f) else f
+        for f in lib_flags
+    ]
+
     return linker_cmd + platform_flags + all_obj_files + ['-o', output_file] + lib_flags
 
 
@@ -302,23 +457,12 @@ def try_link_with_linkers(
 ) -> str:
     """Try linking with multiple linkers.
 
-    Args:
-        obj_files: List of object file paths
-        output_file: Output file path
-        shared: True for shared library, False for executable
-        linkers: List of linkers to try (defaults to platform-specific list)
-        link_objects: Optional extra object files to link
-        link_libraries: Optional link libraries to use
-
     Returns:
         Path to linked file
-
-    Raises:
-        RuntimeError: If all linkers fail
     """
     if linkers is None:
         linkers = get_default_linkers()
-    
+
     errors = []
     for linker in linkers:
         # Check if linker executable is available
@@ -327,9 +471,12 @@ def try_link_with_linkers(
         if not shutil.which(linker_exe):
             errors.append(f"{linker}: not found")
             continue
-        
+
+
+        link_cmd: List[str] = []
         try:
             link_cmd = build_link_command(
+
                 obj_files,
                 output_file,
                 shared=shared,
@@ -337,22 +484,52 @@ def try_link_with_linkers(
                 link_objects=link_objects,
                 link_libraries=link_libraries,
             )
+
+
+
+
+            # On Windows, force an explicit exports list via a `.def` file.
+            # Passing the `.def` as an input file works with zig (windows-gnu)
+            # and avoids MSVC-style `/DEF:` flags.
+            if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
+                try:
+                    out_idx = link_cmd.index('-o')
+                    obj_candidates = [a for a in link_cmd[:out_idx] if a.lower().endswith(('.o', '.obj'))]
+                    def_file = os.path.splitext(os.path.abspath(output_file))[0] + '.exports.def'
+                    if _write_exports_def(def_file, os.path.basename(output_file), obj_candidates):
+                        if def_file not in link_cmd:
+                            link_cmd.insert(out_idx, def_file)
+                except Exception:
+                    pass
+
             # Use stdin=DEVNULL to prevent subprocess from waiting for input
             # This is critical on Windows, especially in ProcessPoolExecutor workers
             subprocess.run(
-                link_cmd, check=True, capture_output=True, text=True,
-                timeout=120, stdin=subprocess.DEVNULL
+
+                link_cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                stdin=subprocess.DEVNULL,
             )
             return output_file
+
         except subprocess.TimeoutExpired:
             errors.append(f"{linker}: timed out after 120s")
         except subprocess.CalledProcessError as e:
-            errors.append(f"{linker}: {e.stderr}")
-    
+            msg = (e.stdout or '') + ("\n" if e.stdout else '') + (e.stderr or '')
+            # Include the command for debugging; this is especially helpful on Windows
+            # where library resolution can be sensitive to path/extension details.
+            cmd_str = ' '.join(link_cmd) if link_cmd else '<link_cmd unavailable>'
+            errors.append(f"{linker}: {msg.strip()}\nCMD: {cmd_str}")
+
+
+
     # All linkers failed
     file_type = "shared library" if shared else "executable"
     raise RuntimeError(
-        f"Failed to link {file_type} with all linkers ({', '.join(linkers)}):\n" + 
+        f"Failed to link {file_type} with all linkers ({', '.join(linkers)}):\n" +
         "\n".join(errors)
     )
 
@@ -399,13 +576,24 @@ def link_files(
                 lock.__enter__()
                 obj_locks.append(lock)
             
-            # Check if output file already exists and is up-to-date
+            # Check if output file already exists and is up-to-date.
+            #
+            # IMPORTANT (Windows): for DLLs we also require the sidecar export
+            # definition + import library to exist; otherwise we must relink to
+            # get a usable export table and `.lib`.
             if os.path.exists(output_file):
                 output_mtime = os.path.getmtime(output_file)
                 obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
                 if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
-                    # Output is up-to-date, skip linking
-                    return output_file
+                    if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
+                        exports_def = os.path.splitext(output_file)[0] + '.exports.def'
+                        implib = os.path.splitext(output_file)[0] + '.lib'
+                        if os.path.exists(exports_def) and os.path.exists(implib):
+                            return output_file
+                    else:
+                        # Output is up-to-date, skip linking
+                        return output_file
+
             
             # If specific linker requested, try it first then fallback
             if linker:

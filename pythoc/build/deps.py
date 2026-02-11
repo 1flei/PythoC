@@ -86,14 +86,24 @@ class GroupKey:
         return '_'.join(parts) if parts else None
     
     def get_file_suffix(self) -> str:
-        """Get suffix string for output file naming."""
+        """Get suffix string for output file naming.
+
+        IMPORTANT: This is used to construct on-disk filenames (e.g. `.dll` on
+        Windows). Group keys persisted in older `.deps` files may contain
+        characters that are invalid in filenames (e.g. `<`, `>` from
+        `.<locals>`). Always sanitize each component here so we can still derive
+        usable paths even when loading legacy deps.
+        """
+        # Local import to avoid import cycles during early startup.
+        from ..utils.path_utils import sanitize_filename
+
         parts = []
         if self.scope:
-            parts.append(self.scope)
+            parts.append(sanitize_filename(self.scope))
         if self.compile_suffix:
-            parts.append(self.compile_suffix)
+            parts.append(sanitize_filename(self.compile_suffix))
         if self.effect_suffix:
-            parts.append(self.effect_suffix)
+            parts.append(sanitize_filename(self.effect_suffix))
         return '.'.join(parts) if parts else ''
 
 
@@ -157,6 +167,8 @@ class GroupDeps:
     # Effect system support (group-level)
     effects_used: Set[str] = field(default_factory=set)  # All effects used by this group
     
+
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization with compressed group keys."""
         # Collect all unique group keys
@@ -187,6 +199,8 @@ class GroupDeps:
         # Add effects if any
         if self.effects_used:
             result['effects_used'] = list(self.effects_used)
+        
+
         
         # Add group keys table if we have any
         if unique_group_keys:
@@ -236,6 +250,7 @@ class GroupDeps:
             link_libraries=d.get('link_libraries', []),
             effects_used=effects_used,
         )
+
     
     def add_group_dependency(self, target_group: GroupKey, dependency_type: str = "function_call"):
         """Add a dependency on another group."""

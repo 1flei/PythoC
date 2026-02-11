@@ -226,9 +226,18 @@ def cimport(path: str, *,
         
         # Use compiled bindgen
         generate_bindings_to_file = _get_bindgen()
+
+        # IMPORTANT (Windows): absolute `lib` paths may contain backslashes.
+        # If those are embedded into generated Python source like
+        # `@extern(lib='C:\\Users\\...')`, sequences like `\U` can be parsed as
+        # unicode escapes and break import. Normalize to forward slashes.
+        lib_for_bindgen = lib or ''
+        if os.name == 'nt' and lib_for_bindgen:
+            lib_for_bindgen = os.path.abspath(lib_for_bindgen).replace('\\', '/')
+
         result = generate_bindings_to_file(
             source_text.encode('utf-8') + b'\0',  # null-terminated
-            (lib or '').encode('utf-8') + b'\0',  # null-terminated
+            lib_for_bindgen.encode('utf-8') + b'\0',  # null-terminated
             bindings_path.encode('utf-8') + b'\0'  # null-terminated
         )
         

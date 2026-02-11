@@ -338,12 +338,13 @@ def _compile_impl(func_or_class,
     else:
         scope_name = None
     
-    # Sanitize suffixes for filename
+    # Sanitize components for filename
+    safe_scope_name = sanitize_filename(scope_name) if scope_name else None
     safe_compile_suffix = sanitize_filename(compile_suffix) if compile_suffix else None
     safe_effect_suffix = sanitize_filename(effect_suffix) if effect_suffix else None
     
     # Build 4-tuple group key
-    group_key = (source_file, scope_name, safe_compile_suffix, safe_effect_suffix)
+    group_key = (source_file, safe_scope_name, safe_compile_suffix, safe_effect_suffix)
     
     # Build output file paths
     if compile_suffix or effect_suffix:
@@ -358,8 +359,8 @@ def _compile_impl(func_or_class,
         
         # Build filename: base.scope.compile_suffix.effect_suffix.{ll,o,so}
         file_parts = [base_name]
-        if scope_name:
-            file_parts.append(scope_name)
+        if safe_scope_name:
+            file_parts.append(safe_scope_name)
         if safe_compile_suffix:
             file_parts.append(safe_compile_suffix)
         if safe_effect_suffix:
@@ -369,7 +370,8 @@ def _compile_impl(func_or_class,
         os.makedirs(build_dir, exist_ok=True)
         ir_file = os.path.join(build_dir, f"{file_base}.ll")
         obj_file = os.path.join(build_dir, f"{file_base}.o")
-        so_file = os.path.join(build_dir, f"{file_base}.so")
+        from ..utils.link_utils import get_shared_lib_extension
+        so_file = os.path.join(build_dir, f"{file_base}{get_shared_lib_extension()}")
     else:
         # No suffix: use standard paths
         build_dir, ir_file, obj_file, so_file = get_build_paths(source_file)
