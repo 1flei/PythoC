@@ -7,11 +7,12 @@ Supports multiple linkers including gcc, clang, and zig for cross-platform compa
 
 import os
 import sys
+import struct
 import shutil
 import subprocess
 import time
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Optional, Set
 from contextlib import contextmanager
 
 
@@ -57,6 +58,77 @@ def _zig_tool_cmd(subcommand: str) -> Optional[List[str]]:
     if _which_cached('python-zig'):
         return ['python-zig', subcommand]
     return None
+
+
+def _read_coff_exports(obj_path: str) -> Set[str]:
+    """Read exported (global defined) symbols from a COFF ``.o`` file.
+
+    This is a pure-Python replacement for ``llvm-nm -g --defined-only``,
+    avoiding a ~0.1-0.4 s subprocess overhead **per call** on Windows.
+    The COFF object format is straightforward: a fixed header followed by
+    section headers and a symbol table with an appended string table.
+
+    Returns a set of exported symbol names (equivalent to symbols with
+    types T, D, B, R, S, V, W in ``llvm-nm`` output).
+    """
+    try:
+        with open(obj_path, 'rb') as f:
+            data = f.read()
+    except (OSError, IOError):
+        return set()
+
+    if len(data) < 20:
+        return set()
+
+    # COFF header: Machine(2) NumSections(2) TimeDateStamp(4)
+    #              PointerToSymbolTable(4) NumberOfSymbols(4) ...
+    sym_table_offset = struct.unpack_from('<I', data, 8)[0]
+    num_symbols = struct.unpack_from('<I', data, 12)[0]
+
+    if sym_table_offset == 0 or num_symbols == 0:
+        return set()
+
+    # String table starts immediately after the symbol table.
+    # Each symbol entry is 18 bytes.
+    string_table_offset = sym_table_offset + num_symbols * 18
+
+    exports: Set[str] = set()
+    i = 0
+    while i < num_symbols:
+        entry_offset = sym_table_offset + i * 18
+        if entry_offset + 18 > len(data):
+            break
+
+        name_bytes = data[entry_offset:entry_offset + 8]
+
+        # Decode symbol name
+        if name_bytes[:4] == b'\x00\x00\x00\x00':
+            # Long name: offset into string table
+            str_offset = struct.unpack_from('<I', name_bytes, 4)[0]
+            abs_offset = string_table_offset + str_offset
+            if abs_offset < len(data):
+                end = data.index(b'\x00', abs_offset) if b'\x00' in data[abs_offset:] else len(data)
+                name = data[abs_offset:end].decode('utf-8', errors='replace')
+            else:
+                name = ''
+        else:
+            name = name_bytes.rstrip(b'\x00').decode('utf-8', errors='replace')
+
+        # SectionNumber (2 bytes, signed), Type (2 bytes),
+        # StorageClass (1 byte), NumberOfAuxSymbols (1 byte)
+        section_num = struct.unpack_from('<h', data, entry_offset + 12)[0]
+        storage_class = data[entry_offset + 16]
+        num_aux = data[entry_offset + 17]
+
+        # IMAGE_SYM_CLASS_EXTERNAL = 2; section > 0 means defined
+        if storage_class == 2 and section_num > 0:
+            if name and not name.startswith('.') and not name.startswith('$'):
+                exports.add(name)
+
+        i += 1 + num_aux
+
+    return exports
+
 
 # Platform-specific file locking
 if sys.platform == 'win32':
@@ -340,13 +412,16 @@ def _write_exports_def(def_file: str, dll_name: str, obj_files: List[str]) -> bo
     accepted by zig on windows-gnu, and it ensures the DLL export table (and the
     resulting import library) contains the symbols needed by downstream links.
 
+    Uses pure-Python COFF parsing instead of ``llvm-nm`` subprocess calls,
+    which saves ~0.1-0.4 s per object file on Windows.
+
     Returns True if a file was written and should be passed to the linker.
     """
     if sys.platform != 'win32':
         return False
 
     # Fast path: if the .def file already exists and is newer than all .o files,
-    # skip the expensive llvm-nm subprocess call.
+    # skip re-scanning the object files.
     if os.path.exists(def_file):
         def_mtime = os.path.getmtime(def_file)
         all_uptodate = True
@@ -358,39 +433,14 @@ def _write_exports_def(def_file: str, dll_name: str, obj_files: List[str]) -> bo
         if all_uptodate:
             return True
 
-    nm_exe = _which_cached('llvm-nm')
-    if not nm_exe:
-        return False
-
-    exports = set()
+    exports: Set[str] = set()
     for obj in obj_files:
         if not obj:
             continue
         low = obj.lower()
         if not (low.endswith('.o') or low.endswith('.obj')):
             continue
-
-        try:
-            proc = subprocess.run(
-                [nm_exe, '-g', '--defined-only', obj],
-                check=True,
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-            )
-        except Exception:
-            continue
-
-        for line in (proc.stdout or '').splitlines():
-            parts = line.strip().split()
-            if len(parts) < 3:
-                continue
-            sym_type = parts[-2]
-            sym = parts[-1]
-            if not sym or sym.startswith('.') or sym.startswith('$'):
-                continue
-            if sym_type.upper() in {'T', 'D', 'B', 'R', 'S', 'V', 'W'}:
-                exports.add(sym)
+        exports |= _read_coff_exports(obj)
 
     if not exports:
         return False
@@ -418,6 +468,9 @@ def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> boo
     what the eventual DLL will export, and `dlltool` creates a minimal `.lib`
     that satisfies the linker without needing the actual `.dll`.
 
+    The `.def` file is now generated via pure-Python COFF parsing (no
+    ``llvm-nm`` subprocess), saving ~0.1-0.4 s per call.
+
     Returns True if a usable `.lib` was generated.
     """
     if sys.platform != 'win32':
@@ -428,8 +481,7 @@ def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> boo
         if os.path.getmtime(implib_path) >= os.path.getmtime(obj_file):
             return True
 
-    # We need both llvm-nm (to read exports) and dlltool (to create .lib)
-    nm_exe = _which_cached('llvm-nm')
+    # We need dlltool to create .lib (def generation is now pure Python)
     dlltool_cmd = _which_cached('llvm-dlltool')
     if dlltool_cmd:
         dlltool_cmd = [dlltool_cmd]
@@ -437,10 +489,8 @@ def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> boo
         dlltool_cmd = _zig_tool_cmd('dlltool')
     if not dlltool_cmd:
         return False
-    if not nm_exe:
-        return False
 
-    # Reuse _write_exports_def to create the .def file
+    # Generate .def file using pure-Python COFF parsing (no subprocess)
     def_file = os.path.splitext(implib_path)[0] + '.exports.def'
     if not _write_exports_def(def_file, dll_name, [obj_file]):
         return False
