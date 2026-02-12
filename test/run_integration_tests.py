@@ -71,45 +71,6 @@ def print_header(text: str, quiet: bool = False):
     print(f"{BOLD}{BLUE}{text:^70}{RESET}")
     print(f"{BOLD}{BLUE}{'='*70}{RESET}\n")
 
-def extract_error_info(stdout: str, stderr: str) -> list:
-    """Extract error information from test output"""
-    errors = []
-    
-    # Combine stdout and stderr for analysis
-    combined = stdout + '\n' + stderr
-    lines = combined.split('\n')
-    
-    # Find traceback or assertion errors
-    in_traceback = False
-    traceback_lines = []
-    
-    for i, line in enumerate(lines):
-        # Start of traceback
-        if 'Traceback (most recent call last):' in line:
-            in_traceback = True
-            traceback_lines = [line.strip()]
-            continue
-        
-        # Collect traceback lines
-        if in_traceback:
-            stripped = line.strip()
-            if stripped:
-                traceback_lines.append(stripped)
-                # Stop at the actual error
-                if 'Error:' in line or 'Error ' in line:
-                    errors.extend(traceback_lines)
-                    break
-        
-        # Direct assertion or error
-        elif 'AssertionError' in line or 'FAILED' in line:
-            # Get context
-            start = max(0, i - 2)
-            end = min(len(lines), i + 3)
-            errors.extend([l.strip() for l in lines[start:end] if l.strip()])
-            break
-    
-    return errors[:12]
-
 def run_tests_serial(test_files: List[Path], quiet: bool = False) -> List[Tuple[str, bool, str, str, float]]:
     """Run tests serially (for accurate timing benchmarks)"""
     results = []
@@ -144,6 +105,13 @@ def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[
                 name, success, stdout, stderr, duration = future.result()
                 status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
                 print(f"{status} {name} ({duration:.2f}s)")
+                if not success:
+                    combined = (stdout.rstrip('\n') + '\n' + stderr.rstrip('\n')).strip()
+                    if combined:
+                        print(f"{YELLOW}  --- output ---{RESET}")
+                        for line in combined.split('\n'):
+                            print(f"    {line}")
+                        print(f"{YELLOW}  --- end ---{RESET}")
                 results.append((name, success, stdout, stderr, duration))
             except Exception as e:
                 print(f"{RED}FAIL{RESET} {test_name} (exception: {e})")
@@ -231,13 +199,14 @@ def main():
             status = f"{GREEN}PASS{RESET}" if success else f"{RED}FAIL{RESET}"
             print(f"{status} {test_name}")
             
-            # Show error details for failed tests
+            # Show full output for failed tests
             if not success:
-                errors = extract_error_info(stdout, stderr)
-                if errors:
-                    print(f"{YELLOW}  Error details:{RESET}")
-                    for error in errors:
-                        print(f"    {error}")
+                combined = (stdout.rstrip('\n') + '\n' + stderr.rstrip('\n')).strip()
+                if combined:
+                    print(f"{YELLOW}  --- output ---{RESET}")
+                    for line in combined.split('\n'):
+                        print(f"    {line}")
+                    print(f"{YELLOW}  --- end ---{RESET}")
     
     total = len(test_files)
     print(f"\n{BOLD}Total: {total}{RESET}")
