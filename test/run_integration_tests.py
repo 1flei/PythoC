@@ -29,8 +29,11 @@ BLUE = '\033[94m'
 RESET = '\033[0m'
 BOLD = '\033[1m'
 
-def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
-    """Run a single test file and return results."""
+def run_single_test(test_file: Path, timeout: int = 300) -> Tuple[str, bool, str, str, float, int]:
+    """Run a single test file and return results.
+
+    Returns (name, success, stdout, stderr, duration, returncode).
+    """
     test_name = test_file.stem
     start_time = time.time()
     
@@ -48,20 +51,20 @@ def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
             [sys.executable, str(test_file)],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
             cwd=workspace,
             env=env,
             stdin=subprocess.DEVNULL
         )
         duration = time.time() - start_time
         success = result.returncode == 0
-        return test_name, success, result.stdout, result.stderr, duration
+        return test_name, success, result.stdout, result.stderr, duration, result.returncode
     except subprocess.TimeoutExpired:
         duration = time.time() - start_time
-        return test_name, False, "", f"Test timed out after 120 seconds", duration
+        return test_name, False, "", f"Test timed out after {timeout} seconds", duration, -1
     except Exception as e:
         duration = time.time() - start_time
-        return test_name, False, "", str(e), duration
+        return test_name, False, "", str(e), duration, -1
 
 def print_header(text: str, quiet: bool = False):
     """Print a formatted header"""
@@ -71,19 +74,37 @@ def print_header(text: str, quiet: bool = False):
     print(f"{BOLD}{BLUE}{text:^70}{RESET}")
     print(f"{BOLD}{BLUE}{'='*70}{RESET}\n")
 
-def run_tests_serial(test_files: List[Path], quiet: bool = False) -> List[Tuple[str, bool, str, str, float]]:
+
+def _print_failure_detail(stdout: str, stderr: str, returncode: int):
+    """Print full output for a failed test."""
+    print(f"    exit code: {returncode}")
+    if stdout.strip():
+        print(f"    {YELLOW}[stdout]{RESET}")
+        for line in stdout.strip().split('\n'):
+            print(f"    {line}")
+    if stderr.strip():
+        print(f"    {YELLOW}[stderr]{RESET}")
+        for line in stderr.strip().split('\n'):
+            print(f"    {line}")
+    if not stdout.strip() and not stderr.strip():
+        print(f"    (no output)")
+
+
+def run_tests_serial(test_files: List[Path], quiet: bool = False) -> List[Tuple[str, bool, str, str, float, int]]:
     """Run tests serially (for accurate timing benchmarks)"""
     results = []
     for i, test_file in enumerate(test_files):
-        test_name, success, stdout, stderr, duration = run_single_test(test_file)
+        test_name, success, stdout, stderr, duration, rc = run_single_test(test_file)
         if not quiet:
             status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
             print(f"[{i+1}/{len(test_files)}] {status} {test_name} ({duration:.2f}s)")
-        results.append((test_name, success, stdout, stderr, duration))
+            if not success:
+                _print_failure_detail(stdout, stderr, rc)
+        results.append((test_name, success, stdout, stderr, duration, rc))
     return results
 
 
-def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[Tuple[str, bool, str, str, float]]:
+def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[Tuple[str, bool, str, str, float, int]]:
     """Run tests in parallel (for faster execution)"""
     if max_workers is None:
         # Limit default parallelism to avoid filesystem contention on Windows.
@@ -102,20 +123,15 @@ def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[
         for future in as_completed(future_to_test):
             test_name = future_to_test[future]
             try:
-                name, success, stdout, stderr, duration = future.result()
+                name, success, stdout, stderr, duration, rc = future.result()
                 status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
                 print(f"{status} {name} ({duration:.2f}s)")
                 if not success:
-                    combined = (stdout.rstrip('\n') + '\n' + stderr.rstrip('\n')).strip()
-                    if combined:
-                        print(f"{YELLOW}  --- output ---{RESET}")
-                        for line in combined.split('\n'):
-                            print(f"    {line}")
-                        print(f"{YELLOW}  --- end ---{RESET}")
-                results.append((name, success, stdout, stderr, duration))
+                    _print_failure_detail(stdout, stderr, rc)
+                results.append((name, success, stdout, stderr, duration, rc))
             except Exception as e:
                 print(f"{RED}FAIL{RESET} {test_name} (exception: {e})")
-                results.append((test_name, False, "", str(e), 0))
+                results.append((test_name, False, "", str(e), 0, -1))
     
     return results
 
@@ -149,7 +165,7 @@ def main():
         if args.serial:
             print(f"Running tests serially...\n")
         else:
-            workers = min(16, os.cpu_count() or 4)
+            workers = min(8, os.cpu_count() or 4)
             print(f"Running tests in parallel with {workers} workers...\n")
     
     # Record wall-clock time for the entire test run
@@ -195,18 +211,13 @@ def main():
     print_header("Test Summary", args.quiet)
     
     if not args.quiet:
-        for test_name, success, stdout, stderr, duration in results:
+        for test_name, success, stdout, stderr, duration, rc in results:
             status = f"{GREEN}PASS{RESET}" if success else f"{RED}FAIL{RESET}"
             print(f"{status} {test_name}")
             
             # Show full output for failed tests
             if not success:
-                combined = (stdout.rstrip('\n') + '\n' + stderr.rstrip('\n')).strip()
-                if combined:
-                    print(f"{YELLOW}  --- output ---{RESET}")
-                    for line in combined.split('\n'):
-                        print(f"    {line}")
-                    print(f"{YELLOW}  --- end ---{RESET}")
+                _print_failure_detail(stdout, stderr, rc)
     
     total = len(test_files)
     print(f"\n{BOLD}Total: {total}{RESET}")
