@@ -27,6 +27,7 @@ classifiers = [
 
 dependencies = [
     "llvmlite>=0.40.0,<0.45.0",
+    "ziglang>=0.13.0; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
