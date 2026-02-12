@@ -29,13 +29,8 @@ BLUE = '\033[94m'
 RESET = '\033[0m'
 BOLD = '\033[1m'
 
-def run_single_test(test_file: Path, attempt: int = 1) -> Tuple[str, bool, str, str, float]:
-    """Run a single test file and return results.
-
-    Args:
-        test_file: Path to test file.
-        attempt: Current attempt number (for logging on retry).
-    """
+def run_single_test(test_file: Path) -> Tuple[str, bool, str, str, float]:
+    """Run a single test file and return results."""
     test_name = test_file.stem
     start_time = time.time()
     
@@ -67,16 +62,6 @@ def run_single_test(test_file: Path, attempt: int = 1) -> Tuple[str, bool, str, 
     except Exception as e:
         duration = time.time() - start_time
         return test_name, False, "", str(e), duration
-
-
-def run_single_test_with_retry(test_file: Path, max_retries: int = 1) -> Tuple[str, bool, str, str, float]:
-    """Run a single test, retrying on failure to handle transient parallel races."""
-    name, success, stdout, stderr, duration = run_single_test(test_file)
-    if success or max_retries < 1:
-        return name, success, stdout, stderr, duration
-    # Retry once — parallel file-system races on Windows can cause transient failures
-    time.sleep(0.5)
-    return run_single_test(test_file, attempt=2)
 
 def print_header(text: str, quiet: bool = False):
     """Print a formatted header"""
@@ -149,7 +134,7 @@ def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_test = {
-            executor.submit(run_single_test_with_retry, test_file): test_file.stem
+            executor.submit(run_single_test, test_file): test_file.stem
             for test_file in test_files
         }
         
@@ -196,7 +181,7 @@ def main():
         if args.serial:
             print(f"Running tests serially...\n")
         else:
-            workers = min(8, os.cpu_count() or 4)
+            workers = min(16, os.cpu_count() or 4)
             print(f"Running tests in parallel with {workers} workers...\n")
     
     # Record wall-clock time for the entire test run

@@ -684,7 +684,9 @@ def link_files(
         # This prevents "file truncated" errors when another process is still writing
         obj_locks = []
         try:
-            for obj_file in obj_files:
+            # Acquire .o locks in sorted order to prevent deadlocks when
+            # multiple processes link different DLLs with overlapping deps.
+            for obj_file in sorted(obj_files):
                 obj_lockfile = obj_file + '.lock'
                 lock = file_lock(obj_lockfile)
                 lock.__enter__()
