@@ -107,7 +107,7 @@ class NestedResource:
 def make_nested_resource() -> NestedResource:
     nr = NestedResource()
     nr.mem = lmalloc(10)
-    nr.file = lfopen("/tmp/test.txt", "w")
+    nr.file = lfopen("build/test_linear_composite_tmp.txt", "w")
     return nr
 
 @compile
@@ -227,7 +227,7 @@ def run_basic_tuple():
 
 @compile
 def run_single_linear_field():
-    f, ft = lfopen("/tmp/test.txt", "w")
+    f, ft = lfopen("build/test_linear_composite_tmp2.txt", "w")
     lfclose(f, ft)
 
 @compile
