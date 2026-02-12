@@ -59,12 +59,15 @@ def get_build_paths(source_file, suffix=None, scope=None):
     base_name = os.path.splitext(os.path.basename(source_file))[0]
     
     # Build filename with optional scope and suffix
-    if suffix and scope:
-        safe_suffix = sanitize_filename(suffix)
-        file_base = f"{base_name}.{scope}.{safe_suffix}"
-    elif suffix:
-        safe_suffix = sanitize_filename(suffix)
+    # Always sanitize scope/suffix to remove chars illegal on Windows (e.g. < > from <locals>)
+    safe_scope = sanitize_filename(scope) if scope else None
+    safe_suffix = sanitize_filename(suffix) if suffix else None
+    if safe_suffix and safe_scope:
+        file_base = f"{base_name}.{safe_scope}.{safe_suffix}"
+    elif safe_suffix:
         file_base = f"{base_name}.{safe_suffix}"
+    elif safe_scope:
+        file_base = f"{base_name}.{safe_scope}"
     else:
         file_base = base_name
     

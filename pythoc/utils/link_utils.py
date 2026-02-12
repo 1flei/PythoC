@@ -10,8 +10,53 @@ import sys
 import shutil
 import subprocess
 import time
+from functools import lru_cache
 from typing import List, Optional
 from contextlib import contextmanager
+
+
+@lru_cache(maxsize=None)
+def _which_cached(name: str) -> Optional[str]:
+    """Cached shutil.which() — avoids repeated PATH scans (expensive on Windows)."""
+    return shutil.which(name)
+
+
+@lru_cache(maxsize=None)
+def _resolve_zig_exe() -> Optional[str]:
+    """Resolve the native zig executable path from the ziglang pip package.
+
+    On Windows, ``python-zig`` is a thin Python wrapper that spawns
+    ``zig.exe`` as a subprocess.  Each invocation pays the Python
+    interpreter startup cost (~0.15 s).  By calling ``zig.exe`` directly
+    we eliminate that overhead — critical when there are 50-100 link
+    operations in a single build.
+
+    Returns the absolute path to ``zig.exe`` (or ``zig`` on other
+    platforms) if available, otherwise ``None``.
+    """
+    try:
+        import ziglang
+        exe_name = 'zig.exe' if sys.platform == 'win32' else 'zig'
+        zig_path = os.path.join(os.path.dirname(ziglang.__file__), exe_name)
+        if os.path.isfile(zig_path):
+            return zig_path
+    except ImportError:
+        pass
+    return None
+
+
+def _zig_tool_cmd(subcommand: str) -> Optional[List[str]]:
+    """Return the command list to invoke a zig sub-tool (``cc``, ``dlltool``, …).
+
+    Prefers the native ``zig.exe <sub>`` when available (faster),
+    falls back to ``python-zig <sub>``.
+    """
+    exe = _resolve_zig_exe()
+    if exe:
+        return [exe, subcommand]
+    if _which_cached('python-zig'):
+        return ['python-zig', subcommand]
+    return None
 
 # Platform-specific file locking
 if sys.platform == 'win32':
@@ -125,22 +170,26 @@ def get_executable_extension() -> str:
 def _get_linker_candidates() -> List[str]:
     """Get linker candidates based on availability.
     
-    On Windows, only zig (python-zig cc) is supported — it targets windows-gnu
+    On Windows, only zig is supported — it targets windows-gnu
     which behaves consistently with Linux.
+
+    Prefers the native ``zig.exe cc`` (faster) over ``python-zig cc``.
     """
     candidates = []
 
     if sys.platform == 'win32':
-        # Windows: only zig is supported
-        if shutil.which('python-zig'):
-            candidates.append('python-zig cc')
+        # Windows: only zig is supported.
+        zig_cc = _zig_tool_cmd('cc')
+        if zig_cc:
+            candidates.append(' '.join(zig_cc))
     else:
         for linker in ['cc', 'clang', 'gcc']:
-            if shutil.which(linker):
+            if _which_cached(linker):
                 candidates.append(linker)
         # zig as fallback on non-Windows
-        if shutil.which('python-zig'):
-            candidates.append('python-zig cc')
+        zig_cc = _zig_tool_cmd('cc')
+        if zig_cc:
+            candidates.append(' '.join(zig_cc))
     
     return candidates
 
@@ -296,7 +345,20 @@ def _write_exports_def(def_file: str, dll_name: str, obj_files: List[str]) -> bo
     if sys.platform != 'win32':
         return False
 
-    nm_exe = shutil.which('llvm-nm')
+    # Fast path: if the .def file already exists and is newer than all .o files,
+    # skip the expensive llvm-nm subprocess call.
+    if os.path.exists(def_file):
+        def_mtime = os.path.getmtime(def_file)
+        all_uptodate = True
+        for obj in obj_files:
+            if obj and os.path.exists(obj):
+                if os.path.getmtime(obj) > def_mtime:
+                    all_uptodate = False
+                    break
+        if all_uptodate:
+            return True
+
+    nm_exe = _which_cached('llvm-nm')
     if not nm_exe:
         return False
 
@@ -361,15 +423,20 @@ def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> boo
     if sys.platform != 'win32':
         return False
 
+    # Fast path: if .lib already exists and is newer than .o, skip.
+    if os.path.exists(implib_path) and os.path.exists(obj_file):
+        if os.path.getmtime(implib_path) >= os.path.getmtime(obj_file):
+            return True
+
     # We need both llvm-nm (to read exports) and dlltool (to create .lib)
-    nm_exe = shutil.which('llvm-nm')
-    dlltool_exe = shutil.which('llvm-dlltool')
-    if not dlltool_exe:
-        # python-zig ships its own dlltool
-        if shutil.which('python-zig'):
-            dlltool_exe = 'python-zig'
-        else:
-            return False
+    nm_exe = _which_cached('llvm-nm')
+    dlltool_cmd = _which_cached('llvm-dlltool')
+    if dlltool_cmd:
+        dlltool_cmd = [dlltool_cmd]
+    else:
+        dlltool_cmd = _zig_tool_cmd('dlltool')
+    if not dlltool_cmd:
+        return False
     if not nm_exe:
         return False
 
@@ -379,10 +446,7 @@ def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> boo
         return False
 
     try:
-        if dlltool_exe == 'python-zig':
-            cmd = ['python-zig', 'dlltool', '-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
-        else:
-            cmd = [dlltool_exe, '-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
+        cmd = dlltool_cmd + ['-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
 
         subprocess.run(
             cmd, check=True, capture_output=True, text=True,
@@ -468,7 +532,7 @@ def try_link_with_linkers(
         # Check if linker executable is available
         # For 'python-zig cc', check 'python-zig'; for 'gcc', check 'gcc'
         linker_exe = linker.split()[0]
-        if not shutil.which(linker_exe):
+        if not _which_cached(linker_exe):
             errors.append(f"{linker}: not found")
             continue
 
