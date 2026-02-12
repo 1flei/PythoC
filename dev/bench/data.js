@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1770868015403,
+  "lastUpdate": 1770873862902,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -555,6 +555,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.707,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "8742fea06c8240907411a0f1d60ec6ab71586026",
+          "message": "Optimize link performance on windows",
+          "timestamp": "2026-02-12T13:20:25+08:00",
+          "tree_id": "c13770c34741c98973fb0cc8da1de7ed09004e7d",
+          "url": "https://github.com/1flei/PythoC/commit/8742fea06c8240907411a0f1d60ec6ab71586026"
+        },
+        "date": 1770873862641,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.81,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.711,
             "unit": "seconds/test"
           }
         ]
