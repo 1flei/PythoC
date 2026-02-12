@@ -12,28 +12,33 @@ import hashlib
 import subprocess
 from typing import List, Optional
 
+from .link_utils import _which_cached, _zig_tool_cmd
+
 
 def get_cc_candidates() -> List[str]:
     """Get C compiler candidates based on availability.
     
     Returns list of compiler commands in priority order.
-    On Windows, only zig (via python-zig) is supported — it targets
-    windows-gnu, which behaves consistently with Linux and avoids
-    MSVC-specific quirks entirely.
+    On Windows, only zig is supported — it targets windows-gnu,
+    which behaves consistently with Linux and avoids MSVC-specific quirks.
+
+    Prefers the native ``zig.exe cc`` (faster) over ``python-zig cc``.
     """
     candidates = []
 
     if sys.platform == 'win32':
-        # Windows: only zig is supported
-        if shutil.which('python-zig'):
-            candidates.append('python-zig cc')
+        # Windows: only zig is supported.
+        zig_cc = _zig_tool_cmd('cc')
+        if zig_cc:
+            candidates.append(' '.join(zig_cc))
     else:
         for cc in ['cc', 'clang', 'gcc']:
-            if shutil.which(cc):
+            if _which_cached(cc):
                 candidates.append(cc)
         # zig as fallback on non-Windows
-        if shutil.which('python-zig'):
-            candidates.append('python-zig cc')
+        zig_cc = _zig_tool_cmd('cc')
+        if zig_cc:
+            candidates.append(' '.join(zig_cc))
     
     return candidates
 
