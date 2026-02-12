@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pythoc"
-version = "0.3.1"
+version = "0.4.0"
 description = "PythoC: A Python DSL compiler that maps statically-typed Python subset to LLVM IR, providing C-equivalent capabilities with Python syntax"
 readme = "README.md"
 requires-python = ">=3.10"
