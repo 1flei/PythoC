@@ -1,7 +1,6 @@
 import os
 import sys
 import atexit
-import tempfile
 from ..utils.link_utils import file_lock
 from .deps import get_dependency_tracker, GroupKey
 
@@ -396,32 +395,23 @@ class OutputManager:
             if group.get('compilation_failed', False):
                 continue
             
-            # Check cache: is .o up-to-date?
-            # If the group was re-opened after an earlier flush in the same
-            # process, we must force recompilation even if timestamps suggest a
-            # cache hit.
             obj_file = group['obj_file']
             source_file = group.get('source_file')
             force_recompile = bool(group.get('force_recompile', False))
 
-            # Acquire the file lock BEFORE the cache check to prevent TOCTOU
-            # races when multiple processes compile the same module in parallel.
-            # Without this, two processes can both see a cache miss, then both
-            # compile and write the same .o — causing corruption or link errors.
+            # File lock covers the entire cache-check → compile → write cycle.
+            # This ensures that when multiple processes need the same .o on a
+            # clean build, only ONE actually compiles; the rest wait and then
+            # see a cache hit.
             lockfile_path = obj_file + '.lock'
 
             with file_lock(lockfile_path):
-                # Re-check cache inside the lock to avoid redundant compilation
-                # when another process already compiled this .o while we waited.
+                # Check cache inside the lock so that waiting processes
+                # see the .o written by the winner and skip compilation.
                 if (not force_recompile) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
-                    # Cache hit - .o is up-to-date, skip compilation
-                    # But we still need to restore dependencies from .deps file
                     self._restore_deps_from_cache(group_key, group)
                     self._flushed_groups.add(group_key)
 
-                    # Save pending compilations to cache in case the group is reopened
-                    # for new functions later. We'll need to restore them to ensure all
-                    # functions are compiled together.
                     group['force_recompile'] = False
                     if group_key in self._pending_compilations:
                         self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
@@ -430,50 +420,41 @@ class OutputManager:
                     logger.debug(f"Cache hit for {group_key}, skipping compilation")
                     continue
 
-                # Cache miss - need to compile
-                # Compile pending functions for this group (two-pass)
+                # Cache miss — this process is the first to compile this .o.
                 try:
                     self._compile_pending_for_group(group_key, group)
                 except Exception:
-                    # Mark this group as failed and re-raise
                     group['compilation_failed'] = True
                     raise
 
                 if not group.get('wrappers'):
-                    # No functions compiled
                     continue
 
                 compiler = group['compiler']
 
-                # Verify module
                 if not compiler.verify_module():
                     raise RuntimeError(f"Module verification failed for group {group_key}")
 
-                # Save unoptimized IR if requested
                 if os.environ.get('PC_SAVE_UNOPT_IR'):
                     unopt_ir_file = group['ir_file'].replace('.ll', '.unopt.ll')
                     with open(unopt_ir_file, 'w') as f:
                         f.write(str(compiler.module))
 
-                # Optimize
                 opt_level = int(os.environ.get('PC_OPT_LEVEL', '2'))
                 compiler.optimize_module(optimization_level=opt_level)
 
-                # Write .o via atomic rename to prevent other processes from
-                # reading a half-written object file.
-                tmp_obj = obj_file + '.tmp'
+                # Write .o atomically so concurrent readers never see a
+                # half-written file.
+                tmp_obj = obj_file + '.tmp.' + str(os.getpid())
                 compiler.save_ir_to_file(group['ir_file'])
                 compiler.compile_to_object(tmp_obj)
                 _atomic_replace(tmp_obj, obj_file)
 
-                # Save dependency information
                 self._save_group_deps(group_key, compiler, obj_file, group)
 
             # Mark this group as flushed
             self._flushed_groups.add(group_key)
             group['force_recompile'] = False
-
-            # Clear wrappers after flushing to mark this group as up-to-date
             group['wrappers'] = []
         
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
