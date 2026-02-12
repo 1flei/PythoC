@@ -31,7 +31,7 @@ def test_alloc():
 
 @compile
 def test_file():
-    file_and_token = lfopen("/tmp/test_linear_wrapper.txt", "w")
+    file_and_token = lfopen("build/test_linear_wrapper_tmp.txt", "w")
     file_ptr = file_and_token[1]
     token = move(file_and_token[0])
     lfclose(token, file_ptr)
@@ -43,7 +43,7 @@ def test_alloc_struct():
 
 @compile
 def test_file_struct():
-    handle = lfopen_struct("/tmp/test_linear_wrapper2.txt", "w")
+    handle = lfopen_struct("build/test_linear_wrapper_tmp2.txt", "w")
     lfclose_struct(*handle)
 
 @compile
