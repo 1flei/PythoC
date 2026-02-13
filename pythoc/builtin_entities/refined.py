@@ -347,27 +347,33 @@ class RefinedType(CompositeType):
         
         Two cases:
         1. Type subscript: refined[T, pred, "tag", ...] -> create RefinedType
-        2. Value subscript: refined_value[i] -> delegate to struct (multi-param only)
+        2. Value subscript: refined_value[i] -> forward to underlying type
+           - single-param refined: underlying is cls._base_type
+           - multi-param refined: underlying is cls._struct_type
         """
-        from ..valueref import ValueRef
+        from ..valueref import wrap_value, ensure_ir
         
-        # Case 1: Type subscript (refined[...])
-        if isinstance(base, type) and issubclass(base, RefinedType):
-            return cls._create_refined_type_from_args(index, node, visitor)
+        # Value subscript - forward to underlying type
+        underlying_type = cls._base_type if cls._base_type is not None else cls._struct_type
+        if underlying_type is None:
+            logger.error(
+                f"{cls.get_name()} has no underlying type for subscript access",
+                node=node, exc_type=TypeError
+            )
+        if not hasattr(underlying_type, 'handle_subscript'):
+            logger.error(
+                f"{cls.get_name()} (refined {underlying_type}) does not support subscript",
+                node=node, exc_type=TypeError
+            )
         
-        # Case 2: Value subscript (refined_value[i])
-        if cls._base_type is not None:
-            if cls._struct_type is None:
-                logger.error(
-                    f"{cls.get_name()} subscript depends on base type {cls._base_type}",
-                    node=node, exc_type=TypeError
-                )
-        
-        # Multi-parameter: delegate to underlying struct
-        if cls._struct_type is None:
-            logger.error(f"{cls.get_name()} has no underlying struct for subscript access", node=node, exc_type=TypeError)
-        
-        return cls._struct_type.handle_subscript(visitor, base, index, node)
+        base_ir = ensure_ir(base)
+        base_with_underlying_type = wrap_value(
+            base_ir,
+            kind=base.kind,
+            type_hint=underlying_type,
+            address=base.address if hasattr(base, 'address') else None
+        )
+        return underlying_type.handle_subscript(visitor, base_with_underlying_type, index, node)
     
     @classmethod
     def _create_refined_type_from_args(cls, args, node, visitor):
@@ -554,11 +560,68 @@ class refined(metaclass=type):
         OwnedPtr = refined[ptr[T], "owned"]
     """
 
+    @classmethod
+    def normalize_subscript_items(cls, items):
+        """Unify type-subscript item normalization with other builtin types.
+
+        This allows `PythonType.handle_subscript` to route `refined[...]` through
+        `handle_type_subscript`, instead of falling back to Python runtime indexing.
+        """
+        from .base import BuiltinType
+        return BuiltinType.normalize_subscript_items(items)
+
+    @classmethod
+    def handle_type_subscript(cls, items):
+        """Handle type subscript: refined[...].
+
+        Called by `PythonType.handle_subscript` after normalization.
+        """
+        # Extract raw arguments from normalized format: ((name?, value), ...)
+        args = tuple(item[1] for item in items)
+
+        # Backward-compat: refined[pred]
+        if len(args) == 1 and callable(args[0]) and not isinstance(args[0], type):
+            return _create_from_single_predicate_internal(args[0], type_resolver=None)
+
+        base_type = None
+        predicates = []
+        tags = []
+
+        for i, arg in enumerate(args):
+            if isinstance(arg, str):
+                tags.append(arg)
+            elif callable(arg) and not isinstance(arg, type):
+                predicates.append(arg)
+            elif isinstance(arg, type):
+                if base_type is None and i == 0:
+                    base_type = arg
+                else:
+                    logger.error(
+                        "refined can only have one base type at position 0",
+                        node=None, exc_type=TypeError,
+                    )
+            else:
+                logger.error(
+                    "refined argument must be a type, callable predicate, or string tag",
+                    node=None, exc_type=TypeError,
+                )
+
+        if base_type is None:
+            logger.error(
+                "refined[...] requires a base type as first argument",
+                node=None, exc_type=TypeError,
+            )
+
+        return _create_from_base_and_constraints_internal(base_type, predicates, tags)
+
     def __class_getitem__(cls, args):
         """Create refined type: refined[...]
 
         Python-level operation that creates a RefinedType class.
         Uses unified internal helpers.
+
+        Note: This runtime path is kept for normal Python evaluation; the compiler
+        uses `handle_type_subscript` via `PythonType.handle_subscript`.
         """
         # Handle both single arg and tuple
         if not isinstance(args, tuple):

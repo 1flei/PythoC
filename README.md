@@ -248,9 +248,9 @@ def is_valid_index(idx: i32) -> bool:
 def process_arrays(i: i32, arr1: array[i32, 10], arr2: array[i32, 10]) -> i32:
     for idx in refine(i, is_valid_index):
         # Type system remembers idx is valid
-        a = arr1[idx[0]]  # Safe: no bounds check
-        b = arr2[idx[0]]  # Safe: no bounds check
-        c = arr1[idx[0]]  # Safe: reuse safely
+        a = arr1[idx]  # Safe: no bounds check
+        b = arr2[idx]  # Safe: no bounds check
+        c = arr1[idx]  # Safe: reuse safely
         return a + b + c
     else:
         return -1
@@ -258,32 +258,82 @@ def process_arrays(i: i32, arr1: array[i32, 10], arr2: array[i32, 10]) -> i32:
 
 **Motivation**: Check once, encode in type system, use safely everywhere. Typical examples: non-null pointers, valid array indices, non-zero divisors. The type system remembers the property, eliminating redundant runtime checks. Zero overhead for subsequent uses.
 
+### Effect System
+
+Compile-time dependency injection with zero runtime overhead.
+Manage the global state and can be overridden at compile-time.
+
+```python
+# rng_lib.py
+from pythoc import compile, effect, u64, void
+from types import SimpleNamespace
+
+@compile
+def rng_next() -> u64:
+    return u64(42)
+
+@compile
+def rng_seed(s: u64) -> void:
+    pass
+
+RNG = SimpleNamespace(next=rng_next, seed=rng_seed)
+
+effect.default(rng=RNG)
+
+@compile
+def use_rng() -> u64:
+    return effect.rng.next()
+
+# Another file can override the default RNG implementation
+from pythoc import *
+from types import SimpleNamespace
+
+@compile
+def mock_rng_next() -> u64:
+    return u64(43)
+
+@compile
+def mock_rng_seed(s: u64) -> void:
+    pass
+
+MockRNG = SimpleNamespace(next=mock_rng_next, seed=mock_rng_seed)
+
+with effect(rng=MockRNG, suffix="mock"):
+    from rng_lib import use_rng
+
+print(use_rng())    # 43
+```
+
+### Defer
+
+Explicit scope-exit actions, lowered to control flow.
+
+```python
+from pythoc import compile, defer, linear, consume, void
+
+@compile
+def consumer(t: linear) -> void:
+    consume(t)
+
+@compile
+def ok_defer(n: i32) -> void:
+    for i in seq(n):
+        t = linear()
+        defer(consumer, t)
+        yield i
+        # consumer(t) executes at scope exit and consumes t no what user-code continues or breaks
+```
+
+### Cimport
+
+Import C modules directly into PythoC.
+`cimport` is a pure PythoC implementation to parse and import C modules.
+It is under a heavy re-design and development currently.
+
+
 ## Python as Preprocessor
 
 Use Python's full power at compile-time for metaprogramming:
-
-### Compile-Time Constants: Zero-Size Fields
-
-```python
-from pythoc import compile, i32, pyconst, struct, typeof, ptr
-
-def Vec(T, size_type):
-    return struct['size': size_type, 'data': ptr[T]]
-
-def make_vec(T, size):
-    ret: Vec(T, typeof(size))
-    ret.size = size
-    ret.data = malloc(size * sizeof(T))
-    return ret
-
-@compile
-def test()-> i32:
-    static_vec = make_vec(i32, 100) # sizeof(static_vec) == sizeof(ptr[T])
-    len: i32 = 100
-    dynamic_vec = make_vec(i32, len) # sizeof(dynamic_vec) == sizeof(struct[i32, ptr[T])
-```
-
-**Use case**: One generic definition, two instantiations with different memory layouts - static saves 4 bytes per instance.
 
 ### Generic Types via Python Functions
 
@@ -347,7 +397,7 @@ sum_8 = make_unrolled_sum(8)
 PythoC provides compile-time and runtime polymorphism through the `Poly` library:
 
 ```python
-from pythoc import compile, i32, f64, ptr, i8
+from pythoc import compile, i32, f64, ptr, i8, enum
 from pythoc.std.poly import Poly
 
 # Define specialized implementations (must have same return type)
@@ -369,13 +419,13 @@ add = Poly(add_i32, add_f64, add_mixed)
 # Static dispatch - type known at compile-time (zero overhead)
 @compile
 def test_static():
-    x = add(10, 20)        # Calls add_i32
+    x = add(i32(10), i32(20))        # Calls add_i32
     y = add(1.5, 2.5)      # Calls add_f64
-    z = add(10, 2.5)       # Calls add_mixed
+    z = add(i32(10), 2.5)       # Calls add_mixed
 
 # Extensible - add implementations dynamically
 @compile
-def add_str(a: ptr[i8], b: ptr[i8]) -> i32:
+def add_str(a: i32, b: ptr[i8]) -> i32:
     return 42
 
 add.append(add_str)
@@ -390,7 +440,13 @@ class Number:
 def test_runtime():
     a: Number = Number(Number.Int, 42)
     b: Number = Number(Number.Float, 3.14)
-    add(a, b)  # Dispatches based on runtime enum tags
+    x: i32 = 10
+    # add(a, b)  # Compilation error: missing f64 + i32 overloads
+    add(x, a)    # OK, dynamic dispatch
+
+if __name__ == "__main__":
+    test_static()
+    test_runtime()
 ```
 
 **Key features**:
@@ -471,14 +527,6 @@ def sum_fibonacci(n: i32) -> i32:
 ```
 
 **Common kernel**: All three features use the same AST transformation and inlining kernel, maintaining C-level performance with high-level abstractions.
-
-### Features in Development
-
-These are actively being designed/implemented and may change:
-
-- **Effect system**: More like a compile-time injection system. Make side effects and global state explicit and manageable. Can also be used to address the symbol conflict issue.
-- **`cimport`**: Import C headers and auto-generate bindings (types, constants, function signatures).
-- **`defer`**: Scope-exit cleanup (e.g., `defer(free, p)`), lowered to explicit control flow.
 
 ## More Examples
 An under development pure pythoc C header parser in `pythoc/bindings` to implement the `cimport` feature.

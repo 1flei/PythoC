@@ -9,7 +9,7 @@ Tests the refined type system including:
 - Field access on refined types
 """
 
-from pythoc import compile, i32, bool, refined, refine
+from pythoc import compile, i32, bool, refined, refine, ptr, nullptr
 
 
 # Basic single-parameter refined type
@@ -102,6 +102,11 @@ def is_nonzero(x: i32) -> bool:
     return x != 0
 
 
+@compile
+def is_nonnull_ptr(p: ptr[i32]) -> bool:
+    return p != ptr[i32](nullptr)
+
+
 # Test using refined type in computation
 @compile
 def safe_divide(dividend: i32, divisor: i32) -> i32:
@@ -111,6 +116,15 @@ def safe_divide(dividend: i32, divisor: i32) -> i32:
         return result
     else:
         return 0  # Return 0 if divisor is zero
+
+
+@compile
+def test_refined_ptr_subscript() -> i32:
+    """Test refined[ptr[T], pred] supports value subscript forwarding."""
+    x: i32 = 42
+    p: ptr[i32] = ptr(x)
+    rp = assume(p, is_nonnull_ptr)
+    return rp[0]
 
 
 @compile
@@ -263,6 +277,10 @@ class TestRefined(unittest.TestCase):
     def test_safe_divide_zero(self):
         """Test safe division with zero divisor"""
         self.assertEqual(test_safe_divide_zero(), 0)
+
+    def test_refined_ptr_subscript(self):
+        """Test refined pointer value subscript"""
+        self.assertEqual(test_refined_ptr_subscript(), 42)
 
     def test_positive_even(self):
         """Test refined type with combined predicates"""

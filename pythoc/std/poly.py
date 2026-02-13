@@ -111,9 +111,10 @@ class Poly:
                 enum_indices.append((i, arg_type))
         
         if not enum_indices:
-            raise TypeError(
+            logger.error(
                 f"Poly: no matching signature for {arg_types} "
-                f"and no Enum argument for dynamic dispatch"
+                f"and no Enum argument for dynamic dispatch",
+                node
             )
         
         # Generate dynamic dispatch for enum arguments
@@ -176,7 +177,7 @@ class Poly:
             error_msg = "Poly: cannot generate dynamic dispatch - missing function overloads:\n"
             for variant_names, sig in missing_combinations:
                 error_msg += f"  - Variants {variant_names}: {sig}\n"
-            raise TypeError(error_msg)
+            logger.error(error_msg, node)
         
         # Step 2: Validate all return types are the same
         if return_types:
@@ -188,7 +189,7 @@ class Poly:
                         f"  Expected all overloads to return {first_return_type}, "
                         f"but found {rt}\n"
                     )
-                    raise TypeError(error_msg)
+                    logger.error(error_msg, node)
 
         # Step 3: Generate and compile dispatch function
         # print(f"all_sigs={all_sigs}")
