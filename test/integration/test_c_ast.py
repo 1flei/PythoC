@@ -2,7 +2,7 @@
 Test c_ast module: linear ownership, refined types, and type construction.
 
 Tests cover:
-1. Linear allocation: alloc returns (proof, ptr), must consume proof
+1. Linear allocation: alloc returns (ptr, proof), must consume proof
 2. Refined types: CTypeRef guarantees non-null
 3. Type construction: make_* functions with ownership transfer
 4. Free functions: recursive free with proof consumption
@@ -46,9 +46,9 @@ from pythoc.bindings.c_ast import (
 
 @compile
 def test_linear_alloc_and_free() -> i32:
-    """Test that linear alloc returns proof and ptr, free consumes proof."""
+    """Test that linear alloc returns ptr and proof, free consumes proof."""
     # Allocate with linear tracking
-    prf, ty = ctype_alloc()
+    ty, prf = ctype_alloc()
     
     # Use the pointer
     ty[0] = CType(CType.Int)
@@ -62,8 +62,8 @@ def test_linear_alloc_and_free() -> i32:
 @compile
 def test_linear_qualtype() -> i32:
     """Test QualType linear allocation."""
-    qt_prf, qt = qualtype_alloc()
-    ty_prf, ty = ctype_alloc()
+    qt, qt_prf = qualtype_alloc()
+    ty, ty_prf = ctype_alloc()
     
     ty[0] = CType(CType.Char)
     qt.type = ty

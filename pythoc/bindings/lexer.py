@@ -6,12 +6,12 @@ Design: Uses linear types to ensure token lifetime is within lexer lifetime.
 - lexer_create() returns (lexer_prf, lexer)
 - lexer_next_token(lex, lex_prf) -> (token, tk_prf, lex_prf) - lexer can produce multiple tokens
 - token_release(token, tk_prf, lex_prf) -> lex_prf - token lifetime must be within lexer lifetime
-- lexer_destroy(lex_prf, lex) - consumes lexer_prf
+- lexer_destroy(lex, lex_prf) - consumes lexer_prf
 """
 
 from pythoc import compile, inline, i32, i8, bool, ptr, array, nullptr, sizeof, void, char, refine, refined, linear, struct, consume, assume, effect
-from pythoc.std.linear_wrapper import linear_wrap
-from pythoc.std.refine_wrapper import nonnull_wrap
+from pythoc.std.linearize import linearize
+from pythoc.std.refinement import nonnull
 from pythoc.std import mem  # Sets up default mem effect
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
@@ -47,14 +47,14 @@ def lexer_destroy_raw(lex: ptr[Lexer]) -> void:
     effect.mem.free(lex)
 
 
-# Define proof types using linear_wrap
-LexerProof, lexer_create, lexer_destroy = linear_wrap(
+# Define proof types using linearize
+LexerProof, lexer_create, lexer_destroy = linearize(
     lexer_create_raw, lexer_destroy_raw, struct_name="LexerProof")
 
 # TokenProof is also a refined linear type with tag
 TokenProof = refined[linear, "TokenProof"]
 
-lexer_nonnull, LexerRef = nonnull_wrap(ptr[Lexer])
+lexer_nonnull, LexerRef = nonnull(ptr[Lexer])
 
 
 @compile
@@ -342,8 +342,8 @@ def tokens_from_source(source: ptr[i8]) -> Token:
     """
     Yield-based iterator for lexing tokens from lex.
     """
-    prf, lex_raw = lexer_create(source)
+    lex_raw, prf = lexer_create(source)
     for lex in refine(lex_raw, lexer_nonnull):
         for tk in lex_tokens(lex):
             yield tk
-    lexer_destroy(prf, lex_raw)
+    lexer_destroy(lex_raw, prf)

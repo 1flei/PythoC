@@ -24,8 +24,8 @@ from pythoc import (
     compile, i32, i64, i8, ptr, enum, sizeof, void, nullptr, bool, char,
     struct, linear, consume, assume, refined, effect
 )
-from pythoc.std.refine_wrapper import nonnull_wrap
-from pythoc.std.linear_wrapper import linear_wrap
+from pythoc.std.refinement import nonnull
+from pythoc.std.linearize import linearize
 from pythoc.std import mem  # Sets up default mem effect
 
 
@@ -55,7 +55,7 @@ class Span:
     len: i32
 
 
-span_nonnull, SpanRef = nonnull_wrap(ptr[Span])
+span_nonnull, SpanRef = nonnull(ptr[Span])
 
 # SourceProof represents ownership/lifetime of a source buffer
 # When parsing, you create a SourceProof for the source buffer,
@@ -327,17 +327,17 @@ for _t in _all_struct_types:
         _t._ensure_field_types_resolved()
 
 # Nonnull predicates and refined types for all AST types
-ctype_nonnull, CTypeRef = nonnull_wrap(ptr[CType])
-qualtype_nonnull, QualTypeRef = nonnull_wrap(ptr[QualType])
-ptrtype_nonnull, PtrTypeRef = nonnull_wrap(ptr[PtrType])
-arraytype_nonnull, ArrayTypeRef = nonnull_wrap(ptr[ArrayType])
-functype_nonnull, FuncTypeRef = nonnull_wrap(ptr[FuncType])
-structtype_nonnull, StructTypeRef = nonnull_wrap(ptr[StructType])
-enumtype_nonnull, EnumTypeRef = nonnull_wrap(ptr[EnumType])
-paraminfo_nonnull, ParamInfoRef = nonnull_wrap(ptr[ParamInfo])
-fieldinfo_nonnull, FieldInfoRef = nonnull_wrap(ptr[FieldInfo])
-enumvalue_nonnull, EnumValueRef = nonnull_wrap(ptr[EnumValue])
-decl_nonnull, DeclRef = nonnull_wrap(ptr[Decl])
+ctype_nonnull, CTypeRef = nonnull(ptr[CType])
+qualtype_nonnull, QualTypeRef = nonnull(ptr[QualType])
+ptrtype_nonnull, PtrTypeRef = nonnull(ptr[PtrType])
+arraytype_nonnull, ArrayTypeRef = nonnull(ptr[ArrayType])
+functype_nonnull, FuncTypeRef = nonnull(ptr[FuncType])
+structtype_nonnull, StructTypeRef = nonnull(ptr[StructType])
+enumtype_nonnull, EnumTypeRef = nonnull(ptr[EnumType])
+paraminfo_nonnull, ParamInfoRef = nonnull(ptr[ParamInfo])
+fieldinfo_nonnull, FieldInfoRef = nonnull(ptr[FieldInfo])
+enumvalue_nonnull, EnumValueRef = nonnull(ptr[EnumValue])
+decl_nonnull, DeclRef = nonnull(ptr[Decl])
 
 
 # =============================================================================
@@ -413,28 +413,28 @@ def _decl_free_raw(p: ptr[Decl]) -> void:
 # Linear-wrapped alloc/free with proof types
 # =============================================================================
 
-CTypeProof, ctype_alloc, ctype_free_linear = linear_wrap(
+CTypeProof, ctype_alloc, ctype_free_linear = linearize(
     _ctype_alloc_raw, _ctype_free_raw, struct_name='CTypeProof')
 
-QualTypeProof, qualtype_alloc, qualtype_free_linear = linear_wrap(
+QualTypeProof, qualtype_alloc, qualtype_free_linear = linearize(
     _qualtype_alloc_raw, _qualtype_free_raw, struct_name='QualTypeProof')
 
-PtrTypeProof, ptrtype_alloc, ptrtype_free_linear = linear_wrap(
+PtrTypeProof, ptrtype_alloc, ptrtype_free_linear = linearize(
     _ptrtype_alloc_raw, _ptrtype_free_raw, struct_name='PtrTypeProof')
 
-ArrayTypeProof, arraytype_alloc, arraytype_free_linear = linear_wrap(
+ArrayTypeProof, arraytype_alloc, arraytype_free_linear = linearize(
     _arraytype_alloc_raw, _arraytype_free_raw, struct_name='ArrayTypeProof')
 
-FuncTypeProof, functype_alloc, functype_free_linear = linear_wrap(
+FuncTypeProof, functype_alloc, functype_free_linear = linearize(
     _functype_alloc_raw, _functype_free_raw, struct_name='FuncTypeProof')
 
-StructTypeProof, structtype_alloc, structtype_free_linear = linear_wrap(
+StructTypeProof, structtype_alloc, structtype_free_linear = linearize(
     _structtype_alloc_raw, _structtype_free_raw, struct_name='StructTypeProof')
 
-EnumTypeProof, enumtype_alloc, enumtype_free_linear = linear_wrap(
+EnumTypeProof, enumtype_alloc, enumtype_free_linear = linearize(
     _enumtype_alloc_raw, _enumtype_free_raw, struct_name='EnumTypeProof')
 
-DeclProof, decl_alloc, decl_free_linear = linear_wrap(
+DeclProof, decl_alloc, decl_free_linear = linearize(
     _decl_alloc_raw, _decl_free_raw, struct_name='DeclProof')
 
 
@@ -465,7 +465,7 @@ def make_qualtype(ty_prf: CTypeProof, ty: ptr[CType], quals: i8) -> struct[QualT
     
     Ownership: Takes ownership of ty (consumes ty_prf), returns ownership of QualType.
     """
-    qt_prf, qt = qualtype_alloc()
+    qt, qt_prf = qualtype_alloc()
     qt.type = ty
     qt.quals = quals
     # Transfer CType ownership into QualType - consume the proof
@@ -506,7 +506,7 @@ def _make_primitive_api():
     for _name, _tag in _types:
         @compile(suffix=_tag)
         def _make_prim() -> struct[CTypeProof, ptr[CType]]:
-            prf, ty = ctype_alloc()
+            ty, prf = ctype_alloc()
             ty[0] = CType(_tag)
             return prf, ty
         setattr(PrimitiveApi, _name, staticmethod(_make_prim))
@@ -542,11 +542,11 @@ def make_ptr_type(pointee_prf: QualTypeProof, pointee: ptr[QualType],
     
     Ownership: Takes ownership of pointee (consumes pointee_prf).
     """
-    pt_prf, pt = ptrtype_alloc()
+    pt, pt_prf = ptrtype_alloc()
     pt.pointee = pointee
     pt.quals = ptr_quals
     
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Ptr, pt)
     
     # Transfer ownership: PtrType now owns pointee, CType owns PtrType
@@ -562,11 +562,11 @@ def make_array_type(elem_prf: QualTypeProof, elem: ptr[QualType],
     
     Ownership: Takes ownership of elem (consumes elem_prf).
     """
-    at_prf, at = arraytype_alloc()
+    at, at_prf = arraytype_alloc()
     at.elem = elem
     at.size = size
     
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Array, at)
     
     consume(elem_prf)
@@ -583,13 +583,13 @@ def make_func_type(ret_prf: QualTypeProof, ret: ptr[QualType],
     Ownership: Takes ownership of ret and params array.
     Note: params array ownership is transferred, caller should not free it.
     """
-    ft_prf, ft = functype_alloc()
+    ft, ft_prf = functype_alloc()
     ft.ret = ret
     ft.params = params
     ft.param_count = param_count
     ft.is_variadic = is_variadic
     
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Func, ft)
     
     consume(ret_prf)
@@ -604,13 +604,13 @@ def make_struct_type(name: Span, fields: ptr[FieldInfo], field_count: i32,
     
     Ownership: Takes ownership of fields array.
     """
-    st_prf, st = structtype_alloc()
+    st, st_prf = structtype_alloc()
     st.name = name
     st.fields = fields
     st.field_count = field_count
     st.is_complete = is_complete
     
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Struct, st)
     
     consume(st_prf)
@@ -624,13 +624,13 @@ def make_union_type(name: Span, fields: ptr[FieldInfo], field_count: i32,
     
     Ownership: Takes ownership of fields array.
     """
-    st_prf, st = structtype_alloc()
+    st, st_prf = structtype_alloc()
     st.name = name
     st.fields = fields
     st.field_count = field_count
     st.is_complete = is_complete
     
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Union, st)
     
     consume(st_prf)
@@ -644,13 +644,13 @@ def make_enum_type(name: Span, values: ptr[EnumValue], value_count: i32,
     
     Ownership: Takes ownership of values array.
     """
-    et_prf, et = enumtype_alloc()
+    et, et_prf = enumtype_alloc()
     et.name = name
     et.values = values
     et.value_count = value_count
     et.is_complete = is_complete
     
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Enum, et)
     
     consume(et_prf)
@@ -660,7 +660,7 @@ def make_enum_type(name: Span, values: ptr[EnumValue], value_count: i32,
 @compile
 def make_typedef_type(name: Span) -> struct[CTypeProof, ptr[CType]]:
     """Create a typedef reference type."""
-    ty_prf, ty = ctype_alloc()
+    ty, ty_prf = ctype_alloc()
     ty[0] = CType(CType.Typedef, name)
     return ty_prf, ty
 
@@ -794,11 +794,11 @@ def qualtype_clone_shallow(qt: ptr[QualType]) -> struct[QualTypeProof, ptr[QualT
 
     Returns (proof, cloned_ptr). Caller takes ownership via proof.
     """
-    new_qt_prf, new_qt = qualtype_alloc()
+    new_qt, new_qt_prf = qualtype_alloc()
     new_qt.quals = qt.quals
 
     # Allocate new CType and copy the tag (shallow)
-    new_ty_prf, new_ty = ctype_alloc()
+    new_ty, new_ty_prf = ctype_alloc()
     new_ty[0] = qt.type[0]  # Copy enum tag + payload
     consume(new_ty_prf)
 
@@ -924,7 +924,7 @@ def ctype_clone_deep(ty: ptr[CType]) -> struct[CTypeProof, ptr[CType]]:
             return make_enum_type(span_empty(), nullptr, 0, 0)
 
         case _:
-            prf, out = ctype_alloc()
+            out, prf = ctype_alloc()
             out[0] = ty[0]
             return prf, out
 

@@ -68,7 +68,7 @@ with effect(mem=MarkerMem, suffix="tracked"):
     @compile
     def test_tracked() -> u64:
         """Test tracked allocator"""
-        prf, ty = ctype_alloc_tracked()
+        ty, prf = ctype_alloc_tracked()
         marker = check_marker(ptr[u8](ty))
         ctype_free_tracked(prf, ty)
         return marker
@@ -77,7 +77,7 @@ with effect(mem=MarkerMem, suffix="tracked"):
 @compile
 def test_default() -> u64:
     """Test default allocator"""
-    prf, ty = ctype_alloc()
+    ty, prf = ctype_alloc()
     marker = check_marker(ptr[u8](ty))
     ctype_free(prf, ty)
     return marker
