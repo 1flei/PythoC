@@ -24,7 +24,7 @@ def test_simple_tokens() -> i32:
     """Test basic token recognition"""
     source: ptr[i8] = "int * ; ( ) ,"
 
-    prf, lex = lexer_create(source)
+    lex, prf = lexer_create(source)
     lex_ref = assume(lex, lexer_nonnull)
 
     result: i32 = 0
@@ -78,7 +78,7 @@ def test_simple_tokens() -> i32:
         result = 1
     prf = token_release(token7, tk_prf7, prf)
 
-    lexer_destroy(prf, lex)
+    lexer_destroy(lex, prf)
     if result == 0:
         printf("OK: test_simple_tokens passed\n")
     return result
@@ -89,7 +89,7 @@ def test_identifiers_and_keywords() -> i32:
     """Test identifier and keyword recognition"""
     source: ptr[i8] = "int foo char bar123"
 
-    prf, lex = lexer_create(source)
+    lex, prf = lexer_create(source)
     lex_ref = assume(lex, lexer_nonnull)
 
     result: i32 = 0
@@ -122,7 +122,7 @@ def test_identifiers_and_keywords() -> i32:
         result = 1
     prf = token_release(token4, tk_prf4, prf)
 
-    lexer_destroy(prf, lex)
+    lexer_destroy(lex, prf)
     if result == 0:
         printf("OK: test_identifiers_and_keywords passed\n")
     return result
@@ -133,7 +133,7 @@ def test_comments() -> i32:
     """Test comment skipping"""
     source: ptr[i8] = "int /* comment */ x"
 
-    prf, lex = lexer_create(source)
+    lex, prf = lexer_create(source)
     lex_ref = assume(lex, lexer_nonnull)
 
     result: i32 = 0
@@ -152,7 +152,7 @@ def test_comments() -> i32:
         result = 1
     prf = token_release(token2, tk_prf2, prf)
 
-    lexer_destroy(prf, lex)
+    lexer_destroy(lex, prf)
     if result == 0:
         printf("OK: test_comments passed\n")
     return result

@@ -3,7 +3,7 @@ Token definitions for C header parser
 """
 
 from pythoc import compile, i32, i8, array, enum, ptr
-from pythoc.std.refine_wrapper import nonnull_wrap
+from pythoc.std.refinement import nonnull
 
 @enum(i32)
 class TokenType:
@@ -119,7 +119,7 @@ class Token:
     col: i32                     # Source column number (1-based)
 
 
-token_nonnull, TokenRef = nonnull_wrap(ptr[Token])
+token_nonnull, TokenRef = nonnull(ptr[Token])
 
 
 # Map token type to C keyword string (lowercase)

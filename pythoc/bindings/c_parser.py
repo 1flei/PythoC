@@ -21,7 +21,7 @@ from pythoc import (
 )
 from pythoc.std import mem  # Sets up default mem effect
 from pythoc.libc.string import memcpy
-from pythoc.std.refine_wrapper import nonnull_wrap
+from pythoc.std.refinement import nonnull
 
 from pythoc.bindings.c_token import Token, TokenType, TokenRef, token_nonnull
 from pythoc.bindings.lexer import (
@@ -110,7 +110,7 @@ class Parser:
     error_count: i32
 
 
-parser_nonnull, ParserRef = nonnull_wrap(ptr[Parser])
+parser_nonnull, ParserRef = nonnull(ptr[Parser])
 
 
 @compile
@@ -268,7 +268,7 @@ class TypeParseState:
     name: Span              # For struct/union/enum/typedef names
 
 
-typeparse_nonnull, TypeParseStateRef = nonnull_wrap(ptr[TypeParseState])
+typeparse_nonnull, TypeParseStateRef = nonnull(ptr[TypeParseState])
 
 
 @compile
@@ -863,7 +863,7 @@ def parse_function_decl(p: ParserRef, prfs: ParserProofs, ret_qt_prf: QualTypePr
     func_qt_prf, func_qt = make_qualtype(func_ty_prf, func_ty, QUAL_NONE)
 
     # Create declaration
-    decl_prf, decl = decl_alloc()
+    decl, decl_prf = decl_alloc()
     decl.kind = DeclKind(DeclKind.Func)
     decl.name = name
     decl.type = func_qt
@@ -906,7 +906,7 @@ def try_make_struct_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> str
     
     if has_name != 0:
         qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
-        decl_prf, decl = decl_alloc()
+        decl, decl_prf = decl_alloc()
         decl.kind = DeclKind(DeclKind.Struct)
         decl.name = name
         decl.type = qt
@@ -916,7 +916,7 @@ def try_make_struct_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> str
     else:
         ctype_free(ty_prf, ty)
         # Return dummy decl - caller must free it
-        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
         return 0, dummy_prf, dummy_decl
 
@@ -941,7 +941,7 @@ def try_make_union_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> stru
     
     if has_name != 0:
         qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
-        decl_prf, decl = decl_alloc()
+        decl, decl_prf = decl_alloc()
         decl.kind = DeclKind(DeclKind.Union)
         decl.name = name
         decl.type = qt
@@ -951,7 +951,7 @@ def try_make_union_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> stru
     else:
         ctype_free(ty_prf, ty)
         # Return dummy decl - caller must free it
-        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
         return 0, dummy_prf, dummy_decl
 
@@ -976,7 +976,7 @@ def try_make_enum_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struc
     
     if has_name != 0:
         qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
-        decl_prf, decl = decl_alloc()
+        decl, decl_prf = decl_alloc()
         decl.kind = DeclKind(DeclKind.Enum)
         decl.name = name
         decl.type = qt
@@ -986,7 +986,7 @@ def try_make_enum_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struc
     else:
         ctype_free(ty_prf, ty)
         # Return dummy decl - caller must free it
-        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
         return 0, dummy_prf, dummy_decl
 
@@ -1010,7 +1010,7 @@ def parse_typedef_decl(p: ParserRef, prfs: ParserProofs, qt_prf: QualTypeProof, 
     name, prfs = parse_declarator_name(p, prfs)
 
     if not span_is_empty(name):
-        decl_prf, decl = decl_alloc()
+        decl, decl_prf = decl_alloc()
         decl.kind = DeclKind(DeclKind.Typedef)
         decl.name = name
         decl.type = qt
@@ -1025,7 +1025,7 @@ def parse_typedef_decl(p: ParserRef, prfs: ParserProofs, qt_prf: QualTypeProof, 
         prfs = parser_skip_until_semicolon(p, prfs)
         if parser_match(p, TokenType.SEMICOLON):
             prfs = parser_advance(p, prfs)
-        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
         return 0, dummy_prf, dummy_decl, prfs
 
@@ -1062,7 +1062,7 @@ def parse_regular_decl(p: ParserRef, prfs: ParserProofs, storage: i8) -> struct[
         prfs = parser_skip_until_semicolon(p, prfs)
         if parser_match(p, TokenType.SEMICOLON):
             prfs = parser_advance(p, prfs)
-        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
         return 0, dummy_prf, dummy_decl, prfs
 
@@ -1077,7 +1077,7 @@ def parse_regular_decl(p: ParserRef, prfs: ParserProofs, storage: i8) -> struct[
         prfs = parser_skip_until_semicolon(p, prfs)
         if parser_match(p, TokenType.SEMICOLON):
             prfs = parser_advance(p, prfs)
-        dummy_prf, dummy_decl = decl_alloc()
+        dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
         return 0, dummy_prf, dummy_decl, prfs
 
@@ -1107,8 +1107,8 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
         # After iteration completes, AST nodes still reference source buffer
         # Caller must keep source alive while using the AST
     """
-    lex_prf, lex_raw = lexer_create(source)
-    defer(lexer_destroy, lex_prf, lex_raw)
+    lex_raw, lex_prf = lexer_create(source)
+    defer(lexer_destroy, lex_raw, lex_prf)
 
     for lex in refine(lex_raw, lexer_nonnull):
         # Create parser state (no linear fields)
