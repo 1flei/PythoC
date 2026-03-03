@@ -697,6 +697,33 @@ class ExpressionsMixin:
         # Value list (Python values, IR values, or nested pc_lists) - create pc_list
         list_type = pc_list.from_elements(elements)
         return wrap_value(list_type, kind="python", type_hint=list_type)
+
+    def visit_GeneratorExp(self, node: ast.GeneratorExp):
+        """Handle generator expression as compile-time-only pyconst value.
+
+        Generator expressions are represented as Python values carrying AST metadata.
+        They are not lowered to runtime iterators in this stage.
+        """
+        import copy
+        from ..builtin_entities.python_type import PythonType
+
+        class _GeneratorExprPlaceholder:
+            pass
+
+        placeholder = _GeneratorExprPlaceholder()
+        placeholder._pc_generator_expr = copy.deepcopy(node)
+        placeholder._pc_is_generator_expr = True
+
+        result = wrap_value(
+            placeholder,
+            kind="python",
+            type_hint=PythonType.wrap(placeholder, is_constant=True)
+        )
+        result._pc_generator_expr_info = {
+            "ast": copy.deepcopy(node),
+            "kind": "generator_expression",
+        }
+        return result
     
 
     def visit_Slice(self, node: ast.Slice):
