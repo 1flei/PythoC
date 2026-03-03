@@ -3,6 +3,7 @@ Loop statement visitor mixin (for, while)
 """
 
 import ast
+import copy
 from ..logger import logger
 from ..scope_manager import ScopeType
 from .control_flow_builder import ControlFlowBuilder
@@ -269,44 +270,127 @@ class LoopsMixin:
     def visit_For(self, node: ast.For):
         """Handle for loops using iterator protocol
         
-        Supports two protocols (in priority order):
-        1. Yield inlining: inline yield function body for zero overhead (REQUIRED for yield)
+        Supports three protocols (in priority order):
+        1. Yield inlining: inline yield function body for zero overhead
         2. Compile-time constant unrolling: for loops over constant sequences
-        
-        Translates:
-            for i in iterable:
-                body
-            else:
-                else_body
-        
-        To (if inlined):
-            # Inlined yield function body with yields replaced by loop body
-            # else_body executes if no break occurred
-        
-        Note: Vtable iterator protocol has been removed. All yield functions
-        must be inlined at compile time.
+        3. Generator expression replay: lower genexp carrier to yield-inline form
         """
         # First evaluate the iterator expression
         iter_val = self.visit_expression(node.iter)
-        
+
         # Check for compile-time constant (Python value)
         if iter_val.is_python_value() and hasattr(iter_val.get_python_value(), "__iter__"):
             py_iterable = iter_val.get_python_value()
             self._visit_for_with_constant_unroll(node, py_iterable)
             return
-        
-        # Check for yield inlining (REQUIRED - no fallback to vtable)
+
+        # Check for direct yield inlining info
         if hasattr(iter_val, '_yield_inline_info') and iter_val._yield_inline_info:
             self._visit_for_with_yield_inline(node, iter_val)
             return
-        
-        # No vtable support - error if not handled above
+
+        # Generator expression carrier: replay by building yield-inline metadata
+        genexp_ast = self._extract_generator_expr_ast(iter_val)
+        if genexp_ast is not None:
+            self._attach_genexp_yield_inline_info(node, iter_val, genexp_ast)
+            self._visit_for_with_yield_inline(node, iter_val)
+            return
+
         logger.error(
             f"Unsupported iterator type: {iter_val}. "
-            f"Only yield functions (via inlining) and compile-time constants are supported. "
-            f"Vtable iterator protocol has been removed.",
+            f"Only yield functions (via inlining), generator expressions (replay), "
+            f"and compile-time constants are supported.",
             node=node, exc_type=TypeError
         )
+
+    def _extract_generator_expr_ast(self, iter_val):
+        """Extract GeneratorExp AST from a genexp carrier ValueRef."""
+        info = getattr(iter_val, '_pc_generator_expr_info', None)
+        if info:
+            gen_ast = info.get('ast')
+            if isinstance(gen_ast, ast.GeneratorExp):
+                return gen_ast
+
+        if iter_val.is_python_value():
+            py_obj = iter_val.get_python_value()
+            gen_ast = getattr(py_obj, '_pc_generator_expr', None)
+            if isinstance(gen_ast, ast.GeneratorExp):
+                return gen_ast
+
+        return None
+
+    def _attach_genexp_yield_inline_info(self, for_node: ast.For, iter_val, genexp_ast: ast.GeneratorExp):
+        """Attach replay-by-expansion yield-inline metadata for generator expressions."""
+        from ..utils import get_next_id
+
+        func_name = f"__pc_genexp_inline_{get_next_id()}"
+        func_ast = self._build_genexp_inline_function_ast(genexp_ast, func_name, for_node)
+
+        call_node = ast.Call(
+            func=ast.Name(id=func_name, ctx=ast.Load()),
+            args=[],
+            keywords=[]
+        )
+        ast.copy_location(call_node, for_node.iter)
+        ast.fix_missing_locations(call_node)
+
+        iter_val._yield_inline_info = {
+            'func_obj': None,
+            'original_ast': func_ast,
+            'call_node': call_node,
+            'call_args': []
+        }
+
+    def _build_genexp_inline_function_ast(
+        self,
+        genexp_ast: ast.GeneratorExp,
+        func_name: str,
+        for_node: ast.For
+    ) -> ast.FunctionDef:
+        """Build a synthetic yield function AST from a GeneratorExp AST."""
+        if not genexp_ast.generators:
+            logger.error("Generator expression must contain at least one generator clause", node=for_node, exc_type=TypeError)
+
+        for comp in genexp_ast.generators:
+            if getattr(comp, 'is_async', 0):
+                logger.error("Async generator expression is not supported", node=for_node, exc_type=TypeError)
+
+        current_body = [
+            ast.Expr(value=ast.Yield(value=copy.deepcopy(genexp_ast.elt)))
+        ]
+
+        for comp in reversed(genexp_ast.generators):
+            body = current_body
+            for cond in reversed(comp.ifs):
+                body = [ast.If(test=copy.deepcopy(cond), body=body, orelse=[])]
+
+            loop_stmt = ast.For(
+                target=copy.deepcopy(comp.target),
+                iter=copy.deepcopy(comp.iter),
+                body=body,
+                orelse=[],
+                type_comment=None
+            )
+            current_body = [loop_stmt]
+
+        func_ast = ast.FunctionDef(
+            name=func_name,
+            args=ast.arguments(
+                posonlyargs=[],
+                args=[],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+                vararg=None,
+                kwarg=None,
+            ),
+            body=current_body,
+            decorator_list=[],
+            returns=None,
+        )
+        ast.copy_location(func_ast, for_node)
+        ast.fix_missing_locations(func_ast)
+        return func_ast
     
     def _visit_for_with_yield_inline(self, node: ast.For, iter_val):
         """Handle for loop with yield inline, including else clause
