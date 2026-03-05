@@ -711,121 +711,123 @@ class LLVMCompiler:
         return True
     
     def optimize_module(self, optimization_level: int = 2):
-        """Optimize the LLVM module with O2 level optimizations by default"""
+        """Optimize the LLVM module.
+
+        The pipeline runs multiple FPM<->MPM rounds so that inlining exposes
+        further simplification opportunities (SROA, InstCombine, etc.).
+
+        Available llvmlite FPM passes (LLVM 14 legacy PM):
+            add_sroa_pass, add_instruction_combining_pass,
+            add_reassociate_expressions_pass, add_cfg_simplification_pass,
+            add_licm_pass, add_loop_deletion_pass, add_loop_rotate_pass,
+            add_gvn_pass, add_dead_code_elimination_pass,
+            add_jump_threading_pass, add_tail_call_elimination_pass,
+            add_loop_unroll_pass
+
+        Available llvmlite MPM passes:
+            add_constant_merge_pass, add_dead_arg_elimination_pass,
+            add_function_attrs_pass, add_global_dce_pass,
+            add_global_optimizer_pass, add_function_inlining_pass,
+            add_ipsccp_pass
+
+        NOT available (do not exist in llvmlite 0.43 / LLVM 14):
+            constant_propagation_pass, early_cse_pass, loop_simplify_pass,
+            indvars_pass, aggressive_dce_pass, loop_vectorize_pass,
+            slp_vectorize_pass
+        """
         if self.module is None:
             return
-        
+
         try:
-            # Parse the IR into an LLVM module
             llvm_module = binding.parse_assembly(str(self.module))
-            
-            # CRITICAL: Use function pass manager for mem2reg (alloca->SSA promotion)
-            # This is essential for good code generation
-            fpm = binding.create_function_pass_manager(llvm_module)
-            
-            # Add SROA pass (Scalar Replacement of Aggregates) - similar to mem2reg
-            # This promotes allocas to registers and is the most important optimization
-            fpm.add_sroa_pass()
-            
-            if optimization_level >= 1:
-                # Basic scalar optimizations - order matters!
-                try:
-                    # Early constant propagation - critical for constant folding after SROA
-                    fpm.add_constant_propagation_pass()
-                    # Early CSE before more expensive opts
-                    fpm.add_early_cse_pass()
-                    # Instruction combining and simplification
-                    fpm.add_instruction_combining_pass()
-                    fpm.add_reassociate_expressions_pass()
-                    fpm.add_cfg_simplification_pass()
-                    # Loop structure normalization
-                    fpm.add_loop_simplify_pass()
-                except AttributeError:
-                    pass
-            
-            if optimization_level >= 2:
-                # Loop optimizations - important for this project
-                try:
-                    fpm.add_licm_pass()
-                    fpm.add_indvars_pass()
-                    fpm.add_loop_deletion_pass()
-                    fpm.add_loop_rotate_pass()
-                except AttributeError:
-                    pass
-                
-                # More aggressive optimizations
-                try:
-                    fpm.add_gvn_pass()
-                    # Run InstCombine again after GVN to clean up
-                    fpm.add_instruction_combining_pass()
-                    fpm.add_dead_code_elimination_pass()
-                    fpm.add_aggressive_dce_pass()
-                except AttributeError:
-                    pass
-            
-            if optimization_level >= 3:
-                # Aggressive loop optimizations
-                try:
-                    fpm.add_loop_unroll_pass()
-                    fpm.add_tail_call_elimination_pass()
-                    fpm.add_jump_threading_pass()
-                except AttributeError:
-                    pass
-                
-                # Vectorization passes
-                try:
-                    fpm.add_loop_vectorize_pass()
-                    fpm.add_slp_vectorize_pass()
-                except AttributeError:
-                    pass
-            
-            # Initialize and run function passes on all functions
-            fpm.initialize()
-            for func in llvm_module.functions:
-                if not func.is_declaration:
-                    fpm.run(func)
-            fpm.finalize()
-            
-            # Now run module-level passes
-            pm = binding.create_module_pass_manager()
-            
-            if optimization_level >= 1:
-                # Module-level basic optimizations
-                try:
-                    pm.add_constant_merge_pass()
-                    pm.add_dead_arg_elimination_pass()
-                except AttributeError:
-                    pass
-            
-            if optimization_level >= 2:
-                # Module-level aggressive optimizations
-                try:
-                    pm.add_function_attrs_pass()
-                    pm.add_global_dce_pass()
-                    pm.add_global_optimizer_pass()
-                    # Inline small functions even at O2
-                    pm.add_function_inlining_pass(225)
-                except AttributeError:
-                    pass
-            
-            if optimization_level >= 3:
-                # Aggressive optimizations (O3 level)
-                try:
-                    # Higher inline threshold for O3
-                    pm.add_function_inlining_pass(500)
-                    pm.add_ipsccp_pass()
-                    pm.add_dead_arg_elimination_pass()
-                except AttributeError:
-                    pass
-            
-            # Run module passes
-            pm.run(llvm_module)
-            
-            # Store the optimized IR
-            self._optimized_ir = str(llvm_module)
-            
+            ir_text = str(llvm_module)
+
+            rounds = 1 if optimization_level <= 1 else 2
+            inline_threshold = 225 if optimization_level <= 2 else 500
+
+            for _ in range(rounds):
+                ir_text = self._run_function_passes(ir_text, optimization_level)
+                ir_text = self._run_module_passes(
+                    ir_text, optimization_level, inline_threshold)
+
+            # Final FPM cleanup after the last inlining round
+            ir_text = self._run_function_passes(ir_text, optimization_level)
+
+            self._optimized_ir = ir_text
+
         except Exception as e:
             raise RuntimeError(f"Optimization failed: {e}")
+
+    def _run_function_passes(self, ir_text: str, opt_level: int) -> str:
+        """Run function-level optimization passes."""
+        llvm_module = binding.parse_assembly(ir_text)
+        fpm = binding.create_function_pass_manager(llvm_module)
+
+        # --- Phase 1: SROA + InstCombine (alloca -> SSA promotion) ---
+        fpm.add_sroa_pass()
+        fpm.add_instruction_combining_pass()
+        fpm.add_cfg_simplification_pass()
+
+        if opt_level >= 1:
+            # --- Phase 2: second SROA round catches what InstCombine exposed ---
+            fpm.add_reassociate_expressions_pass()
+            fpm.add_sroa_pass()
+            fpm.add_instruction_combining_pass()
+
+        if opt_level >= 2:
+            # --- Phase 3: value numbering + branch simplification ---
+            fpm.add_gvn_pass()
+            fpm.add_instruction_combining_pass()
+            fpm.add_jump_threading_pass()
+            fpm.add_cfg_simplification_pass()
+
+            # --- Phase 4: loop optimizations ---
+            fpm.add_licm_pass()
+            fpm.add_loop_rotate_pass()
+            fpm.add_loop_deletion_pass()
+
+            # --- Phase 5: tail call + final SROA/cleanup ---
+            fpm.add_tail_call_elimination_pass()
+            fpm.add_sroa_pass()
+            fpm.add_instruction_combining_pass()
+            fpm.add_gvn_pass()
+            fpm.add_cfg_simplification_pass()
+            fpm.add_dead_code_elimination_pass()
+
+        if opt_level >= 3:
+            # --- Phase 6: aggressive loop opts ---
+            fpm.add_loop_unroll_pass()
+            fpm.add_instruction_combining_pass()
+            fpm.add_cfg_simplification_pass()
+
+        fpm.initialize()
+        for func in llvm_module.functions:
+            if not func.is_declaration:
+                fpm.run(func)
+        fpm.finalize()
+        return str(llvm_module)
+
+    @staticmethod
+    def _run_module_passes(
+        ir_text: str, opt_level: int, inline_threshold: int
+    ) -> str:
+        """Run module-level optimization passes."""
+        llvm_module = binding.parse_assembly(ir_text)
+        pm = binding.create_module_pass_manager()
+
+        if opt_level >= 1:
+            pm.add_constant_merge_pass()
+            pm.add_dead_arg_elimination_pass()
+
+        if opt_level >= 2:
+            pm.add_function_attrs_pass()
+            pm.add_ipsccp_pass()
+            pm.add_function_inlining_pass(inline_threshold)
+            pm.add_global_optimizer_pass()
+            pm.add_global_dce_pass()
+
+        pm.run(llvm_module)
+        return str(llvm_module)
     
     def get_ir(self) -> str:
         """Get the LLVM IR as a string, returning optimized version if available"""
