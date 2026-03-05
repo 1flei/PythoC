@@ -73,7 +73,8 @@ def get_compiler(source_file, user_globals, has_suffix=False):
     return compiler
 
 
-def compile(func_or_class=None, suffix=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
+def compile(func_or_class=None, suffix=None, attrs=None,
+            _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
     """
     Compile a Python function or class to native code.
     
@@ -81,6 +82,9 @@ def compile(func_or_class=None, suffix=None, _effect_suffix=None, _effect_scope=
         func_or_class: Function or class to compile
         suffix: Explicit compile_suffix for function naming (from @compile(suffix=T))
                 This is NOT contagious - each function chooses its own compile_suffix.
+        attrs: Set of LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
+               Applied to cross-module `declare` so the optimizer can treat calls
+               as pure/no-side-effect, enabling CSE and store forwarding.
         _effect_suffix: Internal parameter for effect override (from with effect(suffix=X)).
                 This IS contagious - propagates to transitive calls that use effects.
         _effect_scope: Internal parameter for transitive effect compilation.
@@ -106,6 +110,7 @@ def compile(func_or_class=None, suffix=None, _effect_suffix=None, _effect_scope=
     
     # Normalize compile_suffix early
     compile_suffix = normalize_suffix(suffix)
+    fn_attrs = set(attrs) if attrs else set()
     
     # Get effect_suffix from context if not explicitly provided
     if _effect_suffix is None:
@@ -120,21 +125,24 @@ def compile(func_or_class=None, suffix=None, _effect_suffix=None, _effect_scope=
                                 compile_suffix=compile_suffix,
                                 effect_suffix=effect_suffix,
                                 captured_symbols=captured_symbols,
-                                effect_scope=_effect_scope)
+                                effect_scope=_effect_scope,
+                                fn_attrs=fn_attrs)
         return decorator
 
     return _compile_impl(func_or_class, 
                         compile_suffix=compile_suffix,
                         effect_suffix=effect_suffix,
                         captured_symbols=captured_symbols,
-                        effect_scope=_effect_scope)
+                        effect_scope=_effect_scope,
+                        fn_attrs=fn_attrs)
 
 
 def _compile_impl(func_or_class, 
                   compile_suffix: Optional[str] = None, 
                   effect_suffix: Optional[str] = None,
                   captured_symbols=None,
-                  effect_scope=_SCOPE_NOT_PROVIDED):
+                  effect_scope=_SCOPE_NOT_PROVIDED,
+                  fn_attrs=None):
     """Internal implementation of compile decorator.
     
     Uses 4-tuple group_key: (source_file, scope, compile_suffix, effect_suffix)
@@ -147,6 +155,7 @@ def _compile_impl(func_or_class,
         effect_scope: Override scope for transitive effect compilation.
                      _SCOPE_NOT_PROVIDED means use get_definition_scope().
                      None means module-level scope.
+        fn_attrs: Set of LLVM function-level attributes for cross-module declares.
     """
     if inspect.isclass(func_or_class):
         return _compile_dynamic_class(func_or_class, suffix=compile_suffix)
@@ -389,6 +398,7 @@ def _compile_impl(func_or_class,
         mangled_name=mangled_name,
         overload_enabled=False,
         so_file=so_file,
+        fn_attrs=fn_attrs or set(),
     )
     
     # Associate wrapper with func_info early (before registration)

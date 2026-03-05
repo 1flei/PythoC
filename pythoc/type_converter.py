@@ -593,6 +593,12 @@ class TypeConverter:
                 param_llvm_types, return_llvm_type
             )
             ir_func = func_wrapper.ir_function
+            
+            # Apply function-level attributes to the declare so LLVM can
+            # optimize cross-module calls (e.g. readnone enables CSE)
+            if func_info.fn_attrs:
+                for attr in func_info.fn_attrs:
+                    ir_func.attributes.add(attr)
         
         # Build func type hint
         param_types = [func_info.param_type_hints[p] for p in func_info.param_names]

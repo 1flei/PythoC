@@ -40,7 +40,7 @@ class ErrnoSlotProvider:
 
         slot_type = array[i8, size]
 
-        @compile(suffix=("errno_slot", size))
+        @compile(suffix=("errno_slot", size), attrs={'readnone', 'nounwind'})
         def _slot_fn() -> ptr[slot_type]:
             _slot: static[slot_type]
             return ptr(_slot)
