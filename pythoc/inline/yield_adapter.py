@@ -40,7 +40,8 @@ class YieldInlineAdapter:
         for_node: ast.For,
         func_ast: ast.FunctionDef,
         call_node: ast.Call,
-        func_obj=None
+        func_obj=None,
+        callee_globals_override=None,
     ):
         """
         Try to inline a for loop over a yield function
@@ -96,6 +97,13 @@ class YieldInlineAdapter:
         callee_globals = None
         if func_obj and hasattr(func_obj, '__globals__'):
             callee_globals = func_obj.__globals__
+        if callee_globals_override is not None:
+            if callee_globals is None:
+                callee_globals = dict(callee_globals_override)
+            else:
+                merged = dict(callee_globals)
+                merged.update(callee_globals_override)
+                callee_globals = merged
         
         try:
             # Create inline operation with callee_globals

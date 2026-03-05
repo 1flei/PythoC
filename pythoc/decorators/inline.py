@@ -61,6 +61,36 @@ def inline(func=None, *, cls_method=False, method=False):
             raise RuntimeError(f"Cannot get source code for function {f.__name__}: {e}")
 
         param_names = [arg.arg for arg in func_ast.args.args]
+        default_values = f.__defaults__ or ()
+
+        from .visible import capture_caller_symbols, get_closure_variables
+        captured_symbols = capture_caller_symbols(depth=1)
+        # @inline may be used as @inline (via inline->decorator) or @inline(...)
+        # Merge one more caller level to reliably capture locals like option_type/result_type.
+        captured_symbols_deep = capture_caller_symbols(depth=2)
+        closure_symbols = get_closure_variables(f)
+        merged_func_globals = dict(f.__globals__)
+        merged_func_globals.update(closure_symbols)
+        merged_func_globals.update(captured_symbols)
+        merged_func_globals.update(captured_symbols_deep)
+
+        def _bind_with_defaults(arg_values, bind_names):
+            total_count = len(bind_names)
+            default_count = len(default_values)
+            required_count = total_count - default_count
+
+            if len(arg_values) < required_count or len(arg_values) > total_count:
+                raise TypeError(
+                    f"{f.__name__}() takes {required_count} to {total_count} arguments, got {len(arg_values)}"
+                )
+
+            bindings = dict(zip(bind_names[:len(arg_values)], arg_values))
+            if len(arg_values) < total_count:
+                missing_names = bind_names[len(arg_values):]
+                default_start = len(arg_values) - required_count
+                for idx, name in enumerate(missing_names):
+                    bindings[name] = default_values[default_start + idx]
+            return bindings
 
         def create_handler(visitor, args, node, self_obj=None):
             # For method=True, first arg is self (Python object), rest are IR args
@@ -77,26 +107,19 @@ def inline(func=None, *, cls_method=False, method=False):
                 else:
                     # Assume it's the object itself
                     self_obj = args[0]
-                
-                # Remaining args are the method parameters (excluding self)
-                method_args = args[1:]
-                expected_param_count = len(param_names) - 1  # Exclude self
-                if len(method_args) != expected_param_count:
-                    raise TypeError(f"{f.__name__}() takes {expected_param_count} arguments (excluding self), got {len(method_args)}")
-                
-                # Bind self to the first param_name, rest to method_args
+
+                method_param_names = param_names[1:]
+                method_bindings = _bind_with_defaults(args[1:], method_param_names)
                 param_bindings = {param_names[0]: self_obj}
-                param_bindings.update(dict(zip(param_names[1:], method_args)))
+                param_bindings.update(method_bindings)
             else:
                 # Standard inline or cls_method
-                if len(args) != len(param_names):
-                    raise TypeError(f"{f.__name__}() takes {len(param_names)} arguments, got {len(args)}")
-                param_bindings = dict(zip(param_names, args))
+                param_bindings = _bind_with_defaults(args, param_names)
             
             # Execute inline to generate IR using unified kernel
-            # Pass func_globals so adapter can merge them with caller's globals
+            # Pass merged globals (module + closure + captured caller locals)
             from ..inline import InlineAdapter
-            adapter = InlineAdapter(visitor, param_bindings, func_globals=f.__globals__)
+            adapter = InlineAdapter(visitor, param_bindings, func_globals=merged_func_globals)
             result = adapter.execute_inline(func_ast)
             return result
 
