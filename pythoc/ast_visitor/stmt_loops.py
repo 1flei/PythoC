@@ -420,16 +420,18 @@ class LoopsMixin:
         adapter = YieldInlineAdapter(self)
         inline_info = iter_val._yield_inline_info
         
-        # Extract func_obj to get its __globals__
+        # Extract callee context for resolving names during yield inlining
         func_obj = inline_info.get('func_obj', None)
-        
+        callee_globals = inline_info.get('callee_globals', None)
+
         # Get inlined statements
         # after_else_label is the label name for break to jump to (skip else)
         inlined_stmts, old_user_globals, after_else_label = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
             inline_info['call_node'],
-            func_obj=func_obj
+            func_obj=func_obj,
+            callee_globals_override=callee_globals,
         )
         
         if inlined_stmts is None:

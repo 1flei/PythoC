@@ -77,6 +77,7 @@ def create_yield_iterator_wrapper(func, func_ast, analyzer, user_globals, source
         result = wrap_value(placeholder_wrapper, kind='python', type_hint=PythonType(placeholder_wrapper))
         result._yield_inline_info = {
             'func_obj': func,  # Use original function to access its __globals__
+            'callee_globals': user_globals,
             'placeholder': placeholder_wrapper,
             'original_ast': func_ast,
             'call_node': node,
