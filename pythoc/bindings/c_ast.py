@@ -16,8 +16,6 @@ Usage:
 - Use match-case to dispatch on CType variants and extract payloads safely
 - Use linear alloc/free pairs for memory management
 - Refined types (e.g., CTypeRef) guarantee non-null pointers
-
-See docs/c_ast_review.md for design rationale.
 """
 
 from pythoc import (
@@ -27,6 +25,7 @@ from pythoc import (
 from pythoc.std.refinement import nonnull
 from pythoc.std.linearize import linearize
 from pythoc.std import mem  # Sets up default mem effect
+from pythoc.bindings.c_token import TokenType
 
 
 # =============================================================================
@@ -938,3 +937,343 @@ def qualtype_clone_deep(qt: ptr[QualType]) -> struct[QualTypeProof, ptr[QualType
 
     ty_prf, ty = ctype_clone_deep(qt.type)
     return make_qualtype(ty_prf, ty, qt.quals)
+
+
+# =============================================================================
+# Expression AST
+# =============================================================================
+
+@enum(i8)
+class ExprKind:
+    """Expression node kinds"""
+    # Literals
+    IntLit: None
+    FloatLit: None
+    StringLit: None
+    CharLit: None
+    # Identifier reference
+    Ident: None
+    # Unary operations
+    UnaryOp: None
+    PostfixOp: None
+    Cast: None
+    SizeofExpr: None
+    # Binary operations
+    BinaryOp: None
+    Assign: None
+    # Other
+    Ternary: None
+    Call: None
+    Index: None
+    Member: None
+    Arrow: None
+    Comma: None
+
+
+@compile
+class Expr:
+    """Expression AST node"""
+    kind: ExprKind
+    op: i32              # Operator token type
+    int_val: i64         # Integer literal value
+    span: Span           # Ident name / string text
+    lhs: ptr['Expr']     # Left operand / unary operand / callee
+    rhs: ptr['Expr']     # Right operand
+    extra: ptr['Expr']   # Ternary else branch
+    args: ptr['Expr']    # Call argument array (contiguous)
+    arg_count: i32
+
+
+# Resolve Expr forward references (ptr['Expr'] -> ptr[Expr])
+if hasattr(Expr, '_ensure_field_types_resolved'):
+    Expr._ensure_field_types_resolved()
+
+expr_nonnull, ExprRef = nonnull(ptr[Expr])
+
+
+@compile
+def expr_alloc() -> ptr[Expr]:
+    """Allocate a zeroed Expr node."""
+    e: ptr[Expr] = ptr[Expr](effect.mem.malloc(sizeof(Expr)))
+    e.kind = ExprKind(ExprKind.IntLit)
+    e.op = 0
+    e.int_val = 0
+    e.span = span_empty()
+    e.lhs = nullptr
+    e.rhs = nullptr
+    e.extra = nullptr
+    e.args = nullptr
+    e.arg_count = 0
+    return e
+
+
+@compile
+def expr_alloc_array(count: i32) -> ptr[Expr]:
+    """Allocate an array of Expr nodes."""
+    return ptr[Expr](effect.mem.malloc(sizeof(Expr) * count))
+
+
+@compile
+def _expr_free_contents(e: ptr[Expr]) -> void:
+    """Free the children of an Expr node without freeing the node itself.
+
+    Used for freeing elements inside a contiguous array, where the
+    element memory is owned by the array allocation, not individually.
+    """
+    if e == nullptr:
+        return
+    expr_free_deep(e.lhs)
+    expr_free_deep(e.rhs)
+    expr_free_deep(e.extra)
+    if e.args != nullptr and e.arg_count > 0:
+        i: i32 = 0
+        while i < e.arg_count:
+            _expr_free_contents(ptr(e.args[i]))
+            i = i + 1
+        effect.mem.free(e.args)
+
+
+@compile
+def expr_free_deep(e: ptr[Expr]) -> void:
+    """Recursively free an Expr tree."""
+    if e == nullptr:
+        return
+    expr_free_deep(e.lhs)
+    expr_free_deep(e.rhs)
+    expr_free_deep(e.extra)
+    # Free call args array - elements are in a contiguous array,
+    # so free their contents but not the elements themselves
+    if e.args != nullptr and e.arg_count > 0:
+        i: i32 = 0
+        while i < e.arg_count:
+            _expr_free_contents(ptr(e.args[i]))
+            i = i + 1
+        effect.mem.free(e.args)
+    effect.mem.free(e)
+
+
+@compile
+def expr_eval_const(e: ptr[Expr]) -> i64:
+    """Evaluate a constant expression (for enum values, array sizes).
+
+    Handles integer literals, unary +/-/~/!, and binary
+    +, -, *, /, %, <<, >>, &, |, ^, and ternary.
+    Returns 0 for anything it cannot evaluate.
+    """
+    if e == nullptr:
+        return 0
+
+    match e.kind[0]:
+        case ExprKind.IntLit:
+            return e.int_val
+        case ExprKind.CharLit:
+            return e.int_val
+        case ExprKind.Ident:
+            # Cannot evaluate identifiers without a symbol table
+            return 0
+        case ExprKind.UnaryOp:
+            val: i64 = expr_eval_const(e.lhs)
+            match e.op:
+                case TokenType.MINUS:
+                    return -val
+                case TokenType.PLUS:
+                    return val
+                case TokenType.TILDE:
+                    return ~val
+                case TokenType.EXCLAIM:
+                    if val == 0:
+                        return 1
+                    return 0
+                case _:
+                    return 0
+        case ExprKind.BinaryOp:
+            lval: i64 = expr_eval_const(e.lhs)
+            rval: i64 = expr_eval_const(e.rhs)
+            match e.op:
+                case TokenType.PLUS:
+                    return lval + rval
+                case TokenType.MINUS:
+                    return lval - rval
+                case TokenType.STAR:
+                    return lval * rval
+                case TokenType.SLASH:
+                    if rval != 0:
+                        return lval / rval
+                    return 0
+                case TokenType.PERCENT:
+                    if rval != 0:
+                        return lval % rval
+                    return 0
+                case TokenType.LSHIFT:
+                    return lval << rval
+                case TokenType.RSHIFT:
+                    return lval >> rval
+                case TokenType.AMP:
+                    return lval & rval
+                case TokenType.PIPE:
+                    return lval | rval
+                case TokenType.CARET:
+                    return lval ^ rval
+                case TokenType.LAND:
+                    if lval != 0 and rval != 0:
+                        return 1
+                    return 0
+                case TokenType.LOR:
+                    if lval != 0 or rval != 0:
+                        return 1
+                    return 0
+                case TokenType.EQ:
+                    if lval == rval:
+                        return 1
+                    return 0
+                case TokenType.NE:
+                    if lval != rval:
+                        return 1
+                    return 0
+                case TokenType.LT:
+                    if lval < rval:
+                        return 1
+                    return 0
+                case TokenType.GT:
+                    if lval > rval:
+                        return 1
+                    return 0
+                case TokenType.LE:
+                    if lval <= rval:
+                        return 1
+                    return 0
+                case TokenType.GE:
+                    if lval >= rval:
+                        return 1
+                    return 0
+                case _:
+                    return 0
+        case ExprKind.Ternary:
+            cond: i64 = expr_eval_const(e.lhs)
+            if cond != 0:
+                return expr_eval_const(e.rhs)
+            return expr_eval_const(e.extra)
+        case ExprKind.SizeofExpr:
+            # Cannot evaluate sizeof without type info
+            return 0
+        case _:
+            return 0
+
+
+# =============================================================================
+# Statement AST
+# =============================================================================
+
+@enum(i8)
+class StmtKind:
+    """Statement node kinds"""
+    Expr: None        # Expression statement
+    Return: None      # return expr;
+    If: None          # if (cond) body else else_body
+    While: None       # while (cond) body
+    DoWhile: None     # do body while (cond);
+    For: None         # for (init; cond; incr) body
+    Block: None       # { stmts }
+    Break: None       # break;
+    Continue: None    # continue;
+    Switch: None      # switch (expr) body
+    Case: None        # case expr: body
+    Default: None     # default: body
+    Goto: None        # goto label;
+    Label: None       # label: stmt
+    Decl: None        # Local variable declaration
+    Empty: None       # ;
+
+
+@compile
+class Stmt:
+    """Statement AST node"""
+    kind: StmtKind
+    expr: ptr[Expr]        # Condition/return value/expression
+    init_expr: ptr[Expr]   # For-loop init expression
+    incr_expr: ptr[Expr]   # For-loop increment expression
+    body: ptr['Stmt']      # Body (if/while/for/do/switch)
+    else_body: ptr['Stmt'] # Else branch
+    stmts: ptr['Stmt']     # Block statements array
+    stmt_count: i32
+    label: Span
+    decl_type: ptr[QualType]
+    decl_name: Span
+
+
+# Force resolve Stmt forward reference
+if hasattr(Stmt, '_ensure_field_types_resolved'):
+    Stmt._ensure_field_types_resolved()
+
+stmt_nonnull, StmtRef = nonnull(ptr[Stmt])
+
+
+@compile
+def stmt_alloc() -> ptr[Stmt]:
+    """Allocate a zeroed Stmt node."""
+    s: ptr[Stmt] = ptr[Stmt](effect.mem.malloc(sizeof(Stmt)))
+    s.kind = StmtKind(StmtKind.Empty)
+    s.expr = nullptr
+    s.init_expr = nullptr
+    s.incr_expr = nullptr
+    s.body = nullptr
+    s.else_body = nullptr
+    s.stmts = nullptr
+    s.stmt_count = 0
+    s.label = span_empty()
+    s.decl_type = nullptr
+    s.decl_name = span_empty()
+    return s
+
+
+@compile
+def stmt_alloc_array(count: i32) -> ptr[Stmt]:
+    """Allocate an array of Stmt nodes."""
+    return ptr[Stmt](effect.mem.malloc(sizeof(Stmt) * count))
+
+
+@compile
+def _stmt_free_contents(s: ptr[Stmt]) -> void:
+    """Free the children of a Stmt node without freeing the node itself.
+
+    Used for freeing elements inside a contiguous array, where the
+    element memory is owned by the array allocation, not individually.
+    """
+    if s == nullptr:
+        return
+    expr_free_deep(s.expr)
+    expr_free_deep(s.init_expr)
+    expr_free_deep(s.incr_expr)
+    stmt_free_deep(s.body)
+    stmt_free_deep(s.else_body)
+    if s.stmts != nullptr:
+        i: i32 = 0
+        while i < s.stmt_count:
+            _stmt_free_contents(ptr(s.stmts[i]))
+            i = i + 1
+        effect.mem.free(s.stmts)
+    if s.decl_type != nullptr:
+        _qualtype_free_deep(s.decl_type)
+
+
+@compile
+def stmt_free_deep(s: ptr[Stmt]) -> void:
+    """Recursively free a Stmt tree."""
+    if s == nullptr:
+        return
+    expr_free_deep(s.expr)
+    expr_free_deep(s.init_expr)
+    expr_free_deep(s.incr_expr)
+    stmt_free_deep(s.body)
+    stmt_free_deep(s.else_body)
+    # Free stmts array - elements are in a contiguous array,
+    # so free their contents but not the elements themselves
+    if s.stmts != nullptr:
+        i: i32 = 0
+        while i < s.stmt_count:
+            _stmt_free_contents(ptr(s.stmts[i]))
+            i = i + 1
+        effect.mem.free(s.stmts)
+    if s.decl_type != nullptr:
+        _qualtype_free_deep(s.decl_type)
+    effect.mem.free(s)

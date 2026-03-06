@@ -379,6 +379,13 @@ class ptr(BuiltinType):
         if base.type_hint and hasattr(base.type_hint, 'pointee_type'):
             pointee_type_hint = base.type_hint.pointee_type
 
+        # Resolve forward reference if pointee_type_hint is a string
+        if isinstance(pointee_type_hint, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(pointee_type_hint)
+            if resolved is not None:
+                pointee_type_hint = resolved
+
         if pointee_type_hint is None:
             logger.error(f"Cannot infer pointee type for pointer subscript {base}", node=node, exc_type=TypeError)
 
