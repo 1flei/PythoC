@@ -50,6 +50,7 @@ from pythoc.bindings.c_ast import (
     make_typedef_type,
     # Free functions
     ctype_free, qualtype_free, decl_free,
+    _ctype_free_deep,
     # Clone functions
     qualtype_clone_deep,
     # Constants
@@ -416,8 +417,21 @@ def parse_expr_prefix(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Expr], Par
             prfs = parser_advance(p, prfs)
             if parser_match(p, TokenType.LPAREN):
                 prfs = parser_advance(p, prfs)
-                e.lhs, prfs = parse_expr_bp(p, prfs, 0)
-                _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
+                # Check if next token is a type specifier -> sizeof(type)
+                if is_type_specifier(p.current.type):
+                    ts_sizeof: TypeParseState
+                    ts_sizeof_ref: TypeParseStateRef = assume(ptr(ts_sizeof), typeparse_nonnull)
+                    prfs = parse_type_specifiers(p, prfs, ts_sizeof_ref)
+                    # Store type name in span for downstream use
+                    e.span = ts_sizeof.name
+                    # lhs stays nullptr to distinguish sizeof(type) from sizeof(expr)
+                    # Clean up prebuilt type if inline body was parsed
+                    if ts_sizeof.has_prebuilt != 0 and ts_sizeof.prebuilt_type != nullptr:
+                        _ctype_free_deep(ts_sizeof.prebuilt_type)
+                    _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
+                else:
+                    e.lhs, prfs = parse_expr_bp(p, prfs, 0)
+                    _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
             else:
                 e.lhs, prfs = parse_expr_bp(p, prfs, _PREFIX_BP)
             return e, prfs
@@ -733,6 +747,8 @@ class TypeParseState:
     long_count: i8          # Number of 'long' keywords (0, 1, or 2)
     ptr_depth: i8           # Number of pointer indirections
     name: Span              # For struct/union/enum/typedef names
+    prebuilt_type: ptr[CType]   # Pre-built CType for inline struct/union/enum bodies
+    has_prebuilt: i8            # 1 if prebuilt_type is set (owns the CType)
 
 
 typeparse_nonnull, TypeParseStateRef = nonnull(ptr[TypeParseState])
@@ -748,11 +764,44 @@ def typeparse_init(ts: TypeParseStateRef) -> void:
     ts.long_count = 0
     ts.ptr_depth = 0
     ts.name = span_empty()
+    ts.prebuilt_type = nullptr
+    ts.has_prebuilt = 0
 
 
 # =============================================================================
 # Type parsing - build CType from tokens using match-case
 # =============================================================================
+
+@compile
+def _typeparse_store_prebuilt(ts: TypeParseStateRef, ty_prf: CTypeProof, ty: ptr[CType]) -> void:
+    """Store a pre-built CType (from parse_struct_or_union / parse_enum) into
+    TypeParseState and extract its name.
+
+    Consumes ty_prf.  Between this consume and the later assume(linear()) in
+    build_base_ctype, the CType is held only by ts.prebuilt_type.  This is safe
+    because parse_type_specifiers always returns cleanly and callers always call
+    build_qualtype_from_state (which drains the prebuilt type) before any path
+    that could free the parser.
+    """
+    ts.prebuilt_type = ty
+    ts.has_prebuilt = 1
+
+    # Extract name from the parsed compound type
+    match ty[0]:
+        case (CType.Struct, s):
+            if s != nullptr:
+                ts.name = s.name
+        case (CType.Union, s):
+            if s != nullptr:
+                ts.name = s.name
+        case (CType.Enum, e):
+            if e != nullptr:
+                ts.name = e.name
+        case _:
+            pass
+
+    consume(ty_prf)
+
 
 @compile
 def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRef) -> ParserProofs:
@@ -818,33 +867,30 @@ def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRe
                 prfs = parser_skip_gcc_extensions(p, prfs)
             case TokenType.EXTENSION:
                 prfs = parser_skip_gcc_extensions(p, prfs)
-            # Compound types - these break out of the loop
+            # Compound types - parse body if present, then break
             case TokenType.STRUCT:
                 ts.base_token = TokenType.STRUCT
                 prfs = parser_advance(p, prfs)
-                if parser_match(p, TokenType.IDENTIFIER):
-                    ts.name = span_from_token(p.current)
-                    prfs = parser_advance(p, prfs)
-                if parser_match(p, TokenType.LBRACE):
-                    prfs = parser_skip_balanced(p, prfs, TokenType.LBRACE, TokenType.RBRACE)
+                ty_prf: CTypeProof
+                ty_ptr: ptr[CType]
+                ty_prf, ty_ptr, prfs = parse_struct_or_union(p, prfs, 0)
+                _typeparse_store_prebuilt(ts, ty_prf, ty_ptr)
                 break
             case TokenType.UNION:
                 ts.base_token = TokenType.UNION
                 prfs = parser_advance(p, prfs)
-                if parser_match(p, TokenType.IDENTIFIER):
-                    ts.name = span_from_token(p.current)
-                    prfs = parser_advance(p, prfs)
-                if parser_match(p, TokenType.LBRACE):
-                    prfs = parser_skip_balanced(p, prfs, TokenType.LBRACE, TokenType.RBRACE)
+                ty_prf: CTypeProof
+                ty_ptr: ptr[CType]
+                ty_prf, ty_ptr, prfs = parse_struct_or_union(p, prfs, 1)
+                _typeparse_store_prebuilt(ts, ty_prf, ty_ptr)
                 break
             case TokenType.ENUM:
                 ts.base_token = TokenType.ENUM
                 prfs = parser_advance(p, prfs)
-                if parser_match(p, TokenType.IDENTIFIER):
-                    ts.name = span_from_token(p.current)
-                    prfs = parser_advance(p, prfs)
-                if parser_match(p, TokenType.LBRACE):
-                    prfs = parser_skip_balanced(p, prfs, TokenType.LBRACE, TokenType.RBRACE)
+                ty_prf: CTypeProof
+                ty_ptr: ptr[CType]
+                ty_prf, ty_ptr, prfs = parse_enum(p, prfs)
+                _typeparse_store_prebuilt(ts, ty_prf, ty_ptr)
                 break
             # Identifier (typedef name) - only if no base type yet AND no sign specifier
             case TokenType.IDENTIFIER:
@@ -878,6 +924,16 @@ def build_base_ctype(ts: TypeParseStateRef) -> struct[CTypeProof, ptr[CType]]:
     Build base CType from TypeParseState using match-case.
     Returns (proof, ptr) for linear ownership tracking.
     """
+    # If a prebuilt type exists (inline struct/union/enum body was parsed),
+    # use it directly instead of creating a stub
+    if ts.has_prebuilt != 0 and ts.prebuilt_type != nullptr:
+        ty: ptr[CType] = ts.prebuilt_type
+        ts.prebuilt_type = nullptr
+        ts.has_prebuilt = 0
+        # Create a new proof for the already-allocated CType
+        prf: CTypeProof = assume(linear(), "CTypeProof")
+        return prf, ty
+
     # Default to int if no base type specified but signed/unsigned present
     # Extract tag as i32 for comparison with enum constants
     base: i32 = ts.base_token
