@@ -258,6 +258,66 @@ def parser_skip_gcc_extensions(p: ParserRef, prfs: ParserProofs) -> ParserProofs
 
 
 # =============================================================================
+# Type parsing state (defined here so sizeof(type) in parse_expr_prefix can
+# use TypeParseState before the full type-parsing section)
+# =============================================================================
+
+@compile
+class TypeParseState:
+    """Intermediate state during type parsing"""
+    base_token: i32             # TokenType tag of base type (INT, CHAR, etc.)
+    is_signed: i8           # 1 = signed, 0 = default, -1 = unsigned
+    is_const: i8            # 1 if const
+    is_volatile: i8         # 1 if volatile
+    long_count: i8          # Number of 'long' keywords (0, 1, or 2)
+    ptr_depth: i8           # Number of pointer indirections
+    name: Span              # For struct/union/enum/typedef names
+    prebuilt_type: ptr[CType]   # Pre-built CType for inline struct/union/enum bodies
+    has_prebuilt: i8            # 1 if prebuilt_type is set (owns the CType)
+
+
+typeparse_nonnull, TypeParseStateRef = nonnull(ptr[TypeParseState])
+
+
+@compile
+def typeparse_init(ts: TypeParseStateRef) -> void:
+    """Initialize type parse state"""
+    ts.base_token = TokenType.ERROR
+    ts.is_signed = 0
+    ts.is_const = 0
+    ts.is_volatile = 0
+    ts.long_count = 0
+    ts.ptr_depth = 0
+    ts.name = span_empty()
+    ts.prebuilt_type = nullptr
+    ts.has_prebuilt = 0
+
+
+# =============================================================================
+# Type specifier tokens (for metaprogramming)
+# =============================================================================
+
+# Token types that are type specifiers
+_type_specifier_tokens = [
+    TokenType.VOID, TokenType.CHAR, TokenType.SHORT, TokenType.INT,
+    TokenType.LONG, TokenType.FLOAT, TokenType.DOUBLE,
+    TokenType.SIGNED, TokenType.UNSIGNED,
+    TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
+    TokenType.CONST, TokenType.VOLATILE,
+    TokenType.INLINE, TokenType.RESTRICT, TokenType.BUILTIN_VA_LIST,
+]
+
+
+@inline
+def is_type_specifier(tok_type: i32) -> bool:
+    """Check if token is a type specifier (compile-time unrolled)"""
+    for spec_type in _type_specifier_tokens:
+        if tok_type == spec_type:
+            return True
+    return False
+
+
+# =============================================================================
 # Expression Parser (Pratt / precedence climbing)
 # =============================================================================
 
@@ -710,65 +770,6 @@ def parse_expression(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Expr], Pars
 
 
 # =============================================================================
-# Type specifier tokens (for metaprogramming)
-# =============================================================================
-
-# Token types that are type specifiers
-_type_specifier_tokens = [
-    TokenType.VOID, TokenType.CHAR, TokenType.SHORT, TokenType.INT,
-    TokenType.LONG, TokenType.FLOAT, TokenType.DOUBLE,
-    TokenType.SIGNED, TokenType.UNSIGNED,
-    TokenType.STRUCT, TokenType.UNION, TokenType.ENUM,
-    TokenType.CONST, TokenType.VOLATILE,
-    TokenType.INLINE, TokenType.RESTRICT, TokenType.BUILTIN_VA_LIST,
-]
-
-
-@inline
-def is_type_specifier(tok_type: i32) -> bool:
-    """Check if token is a type specifier (compile-time unrolled)"""
-    for spec_type in _type_specifier_tokens:
-        if tok_type == spec_type:
-            return True
-    return False
-
-
-# =============================================================================
-# Type parsing state
-# =============================================================================
-
-@compile
-class TypeParseState:
-    """Intermediate state during type parsing"""
-    base_token: i32             # TokenType tag of base type (INT, CHAR, etc.)
-    is_signed: i8           # 1 = signed, 0 = default, -1 = unsigned
-    is_const: i8            # 1 if const
-    is_volatile: i8         # 1 if volatile
-    long_count: i8          # Number of 'long' keywords (0, 1, or 2)
-    ptr_depth: i8           # Number of pointer indirections
-    name: Span              # For struct/union/enum/typedef names
-    prebuilt_type: ptr[CType]   # Pre-built CType for inline struct/union/enum bodies
-    has_prebuilt: i8            # 1 if prebuilt_type is set (owns the CType)
-
-
-typeparse_nonnull, TypeParseStateRef = nonnull(ptr[TypeParseState])
-
-
-@compile
-def typeparse_init(ts: TypeParseStateRef) -> void:
-    """Initialize type parse state"""
-    ts.base_token = TokenType.ERROR
-    ts.is_signed = 0
-    ts.is_const = 0
-    ts.is_volatile = 0
-    ts.long_count = 0
-    ts.ptr_depth = 0
-    ts.name = span_empty()
-    ts.prebuilt_type = nullptr
-    ts.has_prebuilt = 0
-
-
-# =============================================================================
 # Type parsing - build CType from tokens using match-case
 # =============================================================================
 
@@ -812,6 +813,10 @@ def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRe
     Returns updated proofs.
     """
     typeparse_init(ts)
+
+    # Declared here because match branches share function scope
+    _ts_ty_prf: CTypeProof
+    _ts_ty_ptr: ptr[CType]
 
     while True:
         tok_type: i32 = p.current.type
@@ -871,26 +876,20 @@ def parse_type_specifiers(p: ParserRef, prfs: ParserProofs, ts: TypeParseStateRe
             case TokenType.STRUCT:
                 ts.base_token = TokenType.STRUCT
                 prfs = parser_advance(p, prfs)
-                ty_prf: CTypeProof
-                ty_ptr: ptr[CType]
-                ty_prf, ty_ptr, prfs = parse_struct_or_union(p, prfs, 0)
-                _typeparse_store_prebuilt(ts, ty_prf, ty_ptr)
+                _ts_ty_prf, _ts_ty_ptr, prfs = parse_struct_or_union(p, prfs, 0)
+                _typeparse_store_prebuilt(ts, _ts_ty_prf, _ts_ty_ptr)
                 break
             case TokenType.UNION:
                 ts.base_token = TokenType.UNION
                 prfs = parser_advance(p, prfs)
-                ty_prf: CTypeProof
-                ty_ptr: ptr[CType]
-                ty_prf, ty_ptr, prfs = parse_struct_or_union(p, prfs, 1)
-                _typeparse_store_prebuilt(ts, ty_prf, ty_ptr)
+                _ts_ty_prf, _ts_ty_ptr, prfs = parse_struct_or_union(p, prfs, 1)
+                _typeparse_store_prebuilt(ts, _ts_ty_prf, _ts_ty_ptr)
                 break
             case TokenType.ENUM:
                 ts.base_token = TokenType.ENUM
                 prfs = parser_advance(p, prfs)
-                ty_prf: CTypeProof
-                ty_ptr: ptr[CType]
-                ty_prf, ty_ptr, prfs = parse_enum(p, prfs)
-                _typeparse_store_prebuilt(ts, ty_prf, ty_ptr)
+                _ts_ty_prf, _ts_ty_ptr, prfs = parse_enum(p, prfs)
+                _typeparse_store_prebuilt(ts, _ts_ty_prf, _ts_ty_ptr)
                 break
             # Identifier (typedef name) - only if no base type yet AND no sign specifier
             case TokenType.IDENTIFIER:
