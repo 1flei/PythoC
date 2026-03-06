@@ -307,33 +307,33 @@ class CompositeType(BuiltinType):
     @classmethod
     def get_type_id_suffix(cls) -> str:
         """Generate type ID suffix based on field structure
-        
+
         This creates a hash-based suffix that uniquely identifies the composite type
         by its field types and names. Same structure = same hash = same type.
-        
+
         Returns:
             8-character hex hash suffix
-            
+
         Examples:
             struct[x: i32, y: i32] -> "a3b4c5d6"
             union[i32, f64] -> "f1e2d3c4"
         """
         from ..type_id import get_type_id
-        
+
         if not cls._field_types:
             return "empty"
-        
+
         # Build field structure string for hashing
         field_ids = []
         field_names = cls._field_names or [None] * len(cls._field_types)
-        
+
         for fname, ftype in zip(field_names, cls._field_types):
             ftype_id = get_type_id(ftype) if ftype is not None else "void"
             if fname:
                 field_ids.append(f"{fname}:{ftype_id}")
             else:
                 field_ids.append(ftype_id)
-        
+
         field_str = ','.join(field_ids)
         field_hash = hashlib.md5(field_str.encode()).hexdigest()[:8]
         return field_hash

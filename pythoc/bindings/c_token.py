@@ -43,6 +43,14 @@ class TokenType:
     CASE: None
     DEFAULT: None
     GOTO: None
+
+    # GCC extension keywords
+    ATTRIBUTE: None
+    EXTENSION: None
+    ASM: None
+    RESTRICT: None
+    INLINE: None
+    BUILTIN_VA_LIST: None
     
     # Identifiers and literals
     IDENTIFIER: None
@@ -213,3 +221,29 @@ g_token_string_to_id = {}
 for token_type, keyword in _token_to_keyword.items():
     g_token_id_to_string[token_type] = keyword
     g_token_string_to_id[keyword] = token_type
+
+# Alias spellings for GCC extension keywords
+g_token_alias_to_id = {
+    "__attribute__": TokenType.ATTRIBUTE,
+    "__attribute": TokenType.ATTRIBUTE,
+    "__extension__": TokenType.EXTENSION,
+    "__asm__": TokenType.ASM,
+    "__asm": TokenType.ASM,
+    "asm": TokenType.ASM,
+    "__restrict": TokenType.RESTRICT,
+    "__restrict__": TokenType.RESTRICT,
+    "restrict": TokenType.RESTRICT,
+    "__inline__": TokenType.INLINE,
+    "__inline": TokenType.INLINE,
+    "inline": TokenType.INLINE,
+    "__volatile__": TokenType.VOLATILE,
+    "__volatile": TokenType.VOLATILE,
+    "__const__": TokenType.CONST,
+    "__const": TokenType.CONST,
+    "__signed__": TokenType.SIGNED,
+    "__signed": TokenType.SIGNED,
+    "__unsigned__": TokenType.UNSIGNED,
+    "__unsigned": TokenType.UNSIGNED,
+    "__builtin_va_list": TokenType.BUILTIN_VA_LIST,
+    "_Bool": TokenType.INT,
+}

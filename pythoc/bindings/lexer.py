@@ -16,7 +16,7 @@ from pythoc.std import mem  # Sets up default mem effect
 from pythoc.libc.string import strlen
 from pythoc.libc.ctype import isalpha, isdigit, isspace, isalnum
 
-from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string, TokenRef, token_nonnull, _operator_to_token
+from pythoc.bindings.c_token import Token, TokenType, g_token_id_to_string, g_token_alias_to_id, TokenRef, token_nonnull, _operator_to_token
 
 
 @compile
@@ -169,6 +169,17 @@ def is_keyword(start: ptr[i8], length: i32) -> i32:
                     break
             if matches:
                 return token_id
+    # Check GCC extension aliases
+    for alias_str, alias_id in g_token_alias_to_id.items():
+        alias_len = len(alias_str)
+        if length == alias_len:
+            matches: bool = True
+            for i in range(alias_len):
+                if start[i] != char(alias_str[i]):
+                    matches = False
+                    break
+            if matches:
+                return alias_id
     return TokenType.ERROR
 
 
@@ -216,9 +227,65 @@ def lexer_read_number(lex: LexerRef, token: TokenRef) -> void:
             lexer_advance(lex)
         else:
             break
-    
+
+    # Consume integer suffixes: u, U, l, L (e.g. 42UL, 0xFF'u', 1LL)
+    while lex.pos < lex.length:
+        c: i8 = lexer_current(lex)
+        if c == char("u") or c == char("U") or c == char("l") or c == char("L"):
+            lexer_advance(lex)
+        else:
+            break
+
     token.length = lex.pos - start_pos
     token.type = TokenType.NUMBER
+
+
+@compile
+def lexer_read_char_literal(lex: LexerRef, token: TokenRef) -> void:
+    """Read character literal 'x' or '\\n' etc. (zero-copy)"""
+    token.start = lex.source + lex.pos
+    start_pos: i32 = lex.pos
+    lexer_advance(lex)  # skip opening '
+
+    # Read until closing ' or EOF
+    while lex.pos < lex.length:
+        c: i8 = lexer_current(lex)
+        if c == char("'"):
+            lexer_advance(lex)  # skip closing '
+            break
+        if c == char("\\"):
+            lexer_advance(lex)  # skip backslash
+            if lex.pos < lex.length:
+                lexer_advance(lex)  # skip escaped char
+        else:
+            lexer_advance(lex)
+
+    token.length = lex.pos - start_pos
+    token.type = TokenType.CHAR_LITERAL
+
+
+@compile
+def lexer_read_string_literal(lex: LexerRef, token: TokenRef) -> void:
+    """Read string literal "..." (zero-copy)"""
+    token.start = lex.source + lex.pos
+    start_pos: i32 = lex.pos
+    lexer_advance(lex)  # skip opening "
+
+    # Read until closing " or EOF
+    while lex.pos < lex.length:
+        c: i8 = lexer_current(lex)
+        if c == char('"'):
+            lexer_advance(lex)  # skip closing "
+            break
+        if c == char("\\"):
+            lexer_advance(lex)  # skip backslash
+            if lex.pos < lex.length:
+                lexer_advance(lex)  # skip escaped char
+        else:
+            lexer_advance(lex)
+
+    token.length = lex.pos - start_pos
+    token.type = TokenType.STRING
 
 
 @compile
@@ -288,6 +355,14 @@ def lexer_next_token_impl(lex: LexerRef) -> Token:
         elif isdigit(c):
             token_ref = assume(ptr(token), token_nonnull)
             lexer_read_number(lex, token_ref)
+        # Character literal
+        elif c == char("'"):
+            token_ref = assume(ptr(token), token_nonnull)
+            lexer_read_char_literal(lex, token_ref)
+        # String literal
+        elif c == char('"'):
+            token_ref = assume(ptr(token), token_nonnull)
+            lexer_read_string_literal(lex, token_ref)
         else:
             # Operators and punctuation - use unified operator matching
             token_ref = assume(ptr(token), token_nonnull)

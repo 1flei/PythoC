@@ -28,11 +28,13 @@ import os
 import sys
 import hashlib
 import importlib.util
+import subprocess
+import warnings
 from typing import Optional, List, Any
 from types import ModuleType
 
 from .registry import get_unified_registry
-from .utils.cc_utils import compile_c_to_object, compile_c_sources
+from .utils.cc_utils import compile_c_to_object, compile_c_sources, find_available_cc
 
 # Delay import to avoid circular dependency
 def _get_bindgen():
@@ -95,6 +97,66 @@ def _import_module_from_file(module_name: str, file_path: str) -> ModuleType:
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _preprocess_source(path: str, cc: Optional[str] = None,
+                       cflags: Optional[List[str]] = None,
+                       include_dirs: Optional[List[str]] = None,
+                       defines: Optional[List[str]] = None) -> str:
+    """Preprocess a C source file using the C compiler's preprocessor.
+
+    Runs `cc -E -P` to expand macros, includes, and conditionals.
+    Falls back to raw file read on failure.
+
+    Args:
+        path: Path to C header/source file
+        cc: C compiler to use (auto-detect if None)
+        cflags: Additional compiler flags
+        include_dirs: Include directories
+        defines: Preprocessor defines
+
+    Returns:
+        Preprocessed source text
+    """
+    try:
+        if cc is None:
+            cc = find_available_cc()
+
+        cmd = cc.split()
+        cmd.extend(['-E', '-P'])
+
+        for inc in (include_dirs or []):
+            cmd.extend(['-I', inc])
+
+        for define in (defines or []):
+            cmd.append(f'-D{define}')
+
+        if cflags:
+            cmd.extend(cflags)
+
+        cmd.append(os.path.abspath(path))
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=60, stdin=subprocess.DEVNULL
+        )
+
+        if result.returncode == 0:
+            return result.stdout
+
+        warnings.warn(
+            f"Preprocessor failed for {path} (exit code {result.returncode}): "
+            f"{result.stderr.strip()[:200]}. Falling back to raw file read.",
+            stacklevel=2
+        )
+    except (FileNotFoundError, RuntimeError, subprocess.TimeoutExpired) as e:
+        warnings.warn(
+            f"Preprocessor unavailable for {path}: {e}. Falling back to raw file read.",
+            stacklevel=2
+        )
+
+    with open(path, 'r', encoding='utf-8') as f:
+        return f.read()
 
 
 def cimport(path: str, *,
@@ -220,9 +282,11 @@ def cimport(path: str, *,
     
     # Generate bindings if needed
     if needs_regen:
-        # Read source file
-        with open(path, 'r', encoding='utf-8') as f:
-            source_text = f.read()
+        # Preprocess source file
+        source_text = _preprocess_source(
+            path, cc=cc, cflags=cflags,
+            include_dirs=include_dirs, defines=defines
+        )
         
         # Use compiled bindgen
         generate_bindings_to_file = _get_bindgen()

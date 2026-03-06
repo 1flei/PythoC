@@ -687,12 +687,22 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
     if python_class:
         canonical_name = python_class.__name__
     else:
-        # Generate a descriptive name from field info
-        from ..type_id import get_type_id
+        # Generate a descriptive name from field info.
+        # Use get_name() / __name__ instead of get_type_id() to avoid
+        # infinite recursion when a field type contains a self-referential
+        # pointer (e.g. struct Expr { ptr['Expr'] lhs; }).
+        # The full type identity is captured by get_type_id_suffix() later,
+        # which is only called lazily — not during struct creation.
         parts = ["struct"]
         for i, ftype in enumerate(field_types):
-            type_id = get_type_id(ftype) if ftype else "void"
-            parts.append(type_id)
+            if ftype is None:
+                parts.append("void")
+            elif hasattr(ftype, 'get_name'):
+                parts.append(ftype.get_name())
+            elif hasattr(ftype, '__name__'):
+                parts.append(ftype.__name__)
+            else:
+                parts.append(str(ftype))
             if field_names and i < len(field_names) and field_names[i]:
                 parts.append(field_names[i])
         canonical_name = "_".join(parts)
