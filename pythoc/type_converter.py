@@ -548,6 +548,13 @@ class TypeConverter:
                             )
 
 
+        # If the callee is still a template (not yet materialized), materialize
+        # the default specialization so the symbol exists at link time.
+        callee_w = func_info.wrapper if func_info else None
+        if callee_w and getattr(callee_w, '_is_template', False):
+            from .decorators.compile import materialize_specialization, DEFAULT_EFFECT_KEY
+            materialize_specialization(callee_w, DEFAULT_EFFECT_KEY, {})
+
         # Always record a dependency for the referenced wrapper.
         #
         # This is important on Windows where we must link dependency groups at

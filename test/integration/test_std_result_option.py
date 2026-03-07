@@ -5,7 +5,7 @@ import unittest
 
 from pythoc import compile, enum, i32, struct
 from pythoc import bool as pc_bool
-from pythoc.std.result import result_wrap, option_wrap
+from pythoc.std.result import result_wrap, option_wrap, make_note, make_hush
 
 
 # =============================================================================
@@ -21,6 +21,10 @@ class Err:
 
 
 R, R_api = result_wrap(i32, Err, name="R")
+
+# Pre-bind cross-type conversions at Python meta layer
+note_O_to_R = make_note(O_api, R_api)
+hush_R_to_O = make_hush(R_api, O_api)
 
 
 # =============================================================================
@@ -590,6 +594,86 @@ def test_result_direct_match_err() -> i32:
 
 
 # =============================================================================
+# unwrap_or tests
+# =============================================================================
+
+@compile
+def test_option_unwrap_or_some() -> i32:
+    o: O = maybe_add1(5)  # Some(6)
+    return O_api.unwrap_or(o, 99)
+
+
+@compile
+def test_option_unwrap_or_none() -> i32:
+    o: O = maybe_add1(0)  # NoneVal
+    return O_api.unwrap_or(o, 99)
+
+
+@compile
+def test_result_unwrap_or_ok() -> i32:
+    r: R = checked_add2(5)  # Ok(7)
+    return R_api.unwrap_or(r, 42)
+
+
+@compile
+def test_result_unwrap_or_err() -> i32:
+    r: R = checked_add2(-1)  # Err(Code, 7)
+    return R_api.unwrap_or(r, 42)
+
+
+# =============================================================================
+# note / hush tests
+# =============================================================================
+
+@compile
+def test_option_note_some() -> i32:
+    o: O = maybe_add1(5)  # Some(6)
+    r: R = note_O_to_R(o, Err(Err.Code, 77))
+    match r:
+        case (R.Ok, v):
+            return v
+        case (R.Err, _):
+            return -1
+
+
+@compile
+def test_option_note_none() -> i32:
+    o: O = maybe_add1(0)  # NoneVal
+    r: R = note_O_to_R(o, Err(Err.Code, 77))
+    match r:
+        case (R.Ok, _):
+            return -1
+        case (R.Err, e):
+            match e:
+                case (Err.Code, c):
+                    return c
+                case _:
+                    return -999
+
+
+@compile
+def test_result_hush_ok() -> i32:
+    r: R = checked_add2(5)  # Ok(7)
+    o: O = hush_R_to_O(r)
+    match o:
+        case (O.Some, v):
+            return v
+        case (O.NoneVal):
+            return -1
+
+
+@compile
+def test_result_hush_err() -> i32:
+    r: R = checked_add2(-1)  # Err(Code, 7)
+    o: O = hush_R_to_O(r)
+    match o:
+        case (O.Some, _):
+            return -2
+        case (O.NoneVal):
+            return -1
+
+
+# =============================================================================
 # Test class
 # =============================================================================
 
@@ -708,6 +792,32 @@ class TestStdResultOption(unittest.TestCase):
     def test_result_direct_match_err(self):
         # checked_add2(-1) = err(Code, 7), 7+100 = 107
         self.assertEqual(test_result_direct_match_err(), 107)
+
+    # -- unwrap_or --
+    def test_option_unwrap_or_some(self):
+        self.assertEqual(test_option_unwrap_or_some(), 6)
+
+    def test_option_unwrap_or_none(self):
+        self.assertEqual(test_option_unwrap_or_none(), 99)
+
+    def test_result_unwrap_or_ok(self):
+        self.assertEqual(test_result_unwrap_or_ok(), 7)
+
+    def test_result_unwrap_or_err(self):
+        self.assertEqual(test_result_unwrap_or_err(), 42)
+
+    # -- note / hush --
+    def test_option_note_some(self):
+        self.assertEqual(test_option_note_some(), 6)
+
+    def test_option_note_none(self):
+        self.assertEqual(test_option_note_none(), 77)
+
+    def test_result_hush_ok(self):
+        self.assertEqual(test_result_hush_ok(), 7)
+
+    def test_result_hush_err(self):
+        self.assertEqual(test_result_hush_err(), -1)
 
 
 if __name__ == "__main__":

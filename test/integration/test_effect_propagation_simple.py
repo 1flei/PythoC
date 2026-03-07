@@ -84,6 +84,8 @@ def test_default() -> u64:
 
 
 if __name__ == '__main__':
+    ok = True
+
     print("Testing tracked allocator...")
     result = test_tracked()
     print(f"Tracked result: {hex(result)}")
@@ -92,12 +94,16 @@ if __name__ == '__main__':
         print("PASS: Tracked allocator was used!")
     else:
         print("FAIL: Tracked allocator was NOT used")
+        ok = False
     
     print()
     print("Testing default allocator...")
     result = test_default()
     print(f"Default result: {hex(result)}")
     if result == MAGIC:
-        print("WARNING: Default allocator coincidentally has marker")
+        print("FAIL: Default allocator should NOT have marker")
+        ok = False
     else:
-        print("OK: Default allocator does not have marker (as expected)")
+        print("PASS: Default allocator does not have marker (as expected)")
+
+    sys.exit(0 if ok else 1)

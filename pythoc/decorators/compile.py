@@ -45,6 +45,59 @@ from ..build import (
 from ..logger import logger, set_source_context
 
 
+DEFAULT_EFFECT_KEY = "__default__"
+
+
+def materialize_specialization(template_wrapper, effect_key, effect_bindings):
+    """Materialize a specialization from a template wrapper.
+
+    Single entry point for producing executable code from a template.
+    Both default (DEFAULT_EFFECT_KEY) and non-default go through this path.
+
+    Args:
+        template_wrapper: A wrapper with _is_template=True
+        effect_key: DEFAULT_EFFECT_KEY for default, or an effect suffix string
+        effect_bindings: Dict of effect name -> implementation (empty for default)
+
+    Returns:
+        Materialized wrapper with compilation queued
+    """
+    cache = getattr(template_wrapper, '_effect_specialized_cache', {})
+    if effect_key in cache:
+        return cache[effect_key]
+
+    if effect_key == DEFAULT_EFFECT_KEY:
+        # Default: queue the template's own compile_callback in-place
+        om = get_output_manager()
+        om.queue_compilation(
+            template_wrapper._group_key,
+            template_wrapper._template_compile_callback,
+            template_wrapper._func_info,
+        )
+        template_wrapper._is_template = False
+        template_wrapper._effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
+        logger.debug(f"Materialized default specialization: {template_wrapper._original_name}")
+        return template_wrapper
+    else:
+        # Non-default: call _compile_impl with effect_suffix
+        from ..effect import restore_effect_context
+        original_scope = template_wrapper._group_key[1] if template_wrapper._group_key else None
+
+        logger.debug(f"Materializing specialization: {template_wrapper._original_name}_{effect_key}")
+
+        with restore_effect_context(effect_bindings):
+            specialized_wrapper = _compile_impl(
+                template_wrapper.__wrapped__,
+                compile_suffix=template_wrapper._compile_suffix,
+                effect_suffix=effect_key,
+                captured_symbols=getattr(template_wrapper, '_captured_symbols', None),
+                effect_scope=original_scope,
+            )
+
+        template_wrapper._effect_specialized_cache[effect_key] = specialized_wrapper
+        return specialized_wrapper
+
+
 def _get_registry():
     return _unified_registry
 
@@ -167,9 +220,12 @@ def _compile_impl(func_or_class,
 
     @wraps(func)
     def wrapper(*args, **kwargs):
+        if getattr(wrapper, '_is_template', False):
+            materialize_specialization(wrapper, DEFAULT_EFFECT_KEY, {})
+
         if not hasattr(wrapper, '_native_func'):
             wrapper._native_func = executor.execute_function(wrapper)
-        
+
         return wrapper._native_func(*args)
     
     source_file, source_code = get_function_file_and_source(func)
@@ -475,7 +531,24 @@ def _compile_impl(func_or_class,
             for effect in effect_deps:
                 dep_tracker.record_effect_usage(_group_key, effect)
     
-    output_manager.queue_compilation(group_key, compile_callback, func_info)
+    from ..effect import is_effect_suffix_suppressed, effect as _effect_singleton
+    # Template condition: suppress_effect_suffix() is hiding a real suffix AND
+    # this wrapper has no compile_suffix AND no effect_suffix.
+    # This means: module-level @compile running inside the import hook's suppress context.
+    # Linearize is safe: it always sets compile_suffix via @compile(suffix=X).
+    _has_suppressed_suffix = (is_effect_suffix_suppressed()
+                              and _effect_singleton._get_current_suffix() is not None)
+    _should_be_template = (_has_suppressed_suffix
+                           and effect_suffix is None
+                           and compile_suffix is None)
+
+    if _should_be_template:
+        wrapper._is_template = True
+        wrapper._template_compile_callback = compile_callback
+        logger.debug(f"@compile {func.__name__}: created as template (suppress active)")
+    else:
+        output_manager.queue_compilation(group_key, compile_callback, func_info)
+        wrapper._is_template = False
     
     wrapper._compiler = compiler
     wrapper._so_file = so_file
@@ -494,47 +567,12 @@ def _compile_impl(func_or_class,
     output_manager.add_wrapper_to_group(group_key, wrapper)
     
     def get_effect_specialized(target_effect_suffix, effect_overrides):
-        """
-        Get or create an effect-specialized version of this wrapper.
-        
-        Args:
-            target_effect_suffix: Effect suffix string (e.g., "MyEffect")
-            effect_overrides: Dict of effect overrides from context
-        
-        Returns:
-            Specialized wrapper with the given effect_suffix
-        """
-        # If this wrapper already has the target effect_suffix, return self
+        """Get or create an effect-specialized version of this wrapper."""
         if wrapper._effect_suffix == target_effect_suffix:
             return wrapper
-        
-        # Check cache
-        if target_effect_suffix in wrapper._effect_specialized_cache:
-            return wrapper._effect_specialized_cache[target_effect_suffix]
-        
-        # Create new specialized version
-        from ..effect import restore_effect_context
-        
-        original_scope = wrapper._group_key[1] if wrapper._group_key else None
-        
-        logger.debug(f"Creating effect-specialized version: {wrapper._original_name}_{target_effect_suffix}")
-        
-        with restore_effect_context(effect_overrides):
-            # IMPORTANT: reuse captured symbols from the original wrapper.
-            # This is required for metaprogrammed functions (e.g., linear_wrap)
-            # whose annotations reference locals (not in closure).
-            specialized_wrapper = _compile_impl(
-                wrapper.__wrapped__,
-                compile_suffix=wrapper._compile_suffix,
-                effect_suffix=target_effect_suffix,
-                captured_symbols=getattr(wrapper, '_captured_symbols', None),
-                effect_scope=original_scope
-            )
-        
-        # Cache the specialized wrapper
-        wrapper._effect_specialized_cache[target_effect_suffix] = specialized_wrapper
-        return specialized_wrapper
-    
+
+        return materialize_specialization(wrapper, target_effect_suffix, effect_overrides)
+
     wrapper.get_effect_specialized = get_effect_specialized
 
     def handle_call(visitor, func_ref, args, node):
