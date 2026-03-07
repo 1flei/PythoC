@@ -4,16 +4,7 @@ from ..builtin_entities import i8, static, ptr, array
 from ..builtin_entities.enum import _create_enum_type
 from ..builtin_entities.types import bool as pc_bool
 from ..effect import effect
-from ..logger import logger
 from pythoc import compile, inline
-
-
-class _UnsupportedHelper:
-    def __init__(self, name):
-        self.name = name
-
-    def handle_call(self, visitor, func_ref, args, node):
-        logger.error(f"{self.name} is not implemented in phase-1", node=node, exc_type=NotImplementedError)
 
 
 class ErrnoSlotProvider:
@@ -95,6 +86,14 @@ def option_wrap(value_type, tag_type=i8, name=None):
             case (option_type.NoneVal):
                 pass
 
+    @compile(suffix=(suffix_base, "unwrap_or"))
+    def option_unwrap_or(o: option_type, default: value_type) -> value_type:
+        match o:
+            case (option_type.Some, v):
+                return v
+            case (option_type.NoneVal):
+                return default
+
     @inline
     def option_do(genexp, _option_type=option_type) -> option_type:
         for value in genexp:
@@ -109,8 +108,7 @@ def option_wrap(value_type, tag_type=i8, name=None):
         do = option_do
         is_some = option_is_some
         is_none = option_is_none
-        unwrap_or = _UnsupportedHelper("option.unwrap_or")
-        note = _UnsupportedHelper("option.note")
+        unwrap_or = option_unwrap_or
 
     return option_type, option_api
 
@@ -163,6 +161,14 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
                 ptr[err_type](errno_slot())[0] = err_value
                 pass
 
+    @compile(suffix=(suffix_base, "unwrap_or"))
+    def result_unwrap_or(r: result_type, default: ok_type) -> ok_type:
+        match r:
+            case (result_type.Ok, v):
+                return v
+            case (result_type.Err, _):
+                return default
+
     @inline
     def result_do(
         genexp,
@@ -181,10 +187,78 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
         do = result_do
         is_ok = result_is_ok
         is_err = result_is_err
-        unwrap_or = _UnsupportedHelper("result.unwrap_or")
-        hush = _UnsupportedHelper("result.hush")
+        unwrap_or = result_unwrap_or
 
     return result_type, result_api
 
 
-__all__ = ["option_wrap", "result_wrap"]
+def make_note(option_api, result_api):
+    """Create an Option->Result conversion function (Python meta layer).
+
+    Binds both types at Python level, returns a plain @compile function
+    usable inside @compile code with no phantom arguments.
+
+    Usage (Python meta layer):
+        note_to_R = make_note(O_api, R_api)
+
+    Usage (@compile code):
+        r: R = note_to_R(o, Err(Err.Code, 77))
+    """
+    opt_type = option_api.type
+    res_type = result_api.type
+    _result_ok = result_api.ok
+    _result_err = result_api.err
+    err_type = res_type._variant_types[1]
+
+    suffix = (
+        getattr(opt_type, '__name__', 'Opt'),
+        getattr(res_type, '__name__', 'Res'),
+        "note",
+    )
+
+    @compile(suffix=suffix)
+    def _note(o: opt_type, err_val: err_type) -> res_type:
+        match o:
+            case (opt_type.Some, v):
+                return _result_ok(v)
+            case (opt_type.NoneVal):
+                return _result_err(err_val)
+
+    return _note
+
+
+def make_hush(result_api, option_api):
+    """Create a Result->Option conversion function (Python meta layer).
+
+    Binds both types at Python level, returns a plain @compile function
+    usable inside @compile code with no phantom arguments.
+
+    Usage (Python meta layer):
+        hush_to_O = make_hush(R_api, O_api)
+
+    Usage (@compile code):
+        o: O = hush_to_O(r)
+    """
+    res_type = result_api.type
+    opt_type = option_api.type
+    _option_some = option_api.some
+    _option_none = option_api.none
+
+    suffix = (
+        getattr(res_type, '__name__', 'Res'),
+        getattr(opt_type, '__name__', 'Opt'),
+        "hush",
+    )
+
+    @compile(suffix=suffix)
+    def _hush(r: res_type) -> opt_type:
+        match r:
+            case (res_type.Ok, v):
+                return _option_some(v)
+            case (res_type.Err, _):
+                return _option_none()
+
+    return _hush
+
+
+__all__ = ["option_wrap", "result_wrap", "make_note", "make_hush"]

@@ -106,8 +106,10 @@ def _create_effect_wrapped_function(original_func, suffix: str):
     """
     Create a new @compile function with the current effect context.
 
-    This re-invokes the compile decorator with the current effect bindings
-    captured, producing a new compiled version with the specified effect_suffix.
+    Prefers `get_effect_specialized()` on the wrapper (which correctly reuses
+    the original captured symbols, including annotation-time locals that are
+    not in the closure). Falls back to re-applying @compile for wrappers
+    that do not support `get_effect_specialized`.
 
     The new version uses 4-tuple group_key: (source_file, scope, None, effect_suffix)
     where source_file is the original function's definition file (NOT caller's file).
@@ -115,19 +117,27 @@ def _create_effect_wrapped_function(original_func, suffix: str):
     Design principle: Same effect_suffix = same implementation = reused across callers.
     If bindings differ but suffix is same, that is a user error.
     """
-    # Get the original Python function from __wrapped__
+    # Prefer get_effect_specialized — it correctly passes _captured_symbols
+    # so that metaprogrammed functions (e.g. linearize wrappers) whose
+    # annotations reference locals work correctly.
+    if hasattr(original_func, 'get_effect_specialized'):
+        try:
+            effect_overrides = capture_effect_context()
+            new_wrapper = original_func.get_effect_specialized(suffix, effect_overrides)
+            if new_wrapper is not None and new_wrapper is not original_func:
+                return new_wrapper
+        except Exception:
+            import traceback
+            traceback.print_exc()
+
+    # Fallback: re-apply @compile decorator
     original_python_func = getattr(original_func, '__wrapped__', None)
     if original_python_func is None:
         return None
 
-    # Re-apply @compile decorator with the new effect_suffix
-    # The effect context is already set, so capture_effect_context() will
-    # capture the current (overridden) effects
     from .decorators.compile import compile as compile_decorator
 
     try:
-        # Create new compiled version with effect_suffix
-        # No _effect_caller_module - group by (source_file, scope, None, effect_suffix)
         new_wrapper = compile_decorator(
             original_python_func, 
             _effect_suffix=suffix
@@ -161,8 +171,12 @@ class EffectImportHook:
 
     def __call__(self, name, globals=None, locals=None, fromlist=(), level=0):
         """Custom __import__ that wraps @compile functions with effect context."""
-        # Call original import
-        module = _original_import(name, globals, locals, fromlist, level)
+        # Import with effect suffix suppressed so that if this is the first
+        # import of the module, its body runs in the default context.
+        # Otherwise all module-level @compile functions would pick up the
+        # effect suffix and contaminate the module bindings permanently.
+        with suppress_effect_suffix():
+            module = _original_import(name, globals, locals, fromlist, level)
 
         suffix = self._effect_context._suffix
         if suffix is None or not fromlist:
@@ -749,8 +763,43 @@ def get_current_effect_suffix() -> Optional[str]:
     Get the current effect suffix from the context stack.
 
     Used by the compiler to determine symbol naming.
+    Returns None when suppress_effect_suffix() is active.
     """
+    if is_effect_suffix_suppressed():
+        return None
     return effect._get_current_suffix()
+
+
+import threading
+
+_suppress_compile_suffix = threading.local()
+
+
+@contextmanager
+def suppress_effect_suffix():
+    """Temporarily hide the effect suffix from @compile.
+
+    Functions decorated with @compile inside this context will not pick up
+    the current effect suffix. This is used by linearize() and the import
+    hook to ensure that module-level @compile functions always produce the
+    default (non-suffixed) version, even when they execute inside an active
+    ``with effect(...)`` block.
+
+    The suffix stack itself is NOT modified so that ``effect.default()``
+    still correctly detects active caller overrides and preserves the
+    caller's effect bindings.
+    """
+    prev = getattr(_suppress_compile_suffix, 'active', False)
+    _suppress_compile_suffix.active = True
+    try:
+        yield
+    finally:
+        _suppress_compile_suffix.active = prev
+
+
+def is_effect_suffix_suppressed() -> bool:
+    """Check if the effect suffix is currently suppressed for @compile."""
+    return getattr(_suppress_compile_suffix, 'active', False)
 
 
 def capture_effect_context() -> Dict[str, Any]:
