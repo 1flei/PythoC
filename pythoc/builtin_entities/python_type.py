@@ -296,28 +296,6 @@ class PythonType(_PythonTypeBase):
         
         return wrap_value(attr_value, kind="python", type_hint=attr_type)
     
-    def handle_method_call(self, visitor, node: ast.Call, method_name: str):
-        """Handle calling a method on a Python object at compile time.
-        
-        DEPRECATED: Use handle_attribute + handle_call instead.
-        This is kept for backward compatibility.
-        """
-        if not self._is_constant:
-            logger.error(
-                f"Cannot call method '{method_name}' on non-constant Python object '{self._python_type.__name__}'",
-                node=node, exc_type=NotImplementedError
-            )
-        base_obj = self._python_object
-        try:
-            target = getattr(base_obj, method_name)
-        except AttributeError:
-            logger.error(f"Python object '{self._python_type.__name__}' has no attribute '{method_name}'",
-                        node=node, exc_type=AttributeError)
-        if not callable(target):
-            logger.error(f"Attribute '{method_name}' of '{self._python_type.__name__}' is not callable",
-                        node=node, exc_type=TypeError)
-        return self._eval_call(visitor, node, target)
-    
     def _eval_call(self, visitor, node: ast.Call, target_callable):
         """Evaluate a Python callable with arguments (constant or runtime)."""
         from llvmlite import ir

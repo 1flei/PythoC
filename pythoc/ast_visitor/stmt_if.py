@@ -113,9 +113,6 @@ class IfStatementMixin:
         """
         cf = self._get_cf_builder()
 
-        # Capture linear state before if statement for branch restoration
-        linear_states_before = cf.capture_linear_snapshot()
-        
         # Normalize to callables
         def make_branch_fn(branch):
             # branch is a list of AST statements
@@ -142,9 +139,6 @@ class IfStatementMixin:
         
         def else_fn_tracked():
             if else_fn:
-                # Reset to state before if for else branch
-                # This ensures else branch starts with same state as then branch
-                cf.restore_linear_snapshot(linear_states_before)
                 else_fn()
         
         # Execute condition processing
@@ -153,12 +147,5 @@ class IfStatementMixin:
             # Linear state validation is done by CFG checker at function end
         else:
             # Simple if without else
-            then_terminated, _ = self.process_condition(condition, then_fn_tracked, None)
-            
-            # If then branch terminates (return/break/continue), the code after the if
-            # only executes when the condition is false. In this case, linear tokens
-            # should be restored to their state before the if.
-            if then_terminated and not condition.is_python_value():
-                cf.restore_linear_snapshot(linear_states_before)
-            # Linear state validation is done by CFG checker at function end
+            self.process_condition(condition, then_fn_tracked, None)
 

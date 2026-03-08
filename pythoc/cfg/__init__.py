@@ -16,8 +16,6 @@ from .linear_checker import (
     LinearSnapshot,
     LinearError,
     LinearChecker,
-    capture_linear_snapshot,
-    restore_linear_snapshot,
     copy_snapshot,
     snapshots_compatible,
     find_snapshot_diffs,
@@ -27,14 +25,12 @@ from .linear_checker import (
 __all__ = [
     # Core data structures
     'CFGBlock',
-    'CFGEdge', 
+    'CFGEdge',
     'CFG',
     # Linear checking
     'LinearSnapshot',
     'LinearError',
     'LinearChecker',
-    'capture_linear_snapshot',
-    'restore_linear_snapshot',
     'copy_snapshot',
     'snapshots_compatible',
     'find_snapshot_diffs',
