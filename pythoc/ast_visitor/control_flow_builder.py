@@ -30,8 +30,6 @@ from ..cfg.linear_checker import (
     LinearRegister,
     LinearTransition,
     LinearEvent,
-    capture_linear_snapshot,
-    restore_linear_snapshot,
     copy_snapshot,
 )
 from ..logger import logger
@@ -456,71 +454,6 @@ class ControlFlowBuilder:
             return False
         
         logger.debug(f"CFG linear check passed for {self._func_name}")
-        return True
-    
-    # ========== Linear State Tracking Methods ==========
-    
-    def capture_linear_snapshot(self) -> LinearSnapshot:
-        """Capture current linear state from visitor's variable registry
-        
-        Returns:
-            LinearSnapshot mapping var_name -> {path -> state}
-        """
-        return capture_linear_snapshot(self._visitor.scope_manager._var_registry)
-    
-    def restore_linear_snapshot(self, snapshot: LinearSnapshot):
-        """Restore linear state to visitor's variable registry
-        
-        Args:
-            snapshot: The snapshot to restore
-        """
-        restore_linear_snapshot(self._visitor.scope_manager._var_registry, snapshot)
-    
-    
-    def validate_merge_point(
-        self, 
-        merge_block_id: int,
-        branch_snapshots: List[Tuple[str, LinearSnapshot]],
-        node: Optional[ast.AST] = None
-    ) -> bool:
-        """DEPRECATED: Linear state validation is now done by CFG checker at function end.
-        
-        This method is kept for backward compatibility but does nothing.
-        The CFG linear checker will validate merge points via dataflow analysis.
-        
-        Args:
-            merge_block_id: The merge block ID
-            branch_snapshots: List of (branch_name, snapshot) tuples
-            node: AST node for error reporting
-            
-        Returns:
-            Always returns True (validation deferred to CFG checker)
-        """
-        # Validation is now done by CFG linear checker at function end
-        return True
-    
-    def validate_if_without_else(
-        self,
-        before_snapshot: LinearSnapshot,
-        after_snapshot: LinearSnapshot,
-        then_terminated: bool,
-        node: Optional[ast.AST] = None
-    ) -> bool:
-        """DEPRECATED: Linear state validation is now done by CFG checker at function end.
-        
-        This method is kept for backward compatibility but does nothing.
-        The CFG linear checker will validate if-without-else via dataflow analysis.
-        
-        Args:
-            before_snapshot: Snapshot before the if statement
-            after_snapshot: Snapshot after the then branch
-            then_terminated: Whether then branch terminates
-            node: AST node for error reporting
-            
-        Returns:
-            Always returns True (validation deferred to CFG checker)
-        """
-        # Validation is now done by CFG linear checker at function end
         return True
     
     def dump_cfg(self, level: int = 0, use_print: bool = False):

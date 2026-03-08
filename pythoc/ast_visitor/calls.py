@@ -22,17 +22,6 @@ from ..registry import get_unified_registry, infer_struct_from_access
 from ..logger import logger
 
 
-class _MethodCallWrapper:
-    """Wrapper for method calls to support unified handle_call interface"""
-    def __init__(self, base_type, method_name):
-        self.base_type = base_type
-        self.method_name = method_name
-    
-    def handle_call(self, visitor, func_ref, args, node):
-        """Delegate to base_type's handle_method_call"""
-        return self.base_type.handle_method_call(visitor, node, self.method_name)
-
-
 class CallsMixin:
     """Mixin containing calls-related visitor methods"""
     
@@ -94,7 +83,6 @@ class CallsMixin:
             - Function pointers: func type with handle_call
             - Builtin types: type class with handle_call (for casting)
             - Python types: PythonType instance with handle_call
-            - Methods: _MethodCallWrapper with handle_call
         """
         # Evaluate the callable expression
         result = self.visit_expression(func_node)

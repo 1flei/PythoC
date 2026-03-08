@@ -137,10 +137,7 @@ class MatchStatementMixin:
         CFG-based linear checking is done at function end via CFG linear checker.
         """
         cf = self._get_cf_builder()
-        
-        # Capture linear states before match for branch restoration
-        linear_states_before = cf.capture_linear_snapshot()
-        
+
         # Create merge block
         merge_block = cf.create_block("match_merge")
         
@@ -195,9 +192,6 @@ class MatchStatementMixin:
         for idx, case in enumerate(node.cases):
             cf.position_at_end(case_blocks[idx])
 
-            # Reset linear states to before match for this case
-            cf.restore_linear_snapshot(linear_states_before)
-
             # Enter scope for case body
             with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
                 # Handle variable binding for MatchAs patterns (case x: or case _:)
@@ -248,11 +242,7 @@ class MatchStatementMixin:
         # Process each case as an if-elif branch
         for idx, case in enumerate(node.cases):
             pattern = case.pattern
-            
-            # Capture linear state before this case
-            # Each case should start with the same linear state
-            linear_states_before_case = cf.capture_linear_snapshot()
-            
+
             # Check if this is a wildcard (default case) without guard
             if isinstance(pattern, ast.MatchAs) and pattern.pattern is None and case.guard is None:
                 # Wildcard always matches - execute body directly
@@ -277,8 +267,7 @@ class MatchStatementMixin:
             next_case_block = cf.create_block(f"case_{idx}_next")
             
             # Capture for closure - need to copy to avoid late binding issues
-            captured_linear_states = linear_states_before_case
-            
+
             if case.guard is not None:
                 # Guarded case: nested process_condition
                 # 1. Check pattern: if matches -> check guard, else -> next case
@@ -300,23 +289,21 @@ class MatchStatementMixin:
                         if not cf.is_terminated():
                             cf.branch(merge_block)
                     
-                    def guard_else(states=captured_linear_states):
-                        # Guard failed - restore linear state and go to next case
-                        cf.restore_linear_snapshot(states)
+                    def guard_else():
+                        # Guard failed - go to next case
                         if not cf.is_terminated():
                             cf.branch(next_case_block)
                     
                     self.process_condition(guard_result, guard_then, guard_else)
                 
-                def pattern_else(states=captured_linear_states):
-                    # Pattern failed - restore linear state and go to next case
-                    cf.restore_linear_snapshot(states)
+                def pattern_else():
+                    # Pattern failed - go to next case
                     if not cf.is_terminated():
                         cf.branch(next_case_block)
-                
+
                 # Use process_condition for pattern check
                 self.process_condition(condition_ref, pattern_then_with_guard, pattern_else)
-                
+
             else:
                 # No guard - simple pattern match using process_condition
                 
@@ -330,9 +317,8 @@ class MatchStatementMixin:
                     if not cf.is_terminated():
                         cf.branch(merge_block)
                 
-                def pattern_else(states=captured_linear_states):
-                    # Pattern failed - restore linear state and go to next case
-                    cf.restore_linear_snapshot(states)
+                def pattern_else():
+                    # Pattern failed - go to next case
                     if not cf.is_terminated():
                         cf.branch(next_case_block)
                 

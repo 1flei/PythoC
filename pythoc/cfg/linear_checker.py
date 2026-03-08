@@ -115,34 +115,6 @@ class LinearError:
         return f"Error: {self.message}"
 
 
-def capture_linear_snapshot(var_registry: "VariableRegistry") -> LinearSnapshot:
-    """Capture current linear states - DEPRECATED, returns empty snapshot
-    
-    Linear state tracking is now done entirely by CFG checker.
-    This function is kept for API compatibility but returns empty snapshot.
-    
-    Args:
-        var_registry: The variable registry (ignored)
-        
-    Returns:
-        Empty LinearSnapshot
-    """
-    return {}
-
-
-def restore_linear_snapshot(var_registry: "VariableRegistry", snapshot: LinearSnapshot):
-    """Restore linear states - DEPRECATED, no-op
-    
-    Linear state tracking is now done entirely by CFG checker.
-    This function is kept for API compatibility but does nothing.
-    
-    Args:
-        var_registry: The variable registry (ignored)
-        snapshot: The snapshot to restore (ignored)
-    """
-    pass
-
-
 def copy_snapshot(snapshot: LinearSnapshot) -> LinearSnapshot:
     """Deep copy a snapshot"""
     return {var_id: dict(paths) for var_id, paths in snapshot.items()}
@@ -797,7 +769,7 @@ def check_linear_types_on_cfg(
         List of linear type errors
     """
     if initial_snapshot is None:
-        initial_snapshot = capture_linear_snapshot(var_registry)
+        initial_snapshot = {}
     
     checker = LinearChecker(var_registry)
     return checker.check(cfg, initial_snapshot)
