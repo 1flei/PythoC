@@ -278,7 +278,6 @@ class LinearChecker:
         Args:
             var_registry: Variable registry for looking up variable info
         """
-        self.var_registry = var_registry
         self.errors: List[LinearError] = []
         
         # Mapping from var_id to (var_name, line_number) for error reporting

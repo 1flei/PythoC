@@ -91,4 +91,4 @@ class FunctionsMixin:
             is_mutable=False,
         )
         
-        self.ctx.var_registry.declare(var_info, allow_shadow=True)
+        self.scope_manager.declare_variable(var_info, allow_shadow=True)

@@ -81,7 +81,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.implicit_coercer = ImplicitCoercer(self.type_converter)
         
         # Unified scope manager for defer, linear types, and variable lifetime
-        self.scope_manager = ScopeManager(self.ctx.var_registry)
+        self.scope_manager = self.ctx.scope_manager
         self.scope_manager.set_visitor(self)
         
         # Linear type tracking - now integrated with VariableInfo
@@ -189,15 +189,15 @@ class LLVMIRVisitor(ast.NodeVisitor):
             is_parameter=is_parameter,
         )
         
-        if self.ctx.var_registry.is_declared_in_current_scope(name):
-            existing = self.ctx.var_registry.lookup(name)
+        if self.scope_manager.is_declared_in_current_scope(name):
+            existing = self.scope_manager.lookup_variable(name)
             if existing:
                 existing.alloca = alloca
                 existing.value_ref = value_ref
                 return existing
         
-        self.ctx.var_registry.declare(var_info, allow_shadow=True)
-        
+        self.scope_manager.declare_variable(var_info, allow_shadow=True)
+
         # Initialize linear states for all linear paths in the type
         # For parameters, initialize as 'active' (passed in with ownership)
         # For other variables, initialize as 'consumed' (not yet assigned, no ownership)
@@ -210,7 +210,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
     def lookup_variable(self, name: str) -> Optional[VariableInfo]:
         """Look up variable or function in context registry (unified)"""
         # 1. First check variable registry
-        var_info = self.ctx.var_registry.lookup(name)
+        var_info = self.scope_manager.lookup_variable(name)
         if var_info:
             return var_info
         
@@ -313,12 +313,12 @@ class LLVMIRVisitor(ast.NodeVisitor):
     
     def get_variable_alloca(self, name: str) -> Optional[ir.AllocaInstr]:
         """Get variable alloca from registry"""
-        var_info = self.ctx.var_registry.lookup(name)
+        var_info = self.scope_manager.lookup_variable(name)
         return var_info.alloca if var_info else None
     
     def has_variable(self, name: str) -> bool:
         """Check if variable exists in registry"""
-        return self.ctx.var_registry.lookup(name) is not None
+        return self.scope_manager.lookup_variable(name) is not None
     
     def visit_expression(self, expr):
         """Visit an expression and return a ValueRef preserving type hints"""

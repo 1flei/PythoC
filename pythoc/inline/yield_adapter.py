@@ -270,9 +270,9 @@ class YieldInlineAdapter:
         """
         available_vars = set()
         
-        # Get variables from visitor's variable registry
-        if hasattr(self.visitor, 'ctx') and hasattr(self.visitor.ctx, 'var_registry'):
-            registry = self.visitor.ctx.var_registry
+        # Get variables from visitor's scope manager
+        if hasattr(self.visitor, 'scope_manager'):
+            registry = self.visitor.scope_manager
             # Get all variables in current scope
             for var_info in registry.get_all_in_current_scope():
                 available_vars.add(var_info.name)

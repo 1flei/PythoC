@@ -187,7 +187,7 @@ class ClosureAdapter:
                 source="closure_arg_temp",
                 is_parameter=False
             )
-            self.visitor.ctx.var_registry.declare(temp_info, allow_shadow=True)
+            self.visitor.scope_manager.declare_variable(temp_info, allow_shadow=True)
         
         return arg_temps
     
@@ -206,8 +206,8 @@ class ClosureAdapter:
         available_vars = set()
         
         # Get all visible variables from ALL scopes (not just current)
-        if hasattr(self.visitor, 'ctx') and hasattr(self.visitor.ctx, 'var_registry'):
-            registry = self.visitor.ctx.var_registry
+        if hasattr(self.visitor, 'scope_manager'):
+            registry = self.visitor.scope_manager
             for var_name in registry.get_all_visible().keys():
                 available_vars.add(var_name)
         
@@ -236,7 +236,7 @@ class ClosureAdapter:
         4. The returned ValueRef should NOT have var_name (like move() returns)
            so that the caller treats it as a fresh value, not a variable reference
         """
-        var_info = self.visitor.ctx.var_registry.lookup(var_name)
+        var_info = self.visitor.scope_manager.lookup_variable(var_name)
         if not var_info:
             logger.warning(f"Result variable {var_name} not found")
             return None

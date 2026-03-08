@@ -447,7 +447,7 @@ class ControlFlowBuilder:
         if initial_snapshot is None:
             initial_snapshot = {}
         
-        checker = LinearChecker(self._visitor.ctx.var_registry)
+        checker = LinearChecker(self._visitor.scope_manager._var_registry)
         errors = checker.check(self._cfg, initial_snapshot)
         
         if errors:
@@ -466,7 +466,7 @@ class ControlFlowBuilder:
         Returns:
             LinearSnapshot mapping var_name -> {path -> state}
         """
-        return capture_linear_snapshot(self._visitor.ctx.var_registry)
+        return capture_linear_snapshot(self._visitor.scope_manager._var_registry)
     
     def restore_linear_snapshot(self, snapshot: LinearSnapshot):
         """Restore linear state to visitor's variable registry
@@ -474,7 +474,7 @@ class ControlFlowBuilder:
         Args:
             snapshot: The snapshot to restore
         """
-        restore_linear_snapshot(self._visitor.ctx.var_registry, snapshot)
+        restore_linear_snapshot(self._visitor.scope_manager._var_registry, snapshot)
     
     
     def validate_merge_point(

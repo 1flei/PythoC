@@ -197,7 +197,7 @@ class AssignmentsMixin:
             var_name = target.id
             
             # Check if variable exists in var_registry (not user_globals)
-            existing_in_registry = self.ctx.var_registry.lookup(var_name)
+            existing_in_registry = self.scope_manager.lookup_variable(var_name)
             
             if existing_in_registry is None:
                 # New variable OR shadowing a user_globals variable
@@ -221,7 +221,7 @@ class AssignmentsMixin:
                     alloca=None,  # No alloca for Python values
                     source="python_value_assign"
                 )
-                self.ctx.var_registry.declare(var_info, allow_shadow=True)
+                self.scope_manager.declare_variable(var_info, allow_shadow=True)
                 return
             else:
                 # Variable exists in var_registry - if it's also a Python value, update it
@@ -414,8 +414,8 @@ class AssignmentsMixin:
         
         # Check if variable already exists in CURRENT scope - AnnAssign is declaration, not reassignment
         # Allow shadowing variables from outer scopes (C-like behavior)
-        if self.ctx.var_registry.is_declared_in_current_scope(var_name):
-            existing = self.ctx.var_registry.lookup(var_name)
+        if self.scope_manager.is_declared_in_current_scope(var_name):
+            existing = self.scope_manager.lookup_variable(var_name)
             logger.error(
                 f"Cannot redeclare variable '{var_name}': already declared in this scope at line {existing.line_number} "
                 f"(attempting redeclaration at line {node.lineno})",
