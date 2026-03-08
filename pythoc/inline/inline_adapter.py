@@ -29,7 +29,7 @@ class InlineAdapter:
     3. Use kernel to generate AST with references to these temp vars
     4. Return AST for visitor to process
     
-    This adapter only touches visitor.ctx.var_registry (read-only for scope, write for temp vars).
+    This adapter only touches visitor.scope_manager (read-only for scope, write for temp vars).
     All IR generation happens in visitor when it processes the returned AST.
     """
     
@@ -201,7 +201,7 @@ class InlineAdapter:
                 source="inline_arg_temp",
                 is_parameter=False
             )
-            self.visitor.ctx.var_registry.declare(temp_info, allow_shadow=True)
+            self.visitor.scope_manager.declare_variable(temp_info, allow_shadow=True)
         
         return arg_temps
     
@@ -209,8 +209,8 @@ class InlineAdapter:
         """Build caller scope context from current visitor state"""
         available_vars = set()
         
-        if hasattr(self.visitor, 'ctx') and hasattr(self.visitor.ctx, 'var_registry'):
-            registry = self.visitor.ctx.var_registry
+        if hasattr(self.visitor, 'scope_manager'):
+            registry = self.visitor.scope_manager
             for var_info in registry.get_all_in_current_scope():
                 available_vars.add(var_info.name)
         
@@ -238,12 +238,12 @@ class InlineAdapter:
         4. The returned ValueRef should NOT have var_name (like move() returns)
            so that the caller treats it as a fresh value, not a variable reference
         """
-        var_info = self.visitor.ctx.var_registry.lookup(var_name)
+        var_info = self.visitor.scope_manager.lookup_variable(var_name)
         if not var_info:
             # Debug: print all variables in all scopes
             logger.warning(f"Result variable {var_name} not found")
-            logger.warning(f"Current scopes: {len(self.visitor.ctx.var_registry.scopes)}")
-            for i, scope in enumerate(self.visitor.ctx.var_registry.scopes):
+            logger.warning(f"Current scopes: {len(self.visitor.scope_manager.scopes)}")
+            for i, scope in enumerate(self.visitor.scope_manager.scopes):
                 logger.warning(f"  Scope {i}: {list(scope.keys())}")
             return None
         

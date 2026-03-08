@@ -6,6 +6,7 @@ import ast
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type
 from ..logger import logger
+from ..scope_manager import ScopeType
 from .control_flow_builder import ControlFlowBuilder
 
 
@@ -198,8 +199,7 @@ class MatchStatementMixin:
             cf.restore_linear_snapshot(linear_states_before)
 
             # Enter scope for case body
-            self.ctx.var_registry.enter_scope()
-            try:
+            with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
                 # Handle variable binding for MatchAs patterns (case x: or case _:)
                 pattern = case.pattern
                 if isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
@@ -209,8 +209,6 @@ class MatchStatementMixin:
 
                 # Execute case body
                 self._visit_stmt_list(case.body, add_to_cfg=True)
-            finally:
-                self.ctx.var_registry.exit_scope()
 
             # Branch to merge if not terminated
             if not cf.is_terminated():

@@ -31,6 +31,7 @@ from .registry import (
     VariableInfo,
     VariableRegistry
 )
+from .scope_manager import ScopeManager
 
 # EnhancedValueRef has been merged into ValueRef in ir_value.py
 # Import it here for backward compatibility
@@ -63,9 +64,9 @@ class CompilationContext:
             self._module = module
             self._builder = builder
         
-        # Variable management
-        self.var_registry = VariableRegistry()
-        
+        # Unified scope manager for variables, defers, and linear types
+        self.scope_manager = ScopeManager()
+
         # Type inference integration
         self.type_inference_ctx: Optional[Any] = None
         
@@ -104,7 +105,7 @@ class CompilationContext:
     def backend(self) -> Optional["AbstractBackend"]:
         """Get the backend (if initialized with one)"""
         return self._backend
-    
+
     def is_constexpr(self) -> bool:
         """Check if this context is for constexpr evaluation"""
         if self._backend is not None:
@@ -116,16 +117,6 @@ class CompilationContext:
         label = f"{prefix}{self.label_counter}"
         self.label_counter += 1
         return label
-    
-    def enter_function(self, func: ir.Function):
-        """Enter a function scope"""
-        self.current_function = func
-        self.var_registry.enter_scope()
-    
-    def exit_function(self):
-        """Exit function scope"""
-        self.var_registry.exit_scope()
-        self.current_function = None
     
     def __repr__(self) -> str:
         if self._module is not None:

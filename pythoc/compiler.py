@@ -429,7 +429,7 @@ class LLVMCompiler:
                 is_parameter=True,
                 is_mutable=True
             )
-            visitor.ctx.var_registry.declare(var_info, allow_shadow=True)
+            visitor.scope_manager.declare_variable(var_info, allow_shadow=True)
             
             # Initialize linear states for parameters (active = ownership transferred)
             if type_hint and visitor._is_linear_type(type_hint):
@@ -501,7 +501,7 @@ class LLVMCompiler:
                 is_mutable=False  # varargs is read-only
             )
             
-            visitor.ctx.var_registry.declare(varargs_var_info, allow_shadow=True)
+            visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
         
         # For union/enum varargs, register a placeholder variable
         # The actual va_list will be initialized on first access in subscripts.py
@@ -531,7 +531,7 @@ class LLVMCompiler:
                 is_mutable=False  # varargs is read-only
             )
             
-            visitor.ctx.var_registry.declare(varargs_var_info, allow_shadow=True)
+            visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
         
         # Initialize list to accumulate all inlined statements
         visitor._all_inlined_stmts = []
@@ -543,7 +543,7 @@ class LLVMCompiler:
         
         # Emit LinearRegister events for linear parameters
         # This must happen after _cf_builder is created
-        for var_info in visitor.ctx.var_registry.get_all_in_current_scope():
+        for var_info in visitor.scope_manager.get_all_in_current_scope():
             if var_info.is_parameter and var_info.type_hint:
                 # Check if parameter type is linear and get all linear paths
                 if visitor._is_linear_type(var_info.type_hint):

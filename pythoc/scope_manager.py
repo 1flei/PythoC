@@ -97,13 +97,10 @@ class ScopeManager:
             scope_manager.exit_scope(cf)
     """
     
-    def __init__(self, var_registry: Any):
-        """Initialize scope manager
-        
-        Args:
-            var_registry: The VariableRegistry to sync with
-        """
-        self._var_registry = var_registry
+    def __init__(self):
+        """Initialize scope manager with its own VariableRegistry"""
+        from .registry import VariableRegistry
+        self._var_registry = VariableRegistry()
         self._scopes: List[Scope] = []
         self._visitor: Optional[Any] = None  # Set by visitor
     
@@ -407,7 +404,24 @@ class ScopeManager:
     def lookup_variable(self, name: str) -> Optional[Any]:
         """Look up a variable in the scope chain"""
         return self._var_registry.lookup(name)
-    
+
+    def is_declared_in_current_scope(self, name: str) -> bool:
+        """Check if variable is declared in the current scope"""
+        return self._var_registry.is_declared_in_current_scope(name)
+
+    def get_all_in_current_scope(self) -> List[Any]:
+        """Get all variables in the current scope"""
+        return self._var_registry.get_all_in_current_scope()
+
+    @property
+    def scopes(self):
+        """Access underlying scope stack (for debug logging)"""
+        return self._var_registry.scopes
+
+    def get_all_visible(self) -> Dict[str, Any]:
+        """Get all currently visible variables (from all scopes)"""
+        return self._var_registry.get_all_visible()
+
     def scope(self, scope_type: ScopeType, cf: Any = None,
               continue_target: Any = None, break_target: Any = None,
               node: Optional[ast.AST] = None):

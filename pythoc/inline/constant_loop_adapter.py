@@ -196,7 +196,7 @@ class ConstantLoopAdapter:
                 source="const_loop_iter_val",
                 is_parameter=False
             )
-            self.visitor.ctx.var_registry.declare(var_info, allow_shadow=True)
+            self.visitor.scope_manager.declare_variable(var_info, allow_shadow=True)
             
             iter_vars[i] = var_name
         
