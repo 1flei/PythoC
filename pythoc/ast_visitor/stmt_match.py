@@ -246,7 +246,8 @@ class MatchStatementMixin:
             # Check if this is a wildcard (default case) without guard
             if isinstance(pattern, ast.MatchAs) and pattern.pattern is None and case.guard is None:
                 # Wildcard always matches - execute body directly
-                self._visit_stmt_list(case.body, add_to_cfg=True)
+                with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                    self._visit_stmt_list(case.body, add_to_cfg=True)
                 if not cf.is_terminated():
                     cf.branch(merge_block)
                 break
@@ -277,14 +278,15 @@ class MatchStatementMixin:
                     # Bind pattern variables (needed for guard evaluation)
                     for var_name, var_value in bindings:
                         self._bind_match_variable(var_name, var_value)
-                    
+
                     # Evaluate guard
                     guard_result = self.visit_expression(case.guard)
-                    
+
                     # Use process_condition for guard check
                     def guard_then():
                         # Execute case body
-                        self._visit_stmt_list(case.body, add_to_cfg=True)
+                        with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                            self._visit_stmt_list(case.body, add_to_cfg=True)
                         # Branch to merge
                         if not cf.is_terminated():
                             cf.branch(merge_block)
@@ -312,7 +314,8 @@ class MatchStatementMixin:
                     for var_name, var_value in bindings:
                         self._bind_match_variable(var_name, var_value)
                     # Execute case body
-                    self._visit_stmt_list(case.body, add_to_cfg=True)
+                    with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                        self._visit_stmt_list(case.body, add_to_cfg=True)
                     # Branch to merge
                     if not cf.is_terminated():
                         cf.branch(merge_block)

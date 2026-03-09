@@ -26,25 +26,28 @@ from ..logger import logger
 @dataclass
 class LabelContext:
     """Context for a scoped label
-    
+
     Key insight from design doc:
     - begin is at the 'with' statement level (visible to siblings)
     - end is inside the body (only visible from inside)
-    
+
     Attributes:
         name: Label name (unique within function)
-        scope_depth: Scope depth INSIDE the label body
         parent_scope_depth: Scope depth at the 'with' statement level
         begin_block: IR block for goto target
         end_block: IR block for goto_end target
         node: Original AST node for error reporting
     """
     name: str
-    scope_depth: int           # Inside scope (after entering)
     parent_scope_depth: int    # Outside scope (at 'with' level)
     begin_block: object        # IR block
     end_block: object          # IR block
     node: ast.AST              # Original AST node for error reporting
+
+    @property
+    def scope_depth(self) -> int:
+        """Inside scope depth (after entering) — always parent + 1"""
+        return self.parent_scope_depth + 1
 
 
 @dataclass
@@ -78,61 +81,18 @@ class PendingGoto:
 
 
 def _find_label_for_begin(visitor, label_name: str) -> Optional[LabelContext]:
-    """Find label for goto. Checks ancestors and siblings/uncles.
-    
-    goto can target:
-    - Self (inside the label)
-    - Ancestors (containing labels)
-    - Siblings (labels at same parent_depth)
-    - Uncles (ancestor's siblings)
-    
-    Returns:
-        LabelContext if found and visible, None otherwise
-    """
-    # 1. Check ancestor chain (including self)
-    for ctx in visitor._scoped_label_stack:
-        if ctx.name == label_name:
-            return ctx
-    
-    # 2. Check siblings and uncles
-    # Siblings/uncles are labels whose parent_depth is in our ancestor chain
-    # or at function level (depth 0)
-    ancestor_depths = {0}  # Function level always included
-    for ctx in visitor._scoped_label_stack:
-        ancestor_depths.add(ctx.parent_scope_depth)
-    
-    for depth in ancestor_depths:
-        if depth in visitor._scope_labels:
-            for ctx in visitor._scope_labels[depth]:
-                if ctx.name == label_name:
-                    return ctx
-    
-    return None
+    """Find label for goto. Delegates to scope_manager."""
+    return visitor.scope_manager.find_label(label_name)
 
 
 def _find_label_for_end(visitor, label_name: str) -> Optional[LabelContext]:
-    """Find label for goto_end. Only checks ancestors (must be inside target).
-    
-    goto_end can ONLY target:
-    - Self (inside the label)
-    - Ancestors (containing labels)
-    
-    This is because X.end is inside X's body, so only X's interior can see it.
-    
-    Returns:
-        LabelContext if found in ancestor chain, None otherwise
-    """
-    # Only check ancestor chain (including self)
-    for ctx in visitor._scoped_label_stack:
-        if ctx.name == label_name:
-            return ctx
-    
-    return None
+    """Find label for goto_end. Delegates to scope_manager."""
+    return visitor.scope_manager.find_label_for_end(label_name)
 
 
 def _is_ancestor_label(visitor, ctx: LabelContext) -> bool:
-    """Check if a label is in the current ancestor chain"""
-    return ctx in visitor._scoped_label_stack
+    """Check if a label is in the current ancestor chain. Delegates to scope_manager."""
+    return visitor.scope_manager.is_ancestor_label(ctx)
 
 
 def _check_sibling_crossing(visitor, target_ctx: LabelContext, node: ast.AST):
@@ -157,10 +117,6 @@ def _check_sibling_crossing(visitor, target_ctx: LabelContext, node: ast.AST):
     # Since this requires significant AST analysis infrastructure,
     # we defer this to a future enhancement.
     pass
-
-
-# REMOVED: _simulate_defer_linear_consumption - old snapshot system
-# Now we emit LinearTransition events directly to CFG
 
 
 def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end: bool, is_ancestor: bool):
@@ -195,10 +151,7 @@ def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end:
                 f"is_goto_end={is_goto_end}, is_ancestor={is_ancestor}")
     
     # Use ScopeManager to emit defers for scopes being exited
-    if hasattr(visitor, 'scope_manager'):
-        visitor.scope_manager.exit_scopes_to(target_parent, visitor._get_cf_builder())
-    else:
-        logger.error("_emit_defers_for_scoped_goto: visitor has no scope_manager", node=None)
+    visitor.scope_manager.exit_scopes_to(target_parent, visitor._get_cf_builder())
 
 
 class label(BuiltinFunction):
@@ -262,35 +215,28 @@ class label(BuiltinFunction):
         cf = visitor._get_cf_builder()
 
         # Check for duplicate label name in function
-        if label_name in visitor._all_labels:
+        if label_name in visitor.scope_manager._all_labels:
             logger.error(f"Label '{label_name}' already defined in this function",
                         node=node, exc_type=SyntaxError)
-        
+
         # Create begin and end blocks
         begin_block = cf.create_block(f"label_{label_name}_begin")
         end_block = cf.create_block(f"label_{label_name}_end")
-        
+
         # Create label context
         # parent_scope_depth is current depth (at 'with' level)
-        # scope_depth is parent + 1 (inside body, after visit_With increments)
+        # scope_depth is derived as parent + 1 (inside body)
         parent_depth = visitor.scope_manager.current_depth
         ctx = LabelContext(
             name=label_name,
-            scope_depth=parent_depth + 1,  # Inside scope (after increment)
             parent_scope_depth=parent_depth,  # At 'with' level
             begin_block=begin_block,
             end_block=end_block,
             node=node
         )
-        
-        # Register in all tracking structures
-        visitor._scoped_label_stack.append(ctx)
-        visitor._all_labels[label_name] = ctx
-        
-        # Register in scope_labels for sibling/uncle lookup
-        if parent_depth not in visitor._scope_labels:
-            visitor._scope_labels[parent_depth] = []
-        visitor._scope_labels[parent_depth].append(ctx)
+
+        # Register in all tracking structures via scope_manager
+        visitor.scope_manager.register_label(ctx)
         
         # Branch to begin block
         if not cf.is_terminated():
@@ -308,87 +254,10 @@ class label(BuiltinFunction):
     @classmethod
     def _resolve_pending_gotos(cls, visitor, ctx: LabelContext):
         """Resolve pending forward goto references to this label.
-        
-        Note: Some defers may have already been emitted by scope_manager.exit_scope()
-        as scopes exited. We only emit defers that haven't been emitted yet
-        (those with depth <= pending.emitted_to_depth and depth > target_parent).
+
+        Delegates to scope_manager which owns the pending goto state.
         """
-        from .defer import _execute_single_defer
-        
-        cf = visitor._get_cf_builder()
-        label_name = ctx.name
-        target_parent = ctx.parent_scope_depth
-        
-        resolved = []
-        
-        for pending in visitor._pending_scoped_gotos:
-            if pending.label_name != label_name:
-                continue
-            
-            if pending.is_goto_end:
-                # goto_end forward reference - should not happen for sibling jumps
-                # (goto_end can only target ancestors, which are always backward refs)
-                logger.error(f"Internal error: forward goto_end to '{label_name}'",
-                            node=pending.node, exc_type=RuntimeError)
-                continue
-            
-            # Save current position
-            saved_block = visitor.builder.block
-            saved_cfg_block_id = cf._current_block_id
-            
-            # Get CFG block ID first (needed for logging)
-            pending_block_id = cf._get_cfg_block_id(pending.block)
-            
-            # Position at pending block for both IR and CFG
-            # This is CRITICAL: we need to update CFG's _current_block_id so that
-            # linear events from defer execution are added to the correct CFG block
-            cf.position_at_end(pending.block)
-            
-            # Temporarily clear terminated flag so defer can emit IR
-            was_terminated = cf._terminated.get(pending_block_id, False)
-            cf._terminated[pending_block_id] = False
-            
-            # Execute defers that haven't been emitted yet:
-            # - depth <= emitted_to_depth (already emitted by scope exits)
-            # - depth > target_parent (need to exit these scopes)
-            # So we emit defers where: target_parent < depth <= emitted_to_depth
-            # Wait, that's wrong. emitted_to_depth tracks what we've already emitted.
-            # We need to emit defers where: target_parent < depth < emitted_to_depth
-            # Because scope_manager emits defers for depth == current_scope.depth,
-            # and updates emitted_to_depth to current_scope.depth.
-            defers_to_execute = [
-                (callable_obj, func_ref, args, defer_node)
-                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
-                if target_parent < depth < pending.emitted_to_depth
-            ]
-            logger.debug(f"Resolving forward goto '{pending.label_name}': executing {len(defers_to_execute)} defers "
-                        f"(goto_scope={pending.goto_scope_depth}, target_parent={target_parent}, "
-                        f"emitted_to_depth={pending.emitted_to_depth})")
-            
-            # Emit defers
-            for callable_obj, func_ref, args, defer_node in defers_to_execute:
-                _execute_single_defer(visitor, callable_obj, func_ref, args, defer_node)
-            
-            # Generate the branch instruction
-            visitor.builder.branch(ctx.begin_block)
-            
-            # Restore terminated flag
-            cf._terminated[pending_block_id] = was_terminated
-            
-            # Restore position for both IR and CFG
-            cf._current_block_id = saved_cfg_block_id
-            visitor.builder.position_at_end(saved_block)
-            
-            # Add CFG edge for the goto
-            begin_block_id = cf._get_cfg_block_id(ctx.begin_block)
-            cf.cfg.add_edge(pending_block_id, begin_block_id, kind='goto')
-            
-            resolved.append(pending)
-        
-        # Remove resolved gotos
-        for item in resolved:
-            visitor._pending_scoped_gotos.remove(item)
-        
+        visitor.scope_manager.resolve_pending_gotos_for_label(ctx)
         return ctx
     
     @classmethod
@@ -414,9 +283,8 @@ class label(BuiltinFunction):
             # Branch to end block (this terminates the block)
             cf.branch(ctx.end_block)
         
-        # Pop from label stack (but keep in _all_labels and _scope_labels for sibling access)
-        if visitor._scoped_label_stack and visitor._scoped_label_stack[-1].name == ctx.name:
-            visitor._scoped_label_stack.pop()
+        # Pop from label stack via scope_manager (keeps in _all_labels and _scope_labels for sibling access)
+        visitor.scope_manager.unregister_label(ctx)
         
         # NOTE: position_at_end is done by caller AFTER scope_manager exits
         logger.debug(f"Exited label scope '{ctx.name}'")
@@ -514,21 +382,7 @@ class goto(BuiltinFunction):
             goto_scope_depth = visitor.scope_manager.current_depth
             
             # Capture defer snapshot for later execution via ScopeManager
-            defer_snapshot = []
-            if not hasattr(visitor, 'scope_manager') or not visitor.scope_manager._scopes:
-                logger.error("Forward goto: visitor has no scope_manager", node=node)
-            else:
-                # Capture from ScopeManager
-                for scope in visitor.scope_manager._scopes:
-                    if scope.depth <= goto_scope_depth:
-                        for defer_info in scope.defers:
-                            defer_snapshot.append((
-                                scope.depth,
-                                defer_info.callable_obj,
-                                defer_info.func_ref,
-                                defer_info.args,
-                                defer_info.node
-                            ))
+            defer_snapshot = visitor.scope_manager.capture_defer_snapshot()
             
             logger.debug(f"Forward goto to '{label_name}': captured {len(defer_snapshot)} defers at scope {goto_scope_depth}")
             
@@ -541,7 +395,7 @@ class goto(BuiltinFunction):
                 node=node,
                 is_goto_end=False
             )
-            visitor._pending_scoped_gotos.append(pending)
+            visitor.scope_manager.add_pending_goto(pending)
             
             # Mark current block as terminated in CFG (forward goto exits the block)
             current_block_id = cf._get_cfg_block_id(current_block)
@@ -636,27 +490,15 @@ class goto_end(BuiltinFunction):
 
 def reset_label_tracking(visitor):
     """Reset label tracking at the start of each function.
-    
-    Called by the visitor when entering a new function.
+
+    Delegates to scope_manager as the single source of truth.
     """
-    visitor._scoped_label_stack = []
-    visitor._scope_labels = {}
-    visitor._all_labels = {}
-    visitor._pending_scoped_gotos = []
+    visitor.scope_manager.reset_label_tracking()
 
 
 def check_scoped_goto_consistency(visitor, func_node):
     """Check that all scoped gotos have been resolved.
-    
-    Called at the end of function compilation.
-    
-    Args:
-        visitor: The visitor instance
-        func_node: The function AST node (for error location)
+
+    Delegates to scope_manager as the single source of truth.
     """
-    # Check for unresolved forward gotos
-    if visitor._pending_scoped_gotos:
-        for pending in visitor._pending_scoped_gotos:
-            goto_type = "goto_end" if pending.is_goto_end else "goto"
-            logger.error(f"Undefined label '{pending.label_name}' in {goto_type} statement",
-                        node=pending.node, exc_type=SyntaxError)
+    visitor.scope_manager.check_goto_consistency(func_node)
