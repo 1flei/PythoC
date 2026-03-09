@@ -202,54 +202,31 @@ class StructInfo:
         return False
 
 
-class ScopeContext:
-    """Context manager for automatic scope management
-    
-    Usage:
-        with var_registry.scope():
-            # Declare variables in new scope
-            ...
-        # Scope automatically exits here
-    """
-    
-    def __init__(self, registry: 'VariableRegistry'):
-        self.registry = registry
-        self.exited_vars: Optional[Dict[str, VariableInfo]] = None
-    
-    def __enter__(self):
-        self.registry.enter_scope()
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.exited_vars = self.registry.exit_scope()
-        return False
-
-
 class VariableRegistry:
     """Scope-aware variable registry
-    
+
     Manages variables with proper scope handling, supporting nested scopes,
     variable shadowing, and type inference integration.
     """
-    
+
     def __init__(self):
         # Scope stack: each scope is a dict of variable name -> VariableInfo
         self.scopes: List[Dict[str, VariableInfo]] = [{}]
-        
+
         # Global variables (module-level)
         self.global_vars: Dict[str, VariableInfo] = {}
-        
+
         # Type inference context (optional integration)
         self.type_inference_ctx: Optional[Any] = None
-        
+
         # Current scope level
         self._scope_level = 0
-    
+
     def enter_scope(self):
         """Enter a new scope (function, block, etc.)"""
         self.scopes.append({})
         self._scope_level += 1
-    
+
     def exit_scope(self) -> Dict[str, VariableInfo]:
         """Exit current scope and return variables in that scope"""
         if len(self.scopes) > 1:
@@ -257,33 +234,19 @@ class VariableRegistry:
             self._scope_level -= 1
             return scope_vars
         return {}
-    
-    def scope(self) -> ScopeContext:
-        """Create a scope context manager for automatic scope management
-        
-        Usage:
-            with var_registry.scope():
-                var_registry.declare(VariableInfo(...))
-                # Variables declared here
-            # Scope automatically exits
-        
-        Returns:
-            ScopeContext that handles enter/exit
-        """
-        return ScopeContext(self)
-    
+
     def declare(self, var_info: VariableInfo, allow_shadow: bool = False):
         """Declare a variable in the current scope
-        
+
         Args:
             var_info: Variable information
             allow_shadow: If True, allow shadowing variables from outer scopes
-        
+
         Raises:
             NameError: If variable already exists in current scope
         """
         current_scope = self.scopes[-1]
-        
+
         # Check if already declared in current scope
         if var_info.name in current_scope and not allow_shadow:
             existing = current_scope[var_info.name]
@@ -291,20 +254,20 @@ class VariableRegistry:
                 f"Variable '{var_info.name}' already declared in this scope "
                 f"(line {existing.line_number})"
             )
-        
+
         # Set scope level
         var_info.scope_level = self._scope_level
-        
+
         # Add to current scope
         current_scope[var_info.name] = var_info
-        
+
         # Sync with type inference context if available
         if self.type_inference_ctx and var_info.type_hint:
             self.type_inference_ctx.set_var_type(var_info.name, var_info.type_hint)
-    
+
     def lookup(self, name: str) -> Optional[VariableInfo]:
         """Look up a variable in the scope chain
-        
+
         Searches from innermost to outermost scope.
         Returns None if variable is not found (caller will try other namespaces).
         """
@@ -312,92 +275,41 @@ class VariableRegistry:
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
-        
+
         # Check global variables
         if name in self.global_vars:
             return self.global_vars[name]
-        
+
         # Variable not found - return None (caller will check other namespaces)
         return None
-    
-    def update_type(self, name: str, new_type_hint: Any):
-        """Update the type of an existing variable"""
-        var_info = self.lookup(name)
-        if var_info:
-            var_info.type_hint = new_type_hint
-            if self.type_inference_ctx:
-                self.type_inference_ctx.set_var_type(name, new_type_hint)
-    
-    def list_current_scope(self) -> Dict[str, VariableInfo]:
-        """List all variables in the current scope"""
-        return self.scopes[-1].copy()
-    
-    def list_all_visible(self) -> Dict[str, VariableInfo]:
-        """List all variables visible in current scope"""
-        result = {}
-        # Start from global, then add each scope (inner scopes override)
-        result.update(self.global_vars)
-        for scope in self.scopes:
-            result.update(scope)
-        return result
-    
+
     def is_declared_in_current_scope(self, name: str) -> bool:
         """Check if variable is declared in the current scope"""
         return name in self.scopes[-1]
-    
+
     def get_all_in_current_scope(self) -> List[VariableInfo]:
         """Get all variables in the current scope"""
         return list(self.scopes[-1].values())
-    
-    def get_type_hint(self, name: str) -> Optional[Any]:
-        """Get type hint of a variable"""
-        var_info = self.lookup(name)
-        return var_info.type_hint if var_info else None
-    
-    def get_llvm_type(self, name: str) -> Optional[ir.Type]:
-        """Get LLVM type of a variable (pointee type of alloca)"""
-        var_info = self.lookup(name)
-        if var_info and var_info.alloca:
-            return var_info.alloca.type.pointee
-        return None
-    
-    def get_alloca(self, name: str) -> Optional[ir.AllocaInstr]:
-        """Get alloca instruction for a variable"""
-        var_info = self.lookup(name)
-        return var_info.alloca if var_info else None
-    
-    def get_all_in_scope(self, scope_level: Optional[int] = None) -> Dict[str, VariableInfo]:
-        """Get all variables in a specific scope level
-        
-        Args:
-            scope_level: Scope level to query (None = current scope)
-        """
-        if scope_level is None:
-            scope_level = self._scope_level
-        
-        if 0 <= scope_level < len(self.scopes):
-            return self.scopes[scope_level].copy()
-        return {}
-    
+
     def get_all_visible(self) -> Dict[str, VariableInfo]:
         """Get all currently visible variables (from all scopes)"""
         visible = {}
-        
+
         # Add globals first
         visible.update(self.global_vars)
-        
+
         # Add from outer to inner scopes (inner shadows outer)
         for scope in self.scopes:
             visible.update(scope)
-        
+
         return visible
-    
+
     def clear(self):
         """Clear all scopes (useful for testing)"""
         self.scopes = [{}]
         self.global_vars.clear()
         self._scope_level = 0
-    
+
     def __repr__(self) -> str:
         return f"VariableRegistry(scopes={len(self.scopes)}, level={self._scope_level})"
 
@@ -410,10 +322,6 @@ class UnifiedCompilationRegistry:
     """
     
     def __init__(self):
-        # ===== Variable Registry =====
-        # Per-compiler variable registry (each compiler has its own scope)
-        self._variable_registries: Dict[str, VariableRegistry] = {}
-
         # ===== Source Code Registry =====
         # Source files: source_file -> full source code
         self._source_files: Dict[str, str] = {}
@@ -444,26 +352,6 @@ class UnifiedCompilationRegistry:
         # Object files to link (from cimport compiled sources)
         self._link_objects: Set[str] = set()
     
-    # ========== Variable Registry Methods ==========
-    
-    def get_variable_registry(self, compiler_id: str = "default") -> VariableRegistry:
-        """Get or create a variable registry for a compiler instance
-        
-        Args:
-            compiler_id: Identifier for the compiler (usually source file path)
-        
-        Returns:
-            VariableRegistry instance
-        """
-        if compiler_id not in self._variable_registries:
-            self._variable_registries[compiler_id] = VariableRegistry()
-        return self._variable_registries[compiler_id]
-    
-    def clear_variable_registry(self, compiler_id: str = "default"):
-        """Clear variable registry for a specific compiler"""
-        if compiler_id in self._variable_registries:
-            self._variable_registries[compiler_id].clear()
-
     # ========== Source Code Methods ==========
     
     def register_source_file(self, source_file: str, source_code: str):
@@ -735,7 +623,6 @@ class UnifiedCompilationRegistry:
 
     def clear_all(self):
         """Clear all registries (useful for testing)"""
-        self._variable_registries.clear()
         self._source_files.clear()
         self._function_sources.clear()
         self._compilers.clear()
@@ -750,14 +637,6 @@ class UnifiedCompilationRegistry:
         print("=" * 60)
         print("UNIFIED COMPILATION REGISTRY STATE")
         print("=" * 60)
-
-        print(f"\n[Variables] {len(self._variable_registries)} registries")
-        for compiler_id, var_reg in self._variable_registries.items():
-            visible = var_reg.list_all_visible()
-            print(f"  {compiler_id}: {len(visible)} variables")
-            if verbose:
-                for name, info in visible.items():
-                    print(f"    - {name}: {info.type_hint}")
 
         print(f"\n[Source Files] {len(self._source_files)}")
         for source_file in self._source_files.keys():

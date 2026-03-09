@@ -29,7 +29,7 @@ import copy
 from .graph import CFG, CFGBlock, CFGEdge
 
 if TYPE_CHECKING:
-    from ..registry import VariableRegistry, VariableInfo
+    from ..registry import VariableInfo
 
 
 # =============================================================================
@@ -237,19 +237,15 @@ class LinearChecker:
     3. At function exit, all linear tokens must be consumed
     
     Usage:
-        checker = LinearChecker(var_registry)
+        checker = LinearChecker()
         errors = checker.check(cfg, initial_snapshot)
         if errors:
             for err in errors:
                 print(err.format())
     """
-    
-    def __init__(self, var_registry: "VariableRegistry"):
-        """Initialize the linear checker
-        
-        Args:
-            var_registry: Variable registry for looking up variable info
-        """
+
+    def __init__(self):
+        """Initialize the linear checker"""
         self.errors: List[LinearError] = []
         
         # Mapping from var_id to (var_name, line_number) for error reporting
@@ -755,21 +751,19 @@ class LinearChecker:
 
 def check_linear_types_on_cfg(
     cfg: CFG,
-    var_registry: "VariableRegistry",
     initial_snapshot: Optional[LinearSnapshot] = None
 ) -> List[LinearError]:
     """Convenience function to run linear type checking on CFG
-    
+
     Args:
         cfg: The control flow graph
-        var_registry: Variable registry
         initial_snapshot: Optional initial snapshot (defaults to capturing current state)
-        
+
     Returns:
         List of linear type errors
     """
     if initial_snapshot is None:
         initial_snapshot = {}
-    
-    checker = LinearChecker(var_registry)
+
+    checker = LinearChecker()
     return checker.check(cfg, initial_snapshot)
