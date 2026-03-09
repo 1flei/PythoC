@@ -187,7 +187,7 @@ def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end:
         is_goto_end: True if this is goto_end, False if goto
         is_ancestor: True if target is in ancestor chain (self or containing label)
     """
-    current_scope = visitor.scope_depth
+    current_scope = visitor.scope_manager.current_depth
     target_parent = target_ctx.parent_scope_depth
     
     logger.debug(f"_emit_defers_for_scoped_goto: current={current_scope}, "
@@ -273,7 +273,7 @@ class label(BuiltinFunction):
         # Create label context
         # parent_scope_depth is current depth (at 'with' level)
         # scope_depth is parent + 1 (inside body, after visit_With increments)
-        parent_depth = visitor.scope_depth
+        parent_depth = visitor.scope_manager.current_depth
         ctx = LabelContext(
             name=label_name,
             scope_depth=parent_depth + 1,  # Inside scope (after increment)
@@ -408,7 +408,7 @@ class label(BuiltinFunction):
             # Emit defers for this scope
             if hasattr(visitor, 'scope_manager'):
                 for scope in visitor.scope_manager._scopes:
-                    if scope.depth == visitor.scope_depth:
+                    if scope.depth == visitor.scope_manager.current_depth:
                         visitor.scope_manager._emit_defers_for_scope(scope)
                         break
             # Branch to end block (this terminates the block)
@@ -511,7 +511,7 @@ class goto(BuiltinFunction):
             # Forward reference: label not yet defined
             # Capture current state for later resolution
             current_block = visitor.builder.block
-            goto_scope_depth = visitor.scope_depth
+            goto_scope_depth = visitor.scope_manager.current_depth
             
             # Capture defer snapshot for later execution via ScopeManager
             defer_snapshot = []

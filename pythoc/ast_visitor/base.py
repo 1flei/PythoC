@@ -83,19 +83,13 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # Unified scope manager for defer, linear types, and variable lifetime
         self.scope_manager = self.ctx.scope_manager
         self.scope_manager.set_visitor(self)
-        
-        # Linear type tracking - now integrated with VariableInfo
-        # TODO: scope_depth will be replaced by scope_manager.current_depth
-        self.scope_depth = 0  # Track scope depth for loop restrictions
-        
+
         # Backward compatibility aliases
         self.current_function = None
         self.label_counter = 0
         self.struct_types = self.ctx.struct_types
         self.source_globals = self.ctx.source_globals
         self.compiler = compiler
-        self.loop_stack = self.ctx.loop_stack
-        self.loop_scope_stack = self.ctx.loop_scope_stack
     
     @property
     def backend(self) -> Optional["AbstractBackend"]:
