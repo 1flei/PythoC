@@ -155,31 +155,24 @@ class ControlFlowMixin:
 
     def visit_Break(self, node: ast.Break):
         """Handle break statements
-        
+
         Deferred calls for all scopes from current down to loop scope are executed.
         """
-        if not self.loop_stack:
+        if not self.scope_manager.is_in_loop():
             logger.error("'break' outside loop", node=node, exc_type=SyntaxError)
-        
+
         cf = self._get_cf_builder()
         if not cf.is_terminated():
-            # Get loop scope depth from scope_manager or legacy loop_scope_stack
             loop_scope_depth = self.scope_manager.get_loop_scope_depth()
-            if loop_scope_depth is None:
-                # Fallback to legacy
-                loop_scope_depth = self.loop_scope_stack[-1] if self.loop_scope_stack else self.scope_depth
-            
+
             logger.debug(f"Break: current scope={self.scope_manager.current_depth}, loop scope={loop_scope_depth}")
-            
+
             # Emit deferred calls from current scope down to loop scope (inclusive)
             self._emit_deferred_calls_down_to_scope(loop_scope_depth)
-            
-            # Get the break target from scope_manager or legacy loop_stack
+
+            # Get the break target from scope_manager
             _, break_block = self.scope_manager.get_loop_targets()
-            if break_block is None:
-                # Fallback to legacy
-                _, break_block = self.loop_stack[-1]
-            
+
             # Add break edge to CFG and generate IR
             cf.branch(break_block)
             # Update the edge kind to 'break'
@@ -190,29 +183,22 @@ class ControlFlowMixin:
 
     def visit_Continue(self, node: ast.Continue):
         """Handle continue statements
-        
+
         Deferred calls for all scopes from current down to loop scope are executed.
         """
-        if not self.loop_stack:
+        if not self.scope_manager.is_in_loop():
             logger.error("'continue' outside loop", node=node, exc_type=SyntaxError)
-        
+
         cf = self._get_cf_builder()
         if not cf.is_terminated():
-            # Get loop scope depth from scope_manager or legacy loop_scope_stack
             loop_scope_depth = self.scope_manager.get_loop_scope_depth()
-            if loop_scope_depth is None:
-                # Fallback to legacy
-                loop_scope_depth = self.loop_scope_stack[-1] if self.loop_scope_stack else self.scope_depth
-            
+
             # Emit deferred calls from current scope down to loop scope (inclusive)
             self._emit_deferred_calls_down_to_scope(loop_scope_depth)
-            
-            # Get the continue target from scope_manager or legacy loop_stack
+
+            # Get the continue target from scope_manager
             continue_block, _ = self.scope_manager.get_loop_targets()
-            if continue_block is None:
-                # Fallback to legacy
-                continue_block, _ = self.loop_stack[-1]
-            
+
             # Add continue edge to CFG and generate IR
             cf.branch(continue_block)
             # Update the edge kind to 'continue'
@@ -279,9 +265,6 @@ class ControlFlowMixin:
         # Use ScopeManager for the label body
         with self.scope_manager.scope(ScopeType.LABEL, self._get_cf_builder(),
                                        node=node) as scope:
-            # Keep legacy scope_depth in sync
-            self.scope_depth = self.scope_manager.current_depth
-            
             try:
                 # Visit body statements (don't add to CFG, label body is special)
                 self._visit_stmt_list(node.body, add_to_cfg=False)
@@ -289,11 +272,8 @@ class ControlFlowMixin:
                 # Exit label scope (branches to end block, pops label stack)
                 # NOTE: Does NOT position_at_end - that's done after scope_manager exits
                 LabelClass.exit_label_scope(self, ctx)
-        
+
         # Position at end block AFTER scope_manager.exit_scope()
         # This ensures is_terminated() check in exit_scope works correctly
         cf = self._get_cf_builder()
         cf.position_at_end(ctx.end_block)
-        
-        # Restore scope_depth after exiting scope
-        self.scope_depth = self.scope_manager.current_depth

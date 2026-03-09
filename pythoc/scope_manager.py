@@ -73,28 +73,19 @@ class Scope:
 
 
 class ScopeManager:
-    """Unified scope manager for variables, defers
-    
+    """Unified scope manager for variables, defers, and loop context
+
     This replaces the separate mechanisms:
     - var_registry.enter_scope() / exit_scope()
     - scope_depth tracking
     - _defer_stack management
-    - loop_scope_stack
-    
+    - loop_stack / loop_scope_stack
+
     Usage:
         with scope_manager.scope(ScopeType.IF) as scope:
             # Variables, defers automatically managed
             ...
         # Defers executed, scope cleaned up
-    
-    Or manually:
-        scope = scope_manager.enter_scope(ScopeType.LOOP)
-        scope.continue_target = header_block
-        scope.break_target = exit_block
-        try:
-            # ... loop body ...
-        finally:
-            scope_manager.exit_scope(cf)
     """
     
     def __init__(self):

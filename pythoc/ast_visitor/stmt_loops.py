@@ -130,52 +130,24 @@ class LoopsMixin:
         
         # Use ScopeManager for unified scope/defer management
         # Enter LOOP scope with continue -> loop_body_start, break -> loop_exit
-        with self.scope_manager.scope(ScopeType.LOOP, cf, 
-                                       continue_target=loop_body_start, 
+        with self.scope_manager.scope(ScopeType.LOOP, cf,
+                                       continue_target=loop_body_start,
                                        break_target=loop_exit,
                                        node=node) as scope:
-            # Keep legacy scope_depth in sync
-            self.scope_depth = self.scope_manager.current_depth
-            
-            # Push to legacy loop_stack for backward compatibility
-            # TODO: Remove once all code uses scope_manager
-            self.loop_stack.append((loop_body_start, loop_exit))
-            self.loop_scope_stack.append(self.scope_depth)
-            
-            try:
-                # Execute loop body
-                self._visit_stmt_list(node.body, add_to_cfg=True)
-                
-                # DISABLED: Linear check for while True - CFG checker handles this
-                # # Check linear tokens in current scope
-                # for var_info in self.ctx.var_registry.get_all_in_current_scope():
-                #     if var_info.linear_state is not None and var_info.linear_scope_depth == self.scope_depth:
-                #         if var_info.linear_state != 'consumed':
-                #             actual_line = self._get_actual_line_number(var_info.line_number)
-                #             logger.error(
-                #                 f"Linear token '{var_info.name}' not consumed in while True body "
-                #                 f"(declared at line {actual_line})", node
-                #             )
-                #         var_info.linear_state = None
-                
-                # Defers are automatically emitted by scope_manager.exit_scope()
-                # But for loop back, we need to emit manually before the branch
-                if not cf.is_terminated():
-                    # Emit defers for this iteration before looping back
-                    self.scope_manager._emit_defers_for_scope(scope)
-                
-                # If body can fall through, it's an infinite loop - loop back
-                if not cf.is_terminated():
-                    cf.branch(loop_body_start)
-                    cf.mark_loop_back(loop_body_start)
-            finally:
-                # Pop legacy loop context
-                self.loop_stack.pop()
-                self.loop_scope_stack.pop()
-        
-        # Restore scope_depth after exiting scope
-        self.scope_depth = self.scope_manager.current_depth
-        
+            # Execute loop body
+            self._visit_stmt_list(node.body, add_to_cfg=True)
+
+            # Defers are automatically emitted by scope_manager.exit_scope()
+            # But for loop back, we need to emit manually before the branch
+            if not cf.is_terminated():
+                # Emit defers for this iteration before looping back
+                self.scope_manager._emit_defers_for_scope(scope)
+
+            # If body can fall through, it's an infinite loop - loop back
+            if not cf.is_terminated():
+                cf.branch(loop_body_start)
+                cf.mark_loop_back(loop_body_start)
+
         # Position at exit block
         cf.position_at_end(loop_exit)
         
@@ -229,29 +201,14 @@ class LoopsMixin:
                                        continue_target=loop_header,
                                        break_target=loop_exit,
                                        node=node) as scope:
-            # Keep legacy scope_depth in sync
-            self.scope_depth = self.scope_manager.current_depth
-            
-            # Push to legacy loop_stack for backward compatibility
-            self.loop_stack.append((loop_header, loop_exit))
-            self.loop_scope_stack.append(self.scope_depth)
-            
-            try:
-                # Execute loop body statements
-                self._visit_stmt_list(node.body, add_to_cfg=True)
-                
-                # Note: Linear token checking is done by CFG linear checker
-                # at function end, NOT here. The defer execution in scope exit
-                # will consume linear tokens, and CFG checker will verify
-                # all paths have consistent linear states.
-            finally:
-                # Pop legacy loop context
-                self.loop_stack.pop()
-                self.loop_scope_stack.pop()
-        
-        # Restore scope_depth after exiting scope
-        self.scope_depth = self.scope_manager.current_depth
-        
+            # Execute loop body statements
+            self._visit_stmt_list(node.body, add_to_cfg=True)
+
+            # Note: Linear token checking is done by CFG linear checker
+            # at function end, NOT here. The defer execution in scope exit
+            # will consume linear tokens, and CFG checker will verify
+            # all paths have consistent linear states.
+
         # Jump back to header (if not terminated by return/break)
         if not cf.is_terminated():
             cf.branch(loop_header)

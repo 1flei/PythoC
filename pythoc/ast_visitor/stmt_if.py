@@ -119,13 +119,8 @@ class IfStatementMixin:
             def execute_stmts():
                 # Use unified ScopeManager for scope/defer management
                 with self.scope_manager.scope(ScopeType.IF, cf, node=node) as scope:
-                    # Keep scope_depth in sync for backward compatibility
-                    # TODO: Remove this once all code uses scope_manager.current_depth
-                    self.scope_depth = self.scope_manager.current_depth
                     self._visit_stmt_list(branch, add_to_cfg=True)
                     # Defers are automatically emitted by scope_manager.exit_scope()
-                # scope_depth restored automatically since scope_manager tracks it
-                self.scope_depth = self.scope_manager.current_depth
             return execute_stmts
             
         condition = self.visit_expression(node.test)
