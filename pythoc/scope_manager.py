@@ -94,6 +94,12 @@ class ScopeManager:
         self._var_registry = VariableRegistry()
         self._scopes: List[Scope] = []
         self._visitor: Optional[Any] = None  # Set by visitor
+
+        # Label tracking state (single source of truth)
+        self._scoped_label_stack: List[Any] = []    # Active labels (nested hierarchy)
+        self._scope_labels: Dict[int, List[Any]] = {}  # parent_depth -> [LabelContext]
+        self._all_labels: Dict[str, Any] = {}        # name -> LabelContext
+        self._pending_scoped_gotos: List[Any] = []   # Forward goto refs
     
     def set_visitor(self, visitor: Any):
         """Set the visitor for defer execution"""
@@ -189,16 +195,15 @@ class ScopeManager:
         """
         if not self._visitor:
             return
-        
-        # Check if visitor has pending gotos
-        if not hasattr(self._visitor, '_pending_scoped_gotos'):
+
+        if not self._pending_scoped_gotos:
             return
-        
+
         from pythoc.builtin_entities.defer import _execute_single_defer
-        
+
         scope_depth = scope.depth
-        
-        for pending in self._visitor._pending_scoped_gotos:
+
+        for pending in self._pending_scoped_gotos:
             # Only process gotos that originate from this scope or deeper
             # If goto_scope_depth >= scope_depth, the goto is from within this scope
             if pending.goto_scope_depth < scope_depth:
@@ -432,6 +437,216 @@ class ScopeManager:
         """
         return _ScopeContext(self, scope_type, cf, continue_target, break_target, node)
     
+    # ========================================================================
+    # Label Tracking Methods
+    # ========================================================================
+
+    def reset_label_tracking(self):
+        """Reset label tracking at the start of each function."""
+        self._scoped_label_stack = []
+        self._scope_labels = {}
+        self._all_labels = {}
+        self._pending_scoped_gotos = []
+
+    def register_label(self, ctx: Any):
+        """Register a label in all tracking structures.
+
+        Args:
+            ctx: LabelContext to register
+        """
+        self._scoped_label_stack.append(ctx)
+        self._all_labels[ctx.name] = ctx
+        parent_depth = ctx.parent_scope_depth
+        if parent_depth not in self._scope_labels:
+            self._scope_labels[parent_depth] = []
+        self._scope_labels[parent_depth].append(ctx)
+
+    def unregister_label(self, ctx: Any):
+        """Pop label from the active label stack.
+
+        Keeps it in _all_labels and _scope_labels for sibling access.
+
+        Args:
+            ctx: LabelContext to unregister
+        """
+        if self._scoped_label_stack and self._scoped_label_stack[-1].name == ctx.name:
+            self._scoped_label_stack.pop()
+
+    def find_label(self, name: str) -> Optional[Any]:
+        """Find label for goto. Checks ancestors and siblings/uncles.
+
+        goto can target:
+        - Self (inside the label)
+        - Ancestors (containing labels)
+        - Siblings (labels at same parent_depth)
+        - Uncles (ancestor's siblings)
+
+        Returns:
+            LabelContext if found and visible, None otherwise
+        """
+        # 1. Check ancestor chain (including self)
+        for ctx in self._scoped_label_stack:
+            if ctx.name == name:
+                return ctx
+
+        # 2. Check siblings and uncles
+        ancestor_depths = {0}  # Function level always included
+        for ctx in self._scoped_label_stack:
+            ancestor_depths.add(ctx.parent_scope_depth)
+
+        for depth in ancestor_depths:
+            if depth in self._scope_labels:
+                for ctx in self._scope_labels[depth]:
+                    if ctx.name == name:
+                        return ctx
+
+        return None
+
+    def find_label_for_end(self, name: str) -> Optional[Any]:
+        """Find label for goto_end. Only checks ancestors (must be inside target).
+
+        goto_end can ONLY target:
+        - Self (inside the label)
+        - Ancestors (containing labels)
+
+        Returns:
+            LabelContext if found in ancestor chain, None otherwise
+        """
+        for ctx in self._scoped_label_stack:
+            if ctx.name == name:
+                return ctx
+        return None
+
+    def is_ancestor_label(self, ctx: Any) -> bool:
+        """Check if a label is in the current ancestor chain"""
+        return ctx in self._scoped_label_stack
+
+    def capture_defer_snapshot(self) -> List:
+        """Capture current defer state for forward goto resolution.
+
+        Returns a list of (depth, callable_obj, func_ref, args, node) tuples
+        representing all defers currently registered across all scopes.
+        """
+        snapshot = []
+        current_depth = self.current_depth
+        for scope in self._scopes:
+            if scope.depth <= current_depth:
+                for defer_info in scope.defers:
+                    snapshot.append((
+                        scope.depth,
+                        defer_info.callable_obj,
+                        defer_info.func_ref,
+                        defer_info.args,
+                        defer_info.node
+                    ))
+        return snapshot
+
+    def resolve_pending_gotos_for_label(self, ctx: Any):
+        """Resolve pending forward goto references when a label is defined.
+
+        When a label is entered, any forward gotos targeting it can now be
+        resolved. This emits remaining defers and generates IR branches.
+
+        Args:
+            ctx: LabelContext being entered
+        """
+        if not self._visitor:
+            return
+
+        from pythoc.builtin_entities.defer import _execute_single_defer
+
+        cf = self._visitor._get_cf_builder()
+        label_name = ctx.name
+        target_parent = ctx.parent_scope_depth
+
+        resolved = []
+
+        for pending in self._pending_scoped_gotos:
+            if pending.label_name != label_name:
+                continue
+
+            if pending.is_goto_end:
+                logger.error(f"Internal error: forward goto_end to '{label_name}'",
+                            node=pending.node, exc_type=RuntimeError)
+                continue
+
+            # Save current position
+            saved_block = self._visitor.builder.block
+            saved_cfg_block_id = cf._current_block_id
+
+            pending_block_id = cf._get_cfg_block_id(pending.block)
+
+            # Position at pending block for both IR and CFG
+            cf.position_at_end(pending.block)
+
+            # Temporarily clear terminated flag so defer can emit IR
+            was_terminated = cf._terminated.get(pending_block_id, False)
+            cf._terminated[pending_block_id] = False
+
+            # Emit defers that haven't been emitted yet:
+            # target_parent < depth < emitted_to_depth
+            defers_to_execute = [
+                (callable_obj, func_ref, args, defer_node)
+                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
+                if target_parent < depth < pending.emitted_to_depth
+            ]
+            logger.debug(f"Resolving forward goto '{pending.label_name}': "
+                        f"executing {len(defers_to_execute)} defers "
+                        f"(goto_scope={pending.goto_scope_depth}, "
+                        f"target_parent={target_parent}, "
+                        f"emitted_to_depth={pending.emitted_to_depth})")
+
+            for callable_obj, func_ref, args, defer_node in defers_to_execute:
+                _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
+
+            # Generate the branch instruction
+            self._visitor.builder.branch(ctx.begin_block)
+
+            # Restore terminated flag
+            cf._terminated[pending_block_id] = was_terminated
+
+            # Restore position for both IR and CFG
+            cf._current_block_id = saved_cfg_block_id
+            self._visitor.builder.position_at_end(saved_block)
+
+            # Add CFG edge for the goto
+            begin_block_id = cf._get_cfg_block_id(ctx.begin_block)
+            cf.cfg.add_edge(pending_block_id, begin_block_id, kind='goto')
+
+            resolved.append(pending)
+
+        for item in resolved:
+            self._pending_scoped_gotos.remove(item)
+
+    def add_pending_goto(self, pending: Any):
+        """Add a pending forward goto reference."""
+        self._pending_scoped_gotos.append(pending)
+
+    def resolve_pending_gotos(self, label_name: str) -> List[Any]:
+        """Get and remove pending gotos for a given label name.
+
+        Returns:
+            List of resolved PendingGoto objects
+        """
+        resolved = [p for p in self._pending_scoped_gotos if p.label_name == label_name]
+        for item in resolved:
+            self._pending_scoped_gotos.remove(item)
+        return resolved
+
+    def check_goto_consistency(self, func_node: Any):
+        """Check that all scoped gotos have been resolved.
+
+        Called at the end of function compilation.
+
+        Args:
+            func_node: The function AST node (for error location)
+        """
+        if self._pending_scoped_gotos:
+            for pending in self._pending_scoped_gotos:
+                goto_type = "goto_end" if pending.is_goto_end else "goto"
+                logger.error(f"Undefined label '{pending.label_name}' in {goto_type} statement",
+                            node=pending.node, exc_type=SyntaxError)
+
     def clear(self):
         """Clear all scopes (for testing or function end)"""
         self._scopes.clear()
