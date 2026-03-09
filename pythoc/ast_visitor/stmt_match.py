@@ -247,6 +247,9 @@ class MatchStatementMixin:
             if isinstance(pattern, ast.MatchAs) and pattern.pattern is None and case.guard is None:
                 # Wildcard always matches - execute body directly
                 with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                    # Bind variable if present (case x:)
+                    if pattern.name is not None:
+                        self._bind_match_variable(pattern.name, subjects[0])
                     self._visit_stmt_list(case.body, add_to_cfg=True)
                 if not cf.is_terminated():
                     cf.branch(merge_block)
@@ -273,30 +276,31 @@ class MatchStatementMixin:
                 # Guarded case: nested process_condition
                 # 1. Check pattern: if matches -> check guard, else -> next case
                 # 2. Check guard: if passes -> execute body, else -> next case
-                
+
                 def pattern_then_with_guard(bindings=bindings, case=case):
-                    # Bind pattern variables (needed for guard evaluation)
-                    for var_name, var_value in bindings:
-                        self._bind_match_variable(var_name, var_value)
+                    # Enter MATCH scope for bindings, guard, and body
+                    with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                        # Bind pattern variables (needed for guard evaluation)
+                        for var_name, var_value in bindings:
+                            self._bind_match_variable(var_name, var_value)
 
-                    # Evaluate guard
-                    guard_result = self.visit_expression(case.guard)
+                        # Evaluate guard
+                        guard_result = self.visit_expression(case.guard)
 
-                    # Use process_condition for guard check
-                    def guard_then():
-                        # Execute case body
-                        with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                        # Use process_condition for guard check
+                        def guard_then():
+                            # Execute case body
                             self._visit_stmt_list(case.body, add_to_cfg=True)
-                        # Branch to merge
-                        if not cf.is_terminated():
-                            cf.branch(merge_block)
-                    
-                    def guard_else():
-                        # Guard failed - go to next case
-                        if not cf.is_terminated():
-                            cf.branch(next_case_block)
-                    
-                    self.process_condition(guard_result, guard_then, guard_else)
+                            # Branch to merge
+                            if not cf.is_terminated():
+                                cf.branch(merge_block)
+
+                        def guard_else():
+                            # Guard failed - go to next case
+                            if not cf.is_terminated():
+                                cf.branch(next_case_block)
+
+                        self.process_condition(guard_result, guard_then, guard_else)
                 
                 def pattern_else():
                     # Pattern failed - go to next case
@@ -310,11 +314,12 @@ class MatchStatementMixin:
                 # No guard - simple pattern match using process_condition
                 
                 def pattern_then(bindings=bindings, case=case):
-                    # Bind pattern variables
-                    for var_name, var_value in bindings:
-                        self._bind_match_variable(var_name, var_value)
-                    # Execute case body
+                    # Enter MATCH scope for bindings and body
                     with self.scope_manager.scope(ScopeType.MATCH, cf, node=case):
+                        # Bind pattern variables
+                        for var_name, var_value in bindings:
+                            self._bind_match_variable(var_name, var_value)
+                        # Execute case body
                         self._visit_stmt_list(case.body, add_to_cfg=True)
                     # Branch to merge
                     if not cf.is_terminated():
