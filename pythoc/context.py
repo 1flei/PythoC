@@ -28,8 +28,7 @@ from .builtin_entities import TYPE_REGISTRY as PC_TYPE_MAP
 
 # Import registry components
 from .registry import (
-    VariableInfo,
-    VariableRegistry
+    VariableInfo
 )
 from .scope_manager import ScopeManager
 

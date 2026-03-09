@@ -36,7 +36,6 @@ from ..logger import logger
 
 if TYPE_CHECKING:
     from .base import LLVMIRVisitor
-    from ..registry import VariableRegistry
 
 
 class ControlFlowBuilder:
@@ -445,7 +444,7 @@ class ControlFlowBuilder:
         if initial_snapshot is None:
             initial_snapshot = {}
         
-        checker = LinearChecker(self._visitor.scope_manager._var_registry)
+        checker = LinearChecker()
         errors = checker.check(self._cfg, initial_snapshot)
         
         if errors:

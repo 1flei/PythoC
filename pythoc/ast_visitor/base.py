@@ -9,7 +9,7 @@ from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..type_converter import TypeConverter, ImplicitCoercer
 from ..context import (
-    VariableInfo, VariableRegistry,
+    VariableInfo,
     CompilationContext, PC_TYPE_MAP
 )
 from ..builtin_entities import (
