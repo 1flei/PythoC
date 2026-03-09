@@ -119,41 +119,6 @@ def _check_sibling_crossing(visitor, target_ctx: LabelContext, node: ast.AST):
     pass
 
 
-def _emit_defers_for_scoped_goto(visitor, target_ctx: LabelContext, is_goto_end: bool, is_ancestor: bool):
-    """Emit deferred calls for scoped goto.
-    
-    From design doc section 5.4 - Formal Rule:
-    Both goto and goto_end exit to the target label's parent depth,
-    executing all defers along the way.
-    
-    - goto("X"): exit to X's parent depth, jump to X.begin (re-enter X)
-    - goto_end("X"): exit to X's parent depth, jump to X.end (skip rest of X)
-    
-    The key insight is that both operations conceptually exit to the same depth
-    (the label's parent), they just jump to different positions afterward.
-    
-    IMPORTANT: This function only EMITS defer calls, it does NOT unregister them.
-    Unregistering is handled by the normal scope exit path. This is because
-    goto may be in a conditional branch, and the other branch still needs the
-    defer registrations.
-    
-    Args:
-        visitor: AST visitor
-        target_ctx: The target label context
-        is_goto_end: True if this is goto_end, False if goto
-        is_ancestor: True if target is in ancestor chain (self or containing label)
-    """
-    current_scope = visitor.scope_manager.current_depth
-    target_parent = target_ctx.parent_scope_depth
-    
-    logger.debug(f"_emit_defers_for_scoped_goto: current={current_scope}, "
-                f"target_parent={target_parent}, "
-                f"is_goto_end={is_goto_end}, is_ancestor={is_ancestor}")
-    
-    # Use ScopeManager to emit defers for scopes being exited
-    visitor.scope_manager.exit_scopes_to(target_parent, visitor._get_cf_builder())
-
-
 class label(BuiltinFunction):
     """label("name") - Scoped label context manager
     
@@ -263,29 +228,24 @@ class label(BuiltinFunction):
     @classmethod
     def exit_label_scope(cls, visitor, ctx: LabelContext):
         """Called by visit_With to clean up the label scope
-        
+
         Emits defers and branches to end block.
-        
+
         IMPORTANT: Does NOT call position_at_end here - that must be done AFTER
         scope_manager.exit_scope() so that is_terminated() check works correctly.
         """
         cf = visitor._get_cf_builder()
-        
+
         # If not terminated, emit defers and branch to end block
         # This must happen BEFORE scope_manager.exit_scope() which also checks is_terminated()
         if not cf.is_terminated():
             # Emit defers for this scope
-            if hasattr(visitor, 'scope_manager'):
-                for scope in visitor.scope_manager._scopes:
-                    if scope.depth == visitor.scope_manager.current_depth:
-                        visitor.scope_manager._emit_defers_for_scope(scope)
-                        break
+            scope = visitor.scope_manager.current_scope
+            if scope is not None:
+                visitor.scope_manager._emit_defers_for_scope(scope)
             # Branch to end block (this terminates the block)
             cf.branch(ctx.end_block)
-        
-        # Pop from label stack via scope_manager (keeps in _all_labels and _scope_labels for sibling access)
-        visitor.scope_manager.unregister_label(ctx)
-        
+
         # NOTE: position_at_end is done by caller AFTER scope_manager exits
         logger.debug(f"Exited label scope '{ctx.name}'")
 
@@ -363,8 +323,9 @@ class goto(BuiltinFunction):
                 # Sibling/uncle: check crossing constraints
                 _check_sibling_crossing(visitor, ctx, node)
             
-            # Execute defers based on target relationship
-            _emit_defers_for_scoped_goto(visitor, ctx, is_goto_end=False, is_ancestor=is_ancestor)
+            # Emit defers for scopes being exited (same as break/continue)
+            visitor.scope_manager.exit_scopes_to(
+                ctx.parent_scope_depth, visitor._get_cf_builder())
             
             # Branch to begin block
             cf.branch(ctx.begin_block)
@@ -472,8 +433,9 @@ class goto_end(BuiltinFunction):
                         f"goto_end can only target self or ancestors (must be inside the label).",
                         node=node, exc_type=SyntaxError)
         
-        # Execute defers (goto_end always exits, so is_ancestor=True, is_goto_end=True)
-        _emit_defers_for_scoped_goto(visitor, ctx, is_goto_end=True, is_ancestor=True)
+        # Emit defers for scopes being exited (same as break/continue)
+        visitor.scope_manager.exit_scopes_to(
+            ctx.parent_scope_depth, visitor._get_cf_builder())
         
         # Branch to end block
         cf.branch(ctx.end_block)

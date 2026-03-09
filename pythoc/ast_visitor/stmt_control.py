@@ -264,7 +264,7 @@ class ControlFlowMixin:
         
         # Use ScopeManager for the label body
         with self.scope_manager.scope(ScopeType.LABEL, self._get_cf_builder(),
-                                       node=node) as scope:
+                                       label_ctx=ctx, node=node) as scope:
             try:
                 # Visit body statements (don't add to CFG, label body is special)
                 self._visit_stmt_list(node.body, add_to_cfg=False)

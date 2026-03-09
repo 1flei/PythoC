@@ -67,6 +67,9 @@ class Scope:
     # For loops: targets for break/continue
     continue_target: Optional[Any] = None  # Block to jump to on continue
     break_target: Optional[Any] = None     # Block to jump to on break
+
+    # For labels: LabelContext (has begin_block, end_block, name)
+    label_ctx: Optional[Any] = None
     
     def __repr__(self):
         return f"Scope(depth={self.depth}, type={self.scope_type.name}, vars={len(self.variables)}, defers={len(self.defers)})"
@@ -96,7 +99,7 @@ class ScopeManager:
         self._visitor: Optional[Any] = None  # Set by visitor
 
         # Label tracking state (single source of truth)
-        self._scoped_label_stack: List[Any] = []    # Active labels (nested hierarchy)
+        # These persist after scope exit for sibling/uncle goto visibility
         self._scope_labels: Dict[int, List[Any]] = {}  # parent_depth -> [LabelContext]
         self._all_labels: Dict[str, Any] = {}        # name -> LabelContext
         self._pending_scoped_gotos: List[Any] = []   # Forward goto refs
@@ -115,27 +118,30 @@ class ScopeManager:
         """Get current scope"""
         return self._scopes[-1] if self._scopes else None
     
-    def enter_scope(self, scope_type: ScopeType, 
+    def enter_scope(self, scope_type: ScopeType,
                     continue_target: Any = None,
-                    break_target: Any = None) -> Scope:
+                    break_target: Any = None,
+                    label_ctx: Any = None) -> Scope:
         """Enter a new scope
-        
+
         Args:
             scope_type: Type of scope (FUNCTION, LOOP, IF, etc.)
             continue_target: For loops, the block to jump to on continue
             break_target: For loops, the block to jump to on break
-        
+            label_ctx: For labels, the LabelContext
+
         Returns:
             The new Scope object
         """
         # Sync with var_registry
         self._var_registry.enter_scope()
-        
+
         scope = Scope(
             depth=len(self._scopes) + 1,
             scope_type=scope_type,
             continue_target=continue_target,
-            break_target=break_target
+            break_target=break_target,
+            label_ctx=label_ctx
         )
         self._scopes.append(scope)
         
@@ -420,22 +426,25 @@ class ScopeManager:
 
     def scope(self, scope_type: ScopeType, cf: Any = None,
               continue_target: Any = None, break_target: Any = None,
+              label_ctx: Any = None,
               node: Optional[ast.AST] = None):
         """Context manager for automatic scope management
-        
+
         Usage:
             with scope_manager.scope(ScopeType.IF, cf, node=if_node) as scope:
                 # ... code ...
             # Defers executed, scope cleaned up
-        
+
         Args:
             scope_type: Type of scope (IF, LOOP, etc.)
             cf: ControlFlowBuilder for termination checks
             continue_target: Target block for continue statements
             break_target: Target block for break statements
+            label_ctx: For labels, the LabelContext
             node: AST node for error reporting
         """
-        return _ScopeContext(self, scope_type, cf, continue_target, break_target, node)
+        return _ScopeContext(self, scope_type, cf, continue_target, break_target,
+                             label_ctx, node)
     
     # ========================================================================
     # Label Tracking Methods
@@ -443,18 +452,20 @@ class ScopeManager:
 
     def reset_label_tracking(self):
         """Reset label tracking at the start of each function."""
-        self._scoped_label_stack = []
         self._scope_labels = {}
         self._all_labels = {}
         self._pending_scoped_gotos = []
 
     def register_label(self, ctx: Any):
-        """Register a label in all tracking structures.
+        """Register a label in persistent tracking structures.
+
+        The label_ctx is stored on the Scope object (via enter_scope),
+        but we also keep _all_labels and _scope_labels for sibling/uncle
+        visibility after the scope exits.
 
         Args:
             ctx: LabelContext to register
         """
-        self._scoped_label_stack.append(ctx)
         self._all_labels[ctx.name] = ctx
         parent_depth = ctx.parent_scope_depth
         if parent_depth not in self._scope_labels:
@@ -462,15 +473,12 @@ class ScopeManager:
         self._scope_labels[parent_depth].append(ctx)
 
     def unregister_label(self, ctx: Any):
-        """Pop label from the active label stack.
+        """No-op: label cleanup is handled by scope exit.
 
-        Keeps it in _all_labels and _scope_labels for sibling access.
-
-        Args:
-            ctx: LabelContext to unregister
+        Kept for API compatibility. _all_labels and _scope_labels persist
+        for sibling/uncle access.
         """
-        if self._scoped_label_stack and self._scoped_label_stack[-1].name == ctx.name:
-            self._scoped_label_stack.pop()
+        pass
 
     def find_label(self, name: str) -> Optional[Any]:
         """Find label for goto. Checks ancestors and siblings/uncles.
@@ -484,15 +492,16 @@ class ScopeManager:
         Returns:
             LabelContext if found and visible, None otherwise
         """
-        # 1. Check ancestor chain (including self)
-        for ctx in self._scoped_label_stack:
-            if ctx.name == name:
-                return ctx
+        # 1. Check ancestor chain via scope stack
+        for scope in self._scopes:
+            if scope.label_ctx is not None and scope.label_ctx.name == name:
+                return scope.label_ctx
 
-        # 2. Check siblings and uncles
+        # 2. Check siblings and uncles via persistent tracking
         ancestor_depths = {0}  # Function level always included
-        for ctx in self._scoped_label_stack:
-            ancestor_depths.add(ctx.parent_scope_depth)
+        for scope in self._scopes:
+            if scope.label_ctx is not None:
+                ancestor_depths.add(scope.label_ctx.parent_scope_depth)
 
         for depth in ancestor_depths:
             if depth in self._scope_labels:
@@ -512,14 +521,17 @@ class ScopeManager:
         Returns:
             LabelContext if found in ancestor chain, None otherwise
         """
-        for ctx in self._scoped_label_stack:
-            if ctx.name == name:
-                return ctx
+        for scope in self._scopes:
+            if scope.label_ctx is not None and scope.label_ctx.name == name:
+                return scope.label_ctx
         return None
 
     def is_ancestor_label(self, ctx: Any) -> bool:
         """Check if a label is in the current ancestor chain"""
-        return ctx in self._scoped_label_stack
+        for scope in self._scopes:
+            if scope.label_ctx is ctx:
+                return True
+        return False
 
     def capture_defer_snapshot(self) -> List:
         """Capture current defer state for forward goto resolution.
@@ -654,23 +666,26 @@ class ScopeManager:
 
 class _ScopeContext:
     """Context manager for ScopeManager.scope()"""
-    
-    def __init__(self, manager: ScopeManager, scope_type: ScopeType, 
+
+    def __init__(self, manager: ScopeManager, scope_type: ScopeType,
                  cf: Any, continue_target: Any, break_target: Any,
+                 label_ctx: Any = None,
                  node: Optional[ast.AST] = None):
         self._manager = manager
         self._scope_type = scope_type
         self._cf = cf
         self._continue_target = continue_target
         self._break_target = break_target
+        self._label_ctx = label_ctx
         self._scope: Optional[Scope] = None
         self._node = node
-    
+
     def __enter__(self) -> Scope:
         self._scope = self._manager.enter_scope(
             self._scope_type,
             continue_target=self._continue_target,
-            break_target=self._break_target
+            break_target=self._break_target,
+            label_ctx=self._label_ctx
         )
         return self._scope
     
