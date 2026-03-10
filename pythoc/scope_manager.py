@@ -185,16 +185,11 @@ class ScopeManager:
     
     def _emit_defers_for_pending_gotos(self, scope: Scope, cf: Any):
         """Emit defers for pending forward gotos that originate from this scope.
-        
-        When exiting a scope, any pending forward goto that was issued from within
-        this scope MUST be exiting this scope (since the label hasn't been defined yet).
-        We emit the defers for this scope at the goto point NOW, while variables are
-        still in the registry.
-        
-        This is the key insight: if goto("forward") is inside scope S, and we're
-        exiting S without having seen label("forward"), then the goto MUST be
-        jumping out of S. So we emit S's defers at the goto point.
-        
+
+        With PCIR, this is simplified: we just switch _current_block_id to the
+        pending block, execute defers (which appends PCIR to that block), then
+        restore _current_block_id. No real IR builder position save/restore needed.
+
         Args:
             scope: The scope being exited
             cf: ControlFlowBuilder
@@ -210,63 +205,51 @@ class ScopeManager:
         scope_depth = scope.depth
 
         for pending in self._pending_scoped_gotos:
-            # Only process gotos that originate from this scope or deeper
-            # If goto_scope_depth >= scope_depth, the goto is from within this scope
             if pending.goto_scope_depth < scope_depth:
                 continue
-            
-            # Skip if we've already emitted defers for this scope depth
-            # (emitted_to_depth tracks the minimum depth we've emitted to)
+
             if pending.emitted_to_depth <= scope_depth:
                 continue
-            
-            # Find defers in the snapshot that belong to this scope
+
             defers_for_this_scope = [
                 (callable_obj, func_ref, args, defer_node)
                 for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
                 if depth == scope_depth
             ]
-            
+
             if not defers_for_this_scope:
-                # Still update emitted_to_depth even if no defers
                 pending.emitted_to_depth = scope_depth
                 continue
-            
+
             logger.debug(f"Emitting {len(defers_for_this_scope)} defers for pending goto "
                         f"'{pending.label_name}' at scope depth {scope_depth}")
-            
-            # Save current position
-            saved_block = self._visitor.builder.block
+
+            # Mark as emitted BEFORE executing to prevent re-entrant emission
+            # (defer execution may create inner scopes whose exits trigger this method)
+            pending.emitted_to_depth = scope_depth
+
+            # Save current CFG block ID
             saved_cfg_block_id = cf._current_block_id
-            
-            # Position at pending block for both IR and CFG
-            # Note: pending.block may have been updated by previous defer emissions
+
+            # Switch to pending block
             pending_block_id = cf._get_cfg_block_id(pending.block)
-            cf.position_at_end(pending.block)
-            
-            # Temporarily clear terminated flag so defer can emit IR
+            cf._current_block_id = pending_block_id
+
+            # Temporarily clear terminated flag so defer can record PCIR
             was_terminated = cf._terminated.get(pending_block_id, False)
             cf._terminated[pending_block_id] = False
-            
-            # Emit defers for this scope
+
+            # Execute defers (appends PCIR to the pending block)
             for callable_obj, func_ref, args, defer_node in defers_for_this_scope:
                 _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
-            
-            # Update emitted_to_depth to track that we've emitted defers for this scope
-            pending.emitted_to_depth = scope_depth
-            
-            # CRITICAL: Update pending.block to current block after defer execution
-            # Defer execution may create new blocks (e.g., closure inlining with labels)
-            # The final branch to target label should be from the current block, not
-            # the original pending block which may now be terminated.
+
+            # Update pending.block to current block after defer execution
+            # (defers may create new blocks via inlining)
             pending.block = self._visitor.builder.block
-            
-            # Restore terminated flag for original block
+
+            # Restore terminated flag and CFG position
             cf._terminated[pending_block_id] = was_terminated
-            
-            # Restore position for both IR and CFG
             cf._current_block_id = saved_cfg_block_id
-            self._visitor.builder.position_at_end(saved_block)
     
     def exit_scopes_to(self, target_depth: int, cf: Any, emit_defers: bool = True) -> List[Scope]:
         """Exit scopes down to target depth (for break/continue/goto)
@@ -556,8 +539,9 @@ class ScopeManager:
     def resolve_pending_gotos_for_label(self, ctx: Any):
         """Resolve pending forward goto references when a label is defined.
 
-        When a label is entered, any forward gotos targeting it can now be
-        resolved. This emits remaining defers and generates IR branches.
+        With PCIR, simplified: switch _current_block_id to pending block, emit
+        remaining defers (appends PCIR), emit branch (appends PCIR), add CFG edge,
+        restore _current_block_id. No real IR builder position save/restore.
 
         Args:
             ctx: LabelContext being entered
@@ -582,21 +566,19 @@ class ScopeManager:
                             node=pending.node, exc_type=RuntimeError)
                 continue
 
-            # Save current position
-            saved_block = self._visitor.builder.block
+            # Save current CFG block ID
             saved_cfg_block_id = cf._current_block_id
 
             pending_block_id = cf._get_cfg_block_id(pending.block)
 
-            # Position at pending block for both IR and CFG
-            cf.position_at_end(pending.block)
+            # Switch to pending block
+            cf._current_block_id = pending_block_id
 
-            # Temporarily clear terminated flag so defer can emit IR
+            # Temporarily clear terminated flag so defer can record PCIR
             was_terminated = cf._terminated.get(pending_block_id, False)
             cf._terminated[pending_block_id] = False
 
-            # Emit defers that haven't been emitted yet:
-            # target_parent < depth < emitted_to_depth
+            # Emit defers that haven't been emitted yet
             defers_to_execute = [
                 (callable_obj, func_ref, args, defer_node)
                 for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
@@ -611,19 +593,18 @@ class ScopeManager:
             for callable_obj, func_ref, args, defer_node in defers_to_execute:
                 _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
 
-            # Generate the branch instruction
+            # Record the branch instruction (appends PCIR to pending/current block)
             self._visitor.builder.branch(ctx.begin_block)
 
-            # Restore terminated flag
-            cf._terminated[pending_block_id] = was_terminated
-
-            # Restore position for both IR and CFG
-            cf._current_block_id = saved_cfg_block_id
-            self._visitor.builder.position_at_end(saved_block)
-
             # Add CFG edge for the goto
+            # Use cf._current_block_id (may have changed if defers created blocks)
+            actual_src_id = cf._current_block_id
             begin_block_id = cf._get_cfg_block_id(ctx.begin_block)
-            cf.cfg.add_edge(pending_block_id, begin_block_id, kind='goto')
+            cf.cfg.add_edge(actual_src_id, begin_block_id, kind='goto')
+
+            # Restore terminated flag and CFG position
+            cf._terminated[pending_block_id] = was_terminated
+            cf._current_block_id = saved_cfg_block_id
 
             resolved.append(pending)
 

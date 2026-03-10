@@ -125,20 +125,13 @@ class func(BuiltinType):
             ValueRef with call result
         """
         from ..valueref import ensure_ir, wrap_value, get_type
-        
-        # Get the function pointer value from func_ref
-        func_value = func_ref
-        
-        # Check if we need to load the function pointer
-        # If func_value.value is an alloca, we need to load it
-        func_ptr_ir = func_value.value
-        if isinstance(func_ptr_ir, ir.AllocaInstr):
-            # This is a function pointer variable, load it
-            func_ptr = visitor.builder.load(func_ptr_ir)
-        else:
-            # This is already a function pointer value
-            func_ptr = ensure_ir(func_value)
-        
+
+        # Get the function pointer from func_ref
+        # func_ref comes from visit_Name which already loads the alloca,
+        # so func_ref.value is the loaded function pointer (not the alloca).
+        # Use ensure_ir to get the underlying value (works with both ir.Value and VReg).
+        func_ptr = ensure_ir(func_ref)
+
         # Get parameter and return types from this func type
         if cls.param_types is None or cls.return_type is None:
             logger.error(f"Function pointer has incomplete type", node=node, exc_type=TypeError)
@@ -170,8 +163,8 @@ class func(BuiltinType):
         
         # Call the function pointer - pass return_type_hint and arg_type_hints for ABI coercion
         logger.debug(f"func.handle_call: calling {getattr(func_ptr, 'name', func_ptr)}, args={len(converted_args)}, return_type={cls.return_type}")
-        logger.debug(f"func.handle_call: func_ptr.function_type={func_ptr.function_type}")
-        logger.debug(f"func.handle_call: converted_args types={[str(a.type) for a in converted_args]}")
+        logger.debug(f"func.handle_call: func_ptr.function_type={getattr(func_ptr, 'function_type', None)}")
+        logger.debug(f"func.handle_call: converted_args types={[str(getattr(a, 'type', '?')) for a in converted_args]}")
         result = visitor.builder.call(func_ptr, converted_args, return_type_hint=cls.return_type, arg_type_hints=cls.param_types)
         
         # Wrap result with return type hint (tracking happens in visit_expression)

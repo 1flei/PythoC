@@ -1,18 +1,21 @@
 """
-Control Flow Builder - Transparent wrapper around LLVMBuilder with CFG tracking
+Control Flow Builder - Wrapper around LLVMBuilder with CFG tracking and PCIR recording.
 
-This module provides a ControlFlowBuilder that wraps the real LLVMBuilder and
-delegates all non-overridden methods via __getattr__. Control-flow methods are
-explicitly overridden to maintain CFG state for linear type checking.
+Design (PCIR = Per-block Captured IR):
+- During the AST visitor walk (build phase), ALL builder calls are recorded
+  as PCIR instructions. No LLVM IR is emitted.
+- Control-flow methods (branch, cbranch, ret, etc.) update CFG state AND
+  record PCIR instructions.
+- create_block() returns SentinelBlock placeholders (not real ir.Block).
+- After the CFG is fully built, emit_ir() replays PCIR to produce real LLVM IR.
 
-Design:
-- ControlFlowBuilder IS the visitor's builder (visitor.builder = cf)
-- All IR emission goes through it transparently
-- Control-flow methods (branch, cbranch, etc.) also update CFG
-- External consumers (type_converter, builtin_entities) need zero changes
+Key benefits:
+- Full separation of CFG construction from IR emission
+- Forward goto becomes trivial (append PCIR, no save/restore)
+- Dead block elimination can happen before IR emission
 """
 
-from typing import Optional, Dict, List, Tuple, TYPE_CHECKING
+from typing import Optional, Dict, List, Tuple, Any, TYPE_CHECKING
 from llvmlite import ir
 import ast
 
@@ -25,6 +28,10 @@ from ..cfg.linear_checker import (
     copy_snapshot,
 )
 from ..logger import logger
+from .pcir import (
+    VReg, VRegPhi, VRegSwitch, SentinelBlock, PCIRInst,
+    infer_result_type, resolve_arg, reset_vreg_counter,
+)
 
 if TYPE_CHECKING:
     from .base import LLVMIRVisitor
@@ -32,37 +39,37 @@ if TYPE_CHECKING:
 
 
 class ControlFlowBuilder:
-    """Transparent wrapper around LLVMBuilder with CFG tracking
+    """Wrapper around LLVMBuilder with CFG tracking and PCIR recording.
 
-    Uses __getattr__ to delegate all non-overridden methods to the real builder.
-    Control-flow methods are explicitly overridden to maintain CFG state.
+    Build phase (before finalize()):
+    - __getattr__ returns a recorder function that creates PCIRInst + VReg
+    - Control-flow methods update CFG state AND record PCIR
+    - create_block() returns SentinelBlock placeholders
+    - No real LLVM IR is emitted
+
+    Replay phase (emit_ir()):
+    - Creates real ir.Blocks for each CFG block
+    - Replays PCIR instructions block by block
+    - Resolves VRegs to actual ir.Values
+    - Patches unterminated blocks
 
     Usage:
-        real_builder = LLVMBuilder(ir_builder)
         cf = ControlFlowBuilder(real_builder, visitor, func_name)
-        visitor.builder = cf  # All IR goes through cf now
-
-        # Control flow methods update CFG:
-        then_block = cf.create_block("then")
-        cf.cbranch(condition, then_block, else_block)
-
-        # All other methods delegate transparently:
-        cf.store(value, ptr)   # -> real_builder.store(value, ptr)
-        cf.load(ptr)           # -> real_builder.load(ptr)
+        visitor.builder = cf
+        # ... visit AST body (records PCIR, builds CFG) ...
+        cf.finalize()   # Finalize CFG structure
+        cf.emit_ir()    # Replay PCIR -> actual LLVM IR
     """
 
     def __init__(self, real_builder: "LLVMBuilder", visitor: "LLVMIRVisitor", func_name: str = ""):
-        """Initialize with a real builder and visitor
-
-        Args:
-            real_builder: The LLVMBuilder instance to wrap
-            visitor: LLVMIRVisitor instance (for get_next_label, current_function)
-            func_name: Name of the function being compiled
-        """
         self._real_builder = real_builder
         self._visitor = visitor
         self._func_name = func_name or "unknown"
         self._finalized = False
+        self._emitted = False
+
+        # Reset VReg counter for each function
+        reset_vreg_counter()
 
         # CFG data structure
         self._cfg = CFG(func_name=self._func_name)
@@ -72,129 +79,197 @@ class ControlFlowBuilder:
         self._cfg.entry_id = self._entry_block.id
 
         # Create virtual exit block in CFG
-        # All return statements and fall-through paths connect to this block.
-        # This makes the exit block a merge point for linear state checking.
         self._exit_block = self._cfg.add_block()
         self._cfg.exit_id = self._exit_block.id
 
         # Current block in CFG
         self._current_block_id = self._entry_block.id
 
-        # Map CFGBlock ID -> LLVM ir.Block
-        # Entry block maps to the function's entry block
-        self._block_map: Dict[int, ir.Block] = {}
-        if real_builder and real_builder.block:
-            self._block_map[self._entry_block.id] = real_builder.block
+        # Map CFGBlock ID -> SentinelBlock (build phase) or ir.Block (replay phase)
+        self._block_map: Dict[int, Any] = {}
 
-        # Track if current CFG block is terminated (has outgoing edge)
+        # Create sentinel for entry block
+        entry_sentinel = SentinelBlock(self._entry_block.id, "entry")
+        self._block_map[self._entry_block.id] = entry_sentinel
+
+        # Tag the real entry ir.Block with the CFG block ID so that
+        # code accessing current_function.entry_basic_block can map back to CFG
+        if real_builder and real_builder.block:
+            real_builder.block._cfg_block_id = self._entry_block.id
+
+        # Store the block label names for creating real blocks during replay
+        self._block_labels: Dict[int, str] = {self._entry_block.id: "entry"}
+
+        # Track if current CFG block is terminated
         self._terminated: Dict[int, bool] = {self._entry_block.id: False}
 
+        # Track insertion mode for position_at_start vs position_at_end
+        # When _insert_at_start is True, PCIR instructions are inserted at
+        # _insert_idx instead of appended (for _create_alloca_in_entry pattern)
+        self._insert_at_start: bool = False
+        self._insert_idx: int = 0
+        # Per-block watermark: tracks how many instructions have been inserted
+        # at the start of each block. When position_at_start is called again,
+        # new instructions go after the watermark (not at index 0).
+        self._start_watermark: Dict[int, int] = {}
+
     def __getattr__(self, name):
-        """Delegate all non-overridden attribute access to the real builder"""
-        return getattr(self._real_builder, name)
+        """Record PCIR instruction instead of delegating to real builder.
+
+        During build phase: returns a recorder function.
+        After emit_ir: delegates to real builder for post-emission operations.
+        """
+        if self._emitted:
+            # After emission, delegate to real builder
+            return getattr(self._real_builder, name)
+
+        # During build phase: return a PCIR recorder
+        def _record(*args, **kwargs):
+            result_type = infer_result_type(name, args, kwargs)
+            if result_type is not None:
+                vreg = VReg(result_type)
+                inst = PCIRInst(op=name, args=args, kwargs=kwargs, result=vreg)
+            else:
+                vreg = None
+                inst = PCIRInst(op=name, args=args, kwargs=kwargs, result=None)
+
+            self._append_pcir(inst)
+            return vreg
+
+        return _record
+
+    def _append_pcir(self, inst: PCIRInst):
+        """Append a PCIR instruction to the current block.
+
+        Respects _insert_at_start mode for position_at_start semantics
+        (used by _create_alloca_in_entry to insert allocas at the beginning).
+        Tracks per-block watermark so subsequent position_at_start calls
+        insert after previously-inserted-at-start instructions.
+        """
+        cfg_block = self._cfg.blocks[self._current_block_id]
+        if self._insert_at_start:
+            cfg_block.pcir.insert(self._insert_idx, inst)
+            self._insert_idx += 1
+            # Update watermark for this block
+            self._start_watermark[self._current_block_id] = self._insert_idx
+        else:
+            cfg_block.pcir.append(inst)
 
     @property
     def cfg(self) -> CFG:
-        """Get the CFG being built"""
         return self._cfg
 
     @property
     def block(self):
-        """Get the current LLVM basic block (properties bypass __getattr__)"""
-        return self._real_builder.block
+        """Get the current block (SentinelBlock during build, ir.Block after emit)."""
+        if self._emitted:
+            return self._real_builder.block
+        return self._block_map.get(self._current_block_id)
 
     @property
     def ir_builder(self):
-        """Get the underlying llvmlite IRBuilder (properties bypass __getattr__)"""
+        """Get the underlying llvmlite IRBuilder.
+
+        During build phase, this is still accessible for operations that need it
+        (e.g., parameter initialization in compiler.py which happens before PCIR).
+        """
         return self._real_builder.ir_builder
 
     @property
     def current_function(self) -> ir.Function:
-        """Get the current LLVM function"""
         return self._visitor.current_function
 
     @property
-    def current_block(self) -> ir.Block:
-        """Get the current LLVM basic block"""
-        return self._real_builder.block
+    def current_block(self):
+        """Get the current block."""
+        if self._emitted:
+            return self._real_builder.block
+        return self._block_map.get(self._current_block_id)
 
     @property
     def current_block_id(self) -> int:
-        """Get current CFG block ID"""
         return self._current_block_id
 
     def is_terminated(self) -> bool:
-        """Check if current block is already terminated"""
-        # Check both CFG and LLVM
-        cfg_terminated = self._terminated.get(self._current_block_id, False)
-        ir_terminated = self._real_builder.block.is_terminated
-        return cfg_terminated or ir_terminated
+        """Check if current block is already terminated."""
+        if self._emitted:
+            cfg_terminated = self._terminated.get(self._current_block_id, False)
+            ir_terminated = self._real_builder.block.is_terminated
+            return cfg_terminated or ir_terminated
+        return self._terminated.get(self._current_block_id, False)
 
-    def create_block(self, name: str) -> ir.Block:
-        """Create a new basic block
+    def create_block(self, name: str):
+        """Create a new basic block.
 
-        Creates both a CFGBlock and an LLVM ir.Block.
-
-        Args:
-            name: Label prefix for the block
-
-        Returns:
-            The LLVM ir.Block (for compatibility with existing code)
+        During build phase: creates CFGBlock + SentinelBlock.
+        Returns SentinelBlock (has _cfg_block_id and name attributes).
         """
         # Create CFG block
         cfg_block = self._cfg.add_block()
         self._terminated[cfg_block.id] = False
 
-        # Create LLVM block
+        # Create sentinel block (placeholder for real ir.Block)
         label = self._visitor.get_next_label(name)
-        ir_block = self.current_function.append_basic_block(label)
+        sentinel = SentinelBlock(cfg_block.id, label)
+        self._block_map[cfg_block.id] = sentinel
+        self._block_labels[cfg_block.id] = label
 
-        # Map CFG block to IR block
-        self._block_map[cfg_block.id] = ir_block
+        logger.debug(f"CFG: create_block '{name}' -> CFGBlock({cfg_block.id}), label={label}")
 
-        # Store CFG block ID in IR block for reverse lookup
-        ir_block._cfg_block_id = cfg_block.id
+        return sentinel
 
-        logger.debug(f"CFG: create_block '{name}' -> CFGBlock({cfg_block.id}), IR={label}")
-
-        return ir_block
-
-    def _get_cfg_block_id(self, ir_block: ir.Block) -> int:
-        """Get CFG block ID for an IR block"""
-        if hasattr(ir_block, '_cfg_block_id'):
-            return ir_block._cfg_block_id
+    def _get_cfg_block_id(self, block) -> int:
+        """Get CFG block ID for a block (SentinelBlock or ir.Block)."""
+        if isinstance(block, SentinelBlock):
+            return block._cfg_block_id
+        if hasattr(block, '_cfg_block_id'):
+            return block._cfg_block_id
         # Fallback: search in map
         for cfg_id, mapped_block in self._block_map.items():
-            if mapped_block is ir_block:
+            if mapped_block is block:
                 return cfg_id
-        raise ValueError(f"IR block {ir_block.name} not found in CFG")
+        raise ValueError(f"Block {getattr(block, 'name', block)} not found in CFG")
 
-    def position_at_end(self, block: ir.Block):
-        """Position at the end of the given block
+    def position_at_end(self, block):
+        """Position at the end of the given block.
 
-        NOTE: We do NOT record exit_snapshot here. Exit snapshots should only
-        be recorded when the block actually terminates (via branch/cbranch/return).
-
-        Args:
-            block: The LLVM block to position at
+        During build phase: only updates CFG current block tracking.
+        After emit: delegates to real builder.
         """
-        if not self._finalized:
-            # Update CFG current block
+        if self._emitted:
             cfg_block_id = self._get_cfg_block_id(block)
             self._current_block_id = cfg_block_id
+            self._real_builder.position_at_end(block)
+            return
+
+        if not self._finalized:
+            cfg_block_id = self._get_cfg_block_id(block)
+            self._current_block_id = cfg_block_id
+            # Switch back to append mode
+            self._insert_at_start = False
             logger.debug(f"CFG: position_at_end CFGBlock({cfg_block_id})")
 
-        # Update IR builder
-        self._real_builder.position_at_end(block)
+    def position_at_start(self, block):
+        """Position at the start of the given block.
 
-    def branch(self, target: ir.Block):
-        """Emit an unconditional branch
-
-        Also records exit snapshot for CFG-based linear checking.
-
-        Args:
-            target: The target block to branch to
+        During build phase: updates CFG current block tracking and enables
+        insert-at-start mode for subsequent PCIR instructions.
+        Uses per-block watermark so repeated calls insert after previously
+        inserted-at-start instructions (e.g., allocas before va_start).
+        After emit: delegates to real builder.
         """
+        if self._emitted:
+            self._real_builder.position_at_start(block)
+            return
+
+        cfg_block_id = self._get_cfg_block_id(block)
+        self._current_block_id = cfg_block_id
+        # Enable insert-at-start mode: subsequent PCIR goes after the watermark
+        self._insert_at_start = True
+        self._insert_idx = self._start_watermark.get(cfg_block_id, 0)
+
+    def branch(self, target):
+        """Record an unconditional branch (CFG + PCIR)."""
         src_id = self._current_block_id
         dst_id = self._get_cfg_block_id(target)
 
@@ -202,19 +277,13 @@ class ControlFlowBuilder:
         self._cfg.add_edge(src_id, dst_id, kind='sequential')
         self._terminated[src_id] = True
 
-        # Generate IR
-        self._real_builder.branch(target)
+        # Record PCIR
+        self._append_pcir(PCIRInst(op='branch', args=(target,), kwargs={}))
 
         logger.debug(f"CFG: branch {src_id} -> {dst_id}")
 
-    def cbranch(self, condition, true_block: ir.Block, false_block: ir.Block):
-        """Emit a conditional branch
-
-        Args:
-            condition: LLVM i1 value for the condition
-            true_block: Block to branch to if condition is true
-            false_block: Block to branch to if condition is false
-        """
+    def cbranch(self, condition, true_block, false_block):
+        """Record a conditional branch (CFG + PCIR)."""
         src_id = self._current_block_id
         true_id = self._get_cfg_block_id(true_block)
         false_id = self._get_cfg_block_id(false_block)
@@ -224,27 +293,23 @@ class ControlFlowBuilder:
         self._cfg.add_edge(src_id, false_id, kind='branch_false')
         self._terminated[src_id] = True
 
-        # Generate IR
-        self._real_builder.cbranch(condition, true_block, false_block)
+        # Record PCIR
+        self._append_pcir(PCIRInst(op='cbranch', args=(condition, true_block, false_block), kwargs={}))
 
         logger.debug(f"CFG: cbranch {src_id} -> T:{true_id}, F:{false_id}")
 
     def unreachable(self):
-        """Emit an unreachable instruction"""
+        """Record an unreachable instruction."""
         if not self._finalized:
             self._terminated[self._current_block_id] = True
             logger.debug(f"CFG: unreachable at CFGBlock({self._current_block_id})")
-        self._real_builder.unreachable()
 
-    def switch(self, value, default_block: ir.Block) -> ir.SwitchInstr:
-        """Emit a switch instruction
+        self._append_pcir(PCIRInst(op='unreachable', args=(), kwargs={}))
 
-        Args:
-            value: The value to switch on
-            default_block: The default case block
+    def switch(self, value, default_block):
+        """Record a switch instruction (CFG + PCIR).
 
-        Returns:
-            The switch instruction (for adding cases)
+        Returns VRegSwitch for adding cases.
         """
         src_id = self._current_block_id
         default_id = self._get_cfg_block_id(default_block)
@@ -253,59 +318,81 @@ class ControlFlowBuilder:
         self._cfg.add_edge(src_id, default_id, kind='sequential')
         self._terminated[src_id] = True
 
-        # Generate IR and return switch for adding cases
-        switch_instr = self._real_builder.switch(value, default_block)
+        # Create VRegSwitch for case tracking
+        current_sentinel = self._block_map.get(src_id)
+        vswitch = VRegSwitch(current_sentinel)
+
+        # Record PCIR
+        self._append_pcir(PCIRInst(op='switch', args=(value, default_block), kwargs={}, result=vswitch))
 
         logger.debug(f"CFG: switch at {src_id}, default -> {default_id}")
 
-        return switch_instr
+        return vswitch
 
     def ret(self, value):
-        """Emit a return instruction with CFG tracking
-
-        Args:
-            value: The return value
-        """
+        """Record a return instruction with CFG tracking."""
         if not self._finalized:
             self.mark_return()
-        self._real_builder.ret(value)
+
+        self._append_pcir(PCIRInst(op='ret', args=(value,), kwargs={}))
 
     def ret_void(self):
-        """Emit a void return instruction with CFG tracking"""
+        """Record a void return instruction with CFG tracking."""
         if not self._finalized:
             self.mark_return()
-        self._real_builder.ret_void()
 
-    def add_switch_case(self, switch_instr: ir.SwitchInstr, value, block: ir.Block):
-        """Add a case to a switch instruction
+        self._append_pcir(PCIRInst(op='ret_void', args=(), kwargs={}))
 
-        Args:
-            switch_instr: The switch instruction
-            value: The case value
-            block: The case block
+    def phi(self, typ, name: str = ""):
+        """Record a PHI node. Returns VRegPhi for add_incoming calls."""
+        vphi = VRegPhi(typ)
+
+        self._append_pcir(PCIRInst(op='phi', args=(typ,), kwargs={'name': name}, result=vphi))
+
+        return vphi
+
+    def select(self, cond, lhs, rhs, name: str = ""):
+        """Record a select instruction."""
+        result_type = infer_result_type('select', (cond, lhs, rhs), {'name': name})
+        vreg = VReg(result_type) if result_type else None
+
+        self._append_pcir(PCIRInst(op='select', args=(cond, lhs, rhs), kwargs={'name': name}, result=vreg))
+
+        return vreg
+
+    def add_switch_case(self, switch_instr, value, block):
+        """Add a case to a switch instruction.
+
+        Works with both VRegSwitch (build phase) and ir.SwitchInstr (post-emit).
         """
-        # Find source block (the one with the switch)
-        src_id = None
-        for cfg_id, ir_block in self._block_map.items():
-            if ir_block is switch_instr.parent:
-                src_id = cfg_id
-                break
+        if isinstance(switch_instr, VRegSwitch):
+            # Build phase: find source block via VRegSwitch's parent sentinel
+            src_sentinel = switch_instr._parent_sentinel
+            if src_sentinel is not None:
+                src_id = src_sentinel._cfg_block_id
+                dst_id = self._get_cfg_block_id(block)
+                self._cfg.add_edge(src_id, dst_id, kind='branch_true')
+                logger.debug(f"CFG: switch case {src_id} -> {dst_id}")
 
-        if src_id is not None:
-            dst_id = self._get_cfg_block_id(block)
-            # Add case edge
-            self._cfg.add_edge(src_id, dst_id, kind='branch_true')
-            logger.debug(f"CFG: switch case {src_id} -> {dst_id}")
+            # Record case in VRegSwitch for replay
+            switch_instr.add_case(value, block)
+        else:
+            # Post-emit: use real switch instruction
+            src_id = None
+            for cfg_id, ir_block in self._block_map.items():
+                if ir_block is switch_instr.parent:
+                    src_id = cfg_id
+                    break
 
-        # Add case to IR switch
-        switch_instr.add_case(value, block)
+            if src_id is not None:
+                dst_id = self._get_cfg_block_id(block)
+                self._cfg.add_edge(src_id, dst_id, kind='branch_true')
+                logger.debug(f"CFG: switch case {src_id} -> {dst_id}")
+
+            switch_instr.add_case(value, block)
 
     def add_stmt(self, stmt: ast.stmt):
-        """Record an AST statement in the current CFG block
-
-        Args:
-            stmt: AST statement to record
-        """
+        """Record an AST statement in the current CFG block."""
         cfg_block = self._cfg.blocks[self._current_block_id]
         cfg_block.stmts.append(stmt)
 
@@ -314,7 +401,6 @@ class ControlFlowBuilder:
     def record_linear_register(self, var_id: int, var_name: str, path: Tuple[int, ...],
                                initial_state: str, line_number: int = None,
                                node: ast.AST = None):
-        """Record a LinearRegister event - variable with linear type enters scope"""
         event = LinearRegister(var_id, var_name, path, initial_state, line_number, node)
         self._add_linear_event(event)
         logger.debug(f"CFG: LinearRegister(id={var_id}, {var_name}, path={path}, initial={initial_state})")
@@ -322,39 +408,26 @@ class ControlFlowBuilder:
     def record_linear_transition(self, var_id: int, var_name: str, path: Tuple[int, ...],
                                   old_state: str, new_state: str, line_number: int = None,
                                   node: ast.AST = None):
-        """Record a LinearTransition event - linear state change"""
         event = LinearTransition(var_id, var_name, path, old_state, new_state, line_number, node)
         self._add_linear_event(event)
         logger.debug(f"CFG: LinearTransition(id={var_id}, {var_name}, path={path}, {old_state}->{new_state})")
 
     def _add_linear_event(self, event: LinearEvent):
-        """Add a linear event to the current block"""
         cfg_block = self._cfg.blocks[self._current_block_id]
         cfg_block.linear_events.append(event)
 
     def mark_return(self):
-        """Mark current block as containing a return statement
-
-        Records exit snapshot and connects to the virtual exit block.
-        This makes the exit block a merge point for linear state checking.
-        """
-        # Connect to virtual exit block (makes exit block a merge point)
+        """Mark current block as containing a return statement."""
         self._cfg.add_edge(self._current_block_id, self._exit_block.id, kind='return')
-
         self._cfg.return_blocks.append(self._current_block_id)
         self._terminated[self._current_block_id] = True
         logger.debug(f"CFG: return at CFGBlock({self._current_block_id}) -> exit({self._exit_block.id})")
 
-    def mark_loop_back(self, target: ir.Block):
-        """Mark a loop back edge (for loop analysis)
-
-        Args:
-            target: The loop header block
-        """
+    def mark_loop_back(self, target):
+        """Mark a loop back edge."""
         src_id = self._current_block_id
         dst_id = self._get_cfg_block_id(target)
 
-        # Update the last edge to be a loop_back edge
         for edge in reversed(self._cfg.edges):
             if edge.source_id == src_id and edge.target_id == dst_id:
                 edge.kind = 'loop_back'
@@ -364,15 +437,15 @@ class ControlFlowBuilder:
         logger.debug(f"CFG: loop_back {src_id} -> {dst_id}")
 
     def finalize(self):
-        """Finalize CFG construction and patch unterminated IR blocks.
+        """Finalize CFG construction.
 
         1. Connect fall-through CFG blocks to exit block
         2. Compute loop headers
-        3. Emit IR terminators for all unterminated LLVM blocks
-        4. Set _finalized flag (post-finalize calls skip CFG tracking)
+        3. Set _finalized flag
+
+        Does NOT emit any IR (that's emit_ir()'s job).
         """
         # For blocks without explicit terminator, connect to exit block
-        # This handles void functions that fall through without return
         reachable = self._cfg.get_reachable_blocks()
         for block_id in reachable:
             if block_id == self._exit_block.id:
@@ -385,12 +458,83 @@ class ControlFlowBuilder:
         # Compute loop headers
         self._cfg.compute_loop_headers()
 
-        # Mark as finalized before emitting IR terminators
         self._finalized = True
+        logger.debug(f"CFG finalized: {self._cfg}")
 
-        # Patch unterminated IR blocks so LLVM IR is always structurally valid.
-        # Use the raw llvmlite builder to bypass ABI coercion - these are
-        # synthetic terminators for unreachable/fallthrough blocks.
+    def emit_ir(self):
+        """Replay PCIR instructions to produce actual LLVM IR.
+
+        Steps:
+        1. Create real ir.Blocks for each CFG block (except entry which exists)
+        2. Build a mapping from CFG block ID -> real ir.Block
+        3. Replay PCIR instructions block by block using block creation order
+        4. Resolve VReg arguments and map results
+        5. Replay PHI incoming edges and switch cases
+        6. Patch unterminated blocks
+        """
+        assert self._finalized, "Must call finalize() before emit_ir()"
+        assert not self._emitted, "emit_ir() already called"
+
+        # Step 1: Create real ir.Blocks for all CFG blocks (except entry and exit)
+        real_block_map: Dict[int, ir.Block] = {}
+
+        # Entry block already exists (it's the function's entry block)
+        entry_ir_block = self._real_builder.block
+        if entry_ir_block is None:
+            # Fallback: get entry from function
+            entry_ir_block = self.current_function.entry_basic_block
+        real_block_map[self._entry_block.id] = entry_ir_block
+        entry_ir_block._cfg_block_id = self._entry_block.id
+
+        # Create ir.Blocks for all other CFG blocks (in creation order, skip exit block)
+        for block_id in sorted(self._cfg.blocks.keys()):
+            if block_id == self._entry_block.id:
+                continue
+            if block_id == self._exit_block.id:
+                continue
+            label = self._block_labels.get(block_id, f"block_{block_id}")
+            ir_block = self.current_function.append_basic_block(label)
+            ir_block._cfg_block_id = block_id
+            real_block_map[block_id] = ir_block
+
+        # Step 2: Update block_map to point to real blocks
+        self._block_map = real_block_map
+
+        # Step 3: Replay PCIR instructions block by block
+        # Use block creation order (sorted by ID)
+        phi_nodes: List[Tuple[VRegPhi, Any]] = []  # (vphi, real_phi) pairs
+        switch_nodes: List[Tuple[VRegSwitch, Any]] = []  # (vswitch, real_switch) pairs
+
+        for block_id in sorted(self._cfg.blocks.keys()):
+            if block_id == self._exit_block.id:
+                continue
+            if block_id not in real_block_map:
+                continue
+
+            ir_block = real_block_map[block_id]
+            cfg_block = self._cfg.blocks[block_id]
+
+            # Position at the real block
+            self._real_builder.position_at_end(ir_block)
+
+            for inst in cfg_block.pcir:
+                self._replay_inst(inst, real_block_map, phi_nodes, switch_nodes)
+
+        # Step 4: Replay PHI incoming edges
+        for vphi, real_phi in phi_nodes:
+            for value, block in vphi._incomings:
+                resolved_value = resolve_arg(value, real_block_map)
+                resolved_block = resolve_arg(block, real_block_map)
+                real_phi.add_incoming(resolved_value, resolved_block)
+
+        # Step 5: Replay switch cases
+        for vswitch, real_switch in switch_nodes:
+            for value, block in vswitch._cases:
+                resolved_value = resolve_arg(value, real_block_map)
+                resolved_block = resolve_arg(block, real_block_map)
+                real_switch.add_case(resolved_value, resolved_block)
+
+        # Step 6: Patch unterminated IR blocks
         raw = self._real_builder.ir_builder
         ret_type = self.current_function.function_type.return_type
         blocks_cleaned = 0
@@ -408,17 +552,34 @@ class ControlFlowBuilder:
                 f"{self.current_function.name}"
             )
 
-        logger.debug(f"CFG finalized: {self._cfg}")
+        self._emitted = True
+        logger.debug(f"PCIR emit_ir completed for {self._func_name}")
+
+    def _replay_inst(self, inst: PCIRInst, block_map: Dict[int, ir.Block],
+                     phi_nodes: list, switch_nodes: list):
+        """Replay a single PCIR instruction on the real builder."""
+        op = inst.op
+
+        # Resolve all args
+        resolved_args = tuple(resolve_arg(a, block_map) for a in inst.args)
+        resolved_kwargs = {k: resolve_arg(v, block_map) for k, v in inst.kwargs.items()}
+
+        # Call the real builder method
+        method = getattr(self._real_builder, op)
+        result = method(*resolved_args, **resolved_kwargs)
+
+        # Map result to VReg
+        if inst.result is not None:
+            if isinstance(inst.result, VRegPhi):
+                inst.result.set_resolved(result)
+                phi_nodes.append((inst.result, result))
+            elif isinstance(inst.result, VRegSwitch):
+                inst.result.set_resolved(result)
+                switch_nodes.append((inst.result, result))
+            elif isinstance(inst.result, VReg):
+                inst.result.set_resolved(result)
 
     def run_cfg_linear_check(self, initial_snapshot: LinearSnapshot = None) -> bool:
-        """Run CFG-based linear type checking
-
-        Args:
-            initial_snapshot: Initial linear state (defaults to empty)
-
-        Returns:
-            True if no errors, False if errors found
-        """
         from ..cfg.linear_checker import LinearChecker
 
         if initial_snapshot is None:
@@ -436,17 +597,10 @@ class ControlFlowBuilder:
         return True
 
     def dump_cfg(self, level: int = 0, use_print: bool = False):
-        """Dump CFG structure for debugging
-
-        Args:
-            level: Log level (0=debug, 1=info)
-            use_print: If True, use print() instead of logger
-        """
         lines = [f"\n=== CFG for {self._func_name} ==="]
         lines.append(f"Entry: B{self._cfg.entry_id}, Exit: B{self._cfg.exit_id}")
         lines.append(f"Blocks: {len(self._cfg.blocks)}, Edges: {len(self._cfg.edges)}")
 
-        # Dump blocks
         lines.append("\nBlocks:")
         for block_id in sorted(self._cfg.blocks.keys()):
             block = self._cfg.blocks[block_id]
@@ -462,11 +616,10 @@ class ControlFlowBuilder:
 
             marker_str = f" ({', '.join(markers)})" if markers else ""
             ir_block = self._block_map.get(block_id)
-            ir_name = ir_block.name if ir_block else "?"
+            ir_name = getattr(ir_block, 'name', '?')
 
             lines.append(f"  B{block_id}{marker_str} [IR: {ir_name}]:")
 
-            # Show statements
             if block.stmts:
                 for stmt in block.stmts:
                     stmt_str = ast.unparse(stmt)[:60]
@@ -474,13 +627,14 @@ class ControlFlowBuilder:
             else:
                 lines.append("    (no statements recorded)")
 
-            # Show linear events
             if block.linear_events:
                 lines.append(f"    Linear events: {len(block.linear_events)}")
                 for event in block.linear_events:
                     lines.append(f"      {event}")
 
-        # Dump edges
+            if block.pcir:
+                lines.append(f"    PCIR: {len(block.pcir)} instructions")
+
         lines.append("\nEdges:")
         for edge in self._cfg.edges:
             lines.append(f"  B{edge.source_id} -> B{edge.target_id} [{edge.kind}]")

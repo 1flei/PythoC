@@ -36,6 +36,7 @@ class CFGBlock:
     stmts: List[ast.stmt] = field(default_factory=list)
     source_range: Optional[Tuple[int, int]] = None
     linear_events: List[Any] = field(default_factory=list)  # List[LinearEvent]
+    pcir: List[Any] = field(default_factory=list)  # List[PCIRInst]
     
     def __repr__(self) -> str:
         stmt_count = len(self.stmts)

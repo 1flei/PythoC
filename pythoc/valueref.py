@@ -189,6 +189,9 @@ class ValueRef:
         # Prioritize actual IR value type for consistency (only for IR values)
         if isinstance(self.value, ir.Value):
             return self.value.type
+        # Support PCIR virtual registers (VReg, VRegPhi, VRegSwitch)
+        if hasattr(self.value, 'type') and hasattr(self.value, 'id'):
+            return self.value.type
         raise TypeError("Cannot determine LLVM type for value")
 
     # Common IR operations, always return ValueRef
@@ -332,11 +335,12 @@ class ValueRef:
 
 def ensure_ir(value: Union[ir.Value, ValueRef], visitor=None) -> ir.Value:
     """Return underlying ir.Value for either ValueRef or ir.Value.
-    
+
     This function is backward compatible and works with both old and new ValueRef.
     Automatically promotes Python values to LLVM constants if possible.
     Special handling for pyconst_field kind.
-    
+    Also handles VReg objects from PCIR (returned as-is since they carry type info).
+
     Args:
         value: ValueRef or ir.Value to extract IR from
         visitor: Optional visitor for context (needed for string constants)
@@ -344,6 +348,10 @@ def ensure_ir(value: Union[ir.Value, ValueRef], visitor=None) -> ir.Value:
     if isinstance(value, ValueRef):
         return value.get_ir_value()
     if isinstance(value, ir.Value):
+        return value
+    # Support PCIR virtual registers (VReg, VRegPhi, VRegSwitch)
+    # They have a .type attribute like ir.Value but aren't ir.Value instances
+    if hasattr(value, 'type') and hasattr(value, 'id'):
         return value
     raise TypeError(f"Cannot get IR value from {type(value)}")
 
@@ -400,16 +408,20 @@ def _infer_kind(value: Union[ir.Value, AnyType],
         if hasattr(type_hint, 'is_python_type') and type_hint.is_python_type():
             return 'python'
     
-    # Rule 3: Check if value is an LLVM pointer type
+    # Rule 3: Check if value is an LLVM value or VReg (PCIR virtual register)
     if isinstance(value, ir.Value):
         if isinstance(value.type, ir.PointerType):
-            # Pointer value - could be 'pointer' or 'address'
-            # Default to 'pointer' (rvalue pointer)
             return 'pointer'
         else:
-            # Non-pointer LLVM value
             return 'value'
-    
+
+    # Rule 3b: VReg from PCIR (has .type and .id like ir.Value but isn't one)
+    if hasattr(value, 'type') and hasattr(value, 'id'):
+        if isinstance(value.type, ir.PointerType):
+            return 'pointer'
+        else:
+            return 'value'
+
     # Rule 4: Non-LLVM value (Python object)
     # If we reach here without a Python type_hint, it's likely a Python value
     return 'python'
