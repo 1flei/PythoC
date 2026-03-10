@@ -363,8 +363,7 @@ class LLVMCompiler:
         real_builder = LLVMBuilder(ir_builder)
 
         # Reset scoped label tracking for this function
-        from .builtin_entities.scoped_label import reset_label_tracking
-        reset_label_tracking(visitor)
+        visitor.scope_manager.reset_label_tracking()
 
         # Set ABI context for struct returns
         sret_info = func_type_hints.get('_sret_info') if func_type_hints else None
@@ -597,8 +596,7 @@ class LLVMCompiler:
         visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
 
         # Check for unresolved scoped goto statements
-        from .builtin_entities.scoped_label import check_scoped_goto_consistency
-        check_scoped_goto_consistency(visitor, ast_node)
+        visitor.scope_manager.check_goto_consistency(ast_node)
 
         # Check for unexecuted deferred calls (should not happen if implementation is correct)
         from .builtin_entities.defer import check_defers_at_function_end
