@@ -582,71 +582,29 @@ class LLVMCompiler:
             visitor.builder.add_stmt(stmt)
             visitor.visit(stmt)
         
-        # Finalize CFG while variables are still in scope.
-        # For fallthrough functions, finalize() may record exit snapshots for the
-        # current block, which requires variables to remain visible.
+        # Finalize CFG and patch unterminated IR blocks.
+        # finalize() connects fall-through CFG blocks to exit, computes loop headers,
+        # and emits IR terminators for all unterminated blocks in one step.
         visitor.builder.finalize()
         visitor.builder.dump_cfg()  # Uses logger.debug by default
-        
-        def _make_ir_structurally_valid():
-            """Make LLVM IR parseable even if we are about to error out.
 
-            Uses _real_builder directly to bypass CFG tracking since the CFG
-            is already finalized at this point.
-            """
-            rb = visitor.builder._real_builder
-            # Ensure function has a return
-            if not rb.block.is_terminated:
-                if return_type == ir.VoidType():
-                    rb.ret_void()
-                elif isinstance(return_type, ir.PointerType):
-                    rb.ret(ir.Constant(return_type, None))
-                elif isinstance(return_type, ir.IntType):
-                    rb.ret(ir.Constant(return_type, 0))
-                elif isinstance(return_type, (ir.FloatType, ir.DoubleType)):
-                    rb.ret(ir.Constant(return_type, 0.0))
-                elif isinstance(return_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-                    rb.ret(ir.Constant(return_type, ir.Undefined))
-                elif isinstance(return_type, ir.ArrayType):
-                    rb.ret(ir.Constant(return_type, ir.Undefined))
-                else:
-                    rb.ret(ir.Constant(return_type, ir.Undefined))
+        # CFG merge checks (and loop invariants).
+        # IR is already structurally valid after finalize(), so errors here
+        # won't cause secondary LLVM parse/verify failures.
+        visitor.builder.run_cfg_linear_check()
 
-            # Clean up basic blocks without terminator instructions
-            blocks_cleaned = 0
-            for block in llvm_function.blocks:
-                if not block.is_terminated:
-                    rb.position_at_end(block)
-                    rb.unreachable()
-                    blocks_cleaned += 1
-            if blocks_cleaned > 0:
-                logger.debug(f"Cleaned up {blocks_cleaned} unterminated blocks in {llvm_function.name}")
-        
-        # CFG merge checks (and loop invariants). If this errors, keep IR valid
-        # to avoid secondary LLVM parse/verify errors hiding the real problem.
-        try:
-            visitor.builder.run_cfg_linear_check()
-        except (SystemExit, Exception):
-            _make_ir_structurally_valid()
-            raise
-        
         # Exit function-level scope in ScopeManager
         # This enforces: when variables go out of scope, all linear states are inactive.
-        # If this errors, also keep IR valid to avoid secondary LLVM parse/verify errors.
-        try:
-            visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
-        except (SystemExit, Exception):
-            _make_ir_structurally_valid()
-            raise
-        
+        visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
+
         # Check for unresolved scoped goto statements
         from .builtin_entities.scoped_label import check_scoped_goto_consistency
         check_scoped_goto_consistency(visitor, ast_node)
-        
+
         # Check for unexecuted deferred calls (should not happen if implementation is correct)
         from .builtin_entities.defer import check_defers_at_function_end
         check_defers_at_function_end(visitor, ast_node)
-        
+
         # Debug hook - capture all inlined statements accumulated during compilation
         from .utils.ast_debug import ast_debugger
         if visitor._all_inlined_stmts:
@@ -657,10 +615,7 @@ class LLVMCompiler:
                 inline_count=len([s for s in visitor._all_inlined_stmts if isinstance(s, ast.While)]),
                 total_stmts=len(visitor._all_inlined_stmts)
             )
-        
-        # Normal completion: ensure IR is structurally valid
-        _make_ir_structurally_valid()
-        
+
         self.compiled_functions.append(llvm_function)
         return llvm_function
     
