@@ -37,6 +37,33 @@ class ScopeType(Enum):
 
 
 @dataclass
+class LabelContext:
+    """Context for a scoped label
+
+    Key insight from design doc:
+    - begin is at the 'with' statement level (visible to siblings)
+    - end is inside the body (only visible from inside)
+
+    Attributes:
+        name: Label name (unique within function)
+        parent_scope_depth: Scope depth at the 'with' statement level
+        begin_block: IR block for goto target
+        end_block: IR block for goto_end target
+        node: Original AST node for error reporting
+    """
+    name: str
+    parent_scope_depth: int    # Outside scope (at 'with' level)
+    begin_block: object        # IR block
+    end_block: object          # IR block
+    node: ast.AST              # Original AST node for error reporting
+
+    @property
+    def scope_depth(self) -> int:
+        """Inside scope depth (after entering) - always parent + 1"""
+        return self.parent_scope_depth + 1
+
+
+@dataclass
 class DeferInfo:
     """Information about a deferred call"""
     callable_obj: Any           # Object with handle_call method
@@ -102,6 +129,11 @@ class ScopeManager:
         # These persist after scope exit for sibling/uncle goto visibility
         self._scope_labels: Dict[int, List[Any]] = {}  # parent_depth -> [LabelContext]
         self._all_labels: Dict[str, Any] = {}        # name -> LabelContext
+
+        # Scope hazards: track var declarations and defer registrations with
+        # line numbers, keyed by scope depth. Used to detect forward sibling
+        # gotos that skip over variable definitions or defer statements.
+        self._scope_hazards: Dict[int, List[Tuple[int, str]]] = {}  # depth -> [(lineno, desc)]
     
     def set_visitor(self, visitor: Any):
         """Set the visitor for defer execution"""
@@ -287,7 +319,15 @@ class ScopeManager:
             node=node
         )
         self._scopes[-1].defers.append(defer_info)
-        
+
+        # Record hazard for sibling crossing check
+        depth = self.current_depth
+        lineno = getattr(node, 'lineno', None)
+        if lineno is not None:
+            self._scope_hazards.setdefault(depth, []).append(
+                (lineno, "defer statement")
+            )
+
         logger.debug(f"Registered defer at scope depth {self.current_depth}")
     
     def get_loop_targets(self) -> Tuple[Optional[Any], Optional[Any]]:
@@ -314,12 +354,19 @@ class ScopeManager:
     
     def declare_variable(self, var_info: Any, allow_shadow: bool = False):
         """Declare a variable in the current scope
-        
+
         This syncs with var_registry and tracks in scope.
         """
         self._var_registry.declare(var_info, allow_shadow=allow_shadow)
         if self._scopes:
             self._scopes[-1].variables[var_info.name] = var_info
+        # Record hazard for sibling crossing check
+        depth = self.current_depth
+        lineno = getattr(var_info, 'line_number', None)
+        if lineno is not None:
+            self._scope_hazards.setdefault(depth, []).append(
+                (lineno, f"variable '{var_info.name}'")
+            )
     
     def lookup_variable(self, name: str) -> Optional[Any]:
         """Look up a variable in the scope chain"""
@@ -372,6 +419,7 @@ class ScopeManager:
         """Reset label tracking at the start of each function."""
         self._scope_labels = {}
         self._all_labels = {}
+        self._scope_hazards = {}
         # Pending gotos are owned by ControlFlowBuilder (fresh per function)
 
     def register_label(self, ctx: Any):
@@ -474,6 +522,189 @@ class ScopeManager:
                         defer_info.node
                     ))
         return snapshot
+
+    def _get_defer_executor(self):
+        """Create a defer executor function for pending goto resolution."""
+        from pythoc.builtin_entities.defer import _execute_single_defer
+        visitor = self._visitor
+
+        def defer_executor(callable_obj, func_ref, args, defer_node):
+            _execute_single_defer(visitor, callable_obj, func_ref, args, defer_node)
+
+        return defer_executor
+
+    def _check_sibling_crossing(self, goto_node: ast.AST, target_node: ast.AST,
+                                parent_depth: int):
+        """Check that a forward sibling goto does not cross variable definitions
+        or defer statements.
+
+        A forward goto from label A to label B (both at parent_depth) must not
+        skip over any variable declarations or defer registrations that occur
+        at the same scope depth between the two labels.
+
+        Args:
+            goto_node: The AST node of the goto() call.
+            target_node: The AST node of the target label's 'with' statement.
+            parent_depth: The parent scope depth where both labels live.
+        """
+        goto_line = getattr(goto_node, 'lineno', None)
+        target_line = getattr(target_node, 'lineno', None)
+        if goto_line is None or target_line is None:
+            return
+
+        hazards = self._scope_hazards.get(parent_depth, [])
+        for lineno, desc in hazards:
+            if goto_line < lineno < target_line:
+                logger.error(
+                    f"forward goto crosses {desc} at line {lineno}. "
+                    f"Forward sibling goto must not skip over variable "
+                    f"definitions or defer statements.",
+                    node=goto_node, exc_type=SyntaxError,
+                )
+
+    def create_label_scope(self, label_name: str, cf, node: ast.AST) -> LabelContext:
+        """Create a label scope: check duplicates, create blocks, register, resolve pending gotos.
+
+        Args:
+            label_name: The label name string.
+            cf: ControlFlowBuilder instance.
+            node: The AST With node.
+
+        Returns:
+            The newly created LabelContext.
+        """
+        if self.has_label(label_name):
+            logger.error(f"Label '{label_name}' already defined in this function",
+                        node=node, exc_type=SyntaxError)
+
+        begin_block = cf.create_block(f"label_{label_name}_begin")
+        end_block = cf.create_block(f"label_{label_name}_end")
+
+        parent_depth = self.current_depth
+        ctx = LabelContext(
+            name=label_name,
+            parent_scope_depth=parent_depth,
+            begin_block=begin_block,
+            end_block=end_block,
+            node=node,
+        )
+
+        self.register_label(ctx)
+
+        if not cf.is_terminated():
+            cf.branch(begin_block)
+        cf.position_at_end(begin_block)
+
+        # Check forward sibling gotos for visibility and crossing hazards
+        for pending in cf.get_pending_gotos_for_label(label_name):
+            # Visibility check: the target label must be at a parent_depth
+            # that was visible from the goto site
+            if pending.is_goto_end:
+                # goto_end can only target ancestors - forward goto_end is
+                # always invalid (the target is not yet entered)
+                logger.error(
+                    f"goto_end: label '{label_name}' not visible. "
+                    f"goto_end can only target self or ancestors "
+                    f"(must be inside the label).",
+                    node=pending.node, exc_type=SyntaxError,
+                )
+            elif parent_depth not in pending.visible_parent_depths:
+                logger.error(
+                    f"goto: label '{label_name}' not visible from goto site. "
+                    f"Forward goto can only target siblings or uncles.",
+                    node=pending.node, exc_type=SyntaxError,
+                )
+            self._check_sibling_crossing(pending.node, node, parent_depth)
+
+        # Resolve any pending forward gotos to this label
+        cf.resolve_pending_gotos(
+            ctx.name, ctx.begin_block, ctx.parent_scope_depth,
+            self._get_defer_executor(),
+        )
+
+        logger.debug(f"Entered label scope '{label_name}' at depth {ctx.scope_depth} "
+                     f"(parent_depth={parent_depth})")
+        return ctx
+
+    def exit_label_scope(self, ctx: LabelContext, cf):
+        """Exit a label scope: emit defers, branch to end block.
+
+        IMPORTANT: Does NOT call position_at_end - that must be done AFTER
+        scope_manager.exit_scope() so that is_terminated() check works correctly.
+
+        Args:
+            ctx: The LabelContext being exited.
+            cf: ControlFlowBuilder instance.
+        """
+        if not cf.is_terminated():
+            scope = self.current_scope
+            if scope is not None:
+                self._emit_defers_for_scope(scope)
+            cf.branch(ctx.end_block)
+
+        logger.debug(f"Exited label scope '{ctx.name}'")
+
+    def register_forward_goto(self, label_name: str, cf, node: ast.AST,
+                              is_goto_end: bool = False):
+        """Register a forward goto (label not yet defined).
+
+        Captures defer snapshot and visible parent depths, then delegates
+        to cfbuilder. The visibility info is used at resolution time to
+        verify the target label is actually visible from the goto site.
+
+        Args:
+            label_name: Target label name.
+            cf: ControlFlowBuilder instance.
+            node: The AST node for error reporting.
+            is_goto_end: True for goto_end, False for goto.
+        """
+        current_block = self._visitor.builder.block
+        goto_scope_depth = self.current_depth
+        defer_snapshot = self.capture_defer_snapshot()
+
+        # Capture visible parent depths for visibility check at resolution time.
+        # These are the parent_depth values where sibling/uncle labels are visible.
+        visible_parent_depths = {0}  # Function level always visible
+        for scope in self._scopes:
+            if scope.label_ctx is not None:
+                visible_parent_depths.add(scope.label_ctx.parent_scope_depth)
+
+        logger.debug(f"Forward goto to '{label_name}': captured {len(defer_snapshot)} "
+                     f"defers at scope {goto_scope_depth}")
+
+        cf.register_pending_goto(
+            block=current_block,
+            label_name=label_name,
+            goto_scope_depth=goto_scope_depth,
+            defer_snapshot=defer_snapshot,
+            node=node,
+            is_goto_end=is_goto_end,
+            visible_parent_depths=visible_parent_depths,
+        )
+
+    def resolve_backward_goto(self, ctx: LabelContext, cf):
+        """Resolve a backward goto (label already defined).
+
+        Exits scopes to target's parent depth and branches to begin_block.
+
+        Args:
+            ctx: The target LabelContext.
+            cf: ControlFlowBuilder instance.
+        """
+        self.exit_scopes_to(ctx.parent_scope_depth, cf)
+        cf.branch(ctx.begin_block, kind='goto')
+
+    def resolve_backward_goto_end(self, ctx: LabelContext, cf):
+        """Resolve a backward goto_end (label already defined).
+
+        Exits scopes to target's parent depth and branches to end_block.
+
+        Args:
+            ctx: The target LabelContext.
+            cf: ControlFlowBuilder instance.
+        """
+        self.exit_scopes_to(ctx.parent_scope_depth, cf)
+        cf.branch(ctx.end_block, kind='goto_end')
 
     def check_goto_consistency(self, func_node: Any):
         """Check that all scoped gotos have been resolved.

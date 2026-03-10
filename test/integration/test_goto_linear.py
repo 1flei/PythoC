@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import unittest
 from pythoc.decorators.compile import compile
-from pythoc.builtin_entities import linear, consume, void, i32, label, goto, goto_end
+from pythoc.builtin_entities import linear, consume, void, i32, label, goto, goto_end, defer, ptr
 from pythoc.std.utility import move
 from pythoc.build.output_manager import flush_all_pending_outputs
 from pythoc.libc.stdio import printf
@@ -457,6 +457,59 @@ def run_error_goto_loop_merge_inconsistent():
 
 
 # =============================================================================
+# Error tests - forward sibling goto crossing
+# =============================================================================
+
+@expect_error(["forward goto crosses variable"], suffix="goto_crosses_var")
+def run_error_goto_crosses_var():
+    """Error: forward goto crosses a variable declaration"""
+    @compile(suffix="goto_crosses_var")
+    def bad() -> i32:
+        with label("A"):
+            goto("B")
+        x: i32 = 42
+        with label("B"):
+            pass
+        return x
+
+
+@expect_error(["forward goto crosses defer"], suffix="goto_crosses_defer")
+def run_error_goto_crosses_defer():
+    """Error: forward goto crosses a defer statement"""
+    @compile(suffix="goto_crosses_defer")
+    def bad() -> void:
+        result: i32 = 0
+        with label("A"):
+            goto("B")
+        defer(printf, "cleanup\n")
+        with label("B"):
+            pass
+
+
+@expect_error(["not visible", "siblings or uncles"], suffix="goto_fwd_into_nested")
+def run_error_goto_fwd_into_nested():
+    """Error: forward goto into a nested label inside a sibling"""
+    @compile(suffix="goto_fwd_into_nested")
+    def bad() -> i32:
+        with label("A"):
+            goto("C")
+        with label("B"):
+            with label("C"):
+                pass
+        return 0
+
+
+@expect_error(["goto_end", "not visible"], suffix="goto_end_fwd")
+def run_error_goto_end_fwd():
+    """Error: forward goto_end is always invalid (not inside target yet)"""
+    @compile(suffix="goto_end_fwd")
+    def bad() -> void:
+        goto_end("later")
+        with label("later"):
+            pass
+
+
+# =============================================================================
 # Test class
 # =============================================================================
 
@@ -584,6 +637,23 @@ class TestGotoLinear(DeferredTestCase):
     def test_error_goto_loop_merge_inconsistent(self):
         """Error: loop via goto with inconsistent state"""
         run_error_goto_loop_merge_inconsistent()
+
+    # Error tests - forward sibling goto crossing
+    def test_error_goto_crosses_var(self):
+        """Error: forward goto crosses variable declaration"""
+        run_error_goto_crosses_var()
+
+    def test_error_goto_crosses_defer(self):
+        """Error: forward goto crosses defer statement"""
+        run_error_goto_crosses_defer()
+
+    def test_error_goto_fwd_into_nested(self):
+        """Error: forward goto into nested label inside sibling"""
+        run_error_goto_fwd_into_nested()
+
+    def test_error_goto_end_fwd(self):
+        """Error: forward goto_end is always invalid"""
+        run_error_goto_end_fwd()
 
 
 if __name__ == '__main__':

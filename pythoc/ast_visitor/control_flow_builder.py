@@ -16,6 +16,7 @@ Key benefits:
 """
 
 from typing import Optional, Dict, List, Tuple, Any, TYPE_CHECKING
+from dataclasses import dataclass, field
 from llvmlite import ir
 import ast
 
@@ -36,6 +37,39 @@ from .pcir import (
 if TYPE_CHECKING:
     from .base import LLVMIRVisitor
     from ..builder import LLVMBuilder
+
+
+@dataclass
+class PendingGoto:
+    """A forward goto reference waiting to be resolved.
+
+    Attributes:
+        block: The IR block where the goto was issued
+        label_name: Target label name
+        goto_scope_depth: Scope depth when goto was issued
+        defer_snapshot: List of (depth, callable_obj, func_ref, args, node) tuples
+        node: AST node for error reporting
+        is_goto_end: True if this is goto_end, False if goto
+        visible_parent_depths: Set of parent_depth values where sibling/uncle
+                               labels would be visible from the goto site
+        emitted_to_depth: Defers with depth > this have been emitted.
+                          Initialized to goto_scope_depth, decremented as scopes exit.
+    """
+    block: object
+    label_name: str
+    goto_scope_depth: int
+    defer_snapshot: List  # List of (depth, callable_obj, func_ref, args, node)
+    node: ast.AST
+    is_goto_end: bool
+    visible_parent_depths: set = field(default_factory=set)
+    emitted_to_depth: int = field(default=None)
+
+    def __post_init__(self):
+        if self.emitted_to_depth is None:
+            # Initially, no defers have been emitted
+            # We'll emit defers for depth > emitted_to_depth
+            # Start with goto_scope_depth + 1 so nothing is emitted yet
+            self.emitted_to_depth = self.goto_scope_depth + 1
 
 
 class ControlFlowBuilder:
@@ -487,13 +521,25 @@ class ControlFlowBuilder:
 
     # ========== Pending Forward Goto API ==========
 
-    def register_pending_goto(self, pending):
+    def register_pending_goto(self, pending=None, *, block=None, label_name=None,
+                              goto_scope_depth=None, defer_snapshot=None,
+                              node=None, is_goto_end=False,
+                              visible_parent_depths=None):
         """Register a forward goto from current block. Marks block terminated.
 
-        Args:
-            pending: Opaque PendingGoto object with .block attribute set to
-                     current block by caller.
+        Can be called with a PendingGoto object (legacy) or keyword args to
+        construct one internally.
         """
+        if pending is None:
+            pending = PendingGoto(
+                block=block,
+                label_name=label_name,
+                goto_scope_depth=goto_scope_depth,
+                defer_snapshot=defer_snapshot,
+                node=node,
+                is_goto_end=is_goto_end,
+                visible_parent_depths=visible_parent_depths or set(),
+            )
         self._pending_gotos.append(pending)
         self.mark_terminated()
 
@@ -601,6 +647,10 @@ class ControlFlowBuilder:
     def get_unresolved_pending_gotos(self):
         """Return list of unresolved pending gotos (for consistency check)."""
         return list(self._pending_gotos)
+
+    def get_pending_gotos_for_label(self, label_name):
+        """Return pending gotos targeting the given label (read-only query)."""
+        return [p for p in self._pending_gotos if p.label_name == label_name]
 
     def reset_pending_gotos(self):
         """Clear pending gotos."""
