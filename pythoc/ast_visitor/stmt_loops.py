@@ -6,7 +6,6 @@ import ast
 import copy
 from ..logger import logger
 from ..scope_manager import ScopeType
-from .control_flow_builder import ControlFlowBuilder
 
 
 def _has_break_in_body(body: list) -> bool:
@@ -54,13 +53,7 @@ def _has_break_in_body(body: list) -> bool:
 
 class LoopsMixin:
     """Mixin for loop statements: for, while"""
-    
-    def _get_cf_builder(self) -> ControlFlowBuilder:
-        """Get or create the ControlFlowBuilder for this visitor"""
-        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
-            self._cf_builder = ControlFlowBuilder(self)
-        return self._cf_builder
-    
+
     def visit_While(self, node: ast.While):
         """Handle while loops
         
@@ -101,7 +94,7 @@ class LoopsMixin:
         # Normal while loop with runtime condition
         self._visit_while_normal(node, cf, condition_val)
     
-    def _visit_while_true(self, node: ast.While, cf: ControlFlowBuilder):
+    def _visit_while_true(self, node: ast.While, cf: "ControlFlowBuilder"):
         """Handle while True - infinite loop or single execution with break
         
         CFG structure for while True:
@@ -157,7 +150,7 @@ class LoopsMixin:
             # No break in the loop - infinite loop, code after is unreachable
             cf.unreachable()
     
-    def _visit_while_normal(self, node: ast.While, cf: ControlFlowBuilder, condition_val):
+    def _visit_while_normal(self, node: ast.While, cf: "ControlFlowBuilder", condition_val):
         """Handle normal while loop with runtime condition
         
         CFG structure:

@@ -7,18 +7,11 @@ from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type
 from ..logger import logger
 from ..scope_manager import ScopeType
-from .control_flow_builder import ControlFlowBuilder
 
 
 class MatchStatementMixin:
     """Mixin for match/case statement handling"""
-    
-    def _get_cf_builder(self) -> ControlFlowBuilder:
-        """Get or create the ControlFlowBuilder for this visitor"""
-        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
-            self._cf_builder = ControlFlowBuilder(self)
-        return self._cf_builder
-    
+
     def visit_Match(self, node: ast.Match):
         """Handle match/case statements (Python 3.10+)
 

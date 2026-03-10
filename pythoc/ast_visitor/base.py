@@ -426,13 +426,12 @@ class LLVMIRVisitor(ast.NodeVisitor):
             # Emit LinearRegister event to CFG
             # Map 'active' -> 'valid', 'consumed' -> 'invalid'
             cfg_state = 'valid' if initial_state == 'active' else 'invalid'
-            if hasattr(self, '_get_cf_builder'):
-                cf = self._get_cf_builder()
-                if cf is not None:
-                    cf.record_linear_register(
-                        var_info.var_id, var_info.name, path, cfg_state,
-                        line_number=var_info.line_number, node=None
-                    )
+            cf = self._get_cf_builder()
+            if cf is not None:
+                cf.record_linear_register(
+                    var_info.var_id, var_info.name, path, cfg_state,
+                    line_number=var_info.line_number, node=None
+                )
         if paths:
             logger.debug(f"Initialized linear states for '{var_info.name}': {paths} -> {initial_state}")
     
@@ -505,16 +504,22 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 linear_paths = self._get_linear_paths(type_hint, path)
                 for lin_path in linear_paths:
                     # Emit LinearTransition event: invalid -> valid (token created)
-                    if hasattr(self, '_get_cf_builder'):
-                        cf = self._get_cf_builder()
-                        if cf is not None:
-                            line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
-                            cf.record_linear_transition(
-                                var_info.var_id, var_name, lin_path, 'invalid', 'valid',
-                                line_number=line_num, node=node
-                            )
+                    cf = self._get_cf_builder()
+                    if cf is not None:
+                        line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
+                        cf.record_linear_transition(
+                            var_info.var_id, var_name, lin_path, 'invalid', 'valid',
+                            line_number=line_num, node=node
+                        )
                 logger.debug(f"Linear token '{var_name}' paths {linear_paths} transitioned to active")
     
+    def _get_cf_builder(self):
+        """Get the ControlFlowBuilder if builder is one, else None"""
+        from .control_flow_builder import ControlFlowBuilder
+        if isinstance(self.builder, ControlFlowBuilder):
+            return self.builder
+        return None
+
     def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer", node=None):
         """Transfer ownership of linear tokens from a ValueRef
         
@@ -571,12 +576,11 @@ class LLVMIRVisitor(ast.NodeVisitor):
         for path in linear_paths:
             # Emit LinearTransition event: valid -> invalid (token consumed)
             # CFG checker will validate that current state is 'valid'
-            if hasattr(self, '_get_cf_builder'):
-                cf = self._get_cf_builder()
-                if cf is not None:
-                    line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
-                    cf.record_linear_transition(
-                        var_info.var_id, var_name, path, 'valid', 'invalid',
-                        line_number=line_num, node=node
-                    )
+            cf = self._get_cf_builder()
+            if cf is not None:
+                line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
+                cf.record_linear_transition(
+                    var_info.var_id, var_name, path, 'valid', 'invalid',
+                    line_number=line_num, node=node
+                )
 

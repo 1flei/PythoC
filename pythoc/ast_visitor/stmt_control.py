@@ -6,21 +6,11 @@ import ast
 from ..valueref import ensure_ir, ValueRef
 from ..logger import logger
 from ..scope_manager import ScopeType
-from .control_flow_builder import ControlFlowBuilder
 
 
 class ControlFlowMixin:
     """Mixin for control flow statements: return, break, continue"""
-    
-    def _get_cf_builder(self) -> ControlFlowBuilder:
-        """Get or create the ControlFlowBuilder for this visitor"""
-        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
-            func_name = ""
-            if hasattr(self, 'current_function') and self.current_function:
-                func_name = self.current_function.name
-            self._cf_builder = ControlFlowBuilder(self, func_name)
-        return self._cf_builder
-    
+
     def _visit_stmt_list(self, stmts, add_to_cfg: bool = True):
         """Visit a list of statements, handling terminated blocks properly.
         
@@ -148,9 +138,8 @@ class ControlFlowMixin:
                     self.builder.ret(value_ir)
             else:
                 self.builder.ret_void()
-            
-            # Mark return in CFG
-            cf.mark_return()
+
+            # mark_return() is now called by self.builder.ret()/ret_void() automatically
         # else: block already terminated, this is unreachable code, silently ignore
 
     def visit_Break(self, node: ast.Break):

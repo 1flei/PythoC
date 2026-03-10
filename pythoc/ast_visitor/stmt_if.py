@@ -7,24 +7,10 @@ from llvmlite import ir
 from ..valueref import ensure_ir, ValueRef
 from ..logger import logger
 from ..scope_manager import ScopeType
-from .control_flow_builder import ControlFlowBuilder
 
 
 class IfStatementMixin:
     """Mixin for if statement handling"""
-
-    def _get_cf_builder(self) -> ControlFlowBuilder:
-        """Get or create the ControlFlowBuilder for this visitor"""
-        if not hasattr(self, '_cf_builder') or self._cf_builder is None:
-            func_name = ""
-            if hasattr(self, 'current_function') and self.current_function:
-                func_name = self.current_function.name
-            self._cf_builder = ControlFlowBuilder(self, func_name)
-        return self._cf_builder
-    
-    def _reset_cf_builder(self):
-        """Reset the ControlFlowBuilder (call at start of new function)"""
-        self._cf_builder = None
 
     def process_condition(self, condition: ValueRef, then_fn, else_fn=None):
         """Handle condition with proper control flow

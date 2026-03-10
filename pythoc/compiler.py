@@ -360,15 +360,20 @@ class LLVMCompiler:
         entry_block = llvm_function.append_basic_block('entry')
         from .builder import LLVMBuilder
         ir_builder = ir.IRBuilder(entry_block)
-        visitor.builder = LLVMBuilder(ir_builder)
-        
+        real_builder = LLVMBuilder(ir_builder)
+
         # Reset scoped label tracking for this function
         from .builtin_entities.scoped_label import reset_label_tracking
         reset_label_tracking(visitor)
-        
+
         # Set ABI context for struct returns
         sret_info = func_type_hints.get('_sret_info') if func_type_hints else None
-        visitor.builder.set_return_abi_context(llvm_function, sret_info)
+        real_builder.set_return_abi_context(llvm_function, sret_info)
+
+        # Create ControlFlowBuilder wrapping real_builder and set as visitor.builder
+        # This must happen before parameter initialization which uses visitor.builder
+        from .ast_visitor.control_flow_builder import ControlFlowBuilder
+        visitor.builder = ControlFlowBuilder(real_builder, visitor, ast_node.name)
         
         # Initialize parameters - they will be registered in variable registry
         # For struct varargs, we also initialize the expanded parameters AND create a struct
@@ -535,14 +540,9 @@ class LLVMCompiler:
         
         # Initialize list to accumulate all inlined statements
         visitor._all_inlined_stmts = []
-        
-        # Always initialize CFG builder for linear type checking
-        # This ensures linear leak detection works even for simple functions without control flow
-        from .ast_visitor.control_flow_builder import ControlFlowBuilder
-        visitor._cf_builder = ControlFlowBuilder(visitor, ast_node.name)
-        
+
         # Emit LinearRegister events for linear parameters
-        # This must happen after _cf_builder is created
+        # This must happen after ControlFlowBuilder is created (visitor.builder)
         for var_info in visitor.scope_manager.get_all_in_current_scope():
             if var_info.is_parameter and var_info.type_hint:
                 # Check if parameter type is linear and get all linear paths
@@ -550,7 +550,7 @@ class LLVMCompiler:
                     paths = visitor._get_linear_paths(var_info.type_hint)
                     for path in paths:
                         # Parameters with linear types start as 'valid' (ownership passed in)
-                        visitor._cf_builder.record_linear_register(
+                        visitor.builder.record_linear_register(
                             var_info.var_id, var_info.name, path, 'valid',
                             line_number=var_info.line_number, node=ast_node
                         )
@@ -565,7 +565,7 @@ class LLVMCompiler:
         # Exception: with label() statements are always processed because they create new reachable blocks
         for stmt in ast_node.body:
             # Check if current block is terminated (unreachable code)
-            if visitor._cf_builder.is_terminated():
+            if visitor.builder.is_terminated():
                 # Check if this is a with label() statement - these should always be processed
                 is_label_stmt = False
                 if isinstance(stmt, ast.With):
@@ -579,40 +579,45 @@ class LLVMCompiler:
                 if not is_label_stmt:
                     logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
                     continue
-            visitor._cf_builder.add_stmt(stmt)
+            visitor.builder.add_stmt(stmt)
             visitor.visit(stmt)
         
         # Finalize CFG while variables are still in scope.
         # For fallthrough functions, finalize() may record exit snapshots for the
         # current block, which requires variables to remain visible.
-        visitor._cf_builder.finalize()
-        visitor._cf_builder.dump_cfg()  # Uses logger.debug by default
+        visitor.builder.finalize()
+        visitor.builder.dump_cfg()  # Uses logger.debug by default
         
         def _make_ir_structurally_valid():
-            """Make LLVM IR parseable even if we are about to error out."""
+            """Make LLVM IR parseable even if we are about to error out.
+
+            Uses _real_builder directly to bypass CFG tracking since the CFG
+            is already finalized at this point.
+            """
+            rb = visitor.builder._real_builder
             # Ensure function has a return
-            if not visitor.builder.block.is_terminated:
+            if not rb.block.is_terminated:
                 if return_type == ir.VoidType():
-                    visitor.builder.ret_void()
+                    rb.ret_void()
                 elif isinstance(return_type, ir.PointerType):
-                    visitor.builder.ret(ir.Constant(return_type, None))
+                    rb.ret(ir.Constant(return_type, None))
                 elif isinstance(return_type, ir.IntType):
-                    visitor.builder.ret(ir.Constant(return_type, 0))
+                    rb.ret(ir.Constant(return_type, 0))
                 elif isinstance(return_type, (ir.FloatType, ir.DoubleType)):
-                    visitor.builder.ret(ir.Constant(return_type, 0.0))
+                    rb.ret(ir.Constant(return_type, 0.0))
                 elif isinstance(return_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-                    visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+                    rb.ret(ir.Constant(return_type, ir.Undefined))
                 elif isinstance(return_type, ir.ArrayType):
-                    visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
+                    rb.ret(ir.Constant(return_type, ir.Undefined))
                 else:
-                    visitor.builder.ret(ir.Constant(return_type, ir.Undefined))
-            
+                    rb.ret(ir.Constant(return_type, ir.Undefined))
+
             # Clean up basic blocks without terminator instructions
             blocks_cleaned = 0
             for block in llvm_function.blocks:
                 if not block.is_terminated:
-                    visitor.builder.position_at_end(block)
-                    visitor.builder.unreachable()
+                    rb.position_at_end(block)
+                    rb.unreachable()
                     blocks_cleaned += 1
             if blocks_cleaned > 0:
                 logger.debug(f"Cleaned up {blocks_cleaned} unterminated blocks in {llvm_function.name}")
@@ -620,7 +625,7 @@ class LLVMCompiler:
         # CFG merge checks (and loop invariants). If this errors, keep IR valid
         # to avoid secondary LLVM parse/verify errors hiding the real problem.
         try:
-            visitor._cf_builder.run_cfg_linear_check()
+            visitor.builder.run_cfg_linear_check()
         except (SystemExit, Exception):
             _make_ir_structurally_valid()
             raise
@@ -629,7 +634,7 @@ class LLVMCompiler:
         # This enforces: when variables go out of scope, all linear states are inactive.
         # If this errors, also keep IR valid to avoid secondary LLVM parse/verify errors.
         try:
-            visitor.scope_manager.exit_scope(visitor._cf_builder, node=ast_node)
+            visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
         except (SystemExit, Exception):
             _make_ir_structurally_valid()
             raise
