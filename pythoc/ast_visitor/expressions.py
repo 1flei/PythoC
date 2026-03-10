@@ -509,7 +509,7 @@ class ExpressionsMixin:
             return wrap_value(result, kind="value")
         
         # Create end block
-        end_block = self.current_function.append_basic_block(self.get_next_label(f"{label_prefix}_end"))
+        end_block = self.builder.create_block(f"{label_prefix}_end")
         
         # Track all blocks that jump to end_block and their values
         phi_incoming = []
@@ -520,9 +520,7 @@ class ExpressionsMixin:
         
         if len(values) == 2:
             # Simple case: just two values
-            continue_block = self.current_function.append_basic_block(
-                self.get_next_label(f"{label_prefix}_continue")
-            )
+            continue_block = self.builder.create_block(f"{label_prefix}_continue")
             
             # Branch: if short_circuit condition met, jump to end; otherwise continue
             if short_circuit_on_true:
@@ -543,7 +541,7 @@ class ExpressionsMixin:
             phi_incoming.append((ensure_ir(val2), second_block))
         else:
             # Multiple values - chain them
-            next_block = self.current_function.append_basic_block(self.get_next_label(f"{label_prefix}_next"))
+            next_block = self.builder.create_block(f"{label_prefix}_next")
             
             # First value: check for short-circuit
             if short_circuit_on_true:
@@ -558,7 +556,7 @@ class ExpressionsMixin:
                 val = self._to_boolean(self.visit_expression(values[i]))
                 current_block = self.builder.block
                 
-                next_block = self.current_function.append_basic_block(self.get_next_label(f"{label_prefix}_next"))
+                next_block = self.builder.create_block(f"{label_prefix}_next")
                 if short_circuit_on_true:
                     self.builder.cbranch(val, end_block, next_block)
                 else:
@@ -588,9 +586,9 @@ class ExpressionsMixin:
         condition = self._to_boolean(self.visit_expression(node.test))
         
         # Create basic blocks
-        then_block = self.current_function.append_basic_block(self.get_next_label("ternary_then"))
-        else_block = self.current_function.append_basic_block(self.get_next_label("ternary_else"))
-        merge_block = self.current_function.append_basic_block(self.get_next_label("ternary_merge"))
+        then_block = self.builder.create_block("ternary_then")
+        else_block = self.builder.create_block("ternary_else")
+        merge_block = self.builder.create_block("ternary_merge")
         
         # Branch based on condition
         self.builder.cbranch(condition, then_block, else_block)
