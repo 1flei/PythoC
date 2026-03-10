@@ -178,15 +178,14 @@ class ControlFlowBuilder:
         Args:
             block: The LLVM block to position at
         """
-        # Update CFG current block
-        cfg_block_id = self._get_cfg_block_id(block)
-
-        self._current_block_id = cfg_block_id
+        if not self._finalized:
+            # Update CFG current block
+            cfg_block_id = self._get_cfg_block_id(block)
+            self._current_block_id = cfg_block_id
+            logger.debug(f"CFG: position_at_end CFGBlock({cfg_block_id})")
 
         # Update IR builder
         self._real_builder.position_at_end(block)
-
-        logger.debug(f"CFG: position_at_end CFGBlock({cfg_block_id})")
 
     def branch(self, target: ir.Block):
         """Emit an unconditional branch
@@ -232,10 +231,10 @@ class ControlFlowBuilder:
 
     def unreachable(self):
         """Emit an unreachable instruction"""
-        self._terminated[self._current_block_id] = True
+        if not self._finalized:
+            self._terminated[self._current_block_id] = True
+            logger.debug(f"CFG: unreachable at CFGBlock({self._current_block_id})")
         self._real_builder.unreachable()
-
-        logger.debug(f"CFG: unreachable at CFGBlock({self._current_block_id})")
 
     def switch(self, value, default_block: ir.Block) -> ir.SwitchInstr:
         """Emit a switch instruction
@@ -365,39 +364,50 @@ class ControlFlowBuilder:
         logger.debug(f"CFG: loop_back {src_id} -> {dst_id}")
 
     def finalize(self):
-        """Finalize CFG construction
+        """Finalize CFG construction and patch unterminated IR blocks.
 
-        Call this at the end of function compilation to:
-        1. Connect fall-through blocks to exit block
-        2. Record exit snapshot for blocks that need it
-        3. Compute loop headers
-        4. Log CFG structure
-
-        Sets _finalized flag so subsequent ret/ret_void calls (from structural
-        fixup) skip CFG tracking.
+        1. Connect fall-through CFG blocks to exit block
+        2. Compute loop headers
+        3. Emit IR terminators for all unterminated LLVM blocks
+        4. Set _finalized flag (post-finalize calls skip CFG tracking)
         """
         # For blocks without explicit terminator, connect to exit block
         # This handles void functions that fall through without return
         reachable = self._cfg.get_reachable_blocks()
         for block_id in reachable:
-            # Skip the exit block itself
             if block_id == self._exit_block.id:
                 continue
-
             successors = self._cfg.get_successors(block_id)
-            # If block has no successors, it's a fall-through to function end
             if not successors:
-                # Connect to exit block (makes exit block a merge point)
                 self._cfg.add_edge(block_id, self._exit_block.id, kind='fallthrough')
                 logger.debug(f"CFG: fallthrough at CFGBlock({block_id}) -> exit({self._exit_block.id})")
 
         # Compute loop headers
         self._cfg.compute_loop_headers()
 
-        # Mark as finalized - subsequent ret/ret_void skip CFG tracking
+        # Mark as finalized before emitting IR terminators
         self._finalized = True
 
-        # Log CFG summary
+        # Patch unterminated IR blocks so LLVM IR is always structurally valid.
+        # Use the raw llvmlite builder to bypass ABI coercion - these are
+        # synthetic terminators for unreachable/fallthrough blocks.
+        raw = self._real_builder.ir_builder
+        ret_type = self.current_function.function_type.return_type
+        blocks_cleaned = 0
+        for block in self.current_function.blocks:
+            if not block.is_terminated:
+                raw.position_at_end(block)
+                if isinstance(ret_type, ir.VoidType):
+                    raw.ret_void()
+                else:
+                    raw.ret(ir.Constant(ret_type, ir.Undefined))
+                blocks_cleaned += 1
+        if blocks_cleaned > 0:
+            logger.debug(
+                f"Patched {blocks_cleaned} unterminated blocks in "
+                f"{self.current_function.name}"
+            )
+
         logger.debug(f"CFG finalized: {self._cfg}")
 
     def run_cfg_linear_check(self, initial_snapshot: LinearSnapshot = None) -> bool:
