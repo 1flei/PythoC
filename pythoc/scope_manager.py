@@ -468,8 +468,11 @@ class ScopeManager:
                 return scope.label_ctx
 
         # 2. Check siblings and uncles via persistent tracking
-        ancestor_depths = {0}  # Function level always included
+        # Include all scope depths in the ancestor chain so labels at any
+        # ancestor level (including the function body level) are visible.
+        ancestor_depths = set()
         for scope in self._scopes:
+            ancestor_depths.add(scope.depth)
             if scope.label_ctx is not None:
                 ancestor_depths.add(scope.label_ctx.parent_scope_depth)
 
@@ -663,9 +666,12 @@ class ScopeManager:
         defer_snapshot = self.capture_defer_snapshot()
 
         # Capture visible parent depths for visibility check at resolution time.
-        # These are the parent_depth values where sibling/uncle labels are visible.
-        visible_parent_depths = {0}  # Function level always visible
+        # A forward goto can target labels at any depth that is an ancestor
+        # of the goto site (including the function body level). This includes
+        # every depth in the scope chain, not just depths where labels exist.
+        visible_parent_depths = set()
         for scope in self._scopes:
+            visible_parent_depths.add(scope.depth)
             if scope.label_ctx is not None:
                 visible_parent_depths.add(scope.label_ctx.parent_scope_depth)
 
