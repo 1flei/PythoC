@@ -159,7 +159,7 @@ class SubscriptsMixin:
             # Must be in entry block to dominate all uses.
             # Use the same position_at_start/position_at_end pattern as _create_alloca_in_entry.
             current_block = self.builder.block
-            entry_block = self.current_function.entry_basic_block
+            entry_block = self.builder.entry_block
             self.builder.position_at_start(entry_block)
             va_list_i8 = self.builder.bitcast(va_list, va_list_type)
             self.builder.call(va_start, [va_list_i8])

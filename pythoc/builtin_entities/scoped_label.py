@@ -180,7 +180,7 @@ class label(BuiltinFunction):
         cf = visitor._get_cf_builder()
 
         # Check for duplicate label name in function
-        if label_name in visitor.scope_manager._all_labels:
+        if visitor.scope_manager.has_label(label_name):
             logger.error(f"Label '{label_name}' already defined in this function",
                         node=node, exc_type=SyntaxError)
 
@@ -220,9 +220,18 @@ class label(BuiltinFunction):
     def _resolve_pending_gotos(cls, visitor, ctx: LabelContext):
         """Resolve pending forward goto references to this label.
 
-        Delegates to scope_manager which owns the pending goto state.
+        Delegates to ControlFlowBuilder which owns the pending goto state.
         """
-        visitor.scope_manager.resolve_pending_gotos_for_label(ctx)
+        from .defer import _execute_single_defer
+
+        cf = visitor._get_cf_builder()
+
+        def defer_executor(callable_obj, func_ref, args, defer_node):
+            _execute_single_defer(visitor, callable_obj, func_ref, args, defer_node)
+
+        cf.resolve_pending_gotos(
+            ctx.name, ctx.begin_block, ctx.parent_scope_depth, defer_executor
+        )
         return ctx
     
     @classmethod
@@ -328,14 +337,7 @@ class goto(BuiltinFunction):
                 ctx.parent_scope_depth, visitor._get_cf_builder())
             
             # Branch to begin block
-            cf.branch(ctx.begin_block)
-            
-            # Update CFG edge kind
-            begin_block_id = cf._get_cfg_block_id(ctx.begin_block)
-            for edge in reversed(cf.cfg.edges):
-                if edge.target_id == begin_block_id:
-                    edge.kind = 'goto'
-                    break
+            cf.branch(ctx.begin_block, kind='goto')
         else:
             # Forward reference: label not yet defined
             # Capture current state for later resolution
@@ -356,11 +358,8 @@ class goto(BuiltinFunction):
                 node=node,
                 is_goto_end=False
             )
-            visitor.scope_manager.add_pending_goto(pending)
-            
-            # Mark current block as terminated in CFG (forward goto exits the block)
-            current_block_id = cf._get_cfg_block_id(current_block)
-            cf._terminated[current_block_id] = True
+            # Register in ControlFlowBuilder (marks block terminated + tracks pending)
+            cf.register_pending_goto(pending)
         
         return wrap_value(None, kind='python', type_hint=void)
 
@@ -438,14 +437,7 @@ class goto_end(BuiltinFunction):
             ctx.parent_scope_depth, visitor._get_cf_builder())
         
         # Branch to end block
-        cf.branch(ctx.end_block)
-        
-        # Update CFG edge kind
-        end_block_id = cf._get_cfg_block_id(ctx.end_block)
-        for edge in reversed(cf.cfg.edges):
-            if edge.target_id == end_block_id:
-                edge.kind = 'goto_end'
-                break
+        cf.branch(ctx.end_block, kind='goto_end')
         
         return wrap_value(None, kind='python', type_hint=void)
 

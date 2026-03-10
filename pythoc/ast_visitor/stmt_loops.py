@@ -146,7 +146,7 @@ class LoopsMixin:
         
         # Check if exit is reachable (only via break)
         # If no edges lead to exit, mark as unreachable
-        if not cf.cfg.get_predecessors(cf._get_cfg_block_id(loop_exit)):
+        if not cf.has_predecessors(loop_exit):
             # No break in the loop - infinite loop, code after is unreachable
             cf.unreachable()
     

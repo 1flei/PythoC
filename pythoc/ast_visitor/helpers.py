@@ -82,7 +82,7 @@ class HelpersMixin:
         current_block = self.builder.block
         
         # Move to entry block and position at start (before any existing instructions)
-        entry_block = self.current_function.entry_basic_block
+        entry_block = self.builder.entry_block
         self.builder.position_at_start(entry_block)
         
         # Create alloca instruction

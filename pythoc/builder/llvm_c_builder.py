@@ -70,28 +70,29 @@ class FunctionWrapper:
         """
         return self._ir_function.args[index + self._arg_offset]
     
-    def get_user_arg_unpacked(self, index: int, ir_builder: ir.IRBuilder) -> Any:
+    def get_user_arg_unpacked(self, index: int, builder) -> Any:
         """Get user-defined argument, unpacking ABI coercion if needed.
-        
+
         Args:
             index: User parameter index
-            ir_builder: IR builder for generating unpack instructions
-            
+            builder: Builder for generating unpack instructions (ir.IRBuilder or
+                     ControlFlowBuilder - any object with load/alloca/store/bitcast)
+
         Returns:
             Tuple of (value, original_type) where value is the unpacked struct
             or the original argument if no coercion was applied.
         """
         arg = self.get_user_arg(index)
         coercion = self._param_coercion_info.get(index)
-        
+
         if coercion:
             from .abi.coercion import unpack_coerced_parameter
             original_type = coercion['original_type']
             coerced_type = coercion['coerced_type']
             is_byval = coercion['is_byval']
-            
+
             unpacked = unpack_coerced_parameter(
-                ir_builder, arg, original_type, coerced_type, is_byval
+                builder, arg, original_type, coerced_type, is_byval
             )
             return unpacked, original_type
         else:

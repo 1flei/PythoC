@@ -157,25 +157,26 @@ def pack_struct_for_argument(builder: ir.IRBuilder, struct_value: ir.Value,
     return coerced_value
 
 
-def unpack_coerced_parameter(builder: ir.IRBuilder, coerced_value: ir.Value,
+def unpack_coerced_parameter(builder, coerced_value: ir.Value,
                             original_type: ir.Type, coerced_type: ir.Type,
                             is_byval: bool) -> ir.Value:
     """Unpack a coerced parameter back to its original struct type.
-    
+
     This is used at function entry to convert ABI-coerced parameters
     back to their original struct types.
-    
+
     For example:
     - i64 -> {i32, i32} (small struct coercion)
     - ptr -> load from ptr (byval)
-    
+
     Args:
-        builder: LLVM IR builder
+        builder: Builder for generating instructions (ir.IRBuilder or
+                 ControlFlowBuilder - any object with load/alloca/store/bitcast)
         coerced_value: The coerced parameter value
         original_type: The original struct type
         coerced_type: The coerced type (i64, {i64, i64}, or ptr)
         is_byval: Whether this is a byval parameter (pointer to copy)
-        
+
     Returns:
         The unpacked struct value
     """
