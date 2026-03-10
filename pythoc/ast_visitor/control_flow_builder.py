@@ -103,6 +103,9 @@ class ControlFlowBuilder:
         # Track if current CFG block is terminated
         self._terminated: Dict[int, bool] = {self._entry_block.id: False}
 
+        # Pending forward gotos (opaque objects with .block, .label_name, etc.)
+        self._pending_gotos: List[Any] = []
+
         # Track insertion mode for position_at_start vs position_at_end
         # When _insert_at_start is True, PCIR instructions are inserted at
         # _insert_idx instead of appended (for _create_alloca_in_entry pattern)
@@ -268,19 +271,24 @@ class ControlFlowBuilder:
         self._insert_at_start = True
         self._insert_idx = self._start_watermark.get(cfg_block_id, 0)
 
-    def branch(self, target):
-        """Record an unconditional branch (CFG + PCIR)."""
+    def branch(self, target, kind='sequential'):
+        """Record an unconditional branch (CFG + PCIR).
+
+        Args:
+            target: Target block (SentinelBlock or ir.Block)
+            kind: Edge kind for CFG ('sequential', 'break', 'continue', 'goto', 'goto_end')
+        """
         src_id = self._current_block_id
         dst_id = self._get_cfg_block_id(target)
 
         # Add edge to CFG
-        self._cfg.add_edge(src_id, dst_id, kind='sequential')
+        self._cfg.add_edge(src_id, dst_id, kind=kind)
         self._terminated[src_id] = True
 
         # Record PCIR
         self._append_pcir(PCIRInst(op='branch', args=(target,), kwargs={}))
 
-        logger.debug(f"CFG: branch {src_id} -> {dst_id}")
+        logger.debug(f"CFG: branch {src_id} -> {dst_id} [{kind}]")
 
     def cbranch(self, condition, true_block, false_block):
         """Record a conditional branch (CFG + PCIR)."""
@@ -435,6 +443,168 @@ class ControlFlowBuilder:
 
         self._cfg.loop_headers.add(dst_id)
         logger.debug(f"CFG: loop_back {src_id} -> {dst_id}")
+
+    def resume_recording_at(self, block):
+        """Switch PCIR recording target to the given block, clearing its terminated flag.
+
+        Returns a saved state tuple to pass to restore_recording().
+        Used by scope_manager for forward-goto defer emission.
+        """
+        cfg_block_id = self._get_cfg_block_id(block)
+        saved_block_id = self._current_block_id
+        was_terminated = self._terminated.get(cfg_block_id, False)
+        self._current_block_id = cfg_block_id
+        self._terminated[cfg_block_id] = False
+        return (saved_block_id, cfg_block_id, was_terminated)
+
+    def restore_recording(self, saved):
+        """Restore recording position from a resume_recording_at() return value."""
+        saved_block_id, pending_block_id, was_terminated = saved
+        self._terminated[pending_block_id] = was_terminated
+        self._current_block_id = saved_block_id
+
+    def mark_terminated(self, block=None):
+        """Mark a block as terminated (e.g. for forward goto pending resolution).
+
+        Args:
+            block: Block to mark. If None, marks the current block.
+        """
+        if block is None:
+            block_id = self._current_block_id
+        else:
+            block_id = self._get_cfg_block_id(block)
+        self._terminated[block_id] = True
+
+    def has_predecessors(self, block) -> bool:
+        """Check if a block has any predecessor edges in the CFG."""
+        block_id = self._get_cfg_block_id(block)
+        return bool(self._cfg.get_predecessors(block_id))
+
+    @property
+    def entry_block(self):
+        """Get the entry block (SentinelBlock during build, ir.Block after emit)."""
+        return self._block_map.get(self._entry_block.id)
+
+    # ========== Pending Forward Goto API ==========
+
+    def register_pending_goto(self, pending):
+        """Register a forward goto from current block. Marks block terminated.
+
+        Args:
+            pending: Opaque PendingGoto object with .block attribute set to
+                     current block by caller.
+        """
+        self._pending_gotos.append(pending)
+        self.mark_terminated()
+
+    def emit_defers_for_pending_gotos(self, scope_depth, defer_executor):
+        """Called during scope exit. Emit defers at scope_depth into each
+        relevant pending goto block.
+
+        For each pending goto whose goto_scope_depth >= scope_depth and
+        emitted_to_depth > scope_depth, switch recording to the pending block,
+        call defer_executor for matching defers, then restore recording.
+
+        Args:
+            scope_depth: The depth of the scope being exited.
+            defer_executor: callable(callable_obj, func_ref, args, node) that
+                            emits a single defer call (appends PCIR to current block).
+        """
+        if not self._pending_gotos:
+            return
+
+        for pending in self._pending_gotos:
+            if pending.goto_scope_depth < scope_depth:
+                continue
+            if pending.emitted_to_depth <= scope_depth:
+                continue
+
+            defers_for_this_scope = [
+                (callable_obj, func_ref, args, defer_node)
+                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
+                if depth == scope_depth
+            ]
+
+            if not defers_for_this_scope:
+                pending.emitted_to_depth = scope_depth
+                continue
+
+            logger.debug(f"CFG: emitting {len(defers_for_this_scope)} defers for pending goto "
+                        f"'{pending.label_name}' at scope depth {scope_depth}")
+
+            # Mark as emitted BEFORE executing (prevents re-entrant emission)
+            pending.emitted_to_depth = scope_depth
+
+            # Switch recording to pending block
+            saved = self.resume_recording_at(pending.block)
+
+            for callable_obj, func_ref, args, defer_node in defers_for_this_scope:
+                defer_executor(callable_obj, func_ref, args, defer_node)
+
+            # Update pending.block (defers may create new blocks via inlining)
+            pending.block = self._block_map.get(self._current_block_id)
+
+            # Restore recording position
+            self.restore_recording(saved)
+
+    def resolve_pending_gotos(self, label_name, target_block, target_parent_depth, defer_executor):
+        """Resolve all pending gotos for label_name.
+
+        Emits remaining defers + branch into each pending goto's block.
+
+        Args:
+            label_name: The label being defined.
+            target_block: The begin_block of the label (branch target).
+            target_parent_depth: The label's parent_scope_depth.
+            defer_executor: callable(callable_obj, func_ref, args, node).
+        """
+        resolved = []
+
+        for pending in self._pending_gotos:
+            if pending.label_name != label_name:
+                continue
+
+            if pending.is_goto_end:
+                logger.error(f"Internal error: forward goto_end to '{label_name}'",
+                            node=pending.node)
+                continue
+
+            # Switch recording to pending block
+            saved = self.resume_recording_at(pending.block)
+
+            # Emit defers that haven't been emitted yet
+            defers_to_execute = [
+                (callable_obj, func_ref, args, defer_node)
+                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
+                if target_parent_depth < depth < pending.emitted_to_depth
+            ]
+            logger.debug(f"CFG: resolving forward goto '{pending.label_name}': "
+                        f"executing {len(defers_to_execute)} defers "
+                        f"(goto_scope={pending.goto_scope_depth}, "
+                        f"target_parent={target_parent_depth}, "
+                        f"emitted_to_depth={pending.emitted_to_depth})")
+
+            for callable_obj, func_ref, args, defer_node in defers_to_execute:
+                defer_executor(callable_obj, func_ref, args, defer_node)
+
+            # Emit branch to target
+            self.branch(target_block, kind='goto')
+
+            # Restore recording position
+            self.restore_recording(saved)
+
+            resolved.append(pending)
+
+        for item in resolved:
+            self._pending_gotos.remove(item)
+
+    def get_unresolved_pending_gotos(self):
+        """Return list of unresolved pending gotos (for consistency check)."""
+        return list(self._pending_gotos)
+
+    def reset_pending_gotos(self):
+        """Clear pending gotos."""
+        self._pending_gotos = []
 
     def finalize(self):
         """Finalize CFG construction.

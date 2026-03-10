@@ -102,7 +102,6 @@ class ScopeManager:
         # These persist after scope exit for sibling/uncle goto visibility
         self._scope_labels: Dict[int, List[Any]] = {}  # parent_depth -> [LabelContext]
         self._all_labels: Dict[str, Any] = {}        # name -> LabelContext
-        self._pending_scoped_gotos: List[Any] = []   # Forward goto refs
     
     def set_visitor(self, visitor: Any):
         """Set the visitor for defer execution"""
@@ -150,106 +149,42 @@ class ScopeManager:
     
     def exit_scope(self, cf: Any, node: Optional[ast.AST] = None) -> Scope:
         """Exit current scope
-        
+
         This:
         1. Emits deferred calls for pending forward gotos from this scope
            (MUST happen before var_registry.exit_scope() so vars are still accessible)
         2. Emits deferred calls for normal exit (if block not terminated)
         3. Removes variables from registry
-        
+
         Args:
             cf: ControlFlowBuilder for checking termination
             node: Optional AST node for error reporting
-        
+
         Returns:
             The exited Scope
         """
         if not self._scopes:
             raise RuntimeError("Cannot exit scope: no scope to exit")
-        
+
         scope = self._scopes.pop()
-        
+
         try:
-            # 1. Emit defers for pending forward gotos from this scope
-            self._emit_defers_for_pending_gotos(scope, cf)
-            
+            # 1. Emit defers for pending forward gotos from this scope (via cfbuilder)
+            if self._visitor:
+                from pythoc.builtin_entities.defer import _execute_single_defer
+                def defer_executor(callable_obj, func_ref, args, defer_node):
+                    _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
+                cf.emit_defers_for_pending_gotos(scope.depth, defer_executor)
+
             # 2. Emit deferred calls for normal exit (if not terminated)
             if not cf.is_terminated():
                 self._emit_defers_for_scope(scope)
         finally:
             # 4. Sync with var_registry (must happen even if checks raise)
             self._var_registry.exit_scope()
-        
+
         logger.debug(f"Exited scope {scope}")
         return scope
-    
-    def _emit_defers_for_pending_gotos(self, scope: Scope, cf: Any):
-        """Emit defers for pending forward gotos that originate from this scope.
-
-        With PCIR, this is simplified: we just switch _current_block_id to the
-        pending block, execute defers (which appends PCIR to that block), then
-        restore _current_block_id. No real IR builder position save/restore needed.
-
-        Args:
-            scope: The scope being exited
-            cf: ControlFlowBuilder
-        """
-        if not self._visitor:
-            return
-
-        if not self._pending_scoped_gotos:
-            return
-
-        from pythoc.builtin_entities.defer import _execute_single_defer
-
-        scope_depth = scope.depth
-
-        for pending in self._pending_scoped_gotos:
-            if pending.goto_scope_depth < scope_depth:
-                continue
-
-            if pending.emitted_to_depth <= scope_depth:
-                continue
-
-            defers_for_this_scope = [
-                (callable_obj, func_ref, args, defer_node)
-                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
-                if depth == scope_depth
-            ]
-
-            if not defers_for_this_scope:
-                pending.emitted_to_depth = scope_depth
-                continue
-
-            logger.debug(f"Emitting {len(defers_for_this_scope)} defers for pending goto "
-                        f"'{pending.label_name}' at scope depth {scope_depth}")
-
-            # Mark as emitted BEFORE executing to prevent re-entrant emission
-            # (defer execution may create inner scopes whose exits trigger this method)
-            pending.emitted_to_depth = scope_depth
-
-            # Save current CFG block ID
-            saved_cfg_block_id = cf._current_block_id
-
-            # Switch to pending block
-            pending_block_id = cf._get_cfg_block_id(pending.block)
-            cf._current_block_id = pending_block_id
-
-            # Temporarily clear terminated flag so defer can record PCIR
-            was_terminated = cf._terminated.get(pending_block_id, False)
-            cf._terminated[pending_block_id] = False
-
-            # Execute defers (appends PCIR to the pending block)
-            for callable_obj, func_ref, args, defer_node in defers_for_this_scope:
-                _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
-
-            # Update pending.block to current block after defer execution
-            # (defers may create new blocks via inlining)
-            pending.block = self._visitor.builder.block
-
-            # Restore terminated flag and CFG position
-            cf._terminated[pending_block_id] = was_terminated
-            cf._current_block_id = saved_cfg_block_id
     
     def exit_scopes_to(self, target_depth: int, cf: Any, emit_defers: bool = True) -> List[Scope]:
         """Exit scopes down to target depth (for break/continue/goto)
@@ -437,7 +372,7 @@ class ScopeManager:
         """Reset label tracking at the start of each function."""
         self._scope_labels = {}
         self._all_labels = {}
-        self._pending_scoped_gotos = []
+        # Pending gotos are owned by ControlFlowBuilder (fresh per function)
 
     def register_label(self, ctx: Any):
         """Register a label in persistent tracking structures.
@@ -462,6 +397,10 @@ class ScopeManager:
         for sibling/uncle access.
         """
         pass
+
+    def has_label(self, name: str) -> bool:
+        """Check if a label with the given name exists."""
+        return name in self._all_labels
 
     def find_label(self, name: str) -> Optional[Any]:
         """Find label for goto. Checks ancestors and siblings/uncles.
@@ -536,96 +475,6 @@ class ScopeManager:
                     ))
         return snapshot
 
-    def resolve_pending_gotos_for_label(self, ctx: Any):
-        """Resolve pending forward goto references when a label is defined.
-
-        With PCIR, simplified: switch _current_block_id to pending block, emit
-        remaining defers (appends PCIR), emit branch (appends PCIR), add CFG edge,
-        restore _current_block_id. No real IR builder position save/restore.
-
-        Args:
-            ctx: LabelContext being entered
-        """
-        if not self._visitor:
-            return
-
-        from pythoc.builtin_entities.defer import _execute_single_defer
-
-        cf = self._visitor._get_cf_builder()
-        label_name = ctx.name
-        target_parent = ctx.parent_scope_depth
-
-        resolved = []
-
-        for pending in self._pending_scoped_gotos:
-            if pending.label_name != label_name:
-                continue
-
-            if pending.is_goto_end:
-                logger.error(f"Internal error: forward goto_end to '{label_name}'",
-                            node=pending.node, exc_type=RuntimeError)
-                continue
-
-            # Save current CFG block ID
-            saved_cfg_block_id = cf._current_block_id
-
-            pending_block_id = cf._get_cfg_block_id(pending.block)
-
-            # Switch to pending block
-            cf._current_block_id = pending_block_id
-
-            # Temporarily clear terminated flag so defer can record PCIR
-            was_terminated = cf._terminated.get(pending_block_id, False)
-            cf._terminated[pending_block_id] = False
-
-            # Emit defers that haven't been emitted yet
-            defers_to_execute = [
-                (callable_obj, func_ref, args, defer_node)
-                for depth, callable_obj, func_ref, args, defer_node in pending.defer_snapshot
-                if target_parent < depth < pending.emitted_to_depth
-            ]
-            logger.debug(f"Resolving forward goto '{pending.label_name}': "
-                        f"executing {len(defers_to_execute)} defers "
-                        f"(goto_scope={pending.goto_scope_depth}, "
-                        f"target_parent={target_parent}, "
-                        f"emitted_to_depth={pending.emitted_to_depth})")
-
-            for callable_obj, func_ref, args, defer_node in defers_to_execute:
-                _execute_single_defer(self._visitor, callable_obj, func_ref, args, defer_node)
-
-            # Record the branch instruction (appends PCIR to pending/current block)
-            self._visitor.builder.branch(ctx.begin_block)
-
-            # Add CFG edge for the goto
-            # Use cf._current_block_id (may have changed if defers created blocks)
-            actual_src_id = cf._current_block_id
-            begin_block_id = cf._get_cfg_block_id(ctx.begin_block)
-            cf.cfg.add_edge(actual_src_id, begin_block_id, kind='goto')
-
-            # Restore terminated flag and CFG position
-            cf._terminated[pending_block_id] = was_terminated
-            cf._current_block_id = saved_cfg_block_id
-
-            resolved.append(pending)
-
-        for item in resolved:
-            self._pending_scoped_gotos.remove(item)
-
-    def add_pending_goto(self, pending: Any):
-        """Add a pending forward goto reference."""
-        self._pending_scoped_gotos.append(pending)
-
-    def resolve_pending_gotos(self, label_name: str) -> List[Any]:
-        """Get and remove pending gotos for a given label name.
-
-        Returns:
-            List of resolved PendingGoto objects
-        """
-        resolved = [p for p in self._pending_scoped_gotos if p.label_name == label_name]
-        for item in resolved:
-            self._pending_scoped_gotos.remove(item)
-        return resolved
-
     def check_goto_consistency(self, func_node: Any):
         """Check that all scoped gotos have been resolved.
 
@@ -634,8 +483,14 @@ class ScopeManager:
         Args:
             func_node: The function AST node (for error location)
         """
-        if self._pending_scoped_gotos:
-            for pending in self._pending_scoped_gotos:
+        if not self._visitor:
+            return
+        cf = self._visitor._get_cf_builder()
+        if cf is None:
+            return
+        unresolved = cf.get_unresolved_pending_gotos()
+        if unresolved:
+            for pending in unresolved:
                 goto_type = "goto_end" if pending.is_goto_end else "goto"
                 logger.error(f"Undefined label '{pending.label_name}' in {goto_type} statement",
                             node=pending.node, exc_type=SyntaxError)

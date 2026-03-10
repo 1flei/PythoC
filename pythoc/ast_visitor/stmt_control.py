@@ -163,12 +163,7 @@ class ControlFlowMixin:
             _, break_block = self.scope_manager.get_loop_targets()
 
             # Add break edge to CFG and generate IR
-            cf.branch(break_block)
-            # Update the edge kind to 'break'
-            for edge in reversed(cf.cfg.edges):
-                if edge.target_id == cf._get_cfg_block_id(break_block):
-                    edge.kind = 'break'
-                    break
+            cf.branch(break_block, kind='break')
 
     def visit_Continue(self, node: ast.Continue):
         """Handle continue statements
@@ -189,12 +184,7 @@ class ControlFlowMixin:
             continue_block, _ = self.scope_manager.get_loop_targets()
 
             # Add continue edge to CFG and generate IR
-            cf.branch(continue_block)
-            # Update the edge kind to 'continue'
-            for edge in reversed(cf.cfg.edges):
-                if edge.target_id == cf._get_cfg_block_id(continue_block):
-                    edge.kind = 'continue'
-                    break
+            cf.branch(continue_block, kind='continue')
 
     def visit_Expr(self, node: ast.Expr):
         """Handle expression statements (like function calls)"""

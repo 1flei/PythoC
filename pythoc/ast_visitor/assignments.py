@@ -472,7 +472,7 @@ class AssignmentsMixin:
     def visit_AugAssign(self, node: ast.AugAssign):
         """Handle augmented assignment statements (+=, -=, *=, etc.)"""
         # Don't process if current block is already terminated
-        if self.builder.block.is_terminated:
+        if self.builder.is_terminated():
             return
         
         # Get the lvalue (address) of the target

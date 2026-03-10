@@ -390,7 +390,7 @@ class LLVMCompiler:
             param_annotation = arg.annotation
             
             # Get unpacked parameter value (handles ABI coercion transparently)
-            param_val, param_type = func_wrapper.get_user_arg_unpacked(i, visitor.builder.ir_builder)
+            param_val, param_type = func_wrapper.get_user_arg_unpacked(i, visitor.builder)
             
             # Allocate and store parameter
             alloca = visitor._create_alloca_in_entry(param_type, f"{param_name}_addr")
@@ -449,7 +449,7 @@ class LLVMCompiler:
             for elem_idx in range(len(element_types)):
                 param_idx = normal_param_count + elem_idx
                 param_val, param_type = func_wrapper.get_user_arg_unpacked(
-                    param_idx, visitor.builder.ir_builder
+                    param_idx, visitor.builder
                 )
                 expanded_values.append(param_val)
                 expanded_types_llvm.append(param_type)
