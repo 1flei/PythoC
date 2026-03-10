@@ -155,30 +155,14 @@ class SubscriptsMixin:
                 va_start_type = ir.FunctionType(ir.VoidType(), [va_list_type])
                 va_start = ir.Function(self.module, va_start_type, va_start_name)
             
-            # CRITICAL: Bitcast and va_start MUST be in entry block to dominate all uses
-            # Save current builder position
+            # Bitcast va_list to i8* and call va_start in entry block
+            # Must be in entry block to dominate all uses.
+            # Use the same position_at_start/position_at_end pattern as _create_alloca_in_entry.
             current_block = self.builder.block
-            
-            # Move to entry block and position after allocas
             entry_block = self.current_function.entry_basic_block
-            # Find the last alloca instruction in entry block
-            last_alloca = None
-            for instr in entry_block.instructions:
-                if isinstance(instr, ir.AllocaInstr):
-                    last_alloca = instr
-            
-            if last_alloca:
-                # Position after the last alloca
-                self.builder.position_after(last_alloca)
-            else:
-                # No allocas, position at start
-                self.builder.position_at_start(entry_block)
-            
-            # Bitcast va_list to i8* in entry block
+            self.builder.position_at_start(entry_block)
             va_list_i8 = self.builder.bitcast(va_list, va_list_type)
             self.builder.call(va_start, [va_list_i8])
-            
-            # Restore builder position
             self.builder.position_at_end(current_block)
             
             varargs_info['va_list'] = va_list

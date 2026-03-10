@@ -602,7 +602,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         # Priority: if base has address, use GEP for lvalue support
         # Otherwise, if base is a struct value, use extract_value
         base_ir_type = get_type(base)
-        
+
         # Compute extended linear path for result
         base_var_name = getattr(base, 'var_name', None)
         base_linear_path = getattr(base, 'linear_path', None)

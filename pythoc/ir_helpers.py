@@ -116,10 +116,16 @@ def is_static(pc_type: Any) -> bool:
 
 def make_load_volatile(load_inst: ir.LoadInstr) -> ir.LoadInstr:
     """Make a load instruction volatile by monkey-patching its descr method
-    
+
     LLVM volatile loads prevent optimization that would eliminate or reorder
     memory accesses, which is essential for memory-mapped I/O and multi-threading.
+
+    During PCIR build phase, load_inst may be a VReg — skip monkey-patching
+    as the actual volatile marking will happen differently.
     """
+    # VReg from PCIR doesn't support descr monkey-patching
+    if not isinstance(load_inst, ir.Instruction):
+        return load_inst
     def volatile_descr(buf):
         """Custom descr that adds volatile keyword
         
@@ -158,10 +164,15 @@ def make_load_volatile(load_inst: ir.LoadInstr) -> ir.LoadInstr:
 
 def make_store_volatile(store_inst: ir.StoreInstr) -> ir.StoreInstr:
     """Make a store instruction volatile by monkey-patching its descr method
-    
+
     LLVM volatile stores prevent optimization that would eliminate or reorder
     memory accesses, which is essential for memory-mapped I/O and multi-threading.
+
+    During PCIR build phase, store_inst may be a VReg — skip monkey-patching.
     """
+    # VReg from PCIR doesn't support descr monkey-patching
+    if not isinstance(store_inst, ir.Instruction):
+        return store_inst
     def volatile_descr(buf):
         """Custom descr that adds volatile keyword
         

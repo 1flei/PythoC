@@ -581,20 +581,19 @@ class LLVMCompiler:
                     continue
             visitor.builder.add_stmt(stmt)
             visitor.visit(stmt)
-        
-        # Finalize CFG and patch unterminated IR blocks.
-        # finalize() connects fall-through CFG blocks to exit, computes loop headers,
-        # and emits IR terminators for all unterminated blocks in one step.
+
+        # Finalize CFG structure (no IR emission yet).
+        # Connects fall-through CFG blocks to exit, computes loop headers.
         visitor.builder.finalize()
         visitor.builder.dump_cfg()  # Uses logger.debug by default
 
         # CFG merge checks (and loop invariants).
-        # IR is already structurally valid after finalize(), so errors here
-        # won't cause secondary LLVM parse/verify failures.
+        # Must happen before emit_ir() since IR doesn't exist yet.
         visitor.builder.run_cfg_linear_check()
 
         # Exit function-level scope in ScopeManager
         # This enforces: when variables go out of scope, all linear states are inactive.
+        # Note: defer execution during scope exit records PCIR (not real IR).
         visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
 
         # Check for unresolved scoped goto statements
@@ -604,6 +603,10 @@ class LLVMCompiler:
         # Check for unexecuted deferred calls (should not happen if implementation is correct)
         from .builtin_entities.defer import check_defers_at_function_end
         check_defers_at_function_end(visitor, ast_node)
+
+        # Replay PCIR -> actual LLVM IR
+        # This must happen after all CFG analysis and scope checking.
+        visitor.builder.emit_ir()
 
         # Debug hook - capture all inlined statements accumulated during compilation
         from .utils.ast_debug import ast_debugger
