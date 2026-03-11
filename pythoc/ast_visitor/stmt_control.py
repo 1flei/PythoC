@@ -41,58 +41,6 @@ class ControlFlowMixin:
                 cf.add_stmt(stmt)
             self.visit(stmt)
     
-    def _execute_deferred_calls_for_return(self):
-        """Emit all deferred calls before return (all scopes)
-        
-        Note: We do NOT clear the defer stack here because other branches
-        (e.g., else branch in if-then-return pattern) may also need to emit
-        the same defers. The defer stack is managed at scope exit, not at return.
-        
-        Each branch that returns will emit its own copy of the deferred calls.
-        
-        Linear token checking is done by CFG merge point analysis at the
-        virtual exit block, not here.
-        """
-        # Use ScopeManager to emit all defers
-        cf = self._get_cf_builder()
-        self.scope_manager.emit_all_defers(cf)
-    
-    def _emit_deferred_calls_for_scope(self, scope_depth: int):
-        """Emit deferred calls for a specific scope (without unregistering)
-        
-        Used at normal block exit points. The unregister happens in finally block.
-        
-        Note: This is a legacy API. New code should use scope_manager directly.
-        """
-        # Find the scope with this depth and emit its defers
-        for scope in reversed(self.scope_manager._scopes):
-            if scope.depth == scope_depth:
-                self.scope_manager._emit_defers_for_scope(scope)
-                return
-        # Fallback to old API if scope not found in scope_manager
-        from ..builtin_entities.defer import emit_deferred_calls
-        emit_deferred_calls(self, scope_depth=scope_depth)
-    
-    def _execute_deferred_calls_for_scope(self, scope_depth: int):
-        """Emit and unregister deferred calls for a specific scope (legacy API)"""
-        from ..builtin_entities.defer import execute_deferred_calls
-        execute_deferred_calls(self, scope_depth=scope_depth)
-    
-    def _emit_deferred_calls_down_to_scope(self, target_scope_depth: int):
-        """Emit deferred calls from current scope down to target scope (inclusive)
-        
-        Used by break/continue to emit defers for all nested scopes
-        before jumping out to the loop scope. Does not unregister.
-        """
-        # Use ScopeManager to emit defers down to target depth
-        cf = self._get_cf_builder()
-        logger.debug(f"Emitting defers from scope {self.scope_manager.current_depth} down to {target_scope_depth}")
-        self.scope_manager.exit_scopes_to(target_scope_depth - 1, cf, emit_defers=True)
-    
-    def _execute_deferred_calls_down_to_scope(self, target_scope_depth: int):
-        """Execute deferred calls from current scope down to target scope (legacy API)"""
-        self._emit_deferred_calls_down_to_scope(target_scope_depth)
-    
     def visit_Return(self, node: ast.Return):
         """Handle return statements with termination check
         
@@ -124,7 +72,7 @@ class ControlFlowMixin:
                     value = self.implicit_coercer.coerce(value, expected_pc_type, node)
             
             # Execute all deferred calls after return value is evaluated (Zig/Go semantics)
-            self._execute_deferred_calls_for_return()
+            self.scope_manager.emit_defers_to_depth(0, cf)
             
             # Now generate the actual return
             if value is not None:
@@ -157,7 +105,7 @@ class ControlFlowMixin:
             logger.debug(f"Break: current scope={self.scope_manager.current_depth}, loop scope={loop_scope_depth}")
 
             # Emit deferred calls from current scope down to loop scope (inclusive)
-            self._emit_deferred_calls_down_to_scope(loop_scope_depth)
+            self.scope_manager.emit_defers_to_depth(loop_scope_depth - 1, cf)
 
             # Get the break target from scope_manager
             _, break_block = self.scope_manager.get_loop_targets()
@@ -178,7 +126,7 @@ class ControlFlowMixin:
             loop_scope_depth = self.scope_manager.get_loop_scope_depth()
 
             # Emit deferred calls from current scope down to loop scope (inclusive)
-            self._emit_deferred_calls_down_to_scope(loop_scope_depth)
+            self.scope_manager.emit_defers_to_depth(loop_scope_depth - 1, cf)
 
             # Get the continue target from scope_manager
             continue_block, _ = self.scope_manager.get_loop_targets()
