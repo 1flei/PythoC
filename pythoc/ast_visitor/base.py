@@ -85,12 +85,39 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.scope_manager.set_visitor(self)
 
         # Backward compatibility aliases
-        self.current_function = None
+        self.func_state = None  # FunctionCompileState, set by compiler.py
+        self._current_function = None
         self.label_counter = 0
         self.struct_types = self.ctx.struct_types
         self.source_globals = self.ctx.source_globals
         self.compiler = compiler
     
+    @property
+    def current_function(self):
+        if self.func_state is not None:
+            return self.func_state.current_function
+        return self._current_function
+
+    @current_function.setter
+    def current_function(self, value):
+        if self.func_state is not None:
+            self.func_state.current_function = value
+        else:
+            self._current_function = value
+
+    @property
+    def current_group_key(self):
+        if self.func_state is not None:
+            return self.func_state.group_key
+        return getattr(self, '_current_group_key', None)
+
+    @current_group_key.setter
+    def current_group_key(self, value):
+        if self.func_state is not None:
+            self.func_state.group_key = value
+        else:
+            self._current_group_key = value
+
     @property
     def backend(self) -> Optional["AbstractBackend"]:
         """Get the backend (if initialized with one)"""

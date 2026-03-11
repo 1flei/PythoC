@@ -473,7 +473,7 @@ class TypeConverter:
         from .builtin_entities import func as func_type_cls
         from llvmlite import ir
         
-        func_name = wrapper._original_name
+        func_name = wrapper._state.original_name
         
         # Get func_info directly from wrapper (not from registry lookup)
         func_info = getattr(wrapper, '_func_info', None)
@@ -481,7 +481,7 @@ class TypeConverter:
             raise NameError(f"Function '{func_name}' missing _func_info attribute")
         
         # Determine actual function name
-        lookup_mangled = getattr(wrapper, '_mangled_name', None)
+        lookup_mangled = wrapper._state.mangled_name
         actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
         
         # Handle transitive effect propagation
@@ -495,7 +495,7 @@ class TypeConverter:
 
         compilation_ctx = get_current_compilation_context()
 
-        callee_effect_suffix = getattr(wrapper, '_effect_suffix', None)
+        callee_effect_suffix = wrapper._state.effect_suffix
 
         # Only propagate when the callee itself is not already effect-specialized.
         if compilation_ctx and callee_effect_suffix is None:
@@ -517,7 +517,8 @@ class TypeConverter:
                     # - If we don't know yet (callee not compiled / deps not loaded), be
                     #   conservative and specialize.
                     should_specialize = True
-                    callee_group_key = getattr(original_wrapper, '_group_key', None) or getattr(wrapper, '_group_key', None)
+                    callee_group_key = getattr(original_wrapper, '_state', None)
+                    callee_group_key = callee_group_key.group_key if callee_group_key else (wrapper._state.group_key if wrapper._state else None)
                     if callee_group_key:
                         try:
                             from .build.deps import get_dependency_tracker
@@ -533,13 +534,13 @@ class TypeConverter:
                         specialized_wrapper = original_wrapper.get_effect_specialized(
                             ctx_effect_suffix, ctx_effects
                         )
-                        func_info = specialized_wrapper._func_info
+                        func_info = specialized_wrapper._state.func_info
                         actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
                         logger.debug(f"Using transitive effect version: {actual_func_name}")
 
                         # Record dependency: caller_group -> specialized_wrapper_group
                         caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                        callee_group_key = getattr(specialized_wrapper, '_group_key', None)
+                        callee_group_key = specialized_wrapper._state.group_key if hasattr(specialized_wrapper, '_state') else None
                         if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
                             from .build.deps import get_dependency_tracker
                             dep_tracker = get_dependency_tracker()
@@ -551,7 +552,7 @@ class TypeConverter:
         # If the callee is still a template (not yet materialized), materialize
         # the default specialization so the symbol exists at link time.
         callee_w = func_info.wrapper if func_info else None
-        if callee_w and getattr(callee_w, '_is_template', False):
+        if callee_w and getattr(callee_w, '_state', None) and callee_w._state.is_template:
             from .decorators.compile import materialize_specialization, DEFAULT_EFFECT_KEY
             materialize_specialization(callee_w, DEFAULT_EFFECT_KEY, {})
 
@@ -564,7 +565,7 @@ class TypeConverter:
         # so the linker sees the correct provider.
         caller_group_key = getattr(self._visitor, 'current_group_key', None)
         callee_wrapper = getattr(func_info, 'wrapper', None) if func_info else None
-        callee_group_key = getattr(callee_wrapper, '_group_key', None) or getattr(wrapper, '_group_key', None)
+        callee_group_key = (callee_wrapper._state.group_key if callee_wrapper and hasattr(callee_wrapper, '_state') and callee_wrapper._state else None) or (wrapper._state.group_key if hasattr(wrapper, '_state') and wrapper._state else None)
         if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
             from .build.deps import get_dependency_tracker
             get_dependency_tracker().record_group_dependency(
