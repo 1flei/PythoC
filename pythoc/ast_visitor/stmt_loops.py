@@ -88,134 +88,87 @@ class LoopsMixin:
         
         # while True - special handling for infinite loop
         if is_constant_condition and constant_value:
-            self._visit_while_true(node, cf)
+            self._visit_while_impl(node, cf, is_constant_true=True)
             return
-        
+
         # Normal while loop with runtime condition
-        self._visit_while_normal(node, cf, condition_val)
+        self._visit_while_impl(node, cf, is_constant_true=False, condition_val=condition_val)
     
-    def _visit_while_true(self, node: ast.While, cf: "ControlFlowBuilder"):
-        """Handle while True - infinite loop or single execution with break
-        
-        CFG structure for while True:
-        - No loop header with condition check (condition is always true)
-        - Body executes directly
-        - break jumps to exit block
-        - If body can fall through (no break/return), it loops back (infinite loop)
-        - Code after while is only reachable via break
-        
-        Linear type handling:
-        - Since it's either infinite loop or single execution (with break),
-          NO loop invariant check is needed
-        - Linear tokens created before while True can be consumed in the body
-        - This is the key difference from normal while loops
+    def _visit_while_impl(self, node: ast.While, cf, is_constant_true: bool, condition_val=None):
+        """Unified while loop implementation.
+
+        Handles both ``while True`` and ``while <cond>`` with the same
+        control-flow skeleton:
+
+            loop_top:           # header (cond) or body start (True)
+                [cbranch]       # only for runtime condition
+            loop_body:
+                <body stmts>
+                emit_defers     # back-edge defer emission
+                branch loop_top
+            [else_block:]       # only for runtime condition with else
+            loop_exit:
+
+        Args:
+            node: The While AST node.
+            cf: ControlFlowBuilder.
+            is_constant_true: True for ``while True``, False for runtime cond.
+            condition_val: The already-evaluated condition (only for runtime).
         """
-        # Create exit block for break targets
-        loop_exit = cf.create_block("while_true_exit")
-        
-        # For while True, we don't need a separate header block
-        # The body IS the loop - it either breaks out or loops back
-        loop_body_start = cf.create_block("while_true_body")
-        
-        # Jump to body
-        cf.branch(loop_body_start)
-        cf.position_at_end(loop_body_start)
-        
-        # Use ScopeManager for unified scope/defer management
-        # Enter LOOP scope with continue -> loop_body_start, break -> loop_exit
-        with self.scope_manager.scope(ScopeType.LOOP, cf,
-                                       continue_target=loop_body_start,
-                                       break_target=loop_exit,
-                                       node=node) as scope:
-            # Execute loop body
-            self._visit_stmt_list(node.body, add_to_cfg=True)
+        has_else = not is_constant_true and node.orelse and len(node.orelse) > 0
 
-            # Defers are automatically emitted by scope_manager.exit_scope()
-            # But for loop back, we need to emit manually before the branch
-            if not cf.is_terminated():
-                # Emit defers for this iteration before looping back
-                self.scope_manager.emit_defers_to_depth(scope.depth - 1, cf)
-
-            # If body can fall through, it's an infinite loop - loop back
-            if not cf.is_terminated():
-                cf.branch(loop_body_start)
-                cf.mark_loop_back(loop_body_start)
-
-        # Position at exit block
-        cf.position_at_end(loop_exit)
-        
-        # Check if exit is reachable (only via break)
-        # If no edges lead to exit, mark as unreachable
-        if not cf.has_predecessors(loop_exit):
-            # No break in the loop - infinite loop, code after is unreachable
-            cf.unreachable()
-    
-    def _visit_while_normal(self, node: ast.While, cf: "ControlFlowBuilder", condition_val):
-        """Handle normal while loop with runtime condition
-        
-        CFG structure:
-        - Header block: evaluate condition
-        - Body block: loop body
-        - Else block (if present): executes when loop completes normally
-        - Exit block: code after loop
-        
-        Linear type handling:
-        - Loop invariant is checked by CFG linear checker at function end
-        - This ensures multiple iterations see consistent linear state
-        """
-        # Create loop blocks
-        loop_header = cf.create_block("while_header")
-        loop_body = cf.create_block("while_body")
+        # -- Create blocks --
         loop_exit = cf.create_block("while_exit")
-        
-        # Create else block if needed
-        has_else = node.orelse and len(node.orelse) > 0
-        if has_else:
-            else_block = cf.create_block("while_else")
-        
-        # Jump to loop header
-        cf.branch(loop_header)
-        
-        # Loop header: check condition
-        cf.position_at_end(loop_header)
-        condition = self._to_boolean(self.visit_expression(node.test))
-        
-        # If has else: condition false -> else block, otherwise -> exit
-        if has_else:
-            cf.cbranch(condition, loop_body, else_block)
+
+        if is_constant_true:
+            # No separate header; body IS the loop top
+            loop_top = cf.create_block("while_true_body")
+            loop_body = loop_top
         else:
-            cf.cbranch(condition, loop_body, loop_exit)
-        
-        # Loop body - use ScopeManager for unified scope/defer management
+            loop_top = cf.create_block("while_header")
+            loop_body = cf.create_block("while_body")
+            if has_else:
+                else_block = cf.create_block("while_else")
+
+        # -- Branch to loop top --
+        cf.branch(loop_top)
+
+        # -- Condition check (runtime only) --
+        if not is_constant_true:
+            cf.position_at_end(loop_top)
+            condition = self._to_boolean(self.visit_expression(node.test))
+            false_target = else_block if has_else else loop_exit
+            cf.cbranch(condition, loop_body, false_target)
+
+        # -- Loop body --
         cf.position_at_end(loop_body)
-        
-        # Enter LOOP scope with continue -> loop_header, break -> loop_exit
+
+        # continue target: loop_top (re-check cond) or loop_body (while True)
         with self.scope_manager.scope(ScopeType.LOOP, cf,
-                                       continue_target=loop_header,
+                                       continue_target=loop_top,
                                        break_target=loop_exit,
                                        node=node) as scope:
-            # Execute loop body statements
             self._visit_stmt_list(node.body, add_to_cfg=True)
 
-            # Note: Linear token checking is done by CFG linear checker
-            # at function end, NOT here. The defer execution in scope exit
-            # will consume linear tokens, and CFG checker will verify
-            # all paths have consistent linear states.
+            # Back-edge: emit defers for this iteration, then branch to loop top
+            if not cf.is_terminated():
+                self.scope_manager.emit_defers_to_depth(scope.depth - 1, cf)
+            if not cf.is_terminated():
+                cf.branch(loop_top)
+                cf.mark_loop_back(loop_top)
 
-        # Jump back to header (if not terminated by return/break)
-        if not cf.is_terminated():
-            cf.branch(loop_header)
-            cf.mark_loop_back(loop_header)
-        
-        # Handle else block if present
+        # -- Post-loop --
         if has_else:
             cf.position_at_end(else_block)
             self._visit_stmt_list(node.orelse, add_to_cfg=True)
             if not cf.is_terminated():
                 cf.branch(loop_exit)
-        
-        # Continue after loop
+
         cf.position_at_end(loop_exit)
+
+        if is_constant_true and not cf.has_predecessors(loop_exit):
+            # No break in while True → infinite loop, code after is unreachable
+            cf.unreachable()
 
     def visit_For(self, node: ast.For):
         """Handle for loops using iterator protocol
