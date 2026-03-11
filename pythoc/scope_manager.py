@@ -209,6 +209,8 @@ class ScopeManager:
                 cf.emit_defers_for_pending_gotos(scope.depth, defer_executor)
 
             # 2. Emit deferred calls for normal exit (if not terminated)
+            # Note: scope is already popped from _scopes, so we call
+            # _emit_defers_for_scope directly on the popped scope object.
             if not cf.is_terminated():
                 self._emit_defers_for_scope(scope)
         finally:
@@ -218,48 +220,28 @@ class ScopeManager:
         logger.debug(f"Exited scope {scope}")
         return scope
     
-    def exit_scopes_to(self, target_depth: int, cf: Any, emit_defers: bool = True) -> List[Scope]:
-        """Exit scopes down to target depth (for break/continue/goto)
-        
-        This emits defers for all scopes being exited but does NOT check linear
-        tokens (they will be checked by the normal scope exit path).
-        
+    def emit_defers_to_depth(self, target_depth: int, cf):
+        """Emit defers from current scope down to target_depth (exclusive).
+
+        This is the single entry point for all control-flow defer emission:
+        - return:        emit_defers_to_depth(0, cf)           — all scopes
+        - break/continue: emit_defers_to_depth(loop_depth-1, cf) — down to loop
+        - backward goto: emit_defers_to_depth(parent_depth, cf) — down to target
+        - scope exit:    emit_defers_to_depth(scope.depth-1, cf) — just this scope
+
+        Does NOT pop scopes — the control flow jump or finally blocks handle that.
+
         Args:
-            target_depth: The depth to exit to (exclusive - this depth is NOT exited)
-            cf: ControlFlowBuilder
-            emit_defers: Whether to emit defers (True for break/continue, may vary for goto)
-        
-        Returns:
-            List of exited scopes
-        """
-        exited = []
-        
-        logger.debug(f"exit_scopes_to: target_depth={target_depth}, scopes={[s.depth for s in self._scopes]}")
-        
-        # Emit defers from current scope down to target (not including target)
-        if emit_defers and not cf.is_terminated():
-            for scope in reversed(self._scopes):
-                logger.debug(f"  checking scope depth={scope.depth}, type={scope.scope_type.name}, defers={len(scope.defers)}")
-                if scope.depth <= target_depth:
-                    logger.debug(f"  stopping at scope depth={scope.depth}")
-                    break
-                self._emit_defers_for_scope(scope)
-        
-        # Note: We don't actually pop scopes here because the control flow
-        # (break/continue) will jump out, and the finally blocks will handle
-        # the actual scope cleanup
-        
-        return exited
-    
-    def emit_all_defers(self, cf: Any):
-        """Emit all deferred calls (for return)
-        
-        Emits defers from all scopes, innermost first.
+            target_depth: Scopes with depth > target_depth have their defers emitted.
+                          0 means emit all defers (return semantics).
+            cf: ControlFlowBuilder for termination checks.
         """
         if cf.is_terminated():
             return
-        
+
         for scope in reversed(self._scopes):
+            if scope.depth <= target_depth:
+                break
             self._emit_defers_for_scope(scope)
     
     def _emit_defers_for_scope(self, scope: Scope):
@@ -640,9 +622,7 @@ class ScopeManager:
             cf: ControlFlowBuilder instance.
         """
         if not cf.is_terminated():
-            scope = self.current_scope
-            if scope is not None:
-                self._emit_defers_for_scope(scope)
+            self.emit_defers_to_depth(self.current_depth - 1, cf)
             cf.branch(ctx.end_block)
 
         logger.debug(f"Exited label scope '{ctx.name}'")
@@ -691,25 +671,25 @@ class ScopeManager:
     def resolve_backward_goto(self, ctx: LabelContext, cf):
         """Resolve a backward goto (label already defined).
 
-        Exits scopes to target's parent depth and branches to begin_block.
+        Emits defers down to target's parent depth and branches to begin_block.
 
         Args:
             ctx: The target LabelContext.
             cf: ControlFlowBuilder instance.
         """
-        self.exit_scopes_to(ctx.parent_scope_depth, cf)
+        self.emit_defers_to_depth(ctx.parent_scope_depth, cf)
         cf.branch(ctx.begin_block, kind='goto')
 
     def resolve_backward_goto_end(self, ctx: LabelContext, cf):
         """Resolve a backward goto_end (label already defined).
 
-        Exits scopes to target's parent depth and branches to end_block.
+        Emits defers down to target's parent depth and branches to end_block.
 
         Args:
             ctx: The target LabelContext.
             cf: ControlFlowBuilder instance.
         """
-        self.exit_scopes_to(ctx.parent_scope_depth, cf)
+        self.emit_defers_to_depth(ctx.parent_scope_depth, cf)
         cf.branch(ctx.end_block, kind='goto_end')
 
     def check_goto_consistency(self, func_node: Any):

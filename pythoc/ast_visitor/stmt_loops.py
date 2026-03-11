@@ -134,7 +134,7 @@ class LoopsMixin:
             # But for loop back, we need to emit manually before the branch
             if not cf.is_terminated():
                 # Emit defers for this iteration before looping back
-                self.scope_manager._emit_defers_for_scope(scope)
+                self.scope_manager.emit_defers_to_depth(scope.depth - 1, cf)
 
             # If body can fall through, it's an infinite loop - loop back
             if not cf.is_terminated():
