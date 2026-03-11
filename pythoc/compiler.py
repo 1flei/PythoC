@@ -161,7 +161,7 @@ class LLVMCompiler:
         self.extern_functions[func_name] = extern_func
         return extern_func
     
-    def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None) -> ir.Function:
+    def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None, func_state = None) -> ir.Function:
         """
         Compile a function directly from an AST node (meta-programming support)
         
@@ -324,7 +324,16 @@ class LLVMCompiler:
             func_type_hints[ast_node.name] = {'params': param_hints}
         
         visitor = LLVMIRVisitor(self.module, None, func_type_hints, None, compiler=self, user_globals=user_globals)
-        
+
+        # Set up FunctionCompileState (Phase 2 fields)
+        # If func_state is provided (from @compile wrapper), populate it.
+        # Otherwise create a minimal one for the legacy code path.
+        if func_state is None:
+            from .context import FunctionCompileState
+            func_state = FunctionCompileState(group_key=group_key)
+        func_state.current_function = llvm_function
+        func_state.all_inlined_stmts = []
+        visitor.func_state = func_state
         visitor.current_function = llvm_function
         visitor.current_group_key = group_key  # For dependency tracking at call time
         
@@ -344,7 +353,7 @@ class LLVMCompiler:
                         pc_type = visitor.type_resolver.parse_annotation(elem_type)
                     if pc_type:
                         element_pc_types.append(pc_type)
-            
+
             # Store varargs info
             # - For struct varargs: used for len(args) constant folding
             # - For union/enum varargs: used for va_arg access
@@ -355,6 +364,7 @@ class LLVMCompiler:
                 'num_normal_params': len(ast_node.args.args),
                 'va_list': None  # Will be initialized on first access (union/enum only)
             }
+        func_state.varargs_info = visitor.current_varargs_info
         
         # Create entry block
         entry_block = llvm_function.append_basic_block('entry')
@@ -537,8 +547,8 @@ class LLVMCompiler:
             
             visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
         
-        # Initialize list to accumulate all inlined statements
-        visitor._all_inlined_stmts = []
+        # Initialize list to accumulate all inlined statements (via func_state)
+        visitor._all_inlined_stmts = func_state.all_inlined_stmts
 
         # Emit LinearRegister events for linear parameters
         # This must happen after ControlFlowBuilder is created (visitor.builder)

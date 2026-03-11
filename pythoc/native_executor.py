@@ -600,14 +600,14 @@ class MultiSOExecutor:
             Python callable wrapper for the native function
         """
         # Extract metadata from wrapper
-        if not (hasattr(wrapper, '_so_file') and hasattr(wrapper, '_compiler')):
+        if not (hasattr(wrapper, '_state') and wrapper._state):
             raise RuntimeError(f"Function was not properly compiled (missing metadata)")
-        
-        source_file = wrapper._source_file
-        so_file = wrapper._so_file
-        compiler = wrapper._compiler
-        func_name = wrapper._original_name
-        actual_func_name = getattr(wrapper, '_actual_func_name', func_name)
+
+        source_file = wrapper._state.source_file
+        so_file = wrapper._state.so_file
+        compiler = wrapper._state.compiler
+        func_name = wrapper._state.original_name
+        actual_func_name = wrapper._state.actual_func_name or func_name
         
         # Check if we need to reload (e.g., after clear_registry())
         if source_file in self.loaded_libs:
@@ -633,7 +633,7 @@ class MultiSOExecutor:
         obj_file = so_file.replace(lib_ext, '.o')
 
         # Collect dependencies from persisted deps graph (source of truth)
-        dependencies = self._get_dependencies(wrapper._compiler, source_file, so_file)
+        dependencies = self._get_dependencies(wrapper._state.compiler, source_file, so_file)
 
         # On Windows, linking dependent groups' raw `.o` files into every DLL can
         # duplicate global/static state across DLLs (e.g., function-local `static`),

@@ -21,6 +21,7 @@ _SCOPE_NOT_PROVIDED = object()
 
 from ..compiler import LLVMCompiler
 from ..registry import register_struct_from_class, _unified_registry
+from ..context import FunctionCompileState
 
 from .structs import (
     add_struct_handle_call as _add_struct_handle_call,
@@ -62,39 +63,39 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
     Returns:
         Materialized wrapper with compilation queued
     """
-    cache = getattr(template_wrapper, '_effect_specialized_cache', {})
-    if effect_key in cache:
-        return cache[effect_key]
+    state = template_wrapper._state
+    if effect_key in state.effect_specialized_cache:
+        return state.effect_specialized_cache[effect_key]
 
     if effect_key == DEFAULT_EFFECT_KEY:
         # Default: queue the template's own compile_callback in-place
         om = get_output_manager()
         om.queue_compilation(
-            template_wrapper._group_key,
-            template_wrapper._template_compile_callback,
-            template_wrapper._func_info,
+            state.group_key,
+            state.template_compile_callback,
+            state.func_info,
         )
-        template_wrapper._is_template = False
-        template_wrapper._effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
-        logger.debug(f"Materialized default specialization: {template_wrapper._original_name}")
+        state.is_template = False
+        state.effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
+        logger.debug(f"Materialized default specialization: {state.original_name}")
         return template_wrapper
     else:
         # Non-default: call _compile_impl with effect_suffix
         from ..effect import restore_effect_context
-        original_scope = template_wrapper._group_key[1] if template_wrapper._group_key else None
+        original_scope = state.group_key[1] if state.group_key else None
 
-        logger.debug(f"Materializing specialization: {template_wrapper._original_name}_{effect_key}")
+        logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
 
         with restore_effect_context(effect_bindings):
             specialized_wrapper = _compile_impl(
                 template_wrapper.__wrapped__,
-                compile_suffix=template_wrapper._compile_suffix,
+                compile_suffix=state.compile_suffix,
                 effect_suffix=effect_key,
-                captured_symbols=getattr(template_wrapper, '_captured_symbols', None),
+                captured_symbols=state.captured_symbols,
                 effect_scope=original_scope,
             )
 
-        template_wrapper._effect_specialized_cache[effect_key] = specialized_wrapper
+        state.effect_specialized_cache[effect_key] = specialized_wrapper
         return specialized_wrapper
 
 
@@ -220,7 +221,7 @@ def _compile_impl(func_or_class,
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if getattr(wrapper, '_is_template', False):
+        if getattr(wrapper, '_state', None) and wrapper._state.is_template:
             materialize_specialization(wrapper, DEFAULT_EFFECT_KEY, {})
 
         if not hasattr(wrapper, '_native_func'):
@@ -479,57 +480,56 @@ def _compile_impl(func_or_class,
     from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
     _captured_effect_context = capture_effect_context()
-    _compile_suffix = compile_suffix
-    _effect_suffix = effect_suffix
-    _group_key = group_key
-    
+
     # Always queue compilation callback - cache check is done at flush time
+    # These closure locals are needed because they are AST/source artifacts
+    # that don't belong on FunctionCompileState (they are compilation inputs,
+    # not per-function state).
     _func_ast = func_ast
     _func_source = func_source
     _param_type_hints = param_type_hints
     _return_type_hint = return_type_hint
-    _source_file = source_file
-    _registry = registry
     _start_line = start_line
-    _func_info = func_info
-    _mangled_name = mangled_name
-    _obj_file = obj_file
-    
+
     def compile_callback(comp):
-        """Deferred compilation callback"""
+        """Deferred compilation callback.
+
+        Reads phase-1 state from wrapper._state (the FunctionCompileState),
+        not from closure locals that duplicate the same data.
+        """
+        st = wrapper._state
         start_effect_tracking()
-        
-        if _effect_suffix:
-            push_compilation_context(_compile_suffix, _effect_suffix, _captured_effect_context, _group_key)
-        
+
+        if st.effect_suffix:
+            push_compilation_context(st.compile_suffix, st.effect_suffix,
+                                     st.captured_effect_context, st.group_key)
+
         try:
-            with restore_effect_context(_captured_effect_context):
-                set_source_context(_source_file, _start_line - 1)
-                # Use func_info.compilation_globals which has been augmented
-                # with group scope at flush time for recursion support
+            with restore_effect_context(st.captured_effect_context):
+                set_source_context(st.source_file, _start_line - 1)
                 comp.compile_function_from_ast(
                     _func_ast,
                     _func_source,
                     reset_module=False,
                     param_type_hints=_param_type_hints,
                     return_type_hint=_return_type_hint,
-                    user_globals=_func_info.compilation_globals,
-                    group_key=_group_key,
+                    user_globals=st.func_info.compilation_globals,
+                    group_key=st.group_key,
+                    func_state=st,
                 )
         finally:
-            if _effect_suffix:
+            if st.effect_suffix:
                 pop_compilation_context()
-        
+
         effect_deps = stop_effect_tracking()
         if effect_deps:
-            _func_info.effect_dependencies = effect_deps
+            st.func_info.effect_dependencies = effect_deps
             logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
-            
-            # Record effect dependencies at group level immediately
+
             from ..build.deps import get_dependency_tracker
             dep_tracker = get_dependency_tracker()
             for effect in effect_deps:
-                dep_tracker.record_effect_usage(_group_key, effect)
+                dep_tracker.record_effect_usage(st.group_key, effect)
     
     from ..effect import is_effect_suffix_suppressed, effect as _effect_singleton
     # Template condition: suppress_effect_suffix() is hiding a real suffix AND
@@ -543,32 +543,46 @@ def _compile_impl(func_or_class,
                            and compile_suffix is None)
 
     if _should_be_template:
-        wrapper._is_template = True
-        wrapper._template_compile_callback = compile_callback
+        wrapper._state = FunctionCompileState(
+            compiler=compiler, so_file=so_file, source_file=source_file,
+            mangled_name=mangled_name, original_name=func.__name__,
+            actual_func_name=actual_func_name, group_key=group_key,
+            compile_suffix=compile_suffix, effect_suffix=effect_suffix,
+            func_info=func_info, captured_effect_context=_captured_effect_context,
+            captured_symbols=captured_symbols,
+            is_template=True,
+            template_compile_callback=compile_callback,
+        )
         logger.debug(f"@compile {func.__name__}: created as template (suppress active)")
     else:
         output_manager.queue_compilation(group_key, compile_callback, func_info)
-        wrapper._is_template = False
-    
-    wrapper._compiler = compiler
-    wrapper._so_file = so_file
-    wrapper._source_file = source_file
-    wrapper._mangled_name = mangled_name
-    wrapper._original_name = func.__name__
-    wrapper._actual_func_name = actual_func_name
-    wrapper._group_key = group_key
-    wrapper._captured_effect_context = _captured_effect_context
-    wrapper._captured_symbols = captured_symbols
-    wrapper._compile_suffix = compile_suffix
-    wrapper._effect_suffix = effect_suffix
-    wrapper._effect_specialized_cache = {}  # Cache for effect-specialized versions
+        wrapper._state = FunctionCompileState(
+            compiler=compiler, so_file=so_file, source_file=source_file,
+            mangled_name=mangled_name, original_name=func.__name__,
+            actual_func_name=actual_func_name, group_key=group_key,
+            compile_suffix=compile_suffix, effect_suffix=effect_suffix,
+            func_info=func_info, captured_effect_context=_captured_effect_context,
+            captured_symbols=captured_symbols,
+            is_template=False,
+        )
     # Note: wrapper._func_info and func_info.wrapper are set earlier (before registration)
-    
+
+    # Backward-compat aliases for external consumers (tests, etc.)
+    wrapper._so_file = wrapper._state.so_file
+    wrapper._source_file = wrapper._state.source_file
+    wrapper._compiler = wrapper._state.compiler
+    wrapper._original_name = wrapper._state.original_name
+    wrapper._actual_func_name = wrapper._state.actual_func_name
+    wrapper._mangled_name = wrapper._state.mangled_name
+    wrapper._group_key = wrapper._state.group_key
+    wrapper._compile_suffix = wrapper._state.compile_suffix
+    wrapper._effect_suffix = wrapper._state.effect_suffix
+
     output_manager.add_wrapper_to_group(group_key, wrapper)
     
     def get_effect_specialized(target_effect_suffix, effect_overrides):
         """Get or create an effect-specialized version of this wrapper."""
-        if wrapper._effect_suffix == target_effect_suffix:
+        if wrapper._state.effect_suffix == target_effect_suffix:
             return wrapper
 
         return materialize_specialization(wrapper, target_effect_suffix, effect_overrides)
@@ -584,7 +598,7 @@ def _compile_impl(func_or_class,
         
         # Record dependency: caller -> callee (at call time, not from LLVM IR)
         caller_group_key = getattr(visitor, 'current_group_key', None)
-        callee_group_key = wrapper._group_key
+        callee_group_key = wrapper._state.group_key
         if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
             dep_tracker = get_dependency_tracker()
             dep_tracker.record_group_dependency(caller_group_key, callee_group_key, "function_call")

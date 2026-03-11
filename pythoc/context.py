@@ -37,6 +37,38 @@ from .scope_manager import ScopeManager
 from .valueref import ValueRef as EnhancedValueRef
 
 
+@dataclass
+class FunctionCompileState:
+    """Unified per-function state across decoration and compilation.
+
+    Phase 1 fields: set at @compile decoration time.
+    Phase 2 fields: set during compile_function_from_ast().
+
+    wrapper._state and visitor.func_state point to the same object.
+    """
+    # --- Phase 1: set at @compile time ---
+    source_file: Optional[str] = None
+    original_name: Optional[str] = None
+    actual_func_name: Optional[str] = None
+    mangled_name: Optional[str] = None
+    group_key: Optional[tuple] = None
+    compile_suffix: Optional[str] = None
+    effect_suffix: Optional[str] = None
+    compiler: Optional[Any] = None
+    so_file: Optional[str] = None
+    func_info: Optional[Any] = None
+    is_template: bool = False
+    captured_effect_context: Optional[Any] = None
+    captured_symbols: Optional[Any] = None
+    effect_specialized_cache: Dict[str, Any] = field(default_factory=dict)
+    template_compile_callback: Optional[Any] = None
+
+    # --- Phase 2: set during compilation ---
+    current_function: Optional[ir.Function] = None
+    varargs_info: Optional[dict] = None
+    all_inlined_stmts: list = field(default_factory=list)
+
+
 class CompilationContext:
     """Global compilation context
     
@@ -68,10 +100,7 @@ class CompilationContext:
 
         # Type inference integration
         self.type_inference_ctx: Optional[Any] = None
-        
-        # Current function being compiled
-        self.current_function: Optional[ir.Function] = None
-        
+
         # Struct types registry
         self.struct_types: Dict[str, ir.Type] = {}
         
