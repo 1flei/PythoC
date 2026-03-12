@@ -49,7 +49,7 @@ from pythoc.bindings.c_ast import (
     make_func_type, make_struct_type, make_union_type, make_enum_type,
     make_typedef_type,
     # Free functions
-    ctype_free, qualtype_free, decl_free,
+    ctype_free, qualtype_free, decl_free, free_params,
     _ctype_free_deep,
     # Clone functions
     qualtype_clone_deep,
@@ -98,6 +98,7 @@ MAX_PARAMS = 32
 MAX_FIELDS = 64
 MAX_ENUM_VALUES = 256
 MAX_ERRORS = 16
+MAX_INIT_LIST_ELEMS = 64
 
 
 @compile
@@ -432,6 +433,74 @@ def parse_char_value(start: ptr[i8], length: i32) -> i64:
 
 
 @compile
+def parse_init_list(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Expr], ParserProofs]:
+    """Parse an initializer list: { expr, expr, ... }
+
+    Expects current token to be LBRACE.
+    Returns an Expr with kind=InitList, elements stored in args/arg_count.
+    """
+    prfs = parser_advance(p, prfs)  # consume '{'
+
+    e: ptr[Expr] = expr_alloc()
+    e.kind = ExprKind(ExprKind.InitList)
+
+    if parser_match(p, TokenType.RBRACE):
+        prfs = parser_advance(p, prfs)
+        return e, prfs
+
+    scratch: array[Expr, MAX_INIT_LIST_ELEMS]
+    count: i32 = 0
+
+    while True:
+        if count >= MAX_INIT_LIST_ELEMS:
+            break
+        elem: ptr[Expr] = nullptr
+        # Handle nested initializer lists
+        if parser_match(p, TokenType.LBRACE):
+            elem, prfs = parse_init_list(p, prfs)
+        else:
+            # Handle designated initializers: .field = expr or [idx] = expr
+            # For simplicity, skip the designator and parse the value
+            if parser_match(p, TokenType.DOT):
+                prfs = parser_advance(p, prfs)  # skip '.'
+                if parser_match(p, TokenType.IDENTIFIER):
+                    prfs = parser_advance(p, prfs)  # skip field name
+                if parser_match(p, TokenType.ASSIGN):
+                    prfs = parser_advance(p, prfs)  # skip '='
+            elif parser_match(p, TokenType.LBRACKET):
+                prfs = parser_advance(p, prfs)  # skip '['
+                # skip index expression
+                _idx_expr: ptr[Expr]
+                _idx_expr, prfs = parse_expr_bp(p, prfs, 20)
+                expr_free_deep(_idx_expr)
+                _, prfs = parser_expect(p, prfs, TokenType.RBRACKET)
+                if parser_match(p, TokenType.ASSIGN):
+                    prfs = parser_advance(p, prfs)  # skip '='
+            elem, prfs = parse_expr_bp(p, prfs, 20)  # Above assignment level
+        if elem != nullptr:
+            scratch[count] = elem[0]
+            effect.mem.free(elem)
+        count = count + 1
+
+        if parser_match(p, TokenType.COMMA):
+            prfs = parser_advance(p, prfs)
+            # Allow trailing comma before '}'
+            if parser_match(p, TokenType.RBRACE):
+                break
+        else:
+            break
+
+    _, prfs = parser_expect(p, prfs, TokenType.RBRACE)
+
+    if count > 0:
+        e.args = expr_alloc_array(count)
+        memcpy(e.args, ptr(scratch[0]), count * sizeof(Expr))
+        e.arg_count = count
+
+    return e, prfs
+
+
+@compile
 def parse_expr_prefix(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Expr], ParserProofs]:
     """Parse a prefix expression (atom or unary operator)."""
     e: ptr[Expr] = nullptr
@@ -496,11 +565,44 @@ def parse_expr_prefix(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Expr], Par
                 e.lhs, prfs = parse_expr_bp(p, prfs, _PREFIX_BP)
             return e, prfs
 
-        # Parenthesized expression (or cast)
+        # Parenthesized expression, cast, or compound literal
         case TokenType.LPAREN:
             prfs = parser_advance(p, prfs)
-            e, prfs = parse_expr_bp(p, prfs, 0)
-            _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
+            # Check if this is a cast or compound literal: (type)expr or (type){...}
+            if is_type_specifier(p.current.type):
+                # Parse the type
+                ts_cast: TypeParseState
+                ts_cast_ref: TypeParseStateRef = assume(ptr(ts_cast), typeparse_nonnull)
+                prfs = parse_type_specifiers(p, prfs, ts_cast_ref)
+                _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
+                # Check for compound literal: (type){init_list}
+                if parser_match(p, TokenType.LBRACE):
+                    e, prfs = parse_init_list(p, prfs)
+                    # Store the type name in span for downstream use
+                    e.span = ts_cast.name
+                    # Clean up prebuilt type if inline body was parsed
+                    if ts_cast.has_prebuilt != 0 and ts_cast.prebuilt_type != nullptr:
+                        _ctype_free_deep(ts_cast.prebuilt_type)
+                    return e, prfs
+                else:
+                    # Cast expression: (type)expr
+                    e = expr_alloc()
+                    e.kind = ExprKind(ExprKind.Cast)
+                    e.span = ts_cast.name
+                    e.lhs, prfs = parse_expr_bp(p, prfs, _PREFIX_BP)
+                    # Clean up prebuilt type if inline body was parsed
+                    if ts_cast.has_prebuilt != 0 and ts_cast.prebuilt_type != nullptr:
+                        _ctype_free_deep(ts_cast.prebuilt_type)
+                    return e, prfs
+            else:
+                # Grouped expression: (expr)
+                e, prfs = parse_expr_bp(p, prfs, 0)
+                _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
+                return e, prfs
+
+        # Initializer list: {1, 2, 3}
+        case TokenType.LBRACE:
+            e, prfs = parse_init_list(p, prfs)
             return e, prfs
 
         # Unary prefix operators: -, +, ~, !, *, &, ++, --
@@ -734,13 +836,14 @@ def parse_expr_bp(p: ParserRef, prfs: ParserProofs, min_bp: i32) -> struct[ptr[E
 
         # Check infix binding power
         # Use metaprogramming to generate if-elif chain
-        found: bool = False
+        matched: bool = False
+        too_weak: bool = False
         for op_tok, bp_pair in _infix_bp.items():
             l_bp = bp_pair[0]
             r_bp = bp_pair[1]
             if tok == op_tok:
                 if l_bp < min_bp:
-                    found = True
+                    too_weak = True
                     break
                 prfs = parser_advance(p, prfs)
                 bin_expr: ptr[Expr] = expr_alloc()
@@ -753,12 +856,11 @@ def parse_expr_bp(p: ParserRef, prfs: ParserProofs, min_bp: i32) -> struct[ptr[E
                 bin_expr.lhs = lhs
                 bin_expr.rhs, prfs = parse_expr_bp(p, prfs, r_bp)
                 lhs = bin_expr
-                found = True
+                matched = True
                 break
 
-        if not found:
+        if too_weak or not matched:
             break
-        # If found but bp was too low, we already broke
 
     return lhs, prfs
 
@@ -1070,59 +1172,67 @@ def build_qualtype_from_state(ts: TypeParseStateRef) -> struct[QualTypeProof, pt
 
 
 # =============================================================================
-# Declarator parsing
+# Recursive Declarator parsing (DeclOp stack approach)
 # =============================================================================
 
-# Declarator modifier kinds
-DECL_MOD_NONE: i8 = 0
-DECL_MOD_FUNC_PTR: i8 = 1   # Function pointer: (*name)(params)
-DECL_MOD_ARRAY: i8 = 2       # Array: name[size]
+# DeclOp kinds
+DECL_OP_PTR: i8 = 1    # Pointer indirection
+DECL_OP_FUNC: i8 = 2   # Function suffix (params)
+DECL_OP_ARRAY: i8 = 3  # Array suffix [size]
+
+MAX_DECL_OPS = 16
 
 
 @compile
-class DeclaratorInfo:
-    """Information about a parsed declarator"""
+class DeclOp:
+    """A single declarator operation (PTR, FUNC, or ARRAY)."""
+    kind: i8              # DECL_OP_PTR, DECL_OP_FUNC, DECL_OP_ARRAY
+    array_size: i32       # For ARRAY: size (-1 for unsized)
+    param_count: i32      # For FUNC: number of params
+    is_variadic: i8       # For FUNC: has ...
+    params: ptr[ParamInfo]  # For FUNC: heap-allocated params
+
+
+@compile
+class DeclaratorResult:
+    """Result of recursive declarator parsing."""
     name: Span
-    modifier: i8             # DECL_MOD_NONE, DECL_MOD_FUNC_PTR, DECL_MOD_ARRAY
-    array_size: i32          # Array size (-1 for unsized)
-    extra_ptr_depth: i8      # Additional pointer stars in declarator
-    # For function pointer: params stored in Parser.params scratch buffer
-    func_ptr_param_count: i32
-    func_ptr_is_variadic: i8
-    func_ptr_params: ptr[ParamInfo]  # Heap-allocated params (caller takes ownership)
+    ops: array[DeclOp, MAX_DECL_OPS]
+    op_count: i32
 
 
-declinfo_nonnull, DeclaratorInfoRef = nonnull(ptr[DeclaratorInfo])
+declresult_nonnull, DeclaratorResultRef = nonnull(ptr[DeclaratorResult])
 
 
 @compile
-def declinfo_init(di: DeclaratorInfoRef) -> void:
-    """Initialize a DeclaratorInfo"""
-    di.name = span_empty()
-    di.modifier = DECL_MOD_NONE
-    di.array_size = -1
-    di.extra_ptr_depth = 0
-    di.func_ptr_param_count = 0
-    di.func_ptr_is_variadic = 0
-    di.func_ptr_params = nullptr
+def declresult_init(dr: DeclaratorResultRef) -> void:
+    """Initialize a DeclaratorResult."""
+    dr.name = span_empty()
+    dr.op_count = 0
 
 
 @compile
-def parse_declarator(p: ParserRef, prfs: ParserProofs, di: DeclaratorInfoRef) -> ParserProofs:
-    """
-    Parse a declarator into DeclaratorInfo.
-    Handles:
-    - Simple: name
-    - Pointer: *name, **name
-    - Function pointer: (*name)(params)
-    - Array: name[expr], name[]
-    - GCC extensions between tokens
-    """
-    declinfo_init(di)
+def parse_declarator_recursive(p: ParserRef, prfs: ParserProofs, dr: DeclaratorResultRef) -> ParserProofs:
+    """Recursive descent declarator parser that fills a DeclOp stack.
 
-    # Handle additional pointer stars in declarator
+    Follows the C declarator grammar:
+      declarator       := pointer? direct-declarator
+      direct-declarator := IDENTIFIER
+                         | '(' declarator ')'       [grouped]
+                         | direct-declarator '(' params ')'  [function suffix]
+                         | direct-declarator '[' expr? ']'   [array suffix]
+      pointer          := '*' qualifiers*
+
+    Algorithm:
+    1. Parse leading '*' stars (defer pushing until after suffixes)
+    2. Parse direct-declarator core: '(' declarator ')' or IDENTIFIER
+    3. Parse suffixes: '(params)' -> push FUNC, '[size]' -> push ARRAY
+    4. Push deferred PTR ops
+    """
+    # Phase 1: Count leading pointer stars
+    star_count: i32 = 0
     while parser_match(p, TokenType.STAR):
-        di.extra_ptr_depth = di.extra_ptr_depth + 1
+        star_count = star_count + 1
         prfs = parser_advance(p, prfs)
         while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE) or parser_match(p, TokenType.RESTRICT):
             prfs = parser_advance(p, prfs)
@@ -1130,102 +1240,73 @@ def parse_declarator(p: ParserRef, prfs: ParserProofs, di: DeclaratorInfoRef) ->
     # Skip GCC extensions before name
     prfs = parser_skip_gcc_extensions(p, prfs)
 
-    # Check for function pointer pattern: ( * name )
+    # Phase 2: Direct-declarator core
+    # '(' followed by '*' or '(' => grouped declarator (recurse)
+    # IDENTIFIER => name
+    # anything else => abstract (unnamed) declarator
     if parser_match(p, TokenType.LPAREN):
-        # Peek: is this (*name) pattern?
-        # Save state - we can look at token to check
-        # Advance past '('
-        prfs = parser_advance(p, prfs)
-
-        # Count pointer stars inside parens
-        inner_ptr_count: i8 = 0
-        while parser_match(p, TokenType.STAR):
-            inner_ptr_count = inner_ptr_count + 1
-            prfs = parser_advance(p, prfs)
-            # Skip qualifiers
-            while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE) or parser_match(p, TokenType.RESTRICT):
-                prfs = parser_advance(p, prfs)
-
-        # Skip GCC extensions
-        prfs = parser_skip_gcc_extensions(p, prfs)
-
-        if inner_ptr_count > 0 and parser_match(p, TokenType.IDENTIFIER):
-            # This is a function pointer: (*name)
-            di.name = span_from_token(p.current)
-            prfs = parser_advance(p, prfs)
-
-            # Skip array brackets inside the grouped declarator (e.g. (*name[]))
-            while parser_match(p, TokenType.LBRACKET):
-                prfs = parser_skip_balanced(p, prfs, TokenType.LBRACKET, TokenType.RBRACKET)
-
+        prfs = parser_advance(p, prfs)  # consume '('
+        if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.LPAREN):
+            # Grouped declarator: '(' declarator ')'
+            prfs = parse_declarator_recursive(p, prfs, dr)
             _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
-
-            # Now parse the parameter list
-            if parser_match(p, TokenType.LPAREN):
-                di.modifier = DECL_MOD_FUNC_PTR
-                param_count: i32 = 0
-                is_variadic: i8 = 0
-                params: ptr[ParamInfo]
-                params, prfs = parse_func_params(p, prfs, ptr(param_count), ptr(is_variadic))
-                di.func_ptr_param_count = param_count
-                di.func_ptr_is_variadic = is_variadic
-                di.func_ptr_params = params
-            else:
-                # Just a grouped pointer declarator, add inner stars to ptr_depth
-                di.extra_ptr_depth = di.extra_ptr_depth + inner_ptr_count
-        elif inner_ptr_count > 0 and parser_match(p, TokenType.RPAREN):
-            # Anonymous function pointer: (*)(params)
-            prfs = parser_advance(p, prfs)
-            if parser_match(p, TokenType.LPAREN):
-                di.modifier = DECL_MOD_FUNC_PTR
-                param_count: i32 = 0
-                is_variadic: i8 = 0
-                params: ptr[ParamInfo]
-                params, prfs = parse_func_params(p, prfs, ptr(param_count), ptr(is_variadic))
-                di.func_ptr_param_count = param_count
-                di.func_ptr_is_variadic = is_variadic
-                di.func_ptr_params = params
-            else:
-                di.extra_ptr_depth = di.extra_ptr_depth + inner_ptr_count
         else:
-            # Not a function pointer pattern - this is a grouped expression
-            # or something else. Skip the rest of the parens.
-            # Parse name inside parens if any
-            if parser_match(p, TokenType.IDENTIFIER):
-                di.name = span_from_token(p.current)
-                prfs = parser_advance(p, prfs)
-            # Skip to closing paren
-            depth: i32 = 1
-            while depth > 0 and p.current.type != TokenType.EOF:
-                if p.current.type == TokenType.LPAREN:
-                    depth = depth + 1
-                elif p.current.type == TokenType.RPAREN:
-                    depth = depth - 1
-                    if depth == 0:
-                        prfs = parser_advance(p, prfs)
-                        break
-                prfs = parser_advance(p, prfs)
+            # Not a grouped declarator - this is a suffix '(' on an empty
+            # direct-declarator. We already consumed '(', so parse the
+            # parameter list body and closing ')' directly.
+            prfs = parse_func_params_body(p, prfs, dr)
     elif parser_match(p, TokenType.IDENTIFIER):
-        # Simple name
-        di.name = span_from_token(p.current)
+        dr.name = span_from_token(p.current)
         prfs = parser_advance(p, prfs)
 
-    # Parse array dimensions: name[expr] or name[]
-    while parser_match(p, TokenType.LBRACKET):
-        prfs = parser_advance(p, prfs)
-        if parser_match(p, TokenType.RBRACKET):
-            # Unsized array []
-            di.modifier = DECL_MOD_ARRAY
-            di.array_size = -1
+    # Phase 3: Parse suffixes (function params, array dimensions)
+    while True:
+        if parser_match(p, TokenType.LPAREN):
+            # Function suffix - parse_func_params consumes '(' ... ')'
+            if dr.op_count < MAX_DECL_OPS:
+                param_count: i32 = 0
+                is_variadic: i8 = 0
+                params: ptr[ParamInfo]
+                params, prfs = parse_func_params(p, prfs, ptr(param_count), ptr(is_variadic))
+                dr.ops[dr.op_count].kind = DECL_OP_FUNC
+                dr.ops[dr.op_count].param_count = param_count
+                dr.ops[dr.op_count].is_variadic = is_variadic
+                dr.ops[dr.op_count].params = params
+                dr.ops[dr.op_count].array_size = 0
+                dr.op_count = dr.op_count + 1
+        elif parser_match(p, TokenType.LBRACKET):
+            # Array suffix
             prfs = parser_advance(p, prfs)
+            arr_size: i32 = -1
+            if parser_match(p, TokenType.RBRACKET):
+                prfs = parser_advance(p, prfs)
+            else:
+                size_expr: ptr[Expr]
+                size_expr, prfs = parse_expr_bp(p, prfs, 0)
+                arr_size = i32(expr_eval_const(size_expr))
+                expr_free_deep(size_expr)
+                _, prfs = parser_expect(p, prfs, TokenType.RBRACKET)
+            if dr.op_count < MAX_DECL_OPS:
+                dr.ops[dr.op_count].kind = DECL_OP_ARRAY
+                dr.ops[dr.op_count].array_size = arr_size
+                dr.ops[dr.op_count].param_count = 0
+                dr.ops[dr.op_count].is_variadic = 0
+                dr.ops[dr.op_count].params = nullptr
+                dr.op_count = dr.op_count + 1
         else:
-            # Sized array [expr]
-            di.modifier = DECL_MOD_ARRAY
-            size_expr: ptr[Expr]
-            size_expr, prfs = parse_expr_bp(p, prfs, 0)
-            di.array_size = i32(expr_eval_const(size_expr))
-            expr_free_deep(size_expr)
-            _, prfs = parser_expect(p, prfs, TokenType.RBRACKET)
+            break
+
+    # Phase 4: Push deferred PTR ops (after suffixes)
+    i: i32 = 0
+    while i < star_count:
+        if dr.op_count < MAX_DECL_OPS:
+            dr.ops[dr.op_count].kind = DECL_OP_PTR
+            dr.ops[dr.op_count].array_size = 0
+            dr.ops[dr.op_count].param_count = 0
+            dr.ops[dr.op_count].is_variadic = 0
+            dr.ops[dr.op_count].params = nullptr
+            dr.op_count = dr.op_count + 1
+        i = i + 1
 
     # Skip GCC extensions after declarator
     prfs = parser_skip_gcc_extensions(p, prfs)
@@ -1234,22 +1315,142 @@ def parse_declarator(p: ParserRef, prfs: ParserProofs, di: DeclaratorInfoRef) ->
 
 
 @compile
-def parse_declarator_name(p: ParserRef, prfs: ParserProofs) -> struct[Span, ParserProofs]:
-    """
-    Parse declarator and return (name, updated_proofs).
-    Compatibility wrapper around parse_declarator.
-    Handles additional pointer stars and array brackets.
-    Returns empty span if no name found.
-    """
-    di: DeclaratorInfo
-    di_ref: DeclaratorInfoRef = assume(ptr(di), declinfo_nonnull)
-    prfs = parse_declarator(p, prfs, di_ref)
+def parse_func_params_body(p: ParserRef, prfs: ParserProofs, dr: DeclaratorResultRef) -> ParserProofs:
+    """Parse function parameter list body when '(' has already been consumed.
 
-    # Free any function pointer params we allocated
-    if di.func_ptr_params != nullptr:
-        effect.mem.free(di.func_ptr_params)
+    Reads parameters and ')' then pushes a FUNC op onto dr.
+    This handles the ambiguous case in parse_declarator_recursive where
+    '(' was consumed speculatively and turned out not to be a grouped declarator.
+    """
+    if dr.op_count >= MAX_DECL_OPS:
+        # Skip to closing paren
+        depth_s: i32 = 1
+        while depth_s > 0 and p.current.type != TokenType.EOF:
+            if p.current.type == TokenType.LPAREN:
+                depth_s = depth_s + 1
+            elif p.current.type == TokenType.RPAREN:
+                depth_s = depth_s - 1
+                if depth_s == 0:
+                    prfs = parser_advance(p, prfs)
+                    break
+            prfs = parser_advance(p, prfs)
+        return prfs
 
-    return di.name, prfs
+    param_count_b: i32 = 0
+    is_variadic_b: i8 = 0
+
+    # Empty params: ')'
+    if parser_match(p, TokenType.RPAREN):
+        prfs = parser_advance(p, prfs)
+    elif parser_match(p, TokenType.VOID):
+        # Check for (void)
+        prfs = parser_advance(p, prfs)
+        if parser_match(p, TokenType.RPAREN):
+            prfs = parser_advance(p, prfs)
+        else:
+            # 'void' was part of param type, need full param parsing.
+            # This is tricky since we already consumed 'void'.
+            # Treat as single void param for now, skip to ')'
+            depth_v: i32 = 1
+            while depth_v > 0 and p.current.type != TokenType.EOF:
+                if p.current.type == TokenType.LPAREN:
+                    depth_v = depth_v + 1
+                elif p.current.type == TokenType.RPAREN:
+                    depth_v = depth_v - 1
+                    if depth_v == 0:
+                        prfs = parser_advance(p, prfs)
+                        break
+                prfs = parser_advance(p, prfs)
+    else:
+        # Parse params into scratch buffer using the full param parser logic
+        while True:
+            if parser_match(p, TokenType.ELLIPSIS):
+                is_variadic_b = 1
+                prfs = parser_advance(p, prfs)
+                break
+
+            if param_count_b >= MAX_PARAMS:
+                break
+
+            # Parse parameter type
+            ts_b: TypeParseState
+            ts_b_ref: TypeParseStateRef = assume(ptr(ts_b), typeparse_nonnull)
+            prfs = parse_type_specifiers(p, prfs, ts_b_ref)
+            qt_b_prf, qt_b = build_qualtype_from_state(ts_b_ref)
+
+            # Parse parameter declarator
+            dr_b: DeclaratorResult
+            dr_b_ref: DeclaratorResultRef = assume(ptr(dr_b), declresult_nonnull)
+            declresult_init(dr_b_ref)
+            prfs = parse_declarator_recursive(p, prfs, dr_b_ref)
+            qt_b_prf, qt_b = apply_decl_ops(dr_b_ref, qt_b_prf, qt_b)
+
+            p.params[param_count_b].name = dr_b.name
+            p.params[param_count_b].type = qt_b
+            consume(qt_b_prf)
+            param_count_b = param_count_b + 1
+
+            match p.current.type:
+                case TokenType.COMMA:
+                    prfs = parser_advance(p, prfs)
+                case _:
+                    break
+
+        _, prfs = parser_expect(p, prfs, TokenType.RPAREN)
+        prfs = parser_skip_gcc_extensions(p, prfs)
+
+    # Push FUNC op
+    dr.ops[dr.op_count].kind = DECL_OP_FUNC
+    dr.ops[dr.op_count].param_count = param_count_b
+    dr.ops[dr.op_count].is_variadic = is_variadic_b
+    dr.ops[dr.op_count].array_size = 0
+    if param_count_b > 0:
+        params_heap: ptr[ParamInfo] = paraminfo_alloc(param_count_b)
+        memcpy(params_heap, ptr(p.params[0]), param_count_b * sizeof(ParamInfo))
+        dr.ops[dr.op_count].params = params_heap
+    else:
+        dr.ops[dr.op_count].params = nullptr
+    dr.op_count = dr.op_count + 1
+
+    return prfs
+
+
+@compile
+def apply_decl_ops(dr: DeclaratorResultRef, qt_prf: QualTypeProof, qt: ptr[QualType]) -> struct[QualTypeProof, ptr[QualType]]:
+    """Apply DeclOps in reverse to build the final type from the base type.
+
+    Reverse application produces correct C type semantics:
+    - int (*fp)(int): ops=[PTR, FUNC] -> reverse: FUNC(int)->int, then PTR -> ptr[func(int)->int]
+    - int *f(int): ops=[FUNC, PTR] -> reverse: PTR -> ptr[int], then FUNC -> func(int)->ptr[int]
+    """
+    i: i32 = dr.op_count - 1
+    while i >= 0:
+        if dr.ops[i].kind == DECL_OP_PTR:
+            qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+        elif dr.ops[i].kind == DECL_OP_FUNC:
+            func_ty_prf, func_ty = make_func_type(
+                qt_prf, qt, dr.ops[i].params,
+                dr.ops[i].param_count, dr.ops[i].is_variadic
+            )
+            qt_prf, qt = make_qualtype(func_ty_prf, func_ty, QUAL_NONE)
+            # Params ownership transferred to FuncType, null out so free_decl_ops won't double-free
+            dr.ops[i].params = nullptr
+        elif dr.ops[i].kind == DECL_OP_ARRAY:
+            arr_ty_prf, arr_ty = make_array_type(qt_prf, qt, dr.ops[i].array_size)
+            qt_prf, qt = make_qualtype(arr_ty_prf, arr_ty, QUAL_NONE)
+        i = i - 1
+    return qt_prf, qt
+
+
+@compile
+def free_decl_ops(dr: DeclaratorResultRef) -> void:
+    """Free heap-allocated ParamInfo in FUNC ops (for error paths)."""
+    i: i32 = 0
+    while i < dr.op_count:
+        if dr.ops[i].kind == DECL_OP_FUNC and dr.ops[i].params != nullptr:
+            free_params(dr.ops[i].params, dr.ops[i].param_count)
+            dr.ops[i].params = nullptr
+        i = i + 1
 
 
 # =============================================================================
@@ -1302,12 +1503,15 @@ def parse_func_params(p: ParserRef, prfs: ParserProofs, param_count: ptr[i32], i
         prfs = parse_type_specifiers(p, prfs, ts_ref)
         qt_prf, qt = build_qualtype_from_state(ts_ref)
 
-        # Parse parameter name
-        name: Span
-        name, prfs = parse_declarator_name(p, prfs)
+        # Parse parameter name (and apply declarator ops to type)
+        dr_param: DeclaratorResult
+        dr_param_ref: DeclaratorResultRef = assume(ptr(dr_param), declresult_nonnull)
+        declresult_init(dr_param_ref)
+        prfs = parse_declarator_recursive(p, prfs, dr_param_ref)
+        qt_prf, qt = apply_decl_ops(dr_param_ref, qt_prf, qt)
 
         # Store in scratch buffer
-        p.params[param_count[0]].name = name
+        p.params[param_count[0]].name = dr_param.name
         p.params[param_count[0]].type = qt
         consume(qt_prf)  # Transfer ownership to params array
 
@@ -1332,21 +1536,6 @@ def parse_func_params(p: ParserRef, prfs: ParserProofs, param_count: ptr[i32], i
     
     return nullptr, prfs
 
-
-@compile
-def parse_function_type(p: ParserRef, prfs: ParserProofs, ret_qt_prf: QualTypeProof, ret_qt: ptr[QualType]) -> struct[CTypeProof, ptr[CType], ParserProofs]:
-    """
-    Parse function type given return type.
-    Takes ownership of ret_qt.
-    Returns (proof, ctype, updated_proofs).
-    """
-    param_count: i32 = 0
-    is_variadic: i8 = 0
-    params: ptr[ParamInfo]
-    params, prfs = parse_func_params(p, prfs, ptr(param_count), ptr(is_variadic))
-    
-    ty_prf, ty = make_func_type(ret_qt_prf, ret_qt, params, param_count, is_variadic)
-    return ty_prf, ty, prfs
 
 
 # =============================================================================
@@ -1381,9 +1570,12 @@ def parse_struct_fields(p: ParserRef, prfs: ParserProofs, field_count: ptr[i32])
         prfs = parse_type_specifiers(p, prfs, ts_ref)
         qt_prf, qt = build_qualtype_from_state(ts_ref)
 
-        # Parse field name
-        name: Span
-        name, prfs = parse_declarator_name(p, prfs)
+        # Parse field name (with recursive declarator for proper func ptr types)
+        dr_field: DeclaratorResult
+        dr_field_ref: DeclaratorResultRef = assume(ptr(dr_field), declresult_nonnull)
+        declresult_init(dr_field_ref)
+        prfs = parse_declarator_recursive(p, prfs, dr_field_ref)
+        qt_prf, qt = apply_decl_ops(dr_field_ref, qt_prf, qt)
 
         # Check for bitfield
         bit_width: i32 = -1
@@ -1394,7 +1586,7 @@ def parse_struct_fields(p: ParserRef, prfs: ParserProofs, field_count: ptr[i32])
                 prfs = parser_advance(p, prfs)
 
         # Store in scratch buffer
-        p.fields[field_count[0]].name = name
+        p.fields[field_count[0]].name = dr_field.name
         p.fields[field_count[0]].type = qt
         p.fields[field_count[0]].bit_width = bit_width
         consume(qt_prf)  # Transfer ownership
@@ -1412,8 +1604,12 @@ def parse_struct_fields(p: ParserRef, prfs: ParserProofs, field_count: ptr[i32])
             prev_qt: ptr[QualType] = p.fields[field_count[0] - 1].type
             new_qt_prf, new_qt = qualtype_clone_deep(prev_qt)
 
-            name, prfs = parse_declarator_name(p, prfs)
-            p.fields[field_count[0]].name = name
+            dr_field2: DeclaratorResult
+            dr_field2_ref: DeclaratorResultRef = assume(ptr(dr_field2), declresult_nonnull)
+            declresult_init(dr_field2_ref)
+            prfs = parse_declarator_recursive(p, prfs, dr_field2_ref)
+            new_qt_prf, new_qt = apply_decl_ops(dr_field2_ref, new_qt_prf, new_qt)
+            p.fields[field_count[0]].name = dr_field2.name
             p.fields[field_count[0]].type = new_qt
             p.fields[field_count[0]].bit_width = -1
             consume(new_qt_prf)
@@ -1558,6 +1754,54 @@ MAX_BLOCK_STMTS = 256
 
 
 @compile
+def parse_local_decl(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Stmt], ParserProofs]:
+    """Parse a local variable declaration statement.
+
+    Handles: type name; type name = expr; type *name; etc.
+    Returns a Stmt with kind=Decl, decl_type, decl_name, and optional expr (initializer).
+    """
+    s: ptr[Stmt] = stmt_alloc()
+    s.kind = StmtKind(StmtKind.Decl)
+
+    # Parse type specifiers
+    ts: TypeParseState
+    ts_ref: TypeParseStateRef = assume(ptr(ts), typeparse_nonnull)
+    prfs = parse_type_specifiers(p, prfs, ts_ref)
+    qt_prf, qt = build_qualtype_from_state(ts_ref)
+
+    # Parse declarator for the variable name
+    dr_local: DeclaratorResult
+    dr_local_ref: DeclaratorResultRef = assume(ptr(dr_local), declresult_nonnull)
+    declresult_init(dr_local_ref)
+    prfs = parse_declarator_recursive(p, prfs, dr_local_ref)
+    qt_prf, qt = apply_decl_ops(dr_local_ref, qt_prf, qt)
+
+    s.decl_type = qt
+    s.decl_name = dr_local.name
+    consume(qt_prf)
+
+    # Parse optional initializer
+    if parser_match(p, TokenType.ASSIGN):
+        prfs = parser_advance(p, prfs)
+        # Check for initializer list: = { ... }
+        if parser_match(p, TokenType.LBRACE):
+            s.expr, prfs = parse_init_list(p, prfs)
+        else:
+            s.expr, prfs = parse_expression(p, prfs)
+
+    # Handle multiple declarators: int a, b, c;
+    # Skip remaining declarators for simplicity
+    while parser_match(p, TokenType.COMMA):
+        prfs = parser_skip_until_semicolon(p, prfs)
+        break
+
+    if parser_match(p, TokenType.SEMICOLON):
+        prfs = parser_advance(p, prfs)
+
+    return s, prfs
+
+
+@compile
 def parse_statement(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Stmt], ParserProofs]:
     """Parse a single statement. Returns (stmt_ptr, updated_proofs)."""
     s: ptr[Stmt] = nullptr
@@ -1627,9 +1871,29 @@ def parse_statement(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Stmt], Parse
             s.kind = StmtKind(StmtKind.For)
             prfs = parser_advance(p, prfs)
             _, prfs = parser_expect(p, prfs, TokenType.LPAREN)
-            # Init
+            # Init - check for declaration (e.g. for (int i = 0; ...))
             if not parser_match(p, TokenType.SEMICOLON):
-                s.init_expr, prfs = parse_expression(p, prfs)
+                if is_type_specifier(p.current.type):
+                    # Parse type + declarator + optional initializer
+                    ts_for: TypeParseState
+                    ts_for_ref: TypeParseStateRef = assume(ptr(ts_for), typeparse_nonnull)
+                    prfs = parse_type_specifiers(p, prfs, ts_for_ref)
+                    qt_for_prf, qt_for = build_qualtype_from_state(ts_for_ref)
+                    # Parse declarator
+                    dr_for: DeclaratorResult
+                    dr_for_ref: DeclaratorResultRef = assume(ptr(dr_for), declresult_nonnull)
+                    declresult_init(dr_for_ref)
+                    prfs = parse_declarator_recursive(p, prfs, dr_for_ref)
+                    qt_for_prf, qt_for = apply_decl_ops(dr_for_ref, qt_for_prf, qt_for)
+                    s.decl_type = qt_for
+                    s.decl_name = dr_for.name
+                    consume(qt_for_prf)
+                    # Optional initializer
+                    if parser_match(p, TokenType.ASSIGN):
+                        prfs = parser_advance(p, prfs)
+                        s.init_expr, prfs = parse_expression(p, prfs)
+                else:
+                    s.init_expr, prfs = parse_expression(p, prfs)
             _, prfs = parser_expect(p, prfs, TokenType.SEMICOLON)
             # Condition
             if not parser_match(p, TokenType.SEMICOLON):
@@ -1704,14 +1968,8 @@ def parse_statement(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Stmt], Parse
 
         case _:
             # Check if this looks like a local variable declaration (type specifier at stmt position)
-            # Skip it since we only care about top-level declarations
-            if parser_match(p, TokenType.INT) or parser_match(p, TokenType.CHAR) or parser_match(p, TokenType.VOID) or parser_match(p, TokenType.SHORT) or parser_match(p, TokenType.LONG) or parser_match(p, TokenType.FLOAT) or parser_match(p, TokenType.DOUBLE) or parser_match(p, TokenType.UNSIGNED) or parser_match(p, TokenType.SIGNED) or parser_match(p, TokenType.STRUCT) or parser_match(p, TokenType.UNION) or parser_match(p, TokenType.ENUM) or parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE) or parser_match(p, TokenType.STATIC) or parser_match(p, TokenType.EXTERN) or parser_match(p, TokenType.BUILTIN_VA_LIST):
-                s = stmt_alloc()
-                s.kind = StmtKind(StmtKind.Decl)
-                prfs = parser_skip_until_semicolon(p, prfs)
-                if parser_match(p, TokenType.SEMICOLON):
-                    prfs = parser_advance(p, prfs)
-                return s, prfs
+            if is_type_specifier(p.current.type):
+                return parse_local_decl(p, prfs)
 
             # Expression statement (or label)
             s = stmt_alloc()
@@ -1783,36 +2041,28 @@ def parse_block(p: ParserRef, prfs: ParserProofs) -> struct[ptr[Stmt], ParserPro
 # Top-level declaration parsing
 # =============================================================================
 
+
 @compile
-def parse_function_decl(p: ParserRef, prfs: ParserProofs, ret_qt_prf: QualTypeProof, ret_qt: ptr[QualType], name: Span) -> struct[DeclProof, ptr[Decl], ParserProofs]:
-    """Parse function declaration given return type and name.
+def make_func_decl_with_body(p: ParserRef, prfs: ParserProofs, qt_prf: QualTypeProof, qt: ptr[QualType], name: Span, storage: i8) -> struct[DeclProof, ptr[Decl], ParserProofs]:
+    """Create a function Decl from a completed function QualType, parsing optional body.
 
-    Takes ownership of ret_qt (via ret_qt_prf).
+    Takes ownership of qt_prf/qt. Returns (decl_prf, decl, updated_prfs).
     """
-    # Parse function type (takes ownership of ret_qt)
-    func_ty_prf, func_ty, prfs = parse_function_type(p, prfs, ret_qt_prf, ret_qt)
-
-    # Wrap in QualType (no qualifiers for function type)
-    func_qt_prf, func_qt = make_qualtype(func_ty_prf, func_ty, QUAL_NONE)
-
-    # Create declaration
     decl, decl_prf = decl_alloc()
     decl.kind = DeclKind(DeclKind.Func)
     decl.name = name
-    decl.type = func_qt
-    decl.storage = STORAGE_NONE
-    consume(func_qt_prf)  # Transfer ownership to Decl
+    decl.type = qt
+    decl.storage = storage
+    decl.body = nullptr
+    consume(qt_prf)
 
-    # Skip GCC extensions before function body (e.g. __attribute__)
+    # Skip GCC extensions before function body
     prfs = parser_skip_gcc_extensions(p, prfs)
 
-    # Parse function body if present, then immediately free it
-    # (only declaration signatures matter for bindgen)
-    # For Phase 1, use skip_balanced for speed — the statement parser is
-    # available but compiles too slowly for complex function bodies.
+    # Parse function body if present
     match p.current.type:
         case TokenType.LBRACE:
-            prfs = parser_skip_balanced(p, prfs, TokenType.LBRACE, TokenType.RBRACE)
+            decl.body, prfs = parse_block(p, prfs)
         case TokenType.SEMICOLON:
             prfs = parser_advance(p, prfs)
         case _:
@@ -1850,6 +2100,7 @@ def try_make_struct_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> str
         decl.name = name
         decl.type = qt
         decl.storage = storage
+        decl.body = nullptr
         consume(qt_prf)
         return 1, decl_prf, decl
     else:
@@ -1857,6 +2108,7 @@ def try_make_struct_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> str
         # Return dummy decl - caller must free it
         dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
+        dummy_decl.body = nullptr
         return 0, dummy_prf, dummy_decl
 
 
@@ -1885,6 +2137,7 @@ def try_make_union_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> stru
         decl.name = name
         decl.type = qt
         decl.storage = storage
+        decl.body = nullptr
         consume(qt_prf)
         return 1, decl_prf, decl
     else:
@@ -1892,6 +2145,7 @@ def try_make_union_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> stru
         # Return dummy decl - caller must free it
         dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
+        dummy_decl.body = nullptr
         return 0, dummy_prf, dummy_decl
 
 
@@ -1920,6 +2174,7 @@ def try_make_enum_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struc
         decl.name = name
         decl.type = qt
         decl.storage = storage
+        decl.body = nullptr
         consume(qt_prf)
         return 1, decl_prf, decl
     else:
@@ -1927,6 +2182,7 @@ def try_make_enum_decl(ty_prf: CTypeProof, ty: ptr[CType], storage: i8) -> struc
         # Return dummy decl - caller must free it
         dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
+        dummy_decl.body = nullptr
         return 0, dummy_prf, dummy_decl
 
 
@@ -1937,47 +2193,14 @@ def parse_typedef_decl(p: ParserRef, prfs: ParserProofs, qt_prf: QualTypeProof, 
     Returns (success, decl_prf, decl, updated_prfs).
     Takes ownership of qt_prf/qt on success, frees them on failure.
     """
-    # Parse pointer indirections
-    while parser_match(p, TokenType.STAR):
-        prfs = parser_advance(p, prfs)
-        while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE) or parser_match(p, TokenType.RESTRICT):
-            prfs = parser_advance(p, prfs)
-        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+    # Use recursive declarator to handle all cases
+    dr_td: DeclaratorResult
+    dr_td_ref: DeclaratorResultRef = assume(ptr(dr_td), declresult_nonnull)
+    declresult_init(dr_td_ref)
+    prfs = parse_declarator_recursive(p, prfs, dr_td_ref)
+    qt_prf, qt = apply_decl_ops(dr_td_ref, qt_prf, qt)
 
-    # Get typedef name using full declarator parser
-    di: DeclaratorInfo
-    di_ref: DeclaratorInfoRef = assume(ptr(di), declinfo_nonnull)
-    prfs = parse_declarator(p, prfs, di_ref)
-
-    # Apply extra pointer stars from declarator
-    depth: i8 = 0
-    while depth < di.extra_ptr_depth:
-        qt_prf, qt = wrap_in_pointer(qt_prf, qt)
-        depth = depth + 1
-
-    # Handle function pointer modifier: typedef ret_type (*name)(params)
-    if di.modifier == DECL_MOD_FUNC_PTR:
-        # Build function type: Func(params) -> ret_type
-        # qt is the return type
-        func_ty_prf, func_ty = make_func_type(
-            qt_prf, qt, di.func_ptr_params,
-            di.func_ptr_param_count, di.func_ptr_is_variadic
-        )
-        # Wrap in pointer (function pointer)
-        func_qt_prf, func_qt = make_qualtype(func_ty_prf, func_ty, QUAL_NONE)
-        func_qt_prf, func_qt = wrap_in_pointer(func_qt_prf, func_qt)
-        qt_prf = move(func_qt_prf)
-        qt = func_qt
-    elif di.modifier == DECL_MOD_ARRAY:
-        # Build array type: Array(elem_type, size)
-        arr_ty_prf, arr_ty = make_array_type(qt_prf, qt, di.array_size)
-        qt_prf, qt = make_qualtype(arr_ty_prf, arr_ty, QUAL_NONE)
-    else:
-        # Free any allocated params that we won't use
-        if di.func_ptr_params != nullptr:
-            effect.mem.free(di.func_ptr_params)
-
-    name: Span = di.name
+    name: Span = dr_td.name
 
     if not span_is_empty(name):
         decl, decl_prf = decl_alloc()
@@ -1985,10 +2208,9 @@ def parse_typedef_decl(p: ParserRef, prfs: ParserProofs, qt_prf: QualTypeProof, 
         decl.name = name
         decl.type = qt
         decl.storage = STORAGE_NONE
+        decl.body = nullptr
         consume(qt_prf)
-        prfs = parser_skip_until_semicolon(p, prfs)
-        if parser_match(p, TokenType.SEMICOLON):
-            prfs = parser_advance(p, prfs)
+        # Don't consume comma or semicolon - let caller handle multi-typedef
         return 1, decl_prf, decl, prfs
     else:
         qualtype_free(qt_prf, qt)
@@ -1997,6 +2219,7 @@ def parse_typedef_decl(p: ParserRef, prfs: ParserProofs, qt_prf: QualTypeProof, 
             prfs = parser_advance(p, prfs)
         dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
+        dummy_decl.body = nullptr
         return 0, dummy_prf, dummy_decl, prfs
 
 
@@ -2024,8 +2247,13 @@ def parse_regular_decl(p: ParserRef, prfs: ParserProofs, storage: i8) -> struct[
     prfs = parse_type_specifiers(p, prfs, ts_ref)
     qt_prf, qt = build_qualtype_from_state(ts_ref)
 
-    name: Span
-    name, prfs = parse_declarator_name(p, prfs)
+    # Use recursive declarator
+    dr_reg: DeclaratorResult
+    dr_reg_ref: DeclaratorResultRef = assume(ptr(dr_reg), declresult_nonnull)
+    declresult_init(dr_reg_ref)
+    prfs = parse_declarator_recursive(p, prfs, dr_reg_ref)
+    qt_prf, qt = apply_decl_ops(dr_reg_ref, qt_prf, qt)
+    name: Span = dr_reg.name
 
     if span_is_empty(name):
         qualtype_free(qt_prf, qt)
@@ -2034,12 +2262,20 @@ def parse_regular_decl(p: ParserRef, prfs: ParserProofs, storage: i8) -> struct[
             prfs = parser_advance(p, prfs)
         dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
+        dummy_decl.body = nullptr
         return 0, dummy_prf, dummy_decl, prfs
 
-    # Function declaration
-    if parser_match(p, TokenType.LPAREN):
-        decl_prf, decl, prfs = parse_function_decl(p, prfs, qt_prf, qt, name)
-        decl.storage = storage
+    # Check if the resulting type is a function type -> function declaration
+    is_func_type: i8 = 0
+    match qt.type[0]:
+        case (CType.Func, _ft):
+            is_func_type = 1
+        case _:
+            pass
+
+    if is_func_type != 0:
+        # Function declaration - use helper
+        decl_prf, decl, prfs = make_func_decl_with_body(p, prfs, qt_prf, qt, name, storage)
         return 1, decl_prf, decl, prfs
     else:
         # Variable declaration - skip for now
@@ -2049,6 +2285,7 @@ def parse_regular_decl(p: ParserRef, prfs: ParserProofs, storage: i8) -> struct[
             prfs = parser_advance(p, prfs)
         dummy_decl, dummy_prf = decl_alloc()
         dummy_decl.type = nullptr
+        dummy_decl.body = nullptr
         return 0, dummy_prf, dummy_decl, prfs
 
 
@@ -2136,8 +2373,19 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
                             success, decl_prf, decl, prfs = parse_typedef_decl(p, prfs, qt_prf, qt)
                             if success != 0:
                                 yield decl_prf, decl
+                                # Handle multiple typedef declarators: typedef struct S a, *b;
+                                while parser_match(p, TokenType.COMMA):
+                                    prfs = parser_advance(p, prfs)
+                                    clone_qt_prf, clone_qt = qualtype_clone_deep(decl.type)
+                                    success2, decl_prf2, decl2, prfs = parse_typedef_decl(p, prfs, clone_qt_prf, clone_qt)
+                                    if success2 != 0:
+                                        yield decl_prf2, decl2
+                                    else:
+                                        decl_free(decl_prf2, decl2)
                             else:
                                 decl_free(decl_prf, decl)
+                            if parser_match(p, TokenType.SEMICOLON):
+                                prfs = parser_advance(p, prfs)
                         case TokenType.UNION:
                             prfs = parser_advance(p, prfs)
                             ty_prf, ty, prfs = parse_struct_or_union(p, prfs, 1)
@@ -2145,8 +2393,18 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
                             success, decl_prf, decl, prfs = parse_typedef_decl(p, prfs, qt_prf, qt)
                             if success != 0:
                                 yield decl_prf, decl
+                                while parser_match(p, TokenType.COMMA):
+                                    prfs = parser_advance(p, prfs)
+                                    clone_qt_prf, clone_qt = qualtype_clone_deep(decl.type)
+                                    success2, decl_prf2, decl2, prfs = parse_typedef_decl(p, prfs, clone_qt_prf, clone_qt)
+                                    if success2 != 0:
+                                        yield decl_prf2, decl2
+                                    else:
+                                        decl_free(decl_prf2, decl2)
                             else:
                                 decl_free(decl_prf, decl)
+                            if parser_match(p, TokenType.SEMICOLON):
+                                prfs = parser_advance(p, prfs)
                         case TokenType.ENUM:
                             prfs = parser_advance(p, prfs)
                             ty_prf, ty, prfs = parse_enum(p, prfs)
@@ -2154,56 +2412,68 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
                             success, decl_prf, decl, prfs = parse_typedef_decl(p, prfs, qt_prf, qt)
                             if success != 0:
                                 yield decl_prf, decl
+                                while parser_match(p, TokenType.COMMA):
+                                    prfs = parser_advance(p, prfs)
+                                    clone_qt_prf, clone_qt = qualtype_clone_deep(decl.type)
+                                    success2, decl_prf2, decl2, prfs = parse_typedef_decl(p, prfs, clone_qt_prf, clone_qt)
+                                    if success2 != 0:
+                                        yield decl_prf2, decl2
+                                    else:
+                                        decl_free(decl_prf2, decl2)
                             else:
                                 decl_free(decl_prf, decl)
+                            if parser_match(p, TokenType.SEMICOLON):
+                                prfs = parser_advance(p, prfs)
                         case _:
                             # Regular typedef: typedef int myint;
                             success, decl_prf, decl, prfs = parse_regular_typedef(p, prfs)
                             if success != 0:
                                 yield decl_prf, decl
+                                while parser_match(p, TokenType.COMMA):
+                                    prfs = parser_advance(p, prfs)
+                                    clone_qt_prf, clone_qt = qualtype_clone_deep(decl.type)
+                                    success2, decl_prf2, decl2, prfs = parse_typedef_decl(p, prfs, clone_qt_prf, clone_qt)
+                                    if success2 != 0:
+                                        yield decl_prf2, decl2
+                                    else:
+                                        decl_free(decl_prf2, decl2)
                             else:
                                 decl_free(decl_prf, decl)
+                            if parser_match(p, TokenType.SEMICOLON):
+                                prfs = parser_advance(p, prfs)
 
                 case TokenType.STRUCT:
-                    # Look ahead to determine if this is:
-                    # 1. A struct definition: struct Name { ... };
-                    # 2. A function/var with struct return type: struct Name* func();
-                    # We parse the struct type first, then check what follows
+                    # Parse struct type first, then check what follows
                     prfs = parser_advance(p, prfs)
                     ty_prf, ty, prfs = parse_struct_or_union(p, prfs, 0)
 
-                    # Check if there's a pointer or identifier after the struct
-                    # If so, this is a function/variable declaration, not just a struct
-                    if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.IDENTIFIER):
-                        # This is a function/variable with struct return type
-                        # Build QualType from the struct type
+                    # Check if there's a declarator after the struct
+                    if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.IDENTIFIER) or parser_match(p, TokenType.LPAREN):
+                        # Function/variable with struct return type
                         qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
 
-                        # Parse pointer indirections
-                        while parser_match(p, TokenType.STAR):
-                            prfs = parser_advance(p, prfs)
-                            # Skip pointer qualifiers
-                            while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE):
-                                prfs = parser_advance(p, prfs)
-                            qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+                        dr_st: DeclaratorResult
+                        dr_st_ref: DeclaratorResultRef = assume(ptr(dr_st), declresult_nonnull)
+                        declresult_init(dr_st_ref)
+                        prfs = parse_declarator_recursive(p, prfs, dr_st_ref)
+                        qt_prf, qt = apply_decl_ops(dr_st_ref, qt_prf, qt)
 
-                        # Parse declarator name
-                        name: Span
-                        name, prfs = parse_declarator_name(p, prfs)
-
-                        if not span_is_empty(name):
-                            match p.current.type:
-                                case TokenType.LPAREN:
-                                    # Function declaration
-                                    decl_prf, decl, prfs = parse_function_decl(p, prfs, qt_prf, qt, name)
-                                    decl.storage = storage
-                                    yield decl_prf, decl
+                        if not span_is_empty(dr_st.name):
+                            # Check if result is a function type
+                            is_func_st: i8 = 0
+                            match qt.type[0]:
+                                case (CType.Func, _ft):
+                                    is_func_st = 1
                                 case _:
-                                    # Variable declaration - skip for now
-                                    qualtype_free(qt_prf, qt)
-                                    prfs = parser_skip_until_semicolon(p, prfs)
-                                    if parser_match(p, TokenType.SEMICOLON):
-                                        prfs = parser_advance(p, prfs)
+                                    pass
+                            if is_func_st != 0:
+                                decl_prf, decl, prfs = make_func_decl_with_body(p, prfs, qt_prf, qt, dr_st.name, storage)
+                                yield decl_prf, decl
+                            else:
+                                qualtype_free(qt_prf, qt)
+                                prfs = parser_skip_until_semicolon(p, prfs)
+                                if parser_match(p, TokenType.SEMICOLON):
+                                    prfs = parser_advance(p, prfs)
                         else:
                             qualtype_free(qt_prf, qt)
                             prfs = parser_skip_until_semicolon(p, prfs)
@@ -2221,34 +2491,33 @@ def parse_declarations(source: ptr[i8]) -> struct[DeclProof, ptr[Decl]]:
                             prfs = parser_advance(p, prfs)
 
                 case TokenType.UNION:
-                    # Same logic as STRUCT - check if this is a union type in a declaration
                     prfs = parser_advance(p, prfs)
                     ty_prf, ty, prfs = parse_struct_or_union(p, prfs, 1)
 
-                    if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.IDENTIFIER):
-                        # Function/variable with union return type
+                    if parser_match(p, TokenType.STAR) or parser_match(p, TokenType.IDENTIFIER) or parser_match(p, TokenType.LPAREN):
                         qt_prf, qt = make_qualtype(ty_prf, ty, QUAL_NONE)
 
-                        while parser_match(p, TokenType.STAR):
-                            prfs = parser_advance(p, prfs)
-                            while parser_match(p, TokenType.CONST) or parser_match(p, TokenType.VOLATILE):
-                                prfs = parser_advance(p, prfs)
-                            qt_prf, qt = wrap_in_pointer(qt_prf, qt)
+                        dr_un: DeclaratorResult
+                        dr_un_ref: DeclaratorResultRef = assume(ptr(dr_un), declresult_nonnull)
+                        declresult_init(dr_un_ref)
+                        prfs = parse_declarator_recursive(p, prfs, dr_un_ref)
+                        qt_prf, qt = apply_decl_ops(dr_un_ref, qt_prf, qt)
 
-                        name: Span
-                        name, prfs = parse_declarator_name(p, prfs)
-
-                        if not span_is_empty(name):
-                            match p.current.type:
-                                case TokenType.LPAREN:
-                                    decl_prf, decl, prfs = parse_function_decl(p, prfs, qt_prf, qt, name)
-                                    decl.storage = storage
-                                    yield decl_prf, decl
+                        if not span_is_empty(dr_un.name):
+                            is_func_un: i8 = 0
+                            match qt.type[0]:
+                                case (CType.Func, _ft):
+                                    is_func_un = 1
                                 case _:
-                                    qualtype_free(qt_prf, qt)
-                                    prfs = parser_skip_until_semicolon(p, prfs)
-                                    if parser_match(p, TokenType.SEMICOLON):
-                                        prfs = parser_advance(p, prfs)
+                                    pass
+                            if is_func_un != 0:
+                                decl_prf, decl, prfs = make_func_decl_with_body(p, prfs, qt_prf, qt, dr_un.name, storage)
+                                yield decl_prf, decl
+                            else:
+                                qualtype_free(qt_prf, qt)
+                                prfs = parser_skip_until_semicolon(p, prfs)
+                                if parser_match(p, TokenType.SEMICOLON):
+                                    prfs = parser_advance(p, prfs)
                         else:
                             qualtype_free(qt_prf, qt)
                             prfs = parser_skip_until_semicolon(p, prfs)

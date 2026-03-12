@@ -312,6 +312,7 @@ class Decl:
     name: Span
     type: ptr[QualType]
     storage: i8
+    body: ptr['Stmt']
 
 
 # =============================================================================
@@ -319,8 +320,8 @@ class Decl:
 # =============================================================================
 
 # Force resolve forward references first
-_all_struct_types = [PtrType, ArrayType, ParamInfo, FuncType, FieldInfo, 
-                     StructType, EnumValue, EnumType, QualType, Decl]
+_all_struct_types = [PtrType, ArrayType, ParamInfo, FuncType, FieldInfo,
+                     StructType, EnumValue, EnumType, QualType]
 for _t in _all_struct_types:
     if hasattr(_t, '_ensure_field_types_resolved'):
         _t._ensure_field_types_resolved()
@@ -772,6 +773,7 @@ def decl_free(prf: DeclProof, d: ptr[Decl]) -> void:
     """Free a declaration and its type, consuming proof."""
     if d != nullptr:
         _qualtype_free_deep(d.type)
+        stmt_free_deep(d.body)
         effect.mem.free(d)
     consume(prf)
 
@@ -968,6 +970,7 @@ class ExprKind:
     Member: None
     Arrow: None
     Comma: None
+    InitList: None
 
 
 @compile
@@ -1204,6 +1207,10 @@ class Stmt:
 # Force resolve Stmt forward reference
 if hasattr(Stmt, '_ensure_field_types_resolved'):
     Stmt._ensure_field_types_resolved()
+
+# Force resolve Decl forward reference (ptr['Stmt'] field)
+if hasattr(Decl, '_ensure_field_types_resolved'):
+    Decl._ensure_field_types_resolved()
 
 stmt_nonnull, StmtRef = nonnull(ptr[Stmt])
 

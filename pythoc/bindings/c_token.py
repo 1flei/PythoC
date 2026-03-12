@@ -246,4 +246,18 @@ g_token_alias_to_id = {
     "__unsigned": TokenType.UNSIGNED,
     "__builtin_va_list": TokenType.BUILTIN_VA_LIST,
     "_Bool": TokenType.INT,
+    # C11 keywords
+    "_Atomic": TokenType.VOLATILE,       # Treat as type qualifier (like volatile)
+    "_Complex": TokenType.DOUBLE,        # Treat _Complex as double
+    "_Noreturn": TokenType.INLINE,       # Skip like inline
+    "__noreturn__": TokenType.INLINE,
+    "_Thread_local": TokenType.STATIC,   # Treat as storage class
+    "__thread": TokenType.STATIC,
+    "_Alignas": TokenType.ATTRIBUTE,     # Skip like attribute (takes parens)
+    "_Alignof": TokenType.SIZEOF,        # Like sizeof
+    "alignof": TokenType.SIZEOF,
+    "__alignof__": TokenType.SIZEOF,
+    "__alignof": TokenType.SIZEOF,
+    "_Static_assert": TokenType.ASM,     # Skip like asm (takes parens)
+    "static_assert": TokenType.ASM,
 }
