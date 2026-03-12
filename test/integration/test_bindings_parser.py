@@ -11,6 +11,8 @@ from pythoc.libc.stdio import printf
 from pythoc.bindings.c_ast import (
     CType, QualType, Decl, DeclKind, ExprKind, StmtKind, Span,
     FuncType, PtrType, ArrayType,
+    StructType, StructTypeRef, structtype_nonnull,
+    FieldInfo, FieldInfoRef, fieldinfo_nonnull,
     qualtype_nonnull, QualTypeRef, ctype_nonnull, CTypeRef,
     functype_nonnull, FuncTypeRef, ptrtype_nonnull, PtrTypeRef,
     arraytype_nonnull, ArrayTypeRef,
@@ -438,6 +440,204 @@ def test_for_loop_with_decl_body() -> i32:
 
 
 # =============================================================================
+# Test: Typedef-name disambiguation
+# =============================================================================
+
+@compile
+def test_typedef_in_sizeof() -> i32:
+    """Test sizeof(mytype) where mytype is a typedef name."""
+    src = "typedef int myint;\nint f(void) { return sizeof(myint); }"
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Func:
+                if span_eq_cstr(decl.name, "f"):
+                    decl_free(decl_prf, decl)
+                    return 1
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    return 0
+
+
+@compile
+def test_typedef_in_cast() -> i32:
+    """Test (mytype)expr where mytype is a typedef name."""
+    src = "typedef int myint;\nint f(void) { return (myint)3; }"
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Func:
+                if span_eq_cstr(decl.name, "f"):
+                    decl_free(decl_prf, decl)
+                    return 1
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    return 0
+
+
+@compile
+def test_typedef_in_local_decl() -> i32:
+    """Test mytype x; where mytype is a typedef name in a function body."""
+    src = "typedef int myint;\nvoid f(void) { myint x; }"
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Func:
+                if span_eq_cstr(decl.name, "f") and decl.body != nullptr:
+                    for body in refine(decl.body, stmt_nonnull):
+                        match body.kind[0]:
+                            case StmtKind.Block:
+                                i: i32 = 0
+                                while i < body.stmt_count:
+                                    match body.stmts[i].kind[0]:
+                                        case StmtKind.Decl:
+                                            decl_free(decl_prf, decl)
+                                            return 1
+                                        case _:
+                                            pass
+                                    i = i + 1
+                            case _:
+                                pass
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    return 0
+
+
+@compile
+def test_typedef_in_for_init() -> i32:
+    """Test for (mytype i = 0; ...) where mytype is a typedef name."""
+    src = "typedef int myint;\nvoid f(void) { for (myint i = 0; i < 10; i++) {} }"
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Func:
+                if span_eq_cstr(decl.name, "f") and decl.body != nullptr:
+                    for body in refine(decl.body, stmt_nonnull):
+                        match body.kind[0]:
+                            case StmtKind.Block:
+                                i: i32 = 0
+                                while i < body.stmt_count:
+                                    match body.stmts[i].kind[0]:
+                                        case StmtKind.For:
+                                            decl_free(decl_prf, decl)
+                                            return 1
+                                        case _:
+                                            pass
+                                    i = i + 1
+                            case _:
+                                pass
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    return 0
+
+
+# =============================================================================
+# Test: Struct multi-declarator correct types
+# =============================================================================
+
+@compile
+def test_struct_multi_decl_correct_types() -> i32:
+    """Test struct S { int a, *b, c[4]; } has correct types for each field.
+    a=int, b=int*, c=int[4] (NOT int*[4]).
+    """
+    src = "struct S { int a, *b, c[4]; };"
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Struct:
+                for qt in refine(decl.type, qualtype_nonnull):
+                    match qt.type[0]:
+                        case (CType.Struct, st):
+                            if st != nullptr and st.field_count == 3:
+                                # Check field a: should be plain int (tag == CType.Int)
+                                a_ok: i8 = 0
+                                for f0_qt in refine(st.fields[0].type, qualtype_nonnull):
+                                    if get_base_type_tag(f0_qt) == CType.Int:
+                                        # Also verify it's not a pointer
+                                        match f0_qt.type[0]:
+                                            case (CType.Ptr, _pt):
+                                                pass
+                                            case _:
+                                                a_ok = 1
+                                # Check field b: should be ptr to int
+                                b_ok: i8 = 0
+                                for f1_qt in refine(st.fields[1].type, qualtype_nonnull):
+                                    match f1_qt.type[0]:
+                                        case (CType.Ptr, pt):
+                                            if pt != nullptr:
+                                                for pt_qt in refine(pt.pointee, qualtype_nonnull):
+                                                    if get_base_type_tag(pt_qt) == CType.Int:
+                                                        b_ok = 1
+                                        case _:
+                                            pass
+                                # Check field c: should be array of int (NOT array of ptr)
+                                c_ok: i8 = 0
+                                for f2_qt in refine(st.fields[2].type, qualtype_nonnull):
+                                    match f2_qt.type[0]:
+                                        case (CType.Array, at):
+                                            if at != nullptr and at.size == 4:
+                                                for at_qt in refine(at.elem, qualtype_nonnull):
+                                                    if get_base_type_tag(at_qt) == CType.Int:
+                                                        c_ok = 1
+                                        case _:
+                                            pass
+                                if a_ok != 0 and b_ok != 0 and c_ok != 0:
+                                    decl_free(decl_prf, decl)
+                                    return 1
+                        case _:
+                            pass
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    return 0
+
+
+# =============================================================================
+# Test: Enum follow-up declarator support
+# =============================================================================
+
+@compile
+def test_enum_var_decl() -> i32:
+    """Test enum Color { R, G, B }; enum Color c; yields a Var decl."""
+    src = "enum Color { R, G, B };\nenum Color c;"
+    found_enum: i8 = 0
+    found_var: i8 = 0
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Enum:
+                found_enum = 1
+            case DeclKind.Var:
+                if span_eq_cstr(decl.name, "c"):
+                    found_var = 1
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    if found_enum != 0 and found_var != 0:
+        return 1
+    return 0
+
+
+@compile
+def test_enum_func_decl() -> i32:
+    """Test enum Color { R, G, B }; enum Color get_color(void); yields a Func decl."""
+    src = "enum Color { R, G, B };\nenum Color get_color(void);"
+    found_enum: i8 = 0
+    found_func: i8 = 0
+    for decl_prf, decl in parse_declarations(src):
+        match decl.kind[0]:
+            case DeclKind.Enum:
+                found_enum = 1
+            case DeclKind.Func:
+                if span_eq_cstr(decl.name, "get_color"):
+                    found_func = 1
+            case _:
+                pass
+        decl_free(decl_prf, decl)
+    if found_enum != 0 and found_func != 0:
+        return 1
+    return 0
+
+
+# =============================================================================
 # Main runner
 # =============================================================================
 
@@ -550,6 +750,48 @@ def main() -> i32:
 
     printf("test_for_loop_with_decl_body: ")
     result = test_for_loop_with_decl_body()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_typedef_in_sizeof: ")
+    result = test_typedef_in_sizeof()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_typedef_in_cast: ")
+    result = test_typedef_in_cast()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_typedef_in_local_decl: ")
+    result = test_typedef_in_local_decl()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_typedef_in_for_init: ")
+    result = test_typedef_in_for_init()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_struct_multi_decl_correct_types: ")
+    result = test_struct_multi_decl_correct_types()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_enum_var_decl: ")
+    result = test_enum_var_decl()
+    printf("%d\n", result)
+    if result != 1:
+        return 1
+
+    printf("test_enum_func_decl: ")
+    result = test_enum_func_decl()
     printf("%d\n", result)
     if result != 1:
         return 1
