@@ -456,6 +456,7 @@ def _compile_impl(func_or_class,
         overload_enabled=False,
         so_file=so_file,
         fn_attrs=fn_attrs or set(),
+        has_llvm_varargs=(varargs_name is not None and varargs_kind in ('union', 'enum', 'none')),
     )
     
     # Associate wrapper with func_info early (before registration)

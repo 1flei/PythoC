@@ -51,7 +51,7 @@ setup(
     ],
     python_requires='>=3.8',
     install_requires=[
-        'llvmlite>=0.40.0,<0.45.0',
+        'llvmlite>=0.40.0,<0.47.0',
         'ziglang>=0.13.0; sys_platform == "win32"',
     ],
     extras_require={

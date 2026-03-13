@@ -110,6 +110,9 @@ class FunctionInfo:
     # This is a mutable reference that gets augmented with group scope at flush time
     # to support self/mutual recursion without name-based registry lookup
     compilation_globals: Optional[Dict[str, Any]] = None
+    # Whether this function uses LLVM-level varargs (union/enum/none varargs).
+    # Struct varargs are expanded at compile time and do not set this flag.
+    has_llvm_varargs: bool = False
     # LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
     # Applied to cross-module `declare` so the optimizer can treat calls as pure, etc.
     fn_attrs: Set[str] = field(default_factory=set)
