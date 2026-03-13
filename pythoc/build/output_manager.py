@@ -257,7 +257,8 @@ class OutputManager:
         temp_builder = LLVMBuilder()
         func_wrapper = temp_builder.declare_function(
             compiler.module, func_name,
-            param_llvm_types, return_type
+            param_llvm_types, return_type,
+            var_arg=func_info.has_llvm_varargs
         )
     
     def _compile_pending_for_group(self, group_key, group):

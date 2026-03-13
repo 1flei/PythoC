@@ -8,13 +8,29 @@ on:
 
 jobs:
   test:
-    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+    name: Test py${{ matrix.python-version }} / llvmlite ${{ matrix.llvmlite-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ['3.10', '3.11', '3.12']
+        llvmlite-version: ['default']
+        include:
+          # Pinned llvmlite 0.44 (legacy PM, LLVM 15)
+          - os: ubuntu-latest
+            python-version: '3.12'
+            llvmlite-version: '0.44.*'
+          - os: macos-latest
+            python-version: '3.12'
+            llvmlite-version: '0.44.*'
+          # Pinned llvmlite 0.46 (new PM, LLVM 20)
+          - os: ubuntu-latest
+            python-version: '3.12'
+            llvmlite-version: '0.46.*'
+          - os: macos-latest
+            python-version: '3.12'
+            llvmlite-version: '0.46.*'
 
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +43,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          if [ "${{ matrix.llvmlite-version }}" != "default" ]; then
+            pip install "llvmlite==${{ matrix.llvmlite-version }}"
+          fi
           pip install -e .
+
+      - name: Show llvmlite version
+        run: python -c "import llvmlite; print(f'llvmlite {llvmlite.__version__}')"
 
       - name: Run tests (first run - no cache)
         env:
@@ -45,13 +67,19 @@ jobs:
           python test/run_all_tests.py
 
   test-windows:
-    name: Test Python ${{ matrix.python-version }} on Windows (zig)
+    name: Test py${{ matrix.python-version }} / llvmlite ${{ matrix.llvmlite-version }} on Windows (zig)
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         python-version: ['3.12']
+        llvmlite-version: ['default']
+        include:
+          - python-version: '3.12'
+            llvmlite-version: '0.44.*'
+          - python-version: '3.12'
+            llvmlite-version: '0.46.*'
 
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +92,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          if ("${{ matrix.llvmlite-version }}" -ne "default") {
+            pip install "llvmlite==${{ matrix.llvmlite-version }}"
+          }
           pip install -e .
+
+      - name: Show llvmlite version
+        run: python -c "import llvmlite; print(f'llvmlite {llvmlite.__version__}')"
 
       - name: Verify zig is available
         run: |

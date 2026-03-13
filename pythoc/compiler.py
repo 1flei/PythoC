@@ -13,9 +13,16 @@ from .type_resolver import TypeResolver
 from .logger import logger
 
 # Initialize LLVM
-binding.initialize()
+# llvmlite 0.45+ auto-initializes core; calling initialize() raises RuntimeError.
+try:
+    binding.initialize()
+except RuntimeError:
+    pass
 binding.initialize_native_target()
 binding.initialize_native_asmprinter()
+
+# Detect pass manager API: llvmlite <0.45 uses legacy PM, >=0.45 uses new PM.
+_USE_NEW_PM = not hasattr(binding, 'create_function_pass_manager')
 
 class LLVMCompiler:
     """Enhanced LLVM compiler using llvmlite"""
@@ -248,7 +255,7 @@ class LLVMCompiler:
         # Determine LLVM varargs flag and actual parameter types
         # - struct varargs: expand into individual parameters, no LLVM varargs
         # - union/enum/none varargs: use LLVM varargs (va_list)
-        has_llvm_varargs = varargs_kind in ('union', 'enum', 'none')
+        has_llvm_varargs = varargs_name is not None and varargs_kind in ('union', 'enum', 'none')
         
         # For struct varargs, expand parameter types
         if varargs_kind == 'struct':
@@ -684,24 +691,8 @@ class LLVMCompiler:
         The pipeline runs multiple FPM<->MPM rounds so that inlining exposes
         further simplification opportunities (SROA, InstCombine, etc.).
 
-        Available llvmlite FPM passes (LLVM 14 legacy PM):
-            add_sroa_pass, add_instruction_combining_pass,
-            add_reassociate_expressions_pass, add_cfg_simplification_pass,
-            add_licm_pass, add_loop_deletion_pass, add_loop_rotate_pass,
-            add_gvn_pass, add_dead_code_elimination_pass,
-            add_jump_threading_pass, add_tail_call_elimination_pass,
-            add_loop_unroll_pass
-
-        Available llvmlite MPM passes:
-            add_constant_merge_pass, add_dead_arg_elimination_pass,
-            add_function_attrs_pass, add_global_dce_pass,
-            add_global_optimizer_pass, add_function_inlining_pass,
-            add_ipsccp_pass
-
-        NOT available (do not exist in llvmlite 0.43 / LLVM 14):
-            constant_propagation_pass, early_cse_pass, loop_simplify_pass,
-            indvars_pass, aggressive_dce_pass, loop_vectorize_pass,
-            slp_vectorize_pass
+        Supports both the legacy pass manager (llvmlite <0.45) and the new
+        pass manager (llvmlite >=0.45) transparently.
         """
         if self.module is None:
             return
@@ -726,35 +717,50 @@ class LLVMCompiler:
         except Exception as e:
             raise RuntimeError(f"Optimization failed: {e}")
 
-    def _run_function_passes(self, ir_text: str, opt_level: int) -> str:
+    @staticmethod
+    def _run_function_passes(ir_text: str, opt_level: int) -> str:
         """Run function-level optimization passes."""
+        if _USE_NEW_PM:
+            return LLVMCompiler._run_function_passes_new(ir_text, opt_level)
+        return LLVMCompiler._run_function_passes_legacy(ir_text, opt_level)
+
+    @staticmethod
+    def _run_module_passes(
+        ir_text: str, opt_level: int, inline_threshold: int
+    ) -> str:
+        """Run module-level optimization passes."""
+        if _USE_NEW_PM:
+            return LLVMCompiler._run_module_passes_new(
+                ir_text, opt_level, inline_threshold)
+        return LLVMCompiler._run_module_passes_legacy(
+            ir_text, opt_level, inline_threshold)
+
+    # ---- Legacy pass manager (llvmlite <0.45, LLVM 14) ----
+
+    @staticmethod
+    def _run_function_passes_legacy(ir_text: str, opt_level: int) -> str:
         llvm_module = binding.parse_assembly(ir_text)
         fpm = binding.create_function_pass_manager(llvm_module)
 
-        # --- Phase 1: SROA + InstCombine (alloca -> SSA promotion) ---
         fpm.add_sroa_pass()
         fpm.add_instruction_combining_pass()
         fpm.add_cfg_simplification_pass()
 
         if opt_level >= 1:
-            # --- Phase 2: second SROA round catches what InstCombine exposed ---
             fpm.add_reassociate_expressions_pass()
             fpm.add_sroa_pass()
             fpm.add_instruction_combining_pass()
 
         if opt_level >= 2:
-            # --- Phase 3: value numbering + branch simplification ---
             fpm.add_gvn_pass()
             fpm.add_instruction_combining_pass()
             fpm.add_jump_threading_pass()
             fpm.add_cfg_simplification_pass()
 
-            # --- Phase 4: loop optimizations ---
             fpm.add_licm_pass()
             fpm.add_loop_rotate_pass()
             fpm.add_loop_deletion_pass()
 
-            # --- Phase 5: tail call + final SROA/cleanup ---
             fpm.add_tail_call_elimination_pass()
             fpm.add_sroa_pass()
             fpm.add_instruction_combining_pass()
@@ -763,7 +769,6 @@ class LLVMCompiler:
             fpm.add_dead_code_elimination_pass()
 
         if opt_level >= 3:
-            # --- Phase 6: aggressive loop opts ---
             fpm.add_loop_unroll_pass()
             fpm.add_instruction_combining_pass()
             fpm.add_cfg_simplification_pass()
@@ -776,10 +781,9 @@ class LLVMCompiler:
         return str(llvm_module)
 
     @staticmethod
-    def _run_module_passes(
+    def _run_module_passes_legacy(
         ir_text: str, opt_level: int, inline_threshold: int
     ) -> str:
-        """Run module-level optimization passes."""
         llvm_module = binding.parse_assembly(ir_text)
         pm = binding.create_module_pass_manager()
 
@@ -795,6 +799,80 @@ class LLVMCompiler:
             pm.add_global_dce_pass()
 
         pm.run(llvm_module)
+        return str(llvm_module)
+
+    # ---- New pass manager (llvmlite >=0.45, LLVM 18+) ----
+
+    @staticmethod
+    def _make_pass_builder(llvm_module):
+        """Create a PassBuilder for the new pass manager API."""
+        target = binding.Target.from_triple(llvm_module.triple)
+        tm = target.create_target_machine()
+        pto = binding.create_pipeline_tuning_options()
+        return binding.create_pass_builder(tm, pto)
+
+    @staticmethod
+    def _run_function_passes_new(ir_text: str, opt_level: int) -> str:
+        llvm_module = binding.parse_assembly(ir_text)
+        pb = LLVMCompiler._make_pass_builder(llvm_module)
+        fpm = binding.create_new_function_pass_manager()
+
+        fpm.add_sroa_pass()
+        fpm.add_instruction_combine_pass()
+        fpm.add_simplify_cfg_pass()
+
+        if opt_level >= 1:
+            fpm.add_reassociate_pass()
+            fpm.add_sroa_pass()
+            fpm.add_instruction_combine_pass()
+
+        if opt_level >= 2:
+            fpm.add_new_gvn_pass()
+            fpm.add_instruction_combine_pass()
+            fpm.add_jump_threading_pass()
+            fpm.add_simplify_cfg_pass()
+
+            # LICM is not exposed in the new PM; loop-rotate + delete suffice.
+            fpm.add_loop_rotate_pass()
+            fpm.add_loop_deletion_pass()
+
+            fpm.add_tail_call_elimination_pass()
+            fpm.add_sroa_pass()
+            fpm.add_instruction_combine_pass()
+            fpm.add_new_gvn_pass()
+            fpm.add_simplify_cfg_pass()
+            fpm.add_aggressive_dce_pass()
+
+        if opt_level >= 3:
+            fpm.add_loop_unroll_pass()
+            fpm.add_instruction_combine_pass()
+            fpm.add_simplify_cfg_pass()
+
+        for func in llvm_module.functions:
+            if not func.is_declaration:
+                fpm.run(func, pb)
+        return str(llvm_module)
+
+    @staticmethod
+    def _run_module_passes_new(
+        ir_text: str, opt_level: int, inline_threshold: int
+    ) -> str:
+        llvm_module = binding.parse_assembly(ir_text)
+        pb = LLVMCompiler._make_pass_builder(llvm_module)
+        pm = binding.create_new_module_pass_manager()
+
+        if opt_level >= 1:
+            pm.add_constant_merge_pass()
+            pm.add_dead_arg_elimination_pass()
+
+        if opt_level >= 2:
+            pm.add_post_order_function_attributes_pass()
+            pm.add_ipsccp_pass()
+            pm.add_always_inliner_pass()
+            pm.add_global_opt_pass()
+            pm.add_global_dead_code_eliminate_pass()
+
+        pm.run(llvm_module, pb)
         return str(llvm_module)
     
     def get_ir(self) -> str:
