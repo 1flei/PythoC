@@ -4,7 +4,7 @@ Factory decorators for compile-time code generation.
 This module provides @meta.factory and @meta.compile_factory which
 turn Python functions into compile-time factories. Factory inputs are
 structurally normalized into compile suffixes for caching and
-specialization (design doc §7.5, §12).
+specialization
 
 Example::
 
