@@ -41,6 +41,7 @@ from .cimport import cimport, cimport_header, cimport_source
 # Import libc module for convenient access
 from . import libc
 from . import std
+from . import meta
 import builtins as _py
 
 # Version information
@@ -76,6 +77,9 @@ __all__ = [
     # C Library
     'libc',
     'std',
+
+    # Meta module
+    'meta',
     
     # Core compiler
     'LLVMCompiler',
