@@ -32,7 +32,7 @@ class YieldInlineAdapter:
             visitor: The ASTVisitor instance (for context/scope info)
         """
         self.visitor = visitor
-    
+
     def try_inline_for_loop(
         self,
         for_node: ast.For,
@@ -43,46 +43,46 @@ class YieldInlineAdapter:
     ):
         """
         Try to inline a for loop over a yield function
-        
+
         Args:
             for_node: The for loop AST node
             func_ast: The yield function's AST
             call_node: The original call AST node
             func_obj: Original function object (to access __globals__)
-            
+
         Returns:
-            (inlined_stmts, old_user_globals, break_flag_var) tuple if successful, 
-            (None, None, None) if failed.
-            Caller MUST restore user_globals after visiting the statements!
+            (InlineResult, after_else_label) tuple if successful,
+            (None, None) if failed.
+            Caller owns the full merge/restore lifecycle.
         """
         # Validate basic requirements
         if not self._is_inlinable(func_ast):
-            return (None, None, None)
-        
+            return (None, None)
+
         # Get loop variable name
         loop_var = self._extract_loop_var(for_node)
         if not loop_var:
-            return (None, None, None)
-        
+            return (None, None)
+
         # Extract call arguments from call node
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
-        
+
         # Get caller context (available variables in current scope)
         caller_context = self._build_caller_context()
-        
+
         # Extract return type annotation from function
         return_type_annotation = None
         if hasattr(func_ast, 'returns') and func_ast.returns:
             return_type_annotation = func_ast.returns
-        
+
         # Check if loop body has break/continue - need special handling
         loop_body = copy.deepcopy(for_node.body)
         body_has_break_or_continue = _has_break_or_continue(loop_body)
-        
+
         # Generate unique label for after-else (used by break to skip else)
         from ..utils import get_next_id
         after_else_label = f"_for_after_else_{get_next_id()}" if body_has_break_or_continue else None
-        
+
         # Create exit rule for yield transformation with type annotation
         exit_rule = YieldExitRule(
             loop_var=loop_var,
@@ -90,7 +90,7 @@ class YieldInlineAdapter:
             return_type_annotation=return_type_annotation,
             after_else_label=after_else_label
         )
-        
+
         # Get callee's globals for kernel
         callee_globals = None
         if func_obj and hasattr(func_obj, '__globals__'):
@@ -102,11 +102,11 @@ class YieldInlineAdapter:
                 merged = dict(callee_globals)
                 merged.update(callee_globals_override)
                 callee_globals = merged
-        
+
         try:
             # Build MetaInlineRequest and delegate to expand_inline
             try:
-                from ..meta.inline_bridge import MetaInlineRequest, expand_inline
+                from .kernel import MetaInlineRequest, expand_inline
                 request = MetaInlineRequest(
                     callee_ast=func_ast,
                     callee_globals=callee_globals or {},
@@ -120,44 +120,10 @@ class YieldInlineAdapter:
                 # If expansion fails, cannot inline
                 from ..logger import logger
                 logger.debug(f"Meta inline expansion rejected yield inline: {e}")
-                return (None, None, None)
+                return (None, None)
 
-            # Process inline result
-            try:
-                from ..logger import logger
-                inlined_stmts = inline_result.stmts
-                
-                # Merge required_globals into visitor's user_globals
-                # Order: old_user_globals first, then required_globals
-                # This ensures intrinsics like 'move' from kernel take precedence
-                old_user_globals = self.visitor.ctx.user_globals
-                merged_globals = {}
-                if old_user_globals:
-                    merged_globals.update(old_user_globals)
-                merged_globals.update(inline_result.required_globals)
-                self.visitor.ctx.user_globals = merged_globals
-                
-                # CRITICAL: Pre-declare loop variable(s) before the inlined statements
-                # This is needed because yield points will only assign to them, not declare them
-                if return_type_annotation and inlined_stmts:
-                    decls = self._create_loop_var_declarations(loop_var, return_type_annotation, for_node)
-                    for decl in reversed(decls):
-                        inlined_stmts.insert(0, decl)
-                
-                # NOTE: for-else is handled by stmt_loops.py, NOT here
-                # Python for-else semantics: else executes when loop completes without break
-                # This is different from attaching else to if's orelse (which would execute
-                # when condition is false, not when loop completes normally)
-                
-                # Return the statements, old_user_globals, and after_else_label for caller
-                # Caller MUST restore globals after visiting all statements!
-                return (inlined_stmts, old_user_globals, after_else_label)
-            except Exception as e:
-                from ..logger import logger
-                logger.warning(f"Yield inlining failed: {e}")
-                import traceback
-                logger.warning(traceback.format_exc())
-                return (None, None, None)
+            # Return InlineResult and after_else_label for caller to own lifecycle
+            return (inline_result, after_else_label)
         except Exception as e:
             raise
     
@@ -180,86 +146,6 @@ class YieldInlineAdapter:
             return target
         # Other complex targets not supported
         return None
-    
-    def _create_loop_var_declarations(
-        self, 
-        loop_var: ast.AST, 
-        return_type_annotation: ast.expr,
-        for_node: ast.For
-    ) -> List[ast.stmt]:
-        """Create variable declarations for loop variable(s)
-        
-        For simple Name: creates single AnnAssign
-        For Tuple: creates declarations for each element using subscript types
-        
-        Args:
-            loop_var: Loop variable target (Name or Tuple)
-            return_type_annotation: Return type annotation (e.g., struct[i32, i32])
-            for_node: Original for node for location info
-            
-        Returns:
-            List of AnnAssign statements for variable declarations
-        """
-        decls = []
-        
-        if isinstance(loop_var, ast.Name):
-            # Simple case: single variable
-            decl = ast.AnnAssign(
-                target=ast.Name(id=loop_var.id, ctx=ast.Store()),
-                annotation=copy.deepcopy(return_type_annotation),
-                value=None,
-                simple=1
-            )
-            ast.copy_location(decl, for_node)
-            decls.append(decl)
-        elif isinstance(loop_var, ast.Tuple):
-            # Tuple unpacking: declare each element
-            # For struct[T1, T2, ...], extract element types
-            for i, elt in enumerate(loop_var.elts):
-                if isinstance(elt, ast.Name):
-                    # Create type annotation for this element
-                    # If return_type_annotation is struct[T1, T2], we need T_i
-                    element_type = self._extract_tuple_element_type(return_type_annotation, i)
-                    
-                    decl = ast.AnnAssign(
-                        target=ast.Name(id=elt.id, ctx=ast.Store()),
-                        annotation=element_type,
-                        value=None,
-                        simple=1
-                    )
-                    ast.copy_location(decl, for_node)
-                    decls.append(decl)
-        
-        return decls
-    
-    def _extract_tuple_element_type(self, type_annotation: ast.expr, index: int) -> ast.expr:
-        """Extract the type of a tuple element from a struct type annotation
-        
-        For struct[T1, T2, ...], returns T_index
-        If we can't determine the type, returns the full annotation
-        
-        Args:
-            type_annotation: The full type annotation (e.g., struct[i32, i32])
-            index: The element index
-            
-        Returns:
-            Type annotation for the element
-        """
-        # Check if it's a Subscript like struct[T1, T2]
-        if isinstance(type_annotation, ast.Subscript):
-            slice_node = type_annotation.slice
-            
-            # Handle Tuple slice: struct[T1, T2]
-            if isinstance(slice_node, ast.Tuple):
-                if index < len(slice_node.elts):
-                    return copy.deepcopy(slice_node.elts[index])
-            
-            # Handle single element: struct[T] (shouldn't happen for tuple unpacking)
-            elif index == 0:
-                return copy.deepcopy(slice_node)
-        
-        # Fallback: return the full annotation (might cause type errors, but better than nothing)
-        return copy.deepcopy(type_annotation)
     
     def _build_caller_context(self) -> ScopeContext:
         """

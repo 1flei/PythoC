@@ -297,79 +297,74 @@ class LoopsMixin:
     
     def _visit_for_with_yield_inline(self, node: ast.For, iter_val):
         """Handle for loop with yield inline, including else clause
-        
+
         For yield inline (e.g., refine), the expansion includes:
         - The yield function body with yield transformed to loop body
         - For-else follows Python semantics: executes if no break occurred
-        
+
         Example:
             for x in refine(val, pred):
                 body
             else:
                 else_body
-        
+
         Python for-else semantics:
         - else executes when loop completes normally (no break)
         - else does NOT execute when break is used
-        
+
         Scoped label approach:
         - break in loop body -> goto_begin("_for_after_else_{id}")
         - continue in loop body -> goto_end("_yield_{id}")
         - After all yields and else, place with label("_for_after_else_{id}"): pass
         """
         from ..inline.yield_adapter import YieldInlineAdapter
-        
+        from ..inline.kernel import merge_inline_globals, restore_globals
+
         cf = self._get_cf_builder()
         adapter = YieldInlineAdapter(self)
         inline_info = iter_val._yield_inline_info
-        
+
         # Extract callee context for resolving names during yield inlining
         func_obj = inline_info.get('func_obj', None)
         callee_globals = inline_info.get('callee_globals', None)
 
-        # Get inlined statements
+        # Get inlined result
         # after_else_label is the label name for break to jump to (skip else)
-        inlined_stmts, old_user_globals, after_else_label = adapter.try_inline_for_loop(
+        inline_result, after_else_label = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
             inline_info['call_node'],
             func_obj=func_obj,
             callee_globals_override=callee_globals,
         )
-        
-        if inlined_stmts is None:
+
+        if inline_result is None:
             # Inlining failed - this is now an error
             logger.error(
                 f"Yield function inlining failed for '{ast.unparse(node.iter)}'. "
                 f"Yield functions must be inlinable (no complex control flow, recursion, etc.)",
                 node=node, exc_type=TypeError
             )
-        
+
+        old_user_globals = merge_inline_globals(self, inline_result)
         try:
             # Fix all missing locations in inlined statements
-            for stmt in inlined_stmts:
+            for stmt in inline_result.stmts:
                 ast.fix_missing_locations(stmt)
-            
+
             # Visit each inlined statement
-            self._visit_stmt_list(inlined_stmts, add_to_cfg=True)
-            
+            self._visit_stmt_list(inline_result.stmts, add_to_cfg=True)
+
             # Execute else clause if present (only reached if no break occurred)
             if node.orelse:
                 self._visit_stmt_list(node.orelse, add_to_cfg=True)
-            
+
             # Place the after_else label as a scoped label (break jumps here to skip else)
             if after_else_label:
-                # Create: with label("_for_after_else_{id}"): pass
-                from ..inline._intrinsics import _intrinsic_name
-                label_call = ast.Call(
-                    func=_intrinsic_name('label'),
-                    args=[ast.Constant(value=after_else_label)],
-                    keywords=[]
-                )
-                label_stmt = ast.With(
-                    items=[ast.withitem(context_expr=label_call, optional_vars=None)],
-                    body=[ast.Pass()]
-                )
+                from ..inline.exit_rules import _empty_label_block
+                label_stmt = _empty_label_block(
+                    ast.Constant(value=after_else_label)
+                ).as_stmt
                 ast.copy_location(label_stmt, node)
                 ast.fix_missing_locations(label_stmt)
                 if not cf.is_terminated():
@@ -377,22 +372,21 @@ class LoopsMixin:
                     self.visit(label_stmt)
         finally:
             # CRITICAL: Restore globals after visiting all inlined statements
-            if old_user_globals is not None:
-                self.ctx.user_globals = old_user_globals
+            restore_globals(self, old_user_globals)
 
     def _visit_for_with_constant_unroll(self, node: ast.For, py_iterable):
         """Unroll for loop at compile time for constant iterables
-        
+
         Uses AST transformation to convert the loop into repeated scope blocks.
         This allows defer and other scope-based features to work correctly.
-        
+
         Transforms:
             for i in [1, 2, 3]:
                 defer(cleanup)
                 body
             else:
                 else_body
-        
+
         To:
             with label("_const_loop_iter_0"):
                 i = 1
@@ -409,14 +403,14 @@ class LoopsMixin:
             else_body
             with label("_const_loop_exit_N"):
                 pass
-        
+
         Each iteration is a separate scope (via label), so:
         - defer is registered and executed per-iteration automatically
         - break transforms to goto_begin(exit_label)
         - continue transforms to goto_end(iter_label)
         """
         from ..inline.constant_loop_adapter import ConstantLoopAdapter
-        from ..inline._intrinsics import _PC_INTRINSICS
+        from ..inline.kernel import InlineResult, merge_inline_globals, restore_globals
 
         cf = self._get_cf_builder()
 
@@ -438,17 +432,12 @@ class LoopsMixin:
             ast.copy_location(stmt, node)
             ast.fix_missing_locations(stmt)
 
-        # Ensure intrinsic namespace is available in user_globals
-        old_user_globals = self.ctx.user_globals
-        merged_globals = {}
-        if old_user_globals:
-            merged_globals.update(old_user_globals)
-        merged_globals['__pc_intrinsics'] = _PC_INTRINSICS
-        self.ctx.user_globals = merged_globals
-        
+        # Use shared merge/restore helpers
+        inline_result = InlineResult(stmts=result.stmts, required_globals=result.required_globals)
+        old_user_globals = merge_inline_globals(self, inline_result)
         try:
             # Visit the transformed statements
             self._visit_stmt_list(result.stmts, add_to_cfg=True)
         finally:
             # Restore user_globals
-            self.ctx.user_globals = old_user_globals
+            restore_globals(self, old_user_globals)

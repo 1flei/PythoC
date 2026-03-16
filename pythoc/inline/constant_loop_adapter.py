@@ -37,10 +37,24 @@ from ..utils import get_next_id
 from ..logger import logger
 from ..valueref import ValueRef, wrap_value
 from ..context import VariableInfo
-from ._intrinsics import _intrinsic_name
+from ..meta.template import quote_stmts, splice_stmts
+from ._intrinsics import _PC_INTRINSICS
+from .exit_rules import _empty_label_block, _goto_begin, _goto_end
 
 if TYPE_CHECKING:
     from ..ast_visitor.visitor_impl import LLVMIRVisitor
+
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+@quote_stmts
+def _const_iter_block(label_name, target, value, body):
+    """One unrolled iteration: labeled scope with binding + transformed body."""
+    with __pc_intrinsics.label(label_name):  # noqa: F821
+        target = value
+        body
 
 
 @dataclass
@@ -50,6 +64,7 @@ class ConstantLoopResult:
     exit_label: str        # Label for break target (after loop)
     after_else_label: Optional[str]  # Label after else clause (if has else)
     iter_var_names: List[str]  # Names of registered iteration value variables
+    required_globals: Dict[str, Any]  # Globals needed for visiting stmts
 
 
 class ConstantLoopAdapter:
@@ -80,92 +95,80 @@ class ConstantLoopAdapter:
     ) -> ConstantLoopResult:
         """
         Transform a constant for loop into repeated scope blocks
-        
+
         Args:
             for_node: The for loop AST node
             iterable: The compile-time constant iterable (list, tuple, range, etc.)
-            
+
         Returns:
             ConstantLoopResult with transformed statements and registered var names
         """
-        # Convert to list for iteration
         elements = list(iterable)
-        
-        # Generate unique IDs for this loop
+        required_globals = {'__pc_intrinsics': _PC_INTRINSICS}
+
         loop_id = get_next_id()
         exit_label = f"_const_loop_exit_{loop_id}"
-        
-        # Check if body has break/continue
+
         body_has_break = _has_break_in_body(for_node.body)
         body_has_continue = _has_continue_in_body(for_node.body)
-        
-        # If has else clause and break, need after_else label
+
         has_else = for_node.orelse and len(for_node.orelse) > 0
-        after_else_label = f"_const_loop_after_else_{loop_id}" if has_else and body_has_break else None
-        
-        # The break target depends on whether there's an else clause
-        # - If no else: break goes to exit_label
-        # - If has else: break goes to after_else_label (skip else)
+        after_else_label = (
+            f"_const_loop_after_else_{loop_id}"
+            if has_else and body_has_break else None
+        )
         break_target = after_else_label if after_else_label else exit_label
-        
+
         stmts = []
         iter_var_names = []
-        
-        # Handle empty iterable
+
+        # Empty iterable: optional else + exit label
         if len(elements) == 0:
-            # Empty loop: just execute else clause if present
             if has_else:
                 stmts.extend(copy.deepcopy(for_node.orelse))
-            # Add exit label
-            stmts.append(self._create_label_scope(exit_label, [ast.Pass()], for_node))
-            return ConstantLoopResult(stmts, exit_label, after_else_label, iter_var_names)
-        
-        # Parse loop variable pattern
-        loop_var_pattern = self._parse_target_pattern(for_node.target, for_node)
-        
-        # Pre-register all iteration values as variables
-        # This is like creating function parameters before inlining
+            stmts.append(
+                _empty_label_block(ast.Constant(value=exit_label)).as_stmt)
+            return ConstantLoopResult(
+                stmts, exit_label, after_else_label,
+                iter_var_names, required_globals)
+
+        # Pre-register iteration value variables
         iter_value_vars = self._register_iteration_values(elements, loop_id)
         iter_var_names = list(iter_value_vars.keys())
-        
-        # Generate iteration blocks
-        for i, element in enumerate(elements):
+
+        # Build per-iteration blocks via template
+        for i, _element in enumerate(elements):
             iter_label = f"_const_loop_iter_{loop_id}_{i}"
-            
-            # Create iteration body
-            iter_body = []
-            
-            # Bind loop variable(s) by referencing the pre-registered variable
-            iter_value_var = iter_value_vars[i]
-            bind_stmts = self._create_binding_stmts_from_var(
-                loop_var_pattern, iter_value_var, element, for_node
-            )
-            iter_body.extend(bind_stmts)
-            
-            # Transform and add loop body
-            for stmt in for_node.body:
-                transformed = self._transform_break_continue(
-                    copy.deepcopy(stmt),
-                    break_target=break_target,
-                    continue_target=iter_label,
-                    body_has_break=body_has_break,
-                    body_has_continue=body_has_continue
-                )
-                iter_body.append(transformed)
-            
-            # Always wrap in scoped label for defer support
-            iter_stmt = self._create_label_scope(iter_label, iter_body, for_node)
-            stmts.append(iter_stmt)
-        
-        # Add else clause if present (only reached if no break)
+
+            # Transform break/continue in a deep copy of the loop body
+            transformed_body = self._transform_body(
+                for_node.body, break_target, iter_label,
+                body_has_break, body_has_continue)
+
+            # Single template call produces the whole iteration block:
+            #   with label(iter_label):
+            #       target = _iter_val_N
+            #       <transformed_body>
+            iter_stmts = _const_iter_block(
+                ast.Constant(value=iter_label),
+                copy.deepcopy(for_node.target),
+                ast.Name(id=iter_value_vars[i], ctx=ast.Load()),
+                splice_stmts(transformed_body),
+            ).as_stmts
+            stmts.extend(iter_stmts)
+
+        # Else clause (only reached when no break)
         if has_else:
             stmts.extend(copy.deepcopy(for_node.orelse))
-        
-        # Add exit/after_else label
+
+        # Final label (exit or after-else)
         final_label = after_else_label if after_else_label else exit_label
-        stmts.append(self._create_label_scope(final_label, [ast.Pass()], for_node))
-        
-        return ConstantLoopResult(stmts, exit_label, after_else_label, iter_var_names)
+        stmts.append(
+            _empty_label_block(ast.Constant(value=final_label)).as_stmt)
+
+        return ConstantLoopResult(
+            stmts, exit_label, after_else_label,
+            iter_var_names, required_globals)
     
     def _register_iteration_values(
         self, 
@@ -221,121 +224,19 @@ class ConstantLoopAdapter:
             type_hint=PythonType.wrap(element, is_constant=True)
         )
     
-    def _parse_target_pattern(self, target: ast.expr, for_node: ast.For) -> Any:
-        """Parse loop target pattern
-        
-        Returns:
-            str for simple Name, list for Tuple (can be nested)
-        """
-        if isinstance(target, ast.Name):
-            return target.id
-        elif isinstance(target, ast.Tuple):
-            return [self._parse_target_pattern(elt, for_node) for elt in target.elts]
-        else:
-            logger.error(
-                f"Unsupported loop target type: {type(target).__name__}",
-                node=for_node, exc_type=NotImplementedError
-            )
-    
-    def _create_binding_stmts_from_var(
+    def _transform_body(
         self,
-        pattern: Any,
-        iter_var_name: str,
-        element: Any,
-        for_node: ast.For
-    ) -> List[ast.stmt]:
-        """Create assignment statements to bind loop variable(s) from iteration variable
-        
-        For simple pattern (single var):
-            i = _iter_val_0
-            
-        For tuple pattern:
-            a, b = _iter_val_0  (if element is tuple)
-            OR
-            a = _iter_val_0[0]
-            b = _iter_val_0[1]
-        
-        Args:
-            pattern: Variable pattern (str or list)
-            iter_var_name: Name of the pre-registered iteration value variable
-            element: The actual element value (for type checking tuple unpacking)
-            for_node: Original for node for location info
-            
-        Returns:
-            List of assignment statements
-        """
-        stmts = []
-        
-        if isinstance(pattern, str):
-            # Simple assignment: i = _iter_val_N
-            assign = ast.Assign(
-                targets=[ast.Name(id=pattern, ctx=ast.Store())],
-                value=ast.Name(id=iter_var_name, ctx=ast.Load())
-            )
-            ast.copy_location(assign, for_node)
-            stmts.append(assign)
-        elif isinstance(pattern, list):
-            # Tuple unpacking: a, b = _iter_val_N
-            # Create tuple target
-            targets = ast.Tuple(
-                elts=[self._pattern_to_store_target(p) for p in pattern],
-                ctx=ast.Store()
-            )
-            assign = ast.Assign(
-                targets=[targets],
-                value=ast.Name(id=iter_var_name, ctx=ast.Load())
-            )
-            ast.copy_location(assign, for_node)
-            stmts.append(assign)
-        
-        return stmts
-    
-    def _pattern_to_store_target(self, pattern: Any) -> ast.expr:
-        """Convert pattern to AST store target"""
-        if isinstance(pattern, str):
-            return ast.Name(id=pattern, ctx=ast.Store())
-        elif isinstance(pattern, list):
-            return ast.Tuple(
-                elts=[self._pattern_to_store_target(p) for p in pattern],
-                ctx=ast.Store()
-            )
-        else:
-            raise TypeError(f"Invalid pattern type: {type(pattern)}")
-    
-    def _create_label_scope(
-        self, 
-        label_name: str, 
         body: List[ast.stmt],
-        for_node: ast.For
-    ) -> ast.With:
-        """Create a scoped label block: with label("name"): body"""
-        label_call = ast.Call(
-            func=_intrinsic_name('label'),
-            args=[ast.Constant(value=label_name)],
-            keywords=[]
-        )
-        with_stmt = ast.With(
-            items=[ast.withitem(context_expr=label_call, optional_vars=None)],
-            body=body if body else [ast.Pass()]
-        )
-        ast.copy_location(with_stmt, for_node)
-        ast.fix_missing_locations(with_stmt)
-        return with_stmt
-    
-    def _transform_break_continue(
-        self,
-        stmt: ast.stmt,
         break_target: str,
         continue_target: str,
         body_has_break: bool,
         body_has_continue: bool
-    ) -> ast.stmt:
-        """Transform break/continue to goto statements"""
+    ) -> List[ast.stmt]:
+        """Deep-copy + transform break/continue in loop body."""
         if not body_has_break and not body_has_continue:
-            return stmt
-        
+            return [copy.deepcopy(s) for s in body]
         transformer = _BreakContinueTransformer(break_target, continue_target)
-        return transformer.visit(stmt)
+        return [transformer.visit(copy.deepcopy(s)) for s in body]
 
 
 class _BreakContinueTransformer(ast.NodeTransformer):
@@ -364,12 +265,8 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         """Transform break to goto_begin(break_target)"""
         if self.loop_depth > 0:
             return node
-        
-        goto_call = ast.Expr(value=ast.Call(
-            func=_intrinsic_name('goto_begin'),
-            args=[ast.Constant(value=self.break_target)],
-            keywords=[]
-        ))
+
+        goto_call = _goto_begin(ast.Constant(value=self.break_target)).as_stmt
         ast.copy_location(goto_call, node)
         return goto_call
     
@@ -377,12 +274,8 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         """Transform continue to goto_end(continue_target)"""
         if self.loop_depth > 0:
             return node
-        
-        goto_call = ast.Expr(value=ast.Call(
-            func=_intrinsic_name('goto_end'),
-            args=[ast.Constant(value=self.continue_target)],
-            keywords=[]
-        ))
+
+        goto_call = _goto_end(ast.Constant(value=self.continue_target)).as_stmt
         ast.copy_location(goto_call, node)
         return goto_call
 

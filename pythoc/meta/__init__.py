@@ -16,7 +16,6 @@ Public API:
     Binding helpers:   ref, ident, const, type_expr, splice_stmt, splice_stmts
     Builders:          func, artifact
     Compilation:       compile_ast, compile_generated, compile_artifact
-    Inline bridge:     MetaInlineRequest, expand_inline
     Factories:         factory, compile_factory
     Normalization:     normalize_factory_key
 """
@@ -49,11 +48,6 @@ from .compile_api import (
     compile_ast,
     compile_generated,
     compile_artifact,
-)
-
-from .inline_bridge import (
-    MetaInlineRequest,
-    expand_inline,
 )
 
 from .normalize import (
@@ -92,9 +86,6 @@ __all__ = [
     'compile_ast',
     'compile_generated',
     'compile_artifact',
-    # Inline bridge
-    'MetaInlineRequest',
-    'expand_inline',
     # Factories
     'factory',
     'compile_factory',
