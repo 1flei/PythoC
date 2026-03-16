@@ -2,8 +2,8 @@
 pythoc.meta - Unified compile-time program generation.
 
 This module is the single public home for compile-time code generation
-in PythoC. It unifies quasi-quote templates, generated functions, and
-AST compilation under one roof.
+in PythoC. It unifies quasi-quote templates, generated functions,
+inline expansion, factories, and AST compilation under one roof.
 
 Core concepts:
     MetaFragment   - a typed fragment of Python AST
@@ -16,6 +16,9 @@ Public API:
     Binding helpers:   ref, ident, const, type_expr, splice_stmt, splice_stmts
     Builders:          func, artifact
     Compilation:       compile_ast, compile_generated, compile_artifact
+    Inline bridge:     MetaInlineRequest, expand_inline
+    Factories:         factory, compile_factory
+    Normalization:     normalize_factory_key
 """
 
 from .fragment import MetaFragment, FragmentKind
@@ -48,6 +51,20 @@ from .compile_api import (
     compile_artifact,
 )
 
+from .inline_bridge import (
+    MetaInlineRequest,
+    expand_inline,
+)
+
+from .normalize import (
+    normalize_factory_key,
+)
+
+from .factory import (
+    factory,
+    compile_factory,
+)
+
 __all__ = [
     # Core types
     'MetaFragment',
@@ -75,4 +92,12 @@ __all__ = [
     'compile_ast',
     'compile_generated',
     'compile_artifact',
+    # Inline bridge
+    'MetaInlineRequest',
+    'expand_inline',
+    # Factories
+    'factory',
+    'compile_factory',
+    # Normalization
+    'normalize_factory_key',
 ]

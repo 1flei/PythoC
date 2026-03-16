@@ -519,7 +519,7 @@ class ScopeManager:
         return defer_executor
 
     def _check_sibling_crossing(self, goto_node: ast.AST, target_node: ast.AST,
-                                parent_depth: int):
+                                parent_depth: int, goto_scope_depth: int):
         """Check that a forward sibling goto does not cross variable definitions
         or defer statements.
 
@@ -527,11 +527,23 @@ class ScopeManager:
         skip over any variable declarations or defer registrations that occur
         at the same scope depth between the two labels.
 
+        The check only applies when the goto was issued from the same depth as
+        the target label's parent (true sibling jump). If the goto originates
+        from a deeper scope, the hazards at parent_depth were already in scope
+        before the goto, so no crossing occurs.
+
         Args:
             goto_node: The AST node of the goto() call.
             target_node: The AST node of the target label's 'with' statement.
             parent_depth: The parent scope depth where both labels live.
+            goto_scope_depth: The scope depth where the goto was issued.
         """
+        # Only check true sibling gotos. A goto from a deeper child scope
+        # cannot cross declarations at the parent level — those declarations
+        # were already in scope when the child scope was entered.
+        if goto_scope_depth != parent_depth:
+            return
+
         goto_line = getattr(goto_node, 'lineno', None)
         target_line = getattr(target_node, 'lineno', None)
         if goto_line is None or target_line is None:
@@ -599,7 +611,8 @@ class ScopeManager:
                     f"Forward goto can only target siblings or uncles.",
                     node=pending.node, exc_type=SyntaxError,
                 )
-            self._check_sibling_crossing(pending.node, node, parent_depth)
+            self._check_sibling_crossing(
+                pending.node, node, parent_depth, pending.goto_scope_depth)
 
         # Resolve any pending forward gotos to this label
         cf.resolve_pending_gotos(

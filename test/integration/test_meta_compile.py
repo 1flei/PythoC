@@ -211,6 +211,32 @@ neg_i32 = meta.compile_ast(
 )
 
 
+# --- Test 11: compile_factory basic ---
+
+@meta.compile_factory
+def make_adder(offset):
+    return meta.func(
+        name="adder",
+        params=[("x", i32)],
+        return_type=i32,
+        body=[
+            ast.Return(value=ast.BinOp(
+                left=ast.Name(id='x', ctx=ast.Load()),
+                op=ast.Add(),
+                right=ast.Constant(value=offset),
+            ))
+        ],
+    )
+
+
+# Instantiate factories at module level (before any test execution)
+adder_10 = make_adder(10)
+adder_20 = make_adder(20)
+
+# --- Test 12: compile_factory cache ---
+adder_10_again = make_adder(10)  # Should be cached
+
+
 # ============================================================================
 # Test functions (no compilation, only execution)
 # ============================================================================
@@ -304,6 +330,22 @@ def test_quote_func_type_expr():
     print("OK test_quote_func_type_expr passed")
 
 
+def test_compile_factory_basic():
+    """Test compile_factory produces working compiled functions"""
+    assert adder_10(5) == 15
+    assert adder_10(0) == 10
+    assert adder_10(-3) == 7
+    assert adder_20(5) == 25
+    assert adder_20(0) == 20
+    print("OK test_compile_factory_basic passed")
+
+
+def test_compile_factory_cache():
+    """Test compile_factory caches same-arg results"""
+    assert adder_10_again is adder_10
+    print("OK test_compile_factory_cache passed")
+
+
 # ============================================================================
 # Run all tests
 # ============================================================================
@@ -319,4 +361,6 @@ if __name__ == '__main__':
     test_meta_func_builder()
     test_cross_call()
     test_quote_func_type_expr()
+    test_compile_factory_basic()
+    test_compile_factory_cache()
     print("\nAll meta compile tests passed!")

@@ -2,7 +2,7 @@
 Yield Inlining Adapter
 
 Thin adapter layer that connects the AST visitor's for-loop handling
-to the universal inline kernel for yield functions.
+to the meta expansion pipeline for yield functions.
 
 This is a simple forwarding layer with minimal logic.
 """
@@ -11,29 +11,27 @@ import ast
 import copy
 from typing import List, Optional, Dict, Any
 
-from .kernel import InlineKernel, InlineResult
 from .scope_analyzer import ScopeContext
 from .exit_rules import YieldExitRule, _has_break_or_continue
 
 
 class YieldInlineAdapter:
     """
-    Adapter for yield function inlining using the universal kernel
-    
+    Adapter for yield function inlining using meta expansion pipeline
+
     This is a thin wrapper that:
     1. Detects yield function calls in for loops
     2. Extracts necessary information
-    3. Forwards to InlineKernel with YieldExitRule
+    3. Forwards to meta.expand_inline() with YieldExitRule
     4. Returns transformed statements
     """
-    
+
     def __init__(self, visitor):
         """
         Args:
             visitor: The ASTVisitor instance (for context/scope info)
         """
         self.visitor = visitor
-        self.kernel = InlineKernel()
     
     def try_inline_for_loop(
         self,
@@ -106,26 +104,27 @@ class YieldInlineAdapter:
                 callee_globals = merged
         
         try:
-            # Create inline operation with callee_globals
+            # Build MetaInlineRequest and delegate to expand_inline
             try:
-                op = self.kernel.create_inline_op(
-                    callee_func=func_ast,
-                    call_site=for_node.iter,  # The call expression
+                from ..meta.inline_bridge import MetaInlineRequest, expand_inline
+                request = MetaInlineRequest(
+                    callee_ast=func_ast,
+                    callee_globals=callee_globals or {},
                     call_args=call_args,
+                    call_site=for_node.iter,  # The call expression
                     caller_context=caller_context,
                     exit_rule=exit_rule,
-                    callee_globals=callee_globals
                 )
+                inline_result = expand_inline(request)
             except Exception as e:
-                # If kernel rejects the operation, cannot inline
+                # If expansion fails, cannot inline
                 from ..logger import logger
-                logger.debug(f"Kernel rejected yield inline: {e}")
+                logger.debug(f"Meta inline expansion rejected yield inline: {e}")
                 return (None, None, None)
-            
-            # Execute inlining - kernel now returns InlineResult
+
+            # Process inline result
             try:
                 from ..logger import logger
-                inline_result = self.kernel.execute_inline(op)
                 inlined_stmts = inline_result.stmts
                 
                 # Merge required_globals into visitor's user_globals

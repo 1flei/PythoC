@@ -439,5 +439,253 @@ class TestQuoteDecorators(unittest.TestCase):
         self.assertIsInstance(tmpl, MetaTemplate)
 
 
+# ============================================================================
+# MetaInlineRequest tests (Phase 3)
+# ============================================================================
+
+class TestMetaInlineRequest(unittest.TestCase):
+
+    def test_construction(self):
+        """MetaInlineRequest can be constructed with all required fields"""
+        from pythoc.meta.inline_bridge import MetaInlineRequest
+        from pythoc.inline.exit_rules import ReturnExitRule
+        from pythoc.inline.scope_analyzer import ScopeContext
+
+        callee_ast = ast.FunctionDef(
+            name="foo",
+            args=ast.arguments(
+                posonlyargs=[], args=[ast.arg(arg='x')],
+                vararg=None, kwonlyargs=[], kw_defaults=[],
+                kwarg=None, defaults=[],
+            ),
+            body=[ast.Return(value=ast.Name(id='x', ctx=ast.Load()))],
+            decorator_list=[], returns=None,
+        )
+        ast.fix_missing_locations(callee_ast)
+
+        call_site = ast.Call(
+            func=ast.Name(id='foo', ctx=ast.Load()),
+            args=[ast.Constant(value=42)],
+            keywords=[],
+        )
+
+        request = MetaInlineRequest(
+            callee_ast=callee_ast,
+            callee_globals={},
+            call_args=[ast.Constant(value=42)],
+            call_site=call_site,
+            caller_context=ScopeContext(available_vars=set()),
+            exit_rule=ReturnExitRule(result_var="_result"),
+        )
+
+        self.assertIsNotNone(request)
+        self.assertEqual(request.callee_ast.name, "foo")
+        self.assertEqual(len(request.call_args), 1)
+        self.assertIsNone(request.result_var)
+
+    def test_with_result_var(self):
+        """MetaInlineRequest supports optional result_var"""
+        from pythoc.meta.inline_bridge import MetaInlineRequest
+        from pythoc.inline.exit_rules import ReturnExitRule
+        from pythoc.inline.scope_analyzer import ScopeContext
+
+        callee_ast = ast.FunctionDef(
+            name="bar",
+            args=ast.arguments(
+                posonlyargs=[], args=[],
+                vararg=None, kwonlyargs=[], kw_defaults=[],
+                kwarg=None, defaults=[],
+            ),
+            body=[ast.Pass()],
+            decorator_list=[], returns=None,
+        )
+        ast.fix_missing_locations(callee_ast)
+
+        request = MetaInlineRequest(
+            callee_ast=callee_ast,
+            callee_globals={},
+            call_args=[],
+            call_site=ast.Constant(value=0),
+            caller_context=ScopeContext(available_vars=set()),
+            exit_rule=ReturnExitRule(result_var="_res"),
+            result_var="_my_result",
+        )
+
+        self.assertEqual(request.result_var, "_my_result")
+
+
+# ============================================================================
+# Normalize factory key tests (Phase 4)
+# ============================================================================
+
+class TestNormalizeFactoryKey(unittest.TestCase):
+
+    def setUp(self):
+        from pythoc.meta.normalize import normalize_factory_key
+        self.normalize = normalize_factory_key
+
+    def test_empty(self):
+        result = self.normalize()
+        self.assertEqual(result, "empty")
+
+    def test_int(self):
+        result = self.normalize(42)
+        self.assertIn("42", result)
+
+    def test_str(self):
+        result = self.normalize("hello")
+        self.assertIn("hello", result)
+
+    def test_float(self):
+        result = self.normalize(3.14)
+        self.assertIn("3.14", result)
+
+    def test_none(self):
+        result = self.normalize(None)
+        self.assertIn("None", result)
+
+    def test_bool(self):
+        result = self.normalize(True, False)
+        self.assertIn("True", result)
+        self.assertIn("False", result)
+
+    def test_tuple(self):
+        result = self.normalize((1, 2, 3))
+        self.assertIn("T(", result)
+
+    def test_list(self):
+        result = self.normalize([1, 2])
+        self.assertIn("L(", result)
+
+    def test_dict(self):
+        result = self.normalize({"a": 1, "b": 2})
+        self.assertIn("D(", result)
+
+    def test_nested(self):
+        result = self.normalize((1, [2, {"k": 3}]))
+        self.assertIn("T(", result)
+        self.assertIn("L(", result)
+        self.assertIn("D(", result)
+
+    def test_determinism(self):
+        """Same inputs always produce same output"""
+        a = self.normalize(1, "x", (2, 3))
+        b = self.normalize(1, "x", (2, 3))
+        self.assertEqual(a, b)
+
+    def test_dict_key_order_independence(self):
+        """Dicts with same content but different insertion order normalize identically"""
+        d1 = {"b": 2, "a": 1}
+        d2 = {"a": 1, "b": 2}
+        self.assertEqual(self.normalize(d1), self.normalize(d2))
+
+    def test_unsupported_type_raises(self):
+        with self.assertRaises(TypeError):
+            self.normalize(object())
+
+    def test_kwargs(self):
+        result = self.normalize(1, name="foo")
+        self.assertIn("KW", result)
+        self.assertIn("name", result)
+        self.assertIn("foo", result)
+
+    def test_different_inputs_different_keys(self):
+        """Different inputs produce different keys"""
+        a = self.normalize(1)
+        b = self.normalize(2)
+        self.assertNotEqual(a, b)
+
+
+# ============================================================================
+# Factory decorator tests (Phase 4)
+# ============================================================================
+
+class TestFactory(unittest.TestCase):
+
+    def test_factory_returns_callable(self):
+        from pythoc.meta.factory import factory
+        from pythoc.meta.generated import GeneratedFunction
+
+        @factory
+        def make_fn(n):
+            return GeneratedFunction(
+                name="fn_{}".format(n),
+                params=[],
+                return_type=None,
+                body=[ast.Pass()],
+            )
+
+        self.assertTrue(callable(make_fn))
+        self.assertTrue(hasattr(make_fn, '_is_meta_factory'))
+
+    def test_factory_produces_generated_function(self):
+        from pythoc.meta.factory import factory
+        from pythoc.meta.generated import GeneratedFunction
+
+        @factory
+        def make_fn(n):
+            return GeneratedFunction(
+                name="fn_{}".format(n),
+                params=[],
+                return_type=None,
+                body=[ast.Pass()],
+            )
+
+        result = make_fn(5)
+        self.assertIsInstance(result, GeneratedFunction)
+        self.assertEqual(result.name, "fn_5")
+
+    def test_factory_caching(self):
+        from pythoc.meta.factory import factory
+        from pythoc.meta.generated import GeneratedFunction
+
+        call_count = [0]
+
+        @factory
+        def make_fn(n):
+            call_count[0] += 1
+            return GeneratedFunction(
+                name="fn_{}".format(n),
+                params=[],
+                return_type=None,
+                body=[ast.Pass()],
+            )
+
+        r1 = make_fn(1)
+        r2 = make_fn(1)
+        self.assertIs(r1, r2)
+        self.assertEqual(call_count[0], 1)  # Called only once
+
+    def test_factory_no_cache(self):
+        from pythoc.meta.factory import factory
+        from pythoc.meta.generated import GeneratedFunction
+
+        call_count = [0]
+
+        @factory(cache=False)
+        def make_fn(n):
+            call_count[0] += 1
+            return GeneratedFunction(
+                name="fn_{}".format(n),
+                params=[],
+                return_type=None,
+                body=[ast.Pass()],
+            )
+
+        r1 = make_fn(1)
+        r2 = make_fn(1)
+        self.assertEqual(call_count[0], 2)  # Called twice
+
+    def test_factory_wrong_return_type_raises(self):
+        from pythoc.meta.factory import factory
+
+        @factory
+        def make_fn():
+            return "not a GeneratedFunction"
+
+        with self.assertRaises(TypeError):
+            make_fn()
+
+
 if __name__ == '__main__':
     unittest.main()
