@@ -1,28 +1,51 @@
 """
-Universal Inline Kernel
+Inline expansion kernel
 
-The core inlining engine that handles all inlining scenarios.
+Contains:
+- InlineResult: output container for inline expansion
+- MetaInlineRequest: structured input for expand_inline()
+- expand_inline(): the AST generation engine
+- merge_inline_globals / restore_globals: shared globals helpers
+
+The expansion uses the quasi-quote layer throughout. Frame templates
+define the complete shape of the inline output, one per exit-rule variant:
+
+  _return_typed_frame  -- return with typed result:
+      [bindings] + result_var: result_type + with label(name): [body]
+
+  _return_void_frame   -- return without result (void/untyped):
+      [bindings] + with label(name): [body]
+
+  _passthrough_frame   -- yield inlining / no return wrapping:
+      [bindings] + [body]
+
+  _yield_frame         -- yield with loop-var declarations:
+      [bindings] + [decls] + [body]
+
+Each param binding is generated via _annotated_binding or _plain_binding
+templates. The call site picks the right frame and feeds all params.
 """
 
 import ast
 import copy
-from dataclasses import dataclass, field
-from typing import List, Set, Dict, Optional, Any, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
-from .scope_analyzer import ScopeAnalyzer, ScopeContext
-from .transformers import InlineBodyTransformer
-from ..utils import get_next_id
-from ._intrinsics import _IntrinsicNamespace, _PC_INTRINSICS, _intrinsic_name
+from ..meta.template import (
+    quote_expr, quote_stmt, quote_stmts,
+    splice_stmts,
+)
 
-if TYPE_CHECKING:
-    from .exit_rules import ExitPointRule
 
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
 
 @dataclass
 class InlineResult:
     """
     Result of inline execution
-    
+
     Contains:
     - stmts: Generated AST statements
     - required_globals: Globals that must be merged into caller's user_globals
@@ -33,433 +56,374 @@ class InlineResult:
 
 
 @dataclass
-class InlineOp:
+class MetaInlineRequest:
+    """Encapsulates an inline expansion request.
+
+    This is the structured input to expand_inline(). Adapters build
+    this from their specific call-site context.
+
+    Attributes:
+        callee_ast: The callee function or lambda AST to inline.
+        callee_globals: Merged globals from the callee's definition site.
+        call_args: AST expressions for each call argument.
+        call_site: The call expression node (for location copying).
+        caller_context: Caller's scope context (for capture detection).
+        exit_rule: How to transform exit points (return, yield, etc.).
     """
-    Represents a single inlining operation
-    
-    Contains all information needed to perform inlining:
-    - What to inline (callee body/params)
-    - Where to inline (call site, caller context)
-    - How to inline (exit rule, scope information)
-    """
-    
-    # Source: what to inline
-    callee_body: List[ast.stmt]
-    callee_params: List[ast.arg]
-    callee_func: Optional[ast.FunctionDef | ast.Lambda]  # Keep original function for metadata
-    
-    # Target: where to inline
-    caller_context: ScopeContext
-    call_site: ast.expr
+    callee_ast: Any  # ast.FunctionDef | ast.Lambda
+    callee_globals: Dict[str, Any]
     call_args: List[ast.expr]
-    
-    # Scope analysis results
-    captured_vars: Set[str]
-    local_vars: Set[str]
-    param_vars: Set[str]
-    
-    # Transformation rule
-    exit_rule: 'ExitPointRule'
-    
-    # Uniqueness
-    inline_id: str
-    
-    # Callee's globals (for name resolution in inlined code)
-    callee_globals: Dict[str, Any] = field(default_factory=dict)
+    call_site: ast.expr
+    caller_context: Any  # ScopeContext
+    exit_rule: Any  # ExitPointRule
 
 
-class InlineKernel:
+# ---------------------------------------------------------------------------
+# Quasi-quote templates
+#
+# These define the *shapes* of generated code declaratively via Python
+# syntax. No manual ast.Call / ast.AnnAssign / ast.With construction.
+# ---------------------------------------------------------------------------
+
+# -- Per-param binding templates --
+
+# target: annotation = move(value)
+@quote_stmt
+def _annotated_binding(target, annotation, value):
+    target: annotation = __pc_intrinsics.move(value)  # noqa: F821
+
+# target = move(value)
+@quote_stmt
+def _plain_binding(target, value):
+    target = __pc_intrinsics.move(value)  # noqa: F821
+
+# converter(value) -- type-convert a constant arg
+@quote_expr
+def _type_convert(converter, value):
+    return converter(value)
+
+# -- Frame templates (one per exit-rule variant) --
+
+# Return with typed result: bindings + result decl + scoped-label body
+@quote_stmts
+def _return_typed_frame(bindings, result_var, result_type, label_name, body):
+    bindings
+    result_var: result_type
+    with __pc_intrinsics.label(label_name):  # noqa: F821
+        body
+
+# Return void/untyped: bindings + scoped-label body (no result decl)
+@quote_stmts
+def _return_void_frame(bindings, label_name, body):
+    bindings
+    with __pc_intrinsics.label(label_name):  # noqa: F821
+        body
+
+# Passthrough (no return wrapping, no loop-var decls)
+@quote_stmts
+def _passthrough_frame(bindings, body):
+    bindings
+    body
+
+# Yield with loop-var declarations prepended
+@quote_stmts
+def _yield_frame(bindings, decls, body):
+    bindings
+    decls
+    body
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _extract_callee(callee_ast):
+    """Deep-copy callee body and params from a FunctionDef or Lambda.
+
+    Returns (body: list[ast.stmt], params: list[ast.arg]).
     """
-    Universal inlining engine - the single source of truth for all inlining
-    
-    This kernel handles:
-    1. Scope analysis (what variables are captured)
-    2. Variable renaming (avoid conflicts)
-    3. Parameter binding (map args to params)
-    4. Body transformation (apply exit rules)
-    5. AST insertion (place transformed body at call site)
-    
-    Usage:
-        kernel = InlineKernel()
-        op = kernel.create_inline_op(...)
-        inlined_stmts = kernel.execute_inline(op)
+    if isinstance(callee_ast, ast.FunctionDef):
+        return copy.deepcopy(callee_ast.body), copy.deepcopy(callee_ast.args.args)
+    elif isinstance(callee_ast, ast.Lambda):
+        return [ast.Return(value=copy.deepcopy(callee_ast.body))], \
+               copy.deepcopy(callee_ast.args.args)
+    else:
+        raise TypeError(
+            "Expected FunctionDef or Lambda, got {}".format(
+                type(callee_ast).__name__))
+
+
+def _build_rename_map(local_vars, param_vars, captured_vars, inline_id):
+    """Build rename map: suffix locals + params, keep captured unchanged."""
+    rename_map = {}
+    suffix = "_{}".format(inline_id)
+    for var in local_vars:
+        if var not in captured_vars:
+            rename_map[var] = "{}{}".format(var, suffix)
+    for var in param_vars:
+        if var not in captured_vars:
+            rename_map[var] = "{}{}".format(var, suffix)
+    return rename_map
+
+
+def _build_param_bindings(callee_params, call_args, rename_map, inline_id):
+    """Build parameter binding statements via per-param templates.
+
+    Returns list[ast.stmt].
     """
-    
-    def create_inline_op(
-        self,
-        callee_func: ast.FunctionDef | ast.Lambda,
-        call_site: ast.expr,
-        call_args: List[ast.expr],
-        caller_context: ScopeContext,
-        exit_rule: 'ExitPointRule',
-        callee_globals: Dict[str, Any] = None
-    ) -> InlineOp:
-        """
-        Create an InlineOp by analyzing callee and caller
-        
-        This is the first phase: analysis
-        
-        Args:
-            callee_func: Function or lambda to inline
-            call_site: Call expression or For node
-            call_args: Argument expressions from call site
-            caller_context: Caller's scope information
-            exit_rule: Rule for transforming exit points
-            callee_globals: Callee function's __globals__ (for name resolution)
-            
-        Returns:
-            InlineOp ready for execution
-            
-        Example:
-            # For: result = add(x, 10)
-            op = kernel.create_inline_op(
-                callee_func=add_func_ast,
-                call_site=call_node,
-                call_args=[Name('x'), Constant(10)],
-                caller_context=ScopeContext(['x', 'y']),
-                exit_rule=ReturnExitRule('_result'),
-                callee_globals=add_func.__globals__
-            )
-        """
-        # Generate unique ID using global generator
-        inline_id = f"inline_{get_next_id()}"
-        
-        # Extract callee body and params
-        # CRITICAL: Deep copy to avoid mutating the original function AST!
-        # Without this, nested inlining will corrupt the original function.
-        if isinstance(callee_func, ast.FunctionDef):
-            callee_body = copy.deepcopy(callee_func.body)
-            callee_params = copy.deepcopy(callee_func.args.args)
-        elif isinstance(callee_func, ast.Lambda):
-            # Lambda body is an expression, wrap in Return
-            callee_body = [ast.Return(value=copy.deepcopy(callee_func.body))]
-            callee_params = copy.deepcopy(callee_func.args.args)
+    stmts = []
+    for i, param in enumerate(callee_params):
+        param_name = param.arg
+        renamed = rename_map.get(param_name, param_name)
+
+        if i < len(call_args):
+            arg_value = copy.deepcopy(call_args[i])
         else:
-            raise TypeError(f"Expected FunctionDef or Lambda, got {type(callee_func)}")
-        
-        # Analyze scope
-        scope_analyzer = ScopeAnalyzer(caller_context)
-        captured_vars, local_vars, param_vars = scope_analyzer.analyze(
-            callee_body, callee_params
-        )
-        
-        return InlineOp(
-            callee_body=callee_body,
-            callee_params=callee_params,
-            callee_func=callee_func,  # Save original function
-            caller_context=caller_context,
-            call_site=call_site,
-            call_args=call_args,
-            captured_vars=captured_vars,
-            local_vars=local_vars,
-            param_vars=param_vars,
-            exit_rule=exit_rule,
-            inline_id=inline_id,
-            callee_globals=callee_globals or {}
-        )
-    
-    def execute_inline(self, op: InlineOp) -> InlineResult:
-        """
-        Execute inlining operation
-        
-        This is the second phase: transformation
-        
-        Args:
-            op: InlineOp from create_inline_op
-            
-        Returns:
-            InlineResult containing:
-            - stmts: List of statements to replace the call site
-            - required_globals: Globals that must be merged into caller's user_globals
-            
-        Example:
-            Input:
-                def add(a, b):
-                    return a + b
-                result = add(x, 10)
-                
-            Output (using scoped label approach):
-                _result: <type>
-                a = x
-                b = 10
-                with label("_inline_exit_0"):
-                    _result = a + b
-                    goto_end("_inline_exit_0")
-        """
-        # Debug hook - capture before
-        from ..utils.ast_debug import ast_debugger
-        func_name = op.callee_func.name if op.callee_func and hasattr(op.callee_func, 'name') else 'lambda'
-        ast_debugger.capture(
-            "before_inline",
-            op.callee_body,
-            func_name=func_name,
-            inline_id=op.inline_id,
-            call_site=ast.unparse(op.call_site) if hasattr(ast, 'unparse') else str(op.call_site)
-        )
-        
-        # 1. Create variable renaming map
-        rename_map = self._create_rename_map(op)
-        
-        # 2. Create parameter bindings
-        param_bindings = self._create_param_bindings(op, rename_map)
-        
-        # 3. For ReturnExitRule, create exit label and result variable declarations
-        from .exit_rules import ReturnExitRule
-        prefix_stmts = []
-        
-        if isinstance(op.exit_rule, ReturnExitRule):
-            # Create exit label name
-            exit_label = f"_inline_exit_{op.inline_id}"
-            op.exit_rule.exit_label = exit_label
-            
-            # Declare result variable if needed
-            if op.exit_rule.result_var:
-                # Try to infer type from function return annotation
-                result_type = None
-                if op.callee_func and hasattr(op.callee_func, 'returns') and op.callee_func.returns:
-                    result_type = op.callee_func.returns
-                
-                # Skip result declaration for void return type
-                is_void = False
-                if result_type and isinstance(result_type, ast.Name) and result_type.id == 'void':
-                    is_void = True
-                
-                # Create result variable declaration (without initialization)
-                # We'll let the first return assign to it
-                if result_type and not is_void:
-                    result_decl = ast.AnnAssign(
-                        target=ast.Name(id=op.exit_rule.result_var, ctx=ast.Store()),
-                        annotation=copy.deepcopy(result_type),
-                        value=None,
-                        simple=1
-                    )
-                    prefix_stmts.append(result_decl)
-        
-        # 4. Transform callee body (no flag variable needed anymore)
-        transformer = InlineBodyTransformer(op.exit_rule, rename_map, flag_var=None)
-        transformed_body = transformer.transform(op.callee_body)
-        
-        # 5. Wrap body in scoped label if ReturnExitRule with exit_label
-        if isinstance(op.exit_rule, ReturnExitRule) and op.exit_rule.exit_label:
-            # Create: with label("_inline_exit_{id}"): <body>
-            exit_label = op.exit_rule.exit_label
-            label_call = ast.Call(
-                func=_intrinsic_name('label'),
-                args=[ast.Constant(value=exit_label)],
-                keywords=[]
-            )
-            with_stmt = ast.With(
-                items=[ast.withitem(context_expr=label_call, optional_vars=None)],
-                body=transformed_body
-            )
-            wrapped_body = [with_stmt]
+            raise ValueError(
+                "Missing argument for parameter '{}' in {}".format(
+                    param_name, inline_id))
+
+        # Type-convert constants when param has annotation
+        if param.annotation and isinstance(arg_value, ast.Constant):
+            arg_value = _type_convert(
+                copy.deepcopy(param.annotation), arg_value
+            ).as_expr
+
+        target = ast.Name(id=renamed, ctx=ast.Store())
+
+        if param.annotation:
+            stmt = _annotated_binding(
+                target, copy.deepcopy(param.annotation), arg_value,
+            ).as_stmt
         else:
-            wrapped_body = transformed_body
-        
-        # 6. Combine: param bindings + prefix (result decl) + wrapped body
-        result = param_bindings + prefix_stmts + wrapped_body
-        
-        # 7. Fix AST locations (copy from call site)
-        for stmt in result:
-            ast.copy_location(stmt, op.call_site)
-            ast.fix_missing_locations(stmt)
-        
-        # Debug hook - capture after (after fixing locations)
-        ast_debugger.capture(
-            "after_inline",
-            result,
-            func_name=func_name,
-            inline_id=op.inline_id,
-            param_count=len(op.callee_params),
-            local_count=len(op.local_vars)
+            stmt = _plain_binding(target, arg_value).as_stmt
+        stmts.append(stmt)
+    return stmts
+
+
+def _transform_body(callee_body, exit_rule, rename_map):
+    """Apply rename + exit-rule transformation to callee body.
+
+    Returns list[ast.stmt].
+    """
+    from .transformers import InlineBodyTransformer
+
+    transformer = InlineBodyTransformer(exit_rule, rename_map, flag_var=None)
+    return transformer.transform(callee_body)
+
+
+def _get_result_type(callee_ast):
+    """Extract non-void return type from callee, or None."""
+    if callee_ast and hasattr(callee_ast, 'returns') and callee_ast.returns:
+        ret = callee_ast.returns
+        if isinstance(ret, ast.Name) and ret.id == 'void':
+            return None
+        return ret
+    return None
+
+
+def _build_loop_var_declarations(loop_var, return_type_annotation, call_site):
+    """Build loop-variable declaration AST nodes for yield inlining.
+
+    For simple Name: creates single AnnAssign.
+    For Tuple: creates declarations for each element using subscript types.
+
+    Args:
+        loop_var: Loop variable target (Name or Tuple).
+        return_type_annotation: Return type annotation from the yield function.
+        call_site: AST node for copy_location.
+
+    Returns:
+        List of AnnAssign statements.
+    """
+    decls = []
+
+    if isinstance(loop_var, ast.Name):
+        decl = ast.AnnAssign(
+            target=ast.Name(id=loop_var.id, ctx=ast.Store()),
+            annotation=copy.deepcopy(return_type_annotation),
+            value=None,
+            simple=1
         )
-        
-        # Build required_globals: callee's globals + intrinsics needed by inlined code
-        required_globals = self._build_required_globals(op)
-        
-        return InlineResult(stmts=result, required_globals=required_globals)
-    
-    def _build_required_globals(self, op: InlineOp) -> Dict[str, Any]:
-        """
-        Build the globals dict that must be merged into caller's user_globals
-
-        This includes:
-        1. Callee's __globals__ (for name resolution in inlined code)
-        2. The __pc_intrinsics namespace (for compiler-generated AST references)
-
-        Args:
-            op: InlineOp with callee_globals
-
-        Returns:
-            Dict of globals to merge
-        """
-        required = {}
-
-        # Start with callee's globals
-        if op.callee_globals:
-            required.update(op.callee_globals)
-
-        # Inject the intrinsic namespace for compiler-generated AST
-        required['__pc_intrinsics'] = _PC_INTRINSICS
-
-        return required
-    
-    def _create_rename_map(self, op: InlineOp) -> Dict[str, str]:
-        """
-        Create variable renaming map to avoid conflicts
-        
-        Strategy:
-        - Captured variables: NOT renamed (they reference outer scope)
-        - Parameters and local variables: ALL renamed with unique suffix
-        
-        CRITICAL: Parameters MUST be renamed to avoid conflicts in nested inline scenarios.
-        Even though parameters are bound to arguments, the binding creates a variable
-        with the parameter name, which can conflict with outer scope variables.
-        
-        Args:
-            op: InlineOp with scope information
-            
-        Returns:
-            Mapping of old names to new names
-            
-        Example:
-            For inline_3:
-                local_vars = {'x', 'y'}
-                param_vars = {'a', 'b'}
-                captured_vars = {'base'}
-                
-            Result:
-                {'x': 'x_inline_3', 'y': 'y_inline_3', 'a': 'a_inline_3', 'b': 'b_inline_3'}
-                # All renamed except base (captured)
-        """
-        rename_map = {}
-        suffix = f"_{op.inline_id}"
-        
-        # Rename ALL local variables (not captured)
-        for var in op.local_vars:
-            if var not in op.captured_vars:
-                rename_map[var] = f"{var}{suffix}"
-        
-        # Rename ALL parameters (not captured)
-        # This is critical for nested inlining
-        for var in op.param_vars:
-            if var not in op.captured_vars:
-                rename_map[var] = f"{var}{suffix}"
-        
-        return rename_map
-    
-    def _create_param_bindings(
-        self, 
-        op: InlineOp, 
-        rename_map: Dict[str, str]
-    ) -> List[ast.stmt]:
-        """
-        Create parameter binding statements
-        
-        For each parameter, create:
-            renamed_param_name = move(arg_value) (with type conversion if needed)
-            
-        With proper type annotations and automatic type conversion.
-        Parameter names are renamed according to rename_map.
-        
-        CRITICAL: All parameter bindings use move() to handle linear type ownership.
-        For non-linear types, move() is a no-op.
-        
-        Args:
-            op: InlineOp with parameter information
-            rename_map: Variable rename mapping (applied to parameter names)
-            
-        Returns:
-            List of assignment statements
-            
-        Example:
-            def add(a: i32, b: i32):
-                return a + b
-                
-            Call: add(x, 1)
-            rename_map: {'a': 'a_inline_0', 'b': 'b_inline_0'}
-            
-            Result:
-                [
-                    AnnAssign(target=Name('a_inline_0'), annotation=Name('i32'), value=Call(move, [Name('x')])),
-                    AnnAssign(target=Name('b_inline_0'), annotation=Name('i32'), value=Call(move, [Call(i32, [Constant(1)])]))
-                ]
-        """
-        bindings = []
-        
-        for i, param in enumerate(op.callee_params):
-            param_name = param.arg
-            
-            # Apply renaming to parameter name
-            renamed_param_name = rename_map.get(param_name, param_name)
-            
-            # Get argument value
-            if i < len(op.call_args):
-                arg_value = copy.deepcopy(op.call_args[i])
-            else:
-                # Missing argument - should be caught earlier by type checker
-                raise ValueError(
-                    f"Missing argument for parameter '{param_name}' "
-                    f"in inline operation {op.inline_id}"
-                )
-            
-            # Wrap argument with type conversion if parameter has type annotation
-            if param.annotation:
-                # Check if arg_value needs type conversion
-                # If it's a constant (Constant node), wrap it with type constructor call
-                if isinstance(arg_value, ast.Constant):
-                    arg_value = self._wrap_with_type_conversion(arg_value, param.annotation)
-                
-                # Wrap in move() for ownership transfer (essential for linear types)
-                moved_value = ast.Call(
-                    func=_intrinsic_name('move'),
-                    args=[arg_value],
-                    keywords=[]
-                )
-                
-                binding = ast.AnnAssign(
-                    target=ast.Name(id=renamed_param_name, ctx=ast.Store()),
-                    annotation=copy.deepcopy(param.annotation),
-                    value=moved_value,
+        ast.copy_location(decl, call_site)
+        decls.append(decl)
+    elif isinstance(loop_var, ast.Tuple):
+        for i, elt in enumerate(loop_var.elts):
+            if isinstance(elt, ast.Name):
+                element_type = _extract_tuple_element_type(
+                    return_type_annotation, i)
+                decl = ast.AnnAssign(
+                    target=ast.Name(id=elt.id, ctx=ast.Store()),
+                    annotation=element_type,
+                    value=None,
                     simple=1
                 )
-            else:
-                # Wrap in move() for ownership transfer
-                moved_value = ast.Call(
-                    func=_intrinsic_name('move'),
-                    args=[arg_value],
-                    keywords=[]
-                )
-                
-                binding = ast.Assign(
-                    targets=[ast.Name(id=renamed_param_name, ctx=ast.Store())],
-                    value=moved_value
-                )
-            
-            bindings.append(binding)
-        
-        return bindings
-    
-    def _wrap_with_type_conversion(self, value: ast.expr, type_annotation: ast.expr) -> ast.expr:
-        """
-        Wrap a value with type conversion call
-        
-        Args:
-            value: The value expression to wrap
-            type_annotation: The target type annotation
-            
-        Returns:
-            Call node: type_annotation(value)
-            
-        Example:
-            value = Constant(1)
-            type_annotation = Name('i32')
-            
-            Result:
-                Call(func=Name('i32'), args=[Constant(1)])
-        """
-        return ast.Call(
-            func=copy.deepcopy(type_annotation),
-            args=[value],
-            keywords=[]
+                ast.copy_location(decl, call_site)
+                decls.append(decl)
+
+    return decls
+
+
+def _extract_tuple_element_type(type_annotation, index):
+    """Extract the type of a tuple element from a struct type annotation.
+
+    For struct[T1, T2, ...], returns T_index.
+    If we can't determine the type, returns the full annotation.
+    """
+    if isinstance(type_annotation, ast.Subscript):
+        slice_node = type_annotation.slice
+        if isinstance(slice_node, ast.Tuple):
+            if index < len(slice_node.elts):
+                return copy.deepcopy(slice_node.elts[index])
+        elif index == 0:
+            return copy.deepcopy(slice_node)
+    return copy.deepcopy(type_annotation)
+
+
+# ---------------------------------------------------------------------------
+# Shared globals helpers
+# ---------------------------------------------------------------------------
+
+def merge_inline_globals(visitor, inline_result):
+    """Merge required_globals into visitor's user_globals.
+
+    Returns old_globals for later restore via restore_globals().
+    """
+    old = visitor.ctx.user_globals
+    merged = dict(old or {})
+    merged.update(inline_result.required_globals)
+    visitor.ctx.user_globals = merged
+    return old
+
+
+def restore_globals(visitor, old_globals):
+    """Restore previously saved user_globals."""
+    visitor.ctx.user_globals = old_globals
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def expand_inline(request):
+    """Generate inlined AST from a MetaInlineRequest.
+
+    Picks the appropriate unified frame template based on exit rule
+    and return type, then feeds all parameters in one shot::
+
+        _return_typed_frame(bindings, result_var, result_type, label, body)
+        _return_void_frame(bindings, label, body)
+        _yield_frame(bindings, decls, body)
+        _passthrough_frame(bindings, body)
+
+    Args:
+        request: A MetaInlineRequest.
+
+    Returns:
+        InlineResult with .stmts and .required_globals.
+    """
+    from .scope_analyzer import ScopeAnalyzer
+    from .exit_rules import ReturnExitRule, YieldExitRule
+    from ._intrinsics import _PC_INTRINSICS
+    from ..utils import get_next_id
+
+    callee_ast = request.callee_ast
+    inline_id = "inline_{}".format(get_next_id())
+
+    # --- Extract callee body and params ---
+    callee_body, callee_params = _extract_callee(callee_ast)
+
+    # --- Scope analysis ---
+    analyzer = ScopeAnalyzer(request.caller_context)
+    captured_vars, local_vars, param_vars = analyzer.analyze(
+        callee_body, callee_params)
+
+    # --- Rename map ---
+    rename_map = _build_rename_map(
+        local_vars, param_vars, captured_vars, inline_id)
+
+    # --- Build param bindings ---
+    binding_stmts = _build_param_bindings(
+        callee_params, request.call_args, rename_map, inline_id)
+
+    # --- Set exit label BEFORE body transform so goto_end nodes see it ---
+    if isinstance(request.exit_rule, ReturnExitRule):
+        exit_label = "_inline_exit_{}".format(inline_id)
+        request.exit_rule.exit_label = exit_label
+
+    # --- Transform body (rename + exit-rule) ---
+    body_stmts = _transform_body(callee_body, request.exit_rule, rename_map)
+
+    # --- Pick frame template and instantiate in one shot ---
+    if isinstance(request.exit_rule, ReturnExitRule):
+        # Read result_var from the single source of truth: the exit rule
+        result_var = request.exit_rule.result_var
+        result_type = _get_result_type(callee_ast)
+
+        if result_type and result_var:
+            # Return with typed result
+            frame = _return_typed_frame(
+                splice_stmts(binding_stmts),
+                ast.Name(id=result_var, ctx=ast.Store()),
+                copy.deepcopy(result_type),
+                ast.Constant(value=exit_label),
+                splice_stmts(body_stmts),
+            )
+        else:
+            # Return void / untyped
+            frame = _return_void_frame(
+                splice_stmts(binding_stmts),
+                ast.Constant(value=exit_label),
+                splice_stmts(body_stmts),
+            )
+    elif isinstance(request.exit_rule, YieldExitRule):
+        # Yield: build loop-var declarations if type annotation exists
+        exit_rule = request.exit_rule
+        decl_stmts = []
+        if exit_rule.return_type_annotation:
+            decl_stmts = _build_loop_var_declarations(
+                exit_rule.loop_var,
+                exit_rule.return_type_annotation,
+                request.call_site,
+            )
+
+        if decl_stmts:
+            frame = _yield_frame(
+                splice_stmts(binding_stmts),
+                splice_stmts(decl_stmts),
+                splice_stmts(body_stmts),
+            )
+        else:
+            frame = _passthrough_frame(
+                splice_stmts(binding_stmts),
+                splice_stmts(body_stmts),
+            )
+    else:
+        # Passthrough (other exit rules)
+        frame = _passthrough_frame(
+            splice_stmts(binding_stmts),
+            splice_stmts(body_stmts),
         )
+
+    result_stmts = frame.as_stmts
+
+    # --- Fix locations from call site ---
+    for stmt in result_stmts:
+        ast.copy_location(stmt, request.call_site)
+        ast.fix_missing_locations(stmt)
+
+    # --- Debug ---
+    from ..utils.ast_debug import ast_debugger
+    func_name = callee_ast.name if hasattr(callee_ast, 'name') else 'lambda'
+    ast_debugger.capture(
+        "after_inline", result_stmts,
+        func_name=func_name, inline_id=inline_id,
+        param_count=len(callee_params), local_count=len(local_vars))
+
+    # --- Required globals ---
+    required_globals = {}
+    if request.callee_globals:
+        required_globals.update(request.callee_globals)
+    required_globals['__pc_intrinsics'] = _PC_INTRINSICS
+
+    return InlineResult(stmts=result_stmts, required_globals=required_globals)

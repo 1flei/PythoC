@@ -73,6 +73,12 @@ def _goto_end(label):
     __pc_intrinsics.goto_end(label)  # noqa: F821
 
 
+@quote_stmt
+def _empty_label_block(label_name):
+    with __pc_intrinsics.label(label_name):  # noqa: F821
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------

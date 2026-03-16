@@ -447,7 +447,7 @@ class TestMetaInlineRequest(unittest.TestCase):
 
     def test_construction(self):
         """MetaInlineRequest can be constructed with all required fields"""
-        from pythoc.meta.inline_bridge import MetaInlineRequest
+        from pythoc.inline.kernel import MetaInlineRequest
         from pythoc.inline.exit_rules import ReturnExitRule
         from pythoc.inline.scope_analyzer import ScopeContext
 
@@ -481,11 +481,12 @@ class TestMetaInlineRequest(unittest.TestCase):
         self.assertIsNotNone(request)
         self.assertEqual(request.callee_ast.name, "foo")
         self.assertEqual(len(request.call_args), 1)
-        self.assertIsNone(request.result_var)
+        # result_var is now only on the exit_rule, not on MetaInlineRequest
+        self.assertEqual(request.exit_rule.result_var, "_result")
 
-    def test_with_result_var(self):
-        """MetaInlineRequest supports optional result_var"""
-        from pythoc.meta.inline_bridge import MetaInlineRequest
+    def test_result_var_on_exit_rule(self):
+        """MetaInlineRequest reads result_var from exit_rule"""
+        from pythoc.inline.kernel import MetaInlineRequest
         from pythoc.inline.exit_rules import ReturnExitRule
         from pythoc.inline.scope_analyzer import ScopeContext
 
@@ -501,17 +502,17 @@ class TestMetaInlineRequest(unittest.TestCase):
         )
         ast.fix_missing_locations(callee_ast)
 
+        exit_rule = ReturnExitRule(result_var="_res")
         request = MetaInlineRequest(
             callee_ast=callee_ast,
             callee_globals={},
             call_args=[],
             call_site=ast.Constant(value=0),
             caller_context=ScopeContext(available_vars=set()),
-            exit_rule=ReturnExitRule(result_var="_res"),
-            result_var="_my_result",
+            exit_rule=exit_rule,
         )
 
-        self.assertEqual(request.result_var, "_my_result")
+        self.assertEqual(request.exit_rule.result_var, "_res")
 
 
 # ============================================================================
