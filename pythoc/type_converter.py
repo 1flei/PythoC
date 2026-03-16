@@ -250,7 +250,7 @@ class TypeConverter:
         base_target = get_base_type(target_type)
         base_source = get_base_type(value.type_hint) if value.type_hint else None
 
-        # Step 2: (enum→int restriction moved to ImplicitCoercer)
+        # Step 2: (enum->int restriction moved to ImplicitCoercer)
 
         # Step 3: Handle struct to enum conversion
         # struct[pyconst[Tag], payload] -> EnumType

@@ -403,7 +403,7 @@ class OutputManager:
             source_file = group.get('source_file')
             force_recompile = bool(group.get('force_recompile', False))
 
-            # File lock covers the entire cache-check → compile → write cycle.
+            # File lock covers the entire cache-check -> compile -> write cycle.
             # This ensures that when multiple processes need the same .o on a
             # clean build, only ONE actually compiles; the rest wait and then
             # see a cache hit.

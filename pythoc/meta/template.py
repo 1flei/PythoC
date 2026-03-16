@@ -279,6 +279,8 @@ def _expand_splices(stmts):
     """Expand _SpliceMarker placeholders in a statement list.
 
     An Expr(value=_SpliceMarker) is replaced with the spliced statements.
+    Recurses into compound statement bodies (with, if, for, while, try, etc.)
+    so that splice_stmts works at any nesting level.
     """
     result = []
     for stmt in stmts:
@@ -286,8 +288,24 @@ def _expand_splices(stmts):
                 and isinstance(stmt.value, _SpliceMarker)):
             result.extend(stmt.value.stmts)
         else:
+            _expand_splices_in_node(stmt)
             result.append(stmt)
     return result
+
+
+def _expand_splices_in_node(node):
+    """Recursively expand splices in nested statement bodies of a node."""
+    # All AST node fields that hold statement lists
+    for field_name in ('body', 'orelse', 'finalbody', 'handlers'):
+        body = getattr(node, field_name, None)
+        if isinstance(body, list) and body:
+            expanded = _expand_splices(body)
+            setattr(node, field_name, expanded)
+    # ExceptHandler nodes inside handlers
+    if hasattr(node, 'handlers'):
+        for handler in getattr(node, 'handlers', []):
+            if hasattr(handler, 'body'):
+                handler.body = _expand_splices(handler.body)
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +418,7 @@ class MetaTemplate:
             result = _expand_splices(result)
         else:
             result = substituter.visit(copy.deepcopy(self.template_ast))
+            _expand_splices_in_node(result)
 
         # Fix locations
         if isinstance(result, list):

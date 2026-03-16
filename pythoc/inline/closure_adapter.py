@@ -1,5 +1,5 @@
 """
-Closure Adapter - Bridges closure calls with universal kernel
+Closure Adapter - Bridges closure calls with meta expansion pipeline
 
 Pure AST adapter - generates AST only, no IR/builder operations.
 Handles captured variables from outer scopes.
@@ -7,7 +7,6 @@ Handles captured variables from outer scopes.
 
 import ast
 from typing import Dict, Optional, Any, TYPE_CHECKING
-from .kernel import InlineKernel, InlineResult
 from .exit_rules import ReturnExitRule
 from .scope_analyzer import ScopeContext
 from ..valueref import ValueRef, wrap_value
@@ -21,21 +20,21 @@ if TYPE_CHECKING:
 
 class ClosureAdapter:
     """
-    Adapter for closure inlining using universal kernel
-    
+    Adapter for closure inlining using meta expansion pipeline
+
     Strategy (same as InlineAdapter):
     1. Create temporary variables for arguments
-    2. Use kernel to transform closure AST (kernel detects captures automatically)
+    2. Use meta.expand_inline() to transform closure AST (detects captures automatically)
     3. Return pure AST for visitor to process
-    
-    The kernel's ScopeAnalyzer automatically detects captured variables.
+
+    ScopeAnalyzer automatically detects captured variables.
     """
-    
+
     def __init__(self, parent_visitor: 'LLVMIRVisitor', param_bindings: Dict[str, Any],
                  func_globals: Dict[str, Any] = None):
         """
         Initialize closure adapter
-        
+
         Args:
             parent_visitor: The visitor that's calling the closure
             param_bindings: Dict mapping parameter names to ValueRefs or Python objects
@@ -44,66 +43,59 @@ class ClosureAdapter:
         self.visitor = parent_visitor
         self.param_bindings = param_bindings
         self.func_globals = func_globals
-        self.kernel = InlineKernel()
     
     
     def execute_closure(self, func_ast: ast.FunctionDef) -> Optional[ValueRef]:
         """
-        Execute closure inline using universal kernel
-        
+        Execute closure inline using universal kernel via meta pipeline
+
         Args:
             func_ast: The closure function AST to execute inline
-            
+
         Returns:
             ValueRef of the return value, or None if no return
         """
         logger.debug(f"ClosureAdapter: executing closure inline for {func_ast.name}")
-        
+
         # Determine result variable name using global ID
         unique_id = get_next_id()
         result_var = f"_closure_result_{unique_id}"
-        
+
         # Create exit rule (using goto-based approach, no flag_var needed)
         exit_rule = ReturnExitRule(result_var=result_var)
-        
+
         # Create temporary variables for arguments and register them
         arg_temps = self._create_arg_temps()
-        
+
         # Create AST argument expressions (Name nodes referencing temp vars)
         arg_exprs = [ast.Name(id=temp_name, ctx=ast.Load()) for temp_name in arg_temps.values()]
-        
+
         # Build caller context from current scope (for capture detection)
         caller_context = self._build_caller_context()
-        
+
         # Create dummy call site
         call_site = ast.Call(
             func=ast.Name(id=func_ast.name, ctx=ast.Load()),
             args=arg_exprs,
             keywords=[]
         )
-        
-        # Create inline operation with func_globals (kernel will detect captures)
+
+        # Build MetaInlineRequest and delegate to expand_inline
+        from ..meta.inline_bridge import MetaInlineRequest, expand_inline
+        request = MetaInlineRequest(
+            callee_ast=func_ast,
+            callee_globals=self.func_globals or {},
+            call_args=arg_exprs,
+            call_site=call_site,
+            caller_context=caller_context,
+            exit_rule=exit_rule,
+            result_var=result_var,
+        )
+
         try:
-            inline_op = self.kernel.create_inline_op(
-                callee_func=func_ast,
-                call_site=call_site,
-                call_args=arg_exprs,
-                caller_context=caller_context,
-                exit_rule=exit_rule,
-                callee_globals=self.func_globals
-            )
-            
-            # Log captured variables for debugging
-            
+            inline_result = expand_inline(request)
         except Exception as e:
-            logger.error(f"ClosureAdapter: failed to create inline op: {e}")
-            raise
-        
-        # Execute inline transformation - get InlineResult
-        try:
-            inline_result = self.kernel.execute_inline(inline_op)
-        except Exception as e:
-            logger.error(f"ClosureAdapter: kernel execution failed: {e}")
+            logger.error(f"ClosureAdapter: meta inline expansion failed: {e}")
             raise
         
         inlined_stmts = inline_result.stmts

@@ -167,7 +167,7 @@ class LoopsMixin:
         cf.position_at_end(loop_exit)
 
         if is_constant_true and not cf.has_predecessors(loop_exit):
-            # No break in while True → infinite loop, code after is unreachable
+            # No break in while True -> infinite loop, code after is unreachable
             cf.unreachable()
 
     def visit_For(self, node: ast.For):
