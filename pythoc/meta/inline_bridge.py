@@ -1,8 +1,8 @@
 """
 Meta-aware inline expansion.
 
-This module implements the meta expansion pipeline for inline scenarios
-(design doc §9.3). It provides MetaInlineRequest as the structured input
+This module implements the meta expansion pipeline for inline scenarios.
+It provides MetaInlineRequest as the structured input
 and expand_inline() as the AST generation engine.
 
 The expansion uses the quasi-quote layer throughout. Three frame templates

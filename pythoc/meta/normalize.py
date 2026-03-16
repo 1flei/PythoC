@@ -3,9 +3,9 @@ Structural normalization of compile-time factory inputs.
 
 This module provides normalize_factory_key() which converts factory
 arguments into deterministic suffix strings for caching and
-specialization (design doc §12).
+specialization.
 
-Supported types (§12.3):
+Supported types:
   - None, bool, int, float, str, bytes
   - tuple/list of supported values
   - dict with supported keys and values
