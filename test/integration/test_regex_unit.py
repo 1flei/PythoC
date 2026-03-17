@@ -18,6 +18,10 @@ from pythoc.regex.parse import (
 from pythoc.regex.nfa import build_nfa, epsilon_closure, NFA
 from pythoc.regex.dfa import build_dfa, DFA
 from pythoc.regex.codegen import CompiledRegex
+from pythoc.regex.analysis import (
+    analyze_pattern, compute_accept_depths, find_linear_chains,
+    PatternInfo, AcceptDepthInfo, LinearChain,
+)
 
 
 # ============================================================================
@@ -262,7 +266,8 @@ class TestCompiledRegexMatch(unittest.TestCase):
     def test_literal_match(self):
         r = CompiledRegex("abc")
         self.assertTrue(r.is_match(b"abc"))
-        self.assertTrue(r.is_match(b"xabcy"))
+        self.assertTrue(r.is_match(b"abcy"))   # matches at start
+        self.assertFalse(r.is_match(b"xabcy"))  # no match at start
         self.assertFalse(r.is_match(b"ab"))
         self.assertFalse(r.is_match(b"xyz"))
 
@@ -276,7 +281,7 @@ class TestCompiledRegexMatch(unittest.TestCase):
         r = CompiledRegex("cat|dog")
         self.assertTrue(r.is_match(b"cat"))
         self.assertTrue(r.is_match(b"dog"))
-        self.assertTrue(r.is_match(b"my cat"))
+        self.assertFalse(r.is_match(b"my cat"))  # no match at start
         self.assertFalse(r.is_match(b"car"))
 
     def test_quantifier_star(self):
@@ -335,7 +340,8 @@ class TestCompiledRegexMatch(unittest.TestCase):
 
     def test_anchor_end(self):
         r = CompiledRegex("world$")
-        self.assertTrue(r.is_match(b"hello world"))
+        self.assertTrue(r.is_match(b"world"))
+        self.assertFalse(r.is_match(b"hello world"))  # no match at start
         self.assertFalse(r.is_match(b"world cup"))
 
     def test_anchor_both(self):
@@ -425,6 +431,119 @@ class TestCompiledRegexMatch(unittest.TestCase):
         r = CompiledRegex("a\\.b")
         self.assertTrue(r.is_match(b"a.b"))
         self.assertFalse(r.is_match(b"axb"))
+
+
+# ============================================================================
+# Analysis tests (PatternInfo, AcceptDepths, LinearChains)
+# ============================================================================
+
+class TestPatternAnalysis(unittest.TestCase):
+    """Test AST-level pattern analysis."""
+
+    def test_literal_suffix(self):
+        info = analyze_pattern(parse("abcd.*efg"))
+        self.assertEqual(info.literal_suffix, b"efg")
+
+    def test_no_suffix_charclass_end(self):
+        info = analyze_pattern(parse("foo[a-z]+"))
+        self.assertIsNone(info.literal_suffix)
+
+    def test_anchor_suffix(self):
+        info = analyze_pattern(parse("abc$"))
+        self.assertEqual(info.literal_suffix, b"abc")
+
+    def test_pure_literal_suffix(self):
+        info = analyze_pattern(parse("hello"))
+        self.assertEqual(info.literal_suffix, b"hello")
+
+    def test_single_char_suffix(self):
+        info = analyze_pattern(parse("a"))
+        self.assertEqual(info.literal_suffix, b"a")
+
+    def test_dotstar_no_suffix(self):
+        info = analyze_pattern(parse("a.*"))
+        self.assertIsNone(info.literal_suffix)
+
+
+class TestAcceptDepths(unittest.TestCase):
+    """Test DFA accept depth computation."""
+
+    def test_fixed_literal(self):
+        nfa = build_nfa(parse("abc"))
+        dfa = build_dfa(nfa)
+        depths = compute_accept_depths(dfa)
+        self.assertTrue(depths.all_unique)
+        self.assertEqual(depths.max_depth, 3)
+
+    def test_charclass_fixed(self):
+        nfa = build_nfa(parse("[a-z][0-9]"))
+        dfa = build_dfa(nfa)
+        depths = compute_accept_depths(dfa)
+        self.assertTrue(depths.all_unique)
+        self.assertEqual(depths.max_depth, 2)
+
+    def test_same_length_alt(self):
+        nfa = build_nfa(parse("cat|dog"))
+        dfa = build_dfa(nfa)
+        depths = compute_accept_depths(dfa)
+        self.assertTrue(depths.all_unique)
+        # All accept states have depth 3
+        for d in depths.depths.values():
+            self.assertEqual(d, 3)
+
+    def test_diff_length_alt(self):
+        nfa = build_nfa(parse("ab|cdef"))
+        dfa = build_dfa(nfa)
+        depths = compute_accept_depths(dfa)
+        self.assertTrue(depths.all_unique)
+        depth_vals = sorted(depths.depths.values())
+        self.assertIn(2, depth_vals)
+        self.assertIn(4, depth_vals)
+
+    def test_star_not_unique(self):
+        nfa = build_nfa(parse("a.*z"))
+        dfa = build_dfa(nfa)
+        depths = compute_accept_depths(dfa)
+        self.assertFalse(depths.all_unique)
+
+    def test_plus_not_unique(self):
+        nfa = build_nfa(parse("a+b"))
+        dfa = build_dfa(nfa)
+        depths = compute_accept_depths(dfa)
+        self.assertFalse(depths.all_unique)
+
+
+class TestLinearChains(unittest.TestCase):
+    """Test DFA linear chain detection."""
+
+    def test_pure_literal_chain(self):
+        nfa = build_nfa(parse("abcd"))
+        dfa = build_dfa(nfa)
+        chains = find_linear_chains(dfa)
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0].byte_sequence, b"abcd")
+
+    def test_no_chain_star(self):
+        nfa = build_nfa(parse("a*"))
+        dfa = build_dfa(nfa)
+        chains = find_linear_chains(dfa)
+        self.assertEqual(len(chains), 0)
+
+    def test_alternation_short_chains(self):
+        nfa = build_nfa(parse("cat|dog"))
+        dfa = build_dfa(nfa)
+        chains = find_linear_chains(dfa)
+        # Each branch has a chain of 2: "at" and "og" (first char branches)
+        chain_bytes = set(c.byte_sequence for c in chains)
+        self.assertIn(b"at", chain_bytes)
+        self.assertIn(b"og", chain_bytes)
+
+    def test_needle_chain(self):
+        nfa = build_nfa(parse("needle"))
+        dfa = build_dfa(nfa)
+        chains = find_linear_chains(dfa)
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0].byte_sequence, b"needle")
 
 
 # ============================================================================

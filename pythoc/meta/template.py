@@ -334,7 +334,14 @@ class _ParamSubstituter(ast.NodeTransformer):
                 # Statement splicing in expression context is an error;
                 # this will be caught at the statement level instead.
                 return replacement
-            return copy.deepcopy(replacement)
+            result = copy.deepcopy(replacement)
+            # Preserve the original syntactic context (Store, Del) when
+            # replacing a Name with another Name.  The template defines
+            # the position (e.g. assignment target -> Store); the binding
+            # only supplies the identifier.
+            if isinstance(result, ast.Name) and not isinstance(node.ctx, ast.Load):
+                result.ctx = copy.copy(node.ctx)
+            return result
         return node
 
 
