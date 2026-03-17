@@ -245,3 +245,67 @@ def build_nfa(ast_node) -> NFA:
     """Build an NFA from a regex AST node."""
     builder = NFABuilder()
     return builder.build(ast_node)
+
+
+def build_search_nfa(nfa: NFA) -> NFA:
+    """Build an unanchored search NFA by prepending .* to the original NFA.
+
+    Adds a new start state with a self-loop on all 256 bytes and an
+    epsilon transition to the original start state. This allows the DFA
+    built from this NFA to match the pattern at any position in a single
+    forward pass (O(n) instead of O(n^2)).
+    """
+    # Deep-copy existing states with shifted IDs (+1)
+    new_states: List[NFAState] = []
+    offset = 1
+    for old_s in nfa.states:
+        ns = NFAState(id=old_s.id + offset)
+        for bval, targets in old_s.byte_transitions.items():
+            ns.byte_transitions[bval] = {t + offset for t in targets}
+        ns.epsilon = {t + offset for t in old_s.epsilon}
+        new_states.append(ns)
+
+    # Create new start state (id=0) with self-loop on all bytes
+    new_start = NFAState(id=0)
+    for b in range(256):
+        new_start.add_byte(b, 0)
+    new_start.add_epsilon(nfa.start + offset)
+
+    all_states = [new_start] + new_states
+    return NFA(states=all_states, start=0, accept=nfa.accept + offset)
+
+
+def reverse_nfa(nfa: NFA) -> NFA:
+    """Reverse an NFA: swap start and accept, reverse all transitions.
+
+    Used to build a reverse DFA for leftmost-start-position recovery.
+    The reversed NFA, when run backward on the input from the match end,
+    finds the leftmost match start position.
+
+    Anchor sentinel transitions (byte values 256=^, 257=$) are skipped
+    and replaced with epsilon transitions.  Anchors express positional
+    constraints already enforced by the forward pass; the reverse DFA
+    only needs to match actual byte content.
+
+    Note: Thompson NFA has a single accept state. The reversed NFA uses
+    the original start as accept, the original accept as start.
+    Epsilon transitions and byte transitions are all reversed.
+    """
+    n_states = len(nfa.states)
+    new_states = [NFAState(id=i) for i in range(n_states)]
+
+    for old_s in nfa.states:
+        # Reverse byte transitions
+        for bval, targets in old_s.byte_transitions.items():
+            if bval >= 256:
+                # Sentinel: treat as epsilon in the reversed NFA
+                for t in targets:
+                    new_states[t].add_epsilon(old_s.id)
+                continue
+            for t in targets:
+                new_states[t].add_byte(bval, old_s.id)
+        # Reverse epsilon transitions
+        for t in old_s.epsilon:
+            new_states[t].add_epsilon(old_s.id)
+
+    return NFA(states=new_states, start=nfa.accept, accept=nfa.start)

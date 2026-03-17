@@ -21,7 +21,7 @@ from pythoc.builtin_entities.types import i8, i32, i64, u8, u64, ptr
 
 from .dfa import DFA
 from .parse import parse
-from .nfa import build_nfa
+from .nfa import build_nfa, build_search_nfa, reverse_nfa
 from .dfa import build_dfa
 
 
@@ -37,6 +37,27 @@ def compile_pattern(pattern: str):
     nfa = build_nfa(re_ast)
     dfa = build_dfa(nfa)
     return dfa
+
+
+def compile_search_dfa(pattern: str):
+    """Build a search DFA (prepend .*) for unanchored O(n) matching."""
+    re_ast = parse(pattern)
+    nfa = build_nfa(re_ast)
+    search_nfa = build_search_nfa(nfa)
+    return build_dfa(search_nfa)
+
+
+def compile_reverse_dfa(pattern: str):
+    """Build a reverse DFA for start-position recovery.
+
+    The reverse DFA matches pattern content backward over real bytes.
+    Anchor sentinels (256=^, 257=$) are positional constraints already
+    enforced by the forward search DFA, so reverse_nfa skips them.
+    """
+    re_ast = parse(pattern)
+    nfa = build_nfa(re_ast)
+    rev_nfa = reverse_nfa(nfa)
+    return build_dfa(rev_nfa)
 
 
 # ---------------------------------------------------------------------------
@@ -117,23 +138,42 @@ def _tpl_state_machine(start_state_val, dead_state_val, i_start,
 
 
 @meta.quote_stmts
-def _tpl_unanchored_is_match(inner):
-    """Unanchored is_match: try each start position."""
-    start: u64 = 0
-    while start <= n:
-        inner
-        start = start + 1
-    return u8(0)
+def _tpl_forward_search_machine(start_state_val, dead_state_val,
+                                 dispatch, accept_store):
+    """Forward search DFA: single pass to find match end position.
+
+    On accept, accept_store sets match_end and state to dead to break.
+    """
+    state: i32 = i32(start_state_val)
+    match_end: i64 = i64(-1)
+    i: u64 = u64(0)
+    while i < n:
+        ch: i32 = i32(data[i]) & 0xFF
+        dispatch
+        accept_store
+        if state == i32(dead_state_val):
+            break
+        i = i + 1
 
 
 @meta.quote_stmts
-def _tpl_unanchored_search(inner):
-    """Unanchored search: try each start position."""
-    start: u64 = 0
-    while start <= n:
-        inner
-        start = start + 1
-    return i64(-1)
+def _tpl_reverse_search_machine(start_state_val, dead_state_val,
+                                 rev_dispatch, rev_accept_store):
+    """Reverse search DFA: backward pass from match_end to find match start.
+
+    Uses unsigned wraparound: j starts at match_end-1, decrements, and
+    the condition j < match_end detects wraparound past 0.
+    """
+    rev_state: i32 = i32(start_state_val)
+    match_start: i64 = match_end
+    j: u64 = u64(match_end) - u64(1)
+    while j < u64(match_end):
+        rch: i32 = i32(data[j]) & 0xFF
+        rev_dispatch
+        rev_accept_store
+        if rev_state == i32(dead_state_val):
+            break
+        j = j - u64(1)
 
 
 @meta.quote_stmt
@@ -335,28 +375,30 @@ def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
 # State dispatch builder (the dynamic if/elif part of the state machine)
 # ---------------------------------------------------------------------------
 
-def _build_dispatch(dfa: DFA, active_states: List[int]) -> ast.stmt:
+def _build_dispatch(dfa: DFA, active_states: List[int],
+                    state_var: str = 'state',
+                    ch_var: str = 'ch') -> ast.stmt:
     """Build the state dispatch if/elif chain for the DFA loop body."""
-    state_ref = meta.ref('state')
+    state_ref = meta.ref(state_var)
     state_branches = []
     for s in active_states:
         test = _q_eq(state_ref, _q_i32(s))
         trans = _byte_transitions_for_state(dfa, s)
 
         if not trans:
-            body = [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))]
+            body = [_q_assign(meta.ref(state_var), _q_i32(dfa.dead_state))]
         else:
             t_branches = []
             for target, byte_vals in trans.items():
-                cond = _byte_condition(byte_vals, 'ch')
-                t_body = [_q_assign(meta.ref('state'), _q_i32(target))]
+                cond = _byte_condition(byte_vals, ch_var)
+                t_body = [_q_assign(meta.ref(state_var), _q_i32(target))]
                 t_branches.append((cond, t_body))
-            t_else = [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))]
+            t_else = [_q_assign(meta.ref(state_var), _q_i32(dfa.dead_state))]
             body = [_if_elif_chain(t_branches, else_body=t_else)]
 
         state_branches.append((test, body))
 
-    state_else = [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))]
+    state_else = [_q_assign(meta.ref(state_var), _q_i32(dfa.dead_state))]
     return _if_elif_chain(state_branches, else_body=state_else)
 
 
@@ -378,17 +420,7 @@ def _build_state_machine(dfa: DFA, i_start=None,
         accept_check_stmts: Optional list of AST stmts inserted between
             dispatch and dead-state break, for early accept detection.
     """
-    # Collect active states
-    active_states = []
-    for s in range(dfa.num_states):
-        if s == dfa.dead_state:
-            continue
-        if _byte_transitions_for_state(dfa, s):
-            active_states.append(s)
-    for s in dfa.accept_states:
-        if s != dfa.dead_state and s not in active_states:
-            active_states.append(s)
-    active_states.sort()
+    active_states = _get_active_states(dfa)
 
     if not active_states:
         dispatch = _q_assign(meta.ref('state'), _q_i32(dfa.dead_state))
@@ -409,73 +441,34 @@ def _build_state_machine(dfa: DFA, i_start=None,
               _splice(accept_check_stmts))
 
 
-# ---------------------------------------------------------------------------
-# Inner match (for unanchored patterns)
-# ---------------------------------------------------------------------------
-
-def _build_inner_match(dfa: DFA, return_on_match, start_var: str) -> List[ast.stmt]:
-    """Build inner match logic: state machine + accept check at end.
-
-    The state machine starts scanning at position 'start_var' and uses
-    in-loop accept detection for non-end-anchored patterns.
-    """
-    stmts = []
-    state_ref = meta.ref('state')
-    start_ref = meta.ref(start_var)
-
-    # If start state is accepting, handle it
-    if dfa.start_state in dfa.accept_states:
-        if dfa.anchored_end:
-            stmts.append(_q(_tpl_if,
-                            _q_eq(start_ref, meta.ref('n')),
-                            _splice([_q_return(return_on_match)])))
-        else:
-            return [_q_return(return_on_match)]
-
-    # Build in-loop accept check for non-end-anchored patterns.
-    # After each transition, if we're in an accept state, return early.
-    accept_check_stmts = []
-    if not dfa.anchored_end:
-        accept_list = sorted(dfa.accept_states)
-        if accept_list:
-            branches = []
-            for s in accept_list:
-                branches.append((_q_eq(state_ref, _q_i32(s)),
-                                 [_q_return(return_on_match)]))
-            accept_check_stmts = [_if_elif_chain(branches)]
-
-    # State machine starts at 'start' position
-    stmts.extend(_build_state_machine(
-        dfa,
-        i_start=start_ref,
-        accept_check_stmts=accept_check_stmts,
-    ))
-
-    # Post-loop accept check (for end-anchored patterns)
-    if dfa.anchored_end:
-        accept_list = sorted(dfa.accept_states)
-        for s in accept_list:
-            inner_if = _q(_tpl_if,
-                          _q_eq(meta.ref('i'), meta.ref('n')),
-                          _splice([_q_return(return_on_match)]))
-            stmts.append(_q(_tpl_if,
-                            _q_eq(state_ref, _q_i32(s)),
-                            _splice([inner_if])))
-
-    return stmts
+def _get_active_states(dfa: DFA) -> List[int]:
+    """Get sorted list of active (non-dead) DFA states."""
+    active_states = []
+    for s in range(dfa.num_states):
+        if s == dfa.dead_state:
+            continue
+        if _byte_transitions_for_state(dfa, s):
+            active_states.append(s)
+    for s in dfa.accept_states:
+        if s != dfa.dead_state and s not in active_states:
+            active_states.append(s)
+    active_states.sort()
+    return active_states
 
 
 # ---------------------------------------------------------------------------
 # Body builders: is_match
 # ---------------------------------------------------------------------------
 
-def _build_is_match_body(dfa: DFA) -> List[ast.stmt]:
-    """Build the full body for an is_match function."""
+def _build_is_match_body(dfa: DFA, search_dfa: DFA = None) -> List[ast.stmt]:
+    """Build the full body for an is_match function.
+
+    For unanchored patterns, uses search_dfa for O(n) single-pass matching.
+    """
     if dfa.anchored_start:
         return _build_anchored_is_match(dfa)
 
-    inner = _build_inner_match(dfa, _q_u8(1), 'start')
-    return _q(_tpl_unanchored_is_match, _splice(inner))
+    return _build_search_dfa_is_match(search_dfa)
 
 
 def _build_anchored_is_match(dfa: DFA) -> List[ast.stmt]:
@@ -517,17 +510,45 @@ def _build_anchored_is_match(dfa: DFA) -> List[ast.stmt]:
     return stmts
 
 
-# ---------------------------------------------------------------------------
-# Body builders: search
-# ---------------------------------------------------------------------------
+def _build_search_dfa_is_match(search_dfa: DFA) -> List[ast.stmt]:
+    """Build is_match body using search DFA for O(n) unanchored matching.
 
-def _build_search_body(dfa: DFA) -> List[ast.stmt]:
-    """Build the full body for a search function."""
+    Single forward pass: run the search DFA (which has .* prepended).
+    If any accept state is reached, return 1 immediately.
+    """
+    stmts = []
+    state_ref = meta.ref('state')
+
+    # If start state is accepting, pattern matches empty string
+    if search_dfa.start_state in search_dfa.accept_states:
+        return [_q_return(_q_u8(1))]
+
+    # Build accept check: on accept, return 1
+    accept_list = sorted(search_dfa.accept_states)
+    accept_check_stmts = []
+    if accept_list:
+        branches = []
+        for s in accept_list:
+            branches.append((_q_eq(state_ref, _q_i32(s)),
+                             [_q_return(_q_u8(1))]))
+        accept_check_stmts = [_if_elif_chain(branches)]
+
+    stmts.extend(_build_state_machine(
+        search_dfa, accept_check_stmts=accept_check_stmts))
+    stmts.append(_q_return(_q_u8(0)))
+    return stmts
+
+def _build_search_body(dfa: DFA, search_dfa: DFA = None,
+                       rev_dfa: DFA = None) -> List[ast.stmt]:
+    """Build the full body for a search function.
+
+    For unanchored patterns, uses O(n) forward+backward pass with
+    search DFA and reverse DFA.
+    """
     if dfa.anchored_start:
         return _build_anchored_search(dfa)
 
-    inner = _build_inner_match(dfa, _q_i64(meta.ref('start')), 'start')
-    return _q(_tpl_unanchored_search, _splice(inner))
+    return _build_search_dfa_search(search_dfa, rev_dfa)
 
 
 def _build_anchored_search(dfa: DFA) -> List[ast.stmt]:
@@ -567,17 +588,98 @@ def _build_anchored_search(dfa: DFA) -> List[ast.stmt]:
     return stmts
 
 
-# ---------------------------------------------------------------------------
-# Compiled function generation via pythoc.meta
-# ---------------------------------------------------------------------------
+def _build_search_dfa_search(search_dfa: DFA,
+                              rev_dfa: DFA) -> List[ast.stmt]:
+    """Build search body using search DFA + reverse DFA for O(n).
 
-def _build_compiled_fn(dfa: DFA, digest: str, kind: str):
+    Two-pass approach:
+    1. Forward pass with search DFA to find match_end
+    2. Backward pass with reverse DFA to find match_start
+    """
+    stmts = []
+
+    # --- Forward pass: find match_end ---
+    fwd_active = _get_active_states(search_dfa)
+    if not fwd_active:
+        fwd_dispatch = _q_assign(meta.ref('state'),
+                                 _q_i32(search_dfa.dead_state))
+    else:
+        fwd_dispatch = _build_dispatch(search_dfa, fwd_active,
+                                       'state', 'ch')
+
+    # Build accept store: on accept, set match_end = i64(i + 1) and
+    # set state to dead to break out of the loop.
+    fwd_accept_list = sorted(search_dfa.accept_states)
+    fwd_accept_stmts = []
+    if fwd_accept_list:
+        branches = []
+        for s in fwd_accept_list:
+            body = [
+                _q_assign(meta.ref('match_end'),
+                          _q_i64(_q_add(meta.ref('i'), meta.const(1)))),
+                _q_assign(meta.ref('state'),
+                          _q_i32(search_dfa.dead_state)),
+            ]
+            branches.append((_q_eq(meta.ref('state'), _q_i32(s)), body))
+        fwd_accept_stmts = [_if_elif_chain(branches)]
+
+    # Handle case where search DFA start state is accepting
+    if search_dfa.start_state in search_dfa.accept_states:
+        return [_q_return(_q_i64(meta.const(0)))]
+
+    stmts.extend(_q(_tpl_forward_search_machine,
+                     meta.const(search_dfa.start_state),
+                     meta.const(search_dfa.dead_state),
+                     _splice([fwd_dispatch]),
+                     _splice(fwd_accept_stmts)))
+
+    # If no match found, return -1
+    stmts.append(_q(_tpl_if,
+                     _q_eq(meta.ref('match_end'), _q_i64(meta.const(-1))),
+                     _splice([_q_return(_q_i64(meta.const(-1)))])))
+
+    # --- Backward pass: find match_start ---
+    rev_active = _get_active_states(rev_dfa)
+    if not rev_active:
+        rev_dispatch = _q_assign(meta.ref('rev_state'),
+                                 _q_i32(rev_dfa.dead_state))
+    else:
+        rev_dispatch = _build_dispatch(rev_dfa, rev_active,
+                                       'rev_state', 'rch')
+
+    # Build reverse accept store: on accept, set match_start = i64(j)
+    rev_accept_list = sorted(rev_dfa.accept_states)
+    rev_accept_stmts = []
+    if rev_accept_list:
+        branches = []
+        for s in rev_accept_list:
+            body = [
+                _q_assign(meta.ref('match_start'),
+                          _q_i64(meta.ref('j'))),
+            ]
+            branches.append((_q_eq(meta.ref('rev_state'), _q_i32(s)), body))
+        rev_accept_stmts = [_if_elif_chain(branches)]
+
+    stmts.extend(_q(_tpl_reverse_search_machine,
+                     meta.const(rev_dfa.start_state),
+                     meta.const(rev_dfa.dead_state),
+                     _splice([rev_dispatch]),
+                     _splice(rev_accept_stmts)))
+
+    # Return match_start
+    stmts.append(_q_return(meta.ref('match_start')))
+    return stmts
+
+def _build_compiled_fn(dfa: DFA, digest: str, kind: str,
+                       search_dfa: DFA = None, rev_dfa: DFA = None):
     """Generate a @compile function using pythoc.meta.
 
     Args:
         dfa: The DFA.
         digest: Pattern digest for unique naming.
         kind: "is_match" or "search".
+        search_dfa: Optional search DFA for O(n) unanchored is_match.
+        rev_dfa: Optional reverse DFA for O(n) unanchored search.
 
     Returns:
         The compiled function.
@@ -586,12 +688,13 @@ def _build_compiled_fn(dfa: DFA, digest: str, kind: str):
         func_name = "regex_is_match"
         suffix = digest
         return_type = u8
-        body_stmts = _build_is_match_body(dfa)
+        body_stmts = _build_is_match_body(dfa, search_dfa=search_dfa)
     elif kind == "search":
         func_name = "regex_search"
         suffix = digest + "_search"
         return_type = i64
-        body_stmts = _build_search_body(dfa)
+        body_stmts = _build_search_body(dfa, search_dfa=search_dfa,
+                                         rev_dfa=rev_dfa)
     else:
         raise ValueError("Unknown kind: {}".format(kind))
 
@@ -622,12 +725,43 @@ class CompiledRegex:
 
     This object performs matching using a Python-level DFA simulation.
     It can also generate @compile functions for native PythoC execution.
+
+    For unanchored patterns, uses a search DFA (prepending .*) for O(n)
+    matching, and a reverse DFA for O(n) start-position recovery.
     """
 
     def __init__(self, pattern: str):
         self.pattern = pattern
         self.dfa = compile_pattern(pattern)
         self._digest = _pattern_digest(pattern)
+        # Build search and reverse DFAs for unanchored patterns
+        if not self.dfa.anchored_start:
+            self._search_dfa = compile_search_dfa(pattern)
+            self._rev_dfa = compile_reverse_dfa(pattern)
+        else:
+            self._search_dfa = None
+            self._rev_dfa = None
+
+    def _run_dfa_accepts(self, dfa, data: bytes, start_pos: int = 0) -> bool:
+        """Run a DFA on data starting from start_pos.
+
+        Returns True if the DFA reaches an accept state at any point
+        (for non-end-anchored) or at end of input (for end-anchored).
+        """
+        state = dfa.start_state
+        if state in dfa.accept_states and not dfa.anchored_end:
+            return True
+        for i in range(start_pos, len(data)):
+            byte_val = data[i]
+            cls = dfa.class_map[byte_val]
+            state = dfa.transitions[state][cls]
+            if state == dfa.dead_state:
+                return False
+            if state in dfa.accept_states and not dfa.anchored_end:
+                return True
+        if dfa.anchored_end:
+            return state in dfa.accept_states
+        return state in dfa.accept_states
 
     def _run_dfa(self, data: bytes, start_pos: int = 0) -> bool:
         """Run the DFA on data starting from start_pos.
@@ -674,11 +808,67 @@ class CompiledRegex:
 
         return last_match
 
+    def _search_dfa_find_first_end(self, data: bytes) -> int:
+        """Run the search DFA and find the end position of the first match.
+
+        Returns index past the last matched byte, or -1 if no match.
+        The search DFA has .* prepended, so it finds the earliest match end.
+
+        For end-anchored patterns, only accepts at the end of data.
+        """
+        dfa = self._search_dfa
+        state = dfa.start_state
+        anchored_end = self.dfa.anchored_end
+
+        if state in dfa.accept_states:
+            if not anchored_end or len(data) == 0:
+                return 0
+
+        for i in range(len(data)):
+            byte_val = data[i]
+            cls = dfa.class_map[byte_val]
+            state = dfa.transitions[state][cls]
+            if state == dfa.dead_state:
+                return -1
+            if state in dfa.accept_states:
+                if not anchored_end:
+                    return i + 1
+                # For $-anchored: only accept at end of data
+                if i + 1 == len(data):
+                    return i + 1
+
+        return -1
+
+    def _rev_dfa_find_start(self, data: bytes, match_end: int) -> int:
+        """Run the reverse DFA backward from match_end to find match start.
+
+        Returns the leftmost start position of the match.
+        """
+        dfa = self._rev_dfa
+        state = dfa.start_state
+        match_start = match_end  # default if start state is accepting
+
+        if state in dfa.accept_states:
+            match_start = match_end
+
+        j = match_end - 1
+        while j >= 0:
+            byte_val = data[j]
+            cls = dfa.class_map[byte_val]
+            state = dfa.transitions[state][cls]
+            if state == dfa.dead_state:
+                break
+            if state in dfa.accept_states:
+                match_start = j
+            j -= 1
+
+        return match_start
+
     def is_match(self, data: bytes) -> bool:
         """Test if data matches (full match if anchored, partial otherwise).
 
         For anchored patterns (^...$), tests full match.
-        For unanchored patterns, tests if data matches from the start.
+        For unanchored patterns, uses search DFA for O(n) matching.
         """
         if self.dfa.anchored_start:
             end = self._run_dfa_find_end(data, 0)
@@ -686,11 +876,8 @@ class CompiledRegex:
                 return end == len(data)
             return end >= 0
         else:
-            for start in range(len(data) + 1):
-                end = self._run_dfa_find_end(data, start)
-                if end >= 0:
-                    return True
-            return False
+            # O(n) via search DFA
+            return self._search_dfa_find_first_end(data) >= 0
 
     def fullmatch(self, data: bytes) -> bool:
         """Test if the entire data matches the pattern."""
@@ -700,6 +887,7 @@ class CompiledRegex:
         """Search for pattern in data.
 
         Returns the start position of the first match, or -1 if not found.
+        For unanchored patterns, uses search DFA + reverse DFA for O(n).
         """
         if self.dfa.anchored_start:
             end = self._run_dfa_find_end(data, 0)
@@ -707,11 +895,11 @@ class CompiledRegex:
                 return 0 if end == len(data) else -1
             return 0 if end >= 0 else -1
         else:
-            for start in range(len(data)):
-                end = self._run_dfa_find_end(data, start)
-                if end >= 0:
-                    return start
-            return -1
+            # O(n): forward pass finds match end, backward pass finds start
+            match_end = self._search_dfa_find_first_end(data)
+            if match_end < 0:
+                return -1
+            return self._rev_dfa_find_start(data, match_end)
 
     def find_span(self, data: bytes):
         """Find the span (start, end) of the first match.
@@ -725,11 +913,12 @@ class CompiledRegex:
                 return (0, len(data)) if end == len(data) else None
             return (0, end) if end >= 0 else None
         else:
-            for start in range(len(data)):
-                end = self._run_dfa_find_end(data, start)
-                if end >= 0:
-                    return (start, end)
-            return None
+            # O(n): forward + backward pass
+            match_end = self._search_dfa_find_first_end(data)
+            if match_end < 0:
+                return None
+            match_start = self._rev_dfa_find_start(data, match_end)
+            return (match_start, match_end)
 
     # -----------------------------------------------------------------
     # @compile function generation
@@ -741,7 +930,8 @@ class CompiledRegex:
         Returns a PythoC compiled function:
             is_match(n: u64, data: ptr[i8]) -> u8
         """
-        return _build_compiled_fn(self.dfa, self._digest, "is_match")
+        return _build_compiled_fn(self.dfa, self._digest, "is_match",
+                                  search_dfa=self._search_dfa)
 
     def generate_search_fn(self):
         """Generate a @compile function for search.
@@ -749,4 +939,6 @@ class CompiledRegex:
         Returns a PythoC compiled function:
             search(n: u64, data: ptr[i8]) -> i64
         """
-        return _build_compiled_fn(self.dfa, self._digest, "search")
+        return _build_compiled_fn(self.dfa, self._digest, "search",
+                                  search_dfa=self._search_dfa,
+                                  rev_dfa=self._rev_dfa)
