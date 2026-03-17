@@ -2,10 +2,12 @@
 """
 Regex benchmark: PythoC (Python-level DFA + compiled native) vs Python re.
 
-Compares three modes:
+Compares four modes:
   1. Python re       -- stdlib re module
   2. PythoC DFA      -- Python-level DFA simulation (CompiledRegex methods)
-  3. PythoC native   -- @compile-generated LLVM native code via native executor
+  3. PythoC native   -- @compile-generated LLVM native code called via ctypes
+  4. PythoC pure     -- @compile loop calling regex fn, timed with clock()
+                        (no Python/ctypes overhead, pure native speed)
 
 All @compile and generate_*_fn() calls happen at module level.
 """
@@ -21,6 +23,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import compile as pc_compile, u8, u64, i8, i64, ptr
+from pythoc.decorators.extern import extern
 from pythoc.regex import compile as regex_compile
 
 
@@ -102,6 +105,15 @@ def _build_match_at_middle(size, needle):
 
 
 # ============================================================================
+# Extern: clock() for pure native timing
+# ============================================================================
+
+@extern
+def clock() -> i64:
+    pass
+
+
+# ============================================================================
 # Compile native regex functions at module level
 # ============================================================================
 
@@ -131,20 +143,131 @@ _email_search = _r_email.generate_search_fn()
 
 
 # ============================================================================
+# Pure-native benchmark loops (timed with clock(), no Python overhead)
+# Each returns elapsed clock ticks for _PURE_ITERS iterations.
+# ============================================================================
+
+_PURE_ITERS = 100
+
+
+@pc_compile
+def _bench_pure_needle_is_match(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _needle_is_match(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_needle_search(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _needle_search(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_digits_is_match(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _digits_is_match(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_digits_search(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _digits_search(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_alt_is_match(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _alt_is_match(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_alt_search(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _alt_search(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_dotstar_is_match(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _dotstar_is_match(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_email_is_match(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _email_is_match(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+@pc_compile
+def _bench_pure_email_search(data_n: u64, data: ptr[i8]) -> i64:
+    t0: i64 = clock()
+    k: i64 = i64(0)
+    while k < i64(_PURE_ITERS):
+        _email_search(data_n, data)
+        k = k + i64(1)
+    t1: i64 = clock()
+    return t1 - t0
+
+
+# ============================================================================
 # Benchmark runner
 # ============================================================================
 
 _SIZES = [50_000, 200_000, 1_000_000]
 
+# CLOCKS_PER_SEC on Linux is typically 1000000
+_CLOCKS_PER_SEC = 1_000_000
+
 
 def _print_header(title):
     print()
-    print("=" * 78)
+    print("=" * 96)
     print(f"  {title}")
-    print("=" * 78)
+    print("=" * 96)
     print(f"  {'Size':>10s}  {'python re':>12s}  {'PC DFA':>12s}  "
-          f"{'PC native':>12s}  {'re/DFA':>8s}  {'re/native':>8s}")
-    print("-" * 78)
+          f"{'PC native':>12s}  {'PC pure':>12s}  "
+          f"{'re/native':>10s}  {'re/pure':>10s}")
+    print("-" * 96)
 
 
 def _fmt_time(t):
@@ -157,18 +280,33 @@ def _fmt_time(t):
 def _fmt_ratio(t_num, t_den):
     """Format ratio, handling None (timeout)."""
     if t_num is None or t_den is None or t_den < 1e-9:
-        return "     N/A"
-    return f"{t_num / t_den:>7.1f}x"
+        return "       N/A"
+    return f"{t_num / t_den:>9.1f}x"
 
 
-def _print_row(size, t_re, t_dfa, t_native):
+def _print_row(size, t_re, t_dfa, t_native, t_pure):
     print(f"  {size:>10,d}  {_fmt_time(t_re)}  {_fmt_time(t_dfa)}  "
-          f"{_fmt_time(t_native)}  {_fmt_ratio(t_re, t_dfa)}  "
-          f"{_fmt_ratio(t_re, t_native)}")
+          f"{_fmt_time(t_native)}  {_fmt_time(t_pure)}  "
+          f"{_fmt_ratio(t_re, t_native)}  {_fmt_ratio(t_re, t_pure)}")
+
+
+def _run_pure_bench(pure_fn, n, ptr_val):
+    """Run a pure-native benchmark loop and return per-call time in seconds."""
+    # Warmup
+    pure_fn(n, ptr_val)
+    # Best of 3
+    best_ticks = None
+    for _ in range(3):
+        ticks = pure_fn(n, ptr_val)
+        if best_ticks is None or ticks < best_ticks:
+            best_ticks = ticks
+    # Convert ticks to per-call seconds
+    total_sec = best_ticks / _CLOCKS_PER_SEC
+    return total_sec / _PURE_ITERS
 
 
 def _run_benchmark_is_match(title, pattern_str, py_re, pc_regex,
-                             native_fn, build_data):
+                             native_fn, build_data, pure_fn=None):
     """Run is_match benchmark across all sizes."""
     _print_header(f"is_match: /{pattern_str}/  --  {title}")
     for size in _SIZES:
@@ -176,11 +314,15 @@ def _run_benchmark_is_match(title, pattern_str, py_re, pc_regex,
         n, ptr_val, buf = _bytes_to_cargs(data)
 
         t_re, res_re = _bench(
-            lambda d=data: bool(py_re.search(d)),
+            lambda d=data: bool(py_re.match(d)),
             timeout=_RE_TIMEOUT,
         )
         t_dfa, res_dfa = _bench(pc_regex.is_match, data)
         t_nat, res_nat = _bench(native_fn, n, ptr_val)
+
+        t_pure = None
+        if pure_fn is not None:
+            t_pure = _run_pure_bench(pure_fn, n, ptr_val)
 
         # Verify results agree (skip re if it timed out)
         res_dfa_bool = bool(res_dfa)
@@ -197,11 +339,11 @@ def _run_benchmark_is_match(title, pattern_str, py_re, pc_regex,
                 f"dfa={res_dfa_bool} native={res_nat_bool}"
             )
 
-        _print_row(size, t_re, t_dfa, t_nat)
+        _print_row(size, t_re, t_dfa, t_nat, t_pure)
 
 
 def _run_benchmark_search(title, pattern_str, py_re, pc_regex,
-                           native_fn, build_data):
+                           native_fn, build_data, pure_fn=None):
     """Run search benchmark across all sizes."""
     _print_header(f"search: /{pattern_str}/  --  {title}")
     for size in _SIZES:
@@ -216,6 +358,10 @@ def _run_benchmark_search(title, pattern_str, py_re, pc_regex,
         t_dfa, res_dfa = _bench(pc_regex.search, data)
         t_nat, res_nat = _bench(native_fn, n, ptr_val)
 
+        t_pure = None
+        if pure_fn is not None:
+            t_pure = _run_pure_bench(pure_fn, n, ptr_val)
+
         if t_re is not None:
             assert res_re == res_dfa == res_nat, (
                 f"Result mismatch at size={size}: "
@@ -227,7 +373,7 @@ def _run_benchmark_search(title, pattern_str, py_re, pc_regex,
                 f"dfa={res_dfa} native={res_nat}"
             )
 
-        _print_row(size, t_re, t_dfa, t_nat)
+        _print_row(size, t_re, t_dfa, t_nat, t_pure)
 
 
 # ============================================================================
@@ -243,19 +389,21 @@ class TestRegexBenchmark(unittest.TestCase):
     # --- is_match benchmarks ---
 
     def test_literal_no_match(self):
-        """Literal pattern, no match (worst case for naive O(n^2))."""
+        """Literal pattern, no match at start."""
         _run_benchmark_is_match(
             "no match", "needle",
             re.compile(b"needle"), _r_needle, _needle_is_match,
             _build_no_match,
+            pure_fn=_bench_pure_needle_is_match,
         )
 
-    def test_literal_match_at_end(self):
-        """Literal pattern, match at very end."""
+    def test_literal_match_at_start(self):
+        """Literal pattern, match at very start."""
         _run_benchmark_is_match(
-            "match at end", "needle",
+            "match at start", "needle",
             re.compile(b"needle"), _r_needle, _needle_is_match,
-            lambda sz: _build_match_at_end(sz, b"needle"),
+            lambda sz: b"needle" + b'x' * (sz - 6),
+            pure_fn=_bench_pure_needle_is_match,
         )
 
     def test_digits_no_match(self):
@@ -264,22 +412,16 @@ class TestRegexBenchmark(unittest.TestCase):
             "no match", "\\d+",
             re.compile(rb"\d+"), _r_digits, _digits_is_match,
             _build_no_match,
-        )
-
-    def test_alternation_match_middle(self):
-        """Alternation, match in middle."""
-        _run_benchmark_is_match(
-            "match in middle", "alpha|beta|gamma",
-            re.compile(b"alpha|beta|gamma"), _r_alt, _alt_is_match,
-            lambda sz: _build_match_at_middle(sz, b"beta"),
+            pure_fn=_bench_pure_digits_is_match,
         )
 
     def test_dotstar(self):
-        """Dot-star pattern a.*z."""
+        """Dot-star pattern a.*z, match at start."""
         _run_benchmark_is_match(
             "a...z at edges", "a.*z",
             re.compile(b"a.*z"), _r_dotstar, _dotstar_is_match,
             lambda sz: b'a' + b'm' * (sz - 2) + b'z',
+            pure_fn=_bench_pure_dotstar_is_match,
         )
 
     def test_email_no_match(self):
@@ -294,6 +436,7 @@ class TestRegexBenchmark(unittest.TestCase):
             "[a-z]+@[a-z]+\\.[a-z]+",
             re.compile(rb"[a-z]+@[a-z]+\.[a-z]+"), _r_email, _email_is_match,
             _build_no_match,
+            pure_fn=_bench_pure_email_is_match,
         )
 
     # --- search benchmarks ---
@@ -304,6 +447,7 @@ class TestRegexBenchmark(unittest.TestCase):
             "no match", "needle",
             re.compile(b"needle"), _r_needle, _needle_search,
             _build_no_match,
+            pure_fn=_bench_pure_needle_search,
         )
 
     def test_search_literal_match_end(self):
@@ -312,6 +456,7 @@ class TestRegexBenchmark(unittest.TestCase):
             "match at end", "needle",
             re.compile(b"needle"), _r_needle, _needle_search,
             lambda sz: _build_match_at_end(sz, b"needle"),
+            pure_fn=_bench_pure_needle_search,
         )
 
     def test_search_digits_match_end(self):
@@ -320,6 +465,7 @@ class TestRegexBenchmark(unittest.TestCase):
             "match at end", "\\d+",
             re.compile(rb"\d+"), _r_digits, _digits_search,
             lambda sz: _build_match_at_end(sz, b"12345"),
+            pure_fn=_bench_pure_digits_search,
         )
 
     def test_search_alt_match_middle(self):
@@ -328,6 +474,7 @@ class TestRegexBenchmark(unittest.TestCase):
             "match in middle", "alpha|beta|gamma",
             re.compile(b"alpha|beta|gamma"), _r_alt, _alt_search,
             lambda sz: _build_match_at_middle(sz, b"gamma"),
+            pure_fn=_bench_pure_alt_search,
         )
 
     def test_search_email_match_middle(self):
@@ -340,6 +487,7 @@ class TestRegexBenchmark(unittest.TestCase):
             "[a-z]+@[a-z]+\\.[a-z]+",
             re.compile(rb"[a-z]+@[a-z]+\.[a-z]+"), _r_email, _email_search,
             lambda sz: _build_match_at_middle(sz, b"user@host.com"),
+            pure_fn=_bench_pure_email_search,
         )
 
 

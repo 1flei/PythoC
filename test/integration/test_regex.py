@@ -35,14 +35,16 @@ class TestRegexLiteralMatch(unittest.TestCase):
     def test_simple_literal(self):
         r = regex_compile("abc")
         self.assertTrue(r.is_match(b"abc"))
-        self.assertTrue(r.is_match(b"xabcx"))
+        self.assertTrue(r.is_match(b"abcx"))   # matches at start
+        self.assertFalse(r.is_match(b"xabcx"))  # no match at start
         self.assertFalse(r.is_match(b"ab"))
         self.assertFalse(r.is_match(b"xyz"))
 
     def test_single_char(self):
         r = regex_compile("x")
         self.assertTrue(r.is_match(b"x"))
-        self.assertTrue(r.is_match(b"axb"))
+        self.assertTrue(r.is_match(b"xab"))    # matches at start
+        self.assertFalse(r.is_match(b"axb"))   # no match at start
         self.assertFalse(r.is_match(b"abc"))
 
     def test_fullmatch_literal(self):
@@ -70,8 +72,10 @@ class TestRegexAlternation(unittest.TestCase):
 
     def test_in_context(self):
         r = regex_compile("cat|dog")
-        self.assertTrue(r.is_match(b"I have a cat"))
-        self.assertTrue(r.is_match(b"my dog"))
+        self.assertFalse(r.is_match(b"I have a cat"))  # no match at start
+        self.assertFalse(r.is_match(b"my dog"))          # no match at start
+        self.assertTrue(r.is_match(b"cat is here"))
+        self.assertTrue(r.is_match(b"dog is here"))
 
 
 class TestRegexQuantifiers(unittest.TestCase):
@@ -162,7 +166,8 @@ class TestRegexAnchors(unittest.TestCase):
 
     def test_end_anchor(self):
         r = regex_compile("world$")
-        self.assertTrue(r.is_match(b"hello world"))
+        self.assertTrue(r.is_match(b"world"))
+        self.assertFalse(r.is_match(b"hello world"))  # no match at start
         self.assertFalse(r.is_match(b"world cup"))
 
     def test_both_anchors(self):
@@ -247,19 +252,19 @@ class TestRegexComplex(unittest.TestCase):
     def test_email_like(self):
         r = regex_compile("[a-z]+@[a-z]+\\.[a-z]+")
         self.assertTrue(r.is_match(b"foo@bar.com"))
-        self.assertTrue(r.is_match(b"email: a@b.cc"))
+        self.assertFalse(r.is_match(b"email: a@b.cc"))  # no match at start
         self.assertFalse(r.is_match(b"foobar"))
 
     def test_ip_like(self):
         r = regex_compile("\\d+\\.\\d+\\.\\d+\\.\\d+")
         self.assertTrue(r.is_match(b"192.168.1.1"))
-        self.assertTrue(r.is_match(b"addr: 10.0.0.1 here"))
+        self.assertFalse(r.is_match(b"addr: 10.0.0.1 here"))  # no match at start
         self.assertFalse(r.is_match(b"abc"))
 
     def test_hex_color(self):
         r = regex_compile("#[0-9a-f]+")
         self.assertTrue(r.is_match(b"#ff0000"))
-        self.assertTrue(r.is_match(b"color: #abc"))
+        self.assertFalse(r.is_match(b"color: #abc"))  # no match at start
         self.assertFalse(r.is_match(b"no hash"))
 
     def test_nested_alternation_group(self):
@@ -302,7 +307,7 @@ def native_abc_match_exact() -> u8:
 
 @compile
 def native_abc_match_embedded() -> u8:
-    """Match "abc" in "xxabcxx" -- should match (1)."""
+    """Match "abc" in "xxabcxx" -- no match at start (0)."""
     return _abc_is_match(u64(7), "xxabcxx")
 
 
@@ -499,6 +504,52 @@ def native_start_no() -> u8:
     return _start_is_match(u64(9), "say hello")
 
 
+# --- 1-pass search: different-length alternation (Opt #1) ---
+_r_diffalt = regex_compile("ab|cdef")
+_diffalt_search = _r_diffalt.generate_search_fn()
+
+@compile
+def native_diffalt_search_ab() -> i64:
+    """Search "ab|cdef" in "xxxabxxx" -- expect 3."""
+    return _diffalt_search(u64(8), "xxxabxxx")
+
+@compile
+def native_diffalt_search_cdef() -> i64:
+    """Search "ab|cdef" in "xxxcdefx" -- expect 3."""
+    return _diffalt_search(u64(8), "xxxcdefx")
+
+@compile
+def native_diffalt_search_none() -> i64:
+    """Search "ab|cdef" in "xxxxxxxx" -- expect -1."""
+    return _diffalt_search(u64(8), "xxxxxxxx")
+
+
+# --- Suffix guard (Opt #3) ---
+_r_suffix = regex_compile("abcd.*efg")
+_suffix_is_match = _r_suffix.generate_is_match_fn()
+_suffix_search = _r_suffix.generate_search_fn()
+
+@compile
+def native_suffix_no_match() -> u8:
+    """Match "abcd.*efg" against "abcdxxxxxx" -- no efg, expect 0."""
+    return _suffix_is_match(u64(10), "abcdxxxxxx")
+
+@compile
+def native_suffix_match() -> u8:
+    """Match "abcd.*efg" against "abcdxxefg" -- expect 1."""
+    return _suffix_is_match(u64(9), "abcdxxefg")
+
+@compile
+def native_suffix_search_found() -> i64:
+    """Search "abcd.*efg" in "xxabcdxefgx" -- expect 2."""
+    return _suffix_search(u64(11), "xxabcdxefgx")
+
+@compile
+def native_suffix_search_none() -> i64:
+    """Search "abcd.*efg" in "xxabcdxxxxx" -- no efg, expect -1."""
+    return _suffix_search(u64(11), "xxabcdxxxxx")
+
+
 class TestRegexCodegen(unittest.TestCase):
     """Test that @compile function generation works and produces correct results."""
 
@@ -508,7 +559,7 @@ class TestRegexCodegen(unittest.TestCase):
         self.assertEqual(native_abc_match_exact(), 1)
 
     def test_is_match_literal_embedded(self):
-        self.assertEqual(native_abc_match_embedded(), 1)
+        self.assertEqual(native_abc_match_embedded(), 0)
 
     def test_is_match_literal_no_match(self):
         self.assertEqual(native_abc_no_match(), 0)
@@ -601,6 +652,31 @@ class TestRegexCodegen(unittest.TestCase):
 
     def test_is_match_start_anchored_no(self):
         self.assertEqual(native_start_no(), 0)
+
+    # --- 1-pass search: different-length alternation (Opt #1) ---
+
+    def test_search_diffalt_ab(self):
+        self.assertEqual(native_diffalt_search_ab(), 3)
+
+    def test_search_diffalt_cdef(self):
+        self.assertEqual(native_diffalt_search_cdef(), 3)
+
+    def test_search_diffalt_none(self):
+        self.assertEqual(native_diffalt_search_none(), -1)
+
+    # --- Suffix guard (Opt #3) ---
+
+    def test_suffix_guard_no_match(self):
+        self.assertEqual(native_suffix_no_match(), 0)
+
+    def test_suffix_guard_match(self):
+        self.assertEqual(native_suffix_match(), 1)
+
+    def test_suffix_guard_search_found(self):
+        self.assertEqual(native_suffix_search_found(), 2)
+
+    def test_suffix_guard_search_none(self):
+        self.assertEqual(native_suffix_search_none(), -1)
 
 
 if __name__ == "__main__":
