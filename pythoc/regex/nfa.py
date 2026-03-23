@@ -24,6 +24,8 @@ class NFAState:
     byte_transitions: Dict[int, Set[int]] = field(default_factory=dict)
     # epsilon (empty) transitions
     epsilon: Set[int] = field(default_factory=set)
+    # Optional tag name for position markers
+    tag: Optional[str] = None
 
     def add_byte(self, byte_val: int, target: int):
         self.byte_transitions.setdefault(byte_val, set()).add(target)
@@ -89,6 +91,8 @@ class NFABuilder:
             return self._build_node(node.child)
         elif isinstance(node, ast.Anchor):
             return self._build_anchor(node)
+        elif isinstance(node, ast.Tag):
+            return self._build_tag(node)
         else:
             raise ValueError(f"Unknown AST node type: {type(node)}")
 
@@ -217,6 +221,19 @@ class NFABuilder:
             self.states[s].add_byte(256, a)  # sentinel for ^
         else:
             self.states[s].add_byte(257, a)  # sentinel for $
+        return _Fragment(s, a)
+
+    def _build_tag(self, node: ast.Tag) -> _Fragment:
+        """Tags are zero-width markers -- emit epsilon transition.
+
+        The tag name is stored on the NFA state for later use in
+        tag-based result models.
+        """
+        s = self._new_state()
+        a = self._new_state()
+        self.states[s].add_epsilon(a)
+        # Store tag name on the source state
+        self.states[s].tag = node.name
         return _Fragment(s, a)
 
 

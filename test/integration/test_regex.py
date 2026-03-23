@@ -245,6 +245,24 @@ class TestRegexSearch(unittest.TestCase):
         r = regex_compile("foo")
         self.assertIsNone(r.find_span(b"xxbarxx"))
 
+    def test_find_span_lazy_dotstar(self):
+        r = regex_compile("a.*b")
+        self.assertEqual(r.find_span(b"xxaxbxbxx"), (2, 5))
+
+
+class TestRegexTags(unittest.TestCase):
+    """Test zero-width tag reporting."""
+
+    def test_variable_width_tag(self):
+        r = regex_compile("a*{mid}b")
+        result = r.find_with_tags(b"aaab")
+        self.assertEqual(result, {"start": 0, "end": 4, "mid": 3})
+
+    def test_alternation_tags(self):
+        r = regex_compile("{x}a|{y}bc")
+        self.assertEqual(r.find_with_tags(b"za"), {"start": 1, "end": 2, "x": 1})
+        self.assertEqual(r.find_with_tags(b"zbc"), {"start": 1, "end": 3, "y": 1})
+
 
 class TestRegexComplex(unittest.TestCase):
     """Test complex/real-world-like patterns."""
@@ -550,6 +568,31 @@ def native_suffix_search_none() -> i64:
     return _suffix_search(u64(11), "xxabcdxxxxx")
 
 
+# --- Skip optimization: "needle" (literal, W=6 skip table) ---
+_r_needle = regex_compile("needle")
+_needle_search = _r_needle.generate_search_fn()
+
+@compile
+def native_skip_search_end() -> i64:
+    """Search 'needle' at end of 50 x's -- skip should fire."""
+    return _needle_search(u64(56), "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxneedle")
+
+@compile
+def native_skip_search_start() -> i64:
+    """Search 'needle' at position 0."""
+    return _needle_search(u64(56), "needlexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+
+@compile
+def native_skip_search_none() -> i64:
+    """Search 'needle' in all x's -- no match."""
+    return _needle_search(u64(50), "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+
+@compile
+def native_skip_search_mid() -> i64:
+    """Search 'needle' in the middle of data."""
+    return _needle_search(u64(56), "xxxxxxxxxxxxxxxxxxxxxxxxxneedlexxxxxxxxxxxxxxxxxxxxxxxxx")
+
+
 class TestRegexCodegen(unittest.TestCase):
     """Test that @compile function generation works and produces correct results."""
 
@@ -677,6 +720,20 @@ class TestRegexCodegen(unittest.TestCase):
 
     def test_suffix_guard_search_none(self):
         self.assertEqual(native_suffix_search_none(), -1)
+
+    # --- Skip optimization "needle" ---
+
+    def test_skip_search_end(self):
+        self.assertEqual(native_skip_search_end(), 50)
+
+    def test_skip_search_start(self):
+        self.assertEqual(native_skip_search_start(), 0)
+
+    def test_skip_search_none(self):
+        self.assertEqual(native_skip_search_none(), -1)
+
+    def test_skip_search_mid(self):
+        self.assertEqual(native_skip_search_mid(), 25)
 
 
 if __name__ == "__main__":

@@ -268,9 +268,19 @@ def compute_accept_depths(dfa: DFA) -> AcceptDepthInfo:
 
     When cycles exist on paths to accept states, max_depth is None
     (unbounded), meaning the full reverse scan is needed for search.
+
+    Only considers real byte classes (not sentinel 256/257 classes)
+    for depth computation and cycle detection.
     """
     if not dfa.accept_states:
         return AcceptDepthInfo(depths={}, all_unique=True, max_depth=None)
+
+    # Sentinel classes to skip (they don't consume input bytes)
+    sentinel_classes = set()
+    if dfa.sentinel_256_class >= 0:
+        sentinel_classes.add(dfa.sentinel_256_class)
+    if dfa.sentinel_257_class >= 0:
+        sentinel_classes.add(dfa.sentinel_257_class)
 
     # Step 1: BFS from start state to compute min depth per state
     visited: Dict[int, int] = {}  # state -> min depth
@@ -283,6 +293,8 @@ def compute_accept_depths(dfa: DFA) -> AcceptDepthInfo:
         next_depth = depth + 1
         seen_targets: Set[int] = set()
         for cls in range(dfa.num_classes):
+            if cls in sentinel_classes:
+                continue
             target = dfa.transitions[state][cls]
             if target == dfa.dead_state or target in seen_targets:
                 continue
@@ -292,8 +304,6 @@ def compute_accept_depths(dfa: DFA) -> AcceptDepthInfo:
                 queue.append((target, next_depth))
 
     # Step 2: Detect cycles (back edges in BFS tree)
-    # A back edge exists when a state transitions to a state with
-    # equal or smaller BFS depth.
     has_cycle = False
     for state in visited:
         if state == dfa.dead_state:
@@ -301,6 +311,8 @@ def compute_accept_depths(dfa: DFA) -> AcceptDepthInfo:
         state_depth = visited[state]
         seen: Set[int] = set()
         for cls in range(dfa.num_classes):
+            if cls in sentinel_classes:
+                continue
             target = dfa.transitions[state][cls]
             if target == dfa.dead_state or target in seen:
                 continue
@@ -332,6 +344,8 @@ def compute_accept_depths(dfa: DFA) -> AcceptDepthInfo:
             state_depth = visited[state]
             seen_t: Set[int] = set()
             for cls in range(dfa.num_classes):
+                if cls in sentinel_classes:
+                    continue
                 target = dfa.transitions[state][cls]
                 if target == dfa.dead_state or target in seen_t:
                     continue
@@ -352,6 +366,8 @@ def compute_accept_depths(dfa: DFA) -> AcceptDepthInfo:
             s = q2.popleft()
             seen_t2: Set[int] = set()
             for cls in range(dfa.num_classes):
+                if cls in sentinel_classes:
+                    continue
                 t = dfa.transitions[s][cls]
                 if t == dfa.dead_state or t in seen_t2:
                     continue
@@ -526,6 +542,9 @@ def find_linear_chains(dfa: DFA) -> List[LinearChain]:
             byte_val, target = chain_edges[current]
             byte_seq.append(byte_val)
             current = target
+            # Stop at accept states so in-loop accept checks can fire
+            if current in dfa.accept_states:
+                break
 
         if len(byte_seq) >= 2:
             chains.append(LinearChain(
@@ -561,6 +580,13 @@ def compute_skip_table(dfa: DFA) -> Optional[SkipInfo]:
     if not dfa.accept_states:
         return None
 
+    # Sentinel classes to skip
+    sentinel_classes = set()
+    if dfa.sentinel_256_class >= 0:
+        sentinel_classes.add(dfa.sentinel_256_class)
+    if dfa.sentinel_257_class >= 0:
+        sentinel_classes.add(dfa.sentinel_257_class)
+
     # Step 1: BFS from start to compute min depth per state
     depth_of: Dict[int, int] = {}
     queue = deque()
@@ -572,6 +598,8 @@ def compute_skip_table(dfa: DFA) -> Optional[SkipInfo]:
         next_depth = depth + 1
         seen_targets: Set[int] = set()
         for cls in range(dfa.num_classes):
+            if cls in sentinel_classes:
+                continue
             target = dfa.transitions[state][cls]
             if target == dfa.dead_state or target in seen_targets:
                 continue
@@ -623,3 +651,169 @@ def compute_skip_table(dfa: DFA) -> Optional[SkipInfo]:
             skip_table[byte_val] = window - 1 - rd
 
     return SkipInfo(window=window, skip_table=skip_table)
+
+
+# ---------------------------------------------------------------------------
+# Per-state skip optimization
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class StateSkipInfo:
+    """Per-state skip probe information.
+
+    For a given DFA state, this describes a lookahead probe that can
+    safely skip bytes when the probe byte is not in live_bytes.
+
+    state: the DFA state this info applies to
+    offset: lookahead distance from current position
+    live_bytes: bytes that could appear at this offset on any path
+                from this state to an accept state within W steps
+    shift: safe jump distance when probe byte not in live_bytes
+    """
+    state: int
+    offset: int
+    live_bytes: FrozenSet[int]
+    shift: int
+
+
+def compute_state_skips(dfa: DFA, max_window: int = 32,
+                         restart_states: Set[int] = None,
+                         ) -> Dict[int, StateSkipInfo]:
+    """Compute per-state skip probes for a DFA.
+
+    For each non-dead, non-accept state: BFS forward up to the
+    minimum accept depth from that state (W). At each depth d,
+    collect the set of live bytes. Select the best probe offset
+    that maximizes: shift * (256 - |live_bytes|) / 256.
+
+    restart_states: optional set of states to exclude from BFS.
+        In a search DFA, states with broad self-loops (the .* prefix)
+        should be excluded because transitions to them represent
+        "restart" rather than forward progress toward a match.
+        Bytes leading only to restart states are not counted as live.
+
+    States that can reach accept through a cycle (back edge in BFS)
+    are excluded, since variable-depth paths make skip probes unsafe.
+
+    Returns a mapping from DFA state to its best StateSkipInfo,
+    only for states where a useful skip (shift > 0, live_bytes < 256)
+    exists.
+    """
+    if not dfa.accept_states:
+        return {}
+
+    if restart_states is None:
+        restart_states = set()
+
+    # Sentinel classes to skip
+    sentinel_classes = set()
+    if dfa.sentinel_256_class >= 0:
+        sentinel_classes.add(dfa.sentinel_256_class)
+    if dfa.sentinel_257_class >= 0:
+        sentinel_classes.add(dfa.sentinel_257_class)
+
+    result: Dict[int, StateSkipInfo] = {}
+
+    for start_state in range(dfa.num_states):
+        if start_state == dfa.dead_state:
+            continue
+        if start_state in dfa.accept_states:
+            continue
+        if start_state in restart_states:
+            continue
+
+        # BFS from start_state to find min accept depth (W)
+        # Also detect cycles: if any back edge exists, skip this state
+        visited: Dict[int, int] = {start_state: 0}
+        queue = deque([(start_state, 0)])
+        min_accept_depth = None
+        has_cycle = False
+
+        # Collect bytes at each depth
+        bytes_at_depth: Dict[int, Set[int]] = {}
+
+        while queue:
+            s, depth = queue.popleft()
+            if min_accept_depth is not None and depth >= min_accept_depth:
+                continue
+            if depth >= max_window:
+                continue
+
+            next_depth = depth + 1
+            live_at_depth = bytes_at_depth.setdefault(depth, set())
+            seen_targets: Set[int] = set()
+
+            for byte_val in range(256):
+                cls = dfa.class_map[byte_val]
+                target = dfa.transitions[s][cls]
+                if target == dfa.dead_state:
+                    continue
+                if target in restart_states:
+                    # Transition to restart state: don't count as live,
+                    # don't follow in BFS
+                    continue
+                live_at_depth.add(byte_val)
+                if target not in seen_targets:
+                    seen_targets.add(target)
+                    if target in dfa.accept_states:
+                        if min_accept_depth is None or next_depth < min_accept_depth:
+                            min_accept_depth = next_depth
+                    elif target not in visited or visited[target] > next_depth:
+                        visited[target] = next_depth
+                        queue.append((target, next_depth))
+
+        # Skip states that can reach accept via variable-length paths.
+        # A state with a self-loop (excluding restart states) on the path
+        # to accept creates variable accept depths, making skip unsafe.
+        has_variable_path = False
+        if min_accept_depth is not None:
+            for s in visited:
+                if s in restart_states:
+                    continue
+                s_depth = visited[s]
+                if s_depth >= min_accept_depth:
+                    continue
+                for bv in range(256):
+                    cls = dfa.class_map[bv]
+                    t = dfa.transitions[s][cls]
+                    if t == s and t not in restart_states:
+                        has_variable_path = True
+                        break
+                if has_variable_path:
+                    break
+
+        if has_variable_path:
+            continue
+
+        if min_accept_depth is None or min_accept_depth < 2:
+            continue
+
+        W = min_accept_depth
+
+        # Select best probe offset: maximize shift * (256 - |live|) / 256
+        best_score = 0
+        best_info = None
+
+        for d in range(W):
+            live = bytes_at_depth.get(d, set())
+            live_count = len(live)
+            if live_count >= 256:
+                continue
+            # shift = how far we can advance if probe byte not in live
+            shift = W - 1 - d
+            if shift <= 0:
+                continue
+            score = shift * (256 - live_count)
+            if score > best_score:
+                best_score = score
+                best_info = StateSkipInfo(
+                    state=start_state,
+                    offset=d,
+                    live_bytes=frozenset(live),
+                    shift=shift,
+                )
+
+        if best_info is not None:
+            result[start_state] = best_info
+
+    return result
