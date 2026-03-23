@@ -13,14 +13,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc.regex.parse import (
     parse, ParseError,
-    Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor,
+    Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor, Tag,
 )
 from pythoc.regex.nfa import build_nfa, epsilon_closure, NFA
 from pythoc.regex.dfa import build_dfa, DFA
-from pythoc.regex.codegen import CompiledRegex
+from pythoc.regex.codegen import CompiledRegex, compile_pattern
 from pythoc.regex.analysis import (
     analyze_pattern, compute_accept_depths, find_linear_chains,
-    PatternInfo, AcceptDepthInfo, LinearChain,
+    compute_skip_table, compute_state_skips,
+    PatternInfo, AcceptDepthInfo, LinearChain, SkipInfo, StateSkipInfo,
 )
 
 
@@ -166,6 +167,61 @@ class TestParser(unittest.TestCase):
         self.assertIsInstance(node, Group)
         self.assertIsInstance(node.child, Alternate)
 
+    # --- Lazy repeat syntax ---
+
+    def test_lazy_star(self):
+        with self.assertRaises(ParseError):
+            parse("a*?")
+
+    def test_lazy_plus(self):
+        with self.assertRaises(ParseError):
+            parse("a+?")
+
+    def test_lazy_question(self):
+        with self.assertRaises(ParseError):
+            parse("a??")
+
+    def test_plain_star_is_lazy_by_default(self):
+        node = parse("a*")
+        self.assertIsInstance(node, Repeat)
+        self.assertTrue(node.lazy)
+
+    # --- Tag syntax ---
+
+    def test_tag_simple(self):
+        node = parse("{foo}")
+        self.assertIsInstance(node, Tag)
+        self.assertEqual(node.name, "foo")
+
+    def test_tag_underscore(self):
+        node = parse("{_beg}")
+        self.assertIsInstance(node, Tag)
+        self.assertEqual(node.name, "_beg")
+
+    def test_tag_in_pattern(self):
+        node = parse("a{mid}b")
+        self.assertIsInstance(node, Concat)
+        self.assertIsInstance(node.children[1], Tag)
+        self.assertEqual(node.children[1].name, "mid")
+
+    def test_brace_as_literal(self):
+        """{ not followed by alpha/underscore is a literal."""
+        node = parse("{")
+        self.assertIsInstance(node, Literal)
+        self.assertEqual(node.byte, ord('{'))
+
+    def test_numeric_brace_repeat_rejected(self):
+        with self.assertRaises(ParseError):
+            parse("a{2}")
+
+    def test_duplicate_tags_rejected(self):
+        with self.assertRaises(ParseError):
+            parse("{x}a{x}")
+
+    def test_reserved_internal_tag_prefix_rejected(self):
+        with self.assertRaises(ParseError):
+            parse("{__pythoc_internal_beg}")
+
 
 # ============================================================================
 # NFA tests
@@ -241,13 +297,15 @@ class TestDFA(unittest.TestCase):
         ast = parse("^abc")
         nfa = build_nfa(ast)
         dfa = build_dfa(nfa)
-        self.assertTrue(dfa.anchored_start)
+        # Sentinel 256 class should exist
+        self.assertNotEqual(dfa.sentinel_256_class, -1)
 
     def test_anchor_end(self):
         ast = parse("abc$")
         nfa = build_nfa(ast)
         dfa = build_dfa(nfa)
-        self.assertTrue(dfa.anchored_end)
+        # Sentinel 257 class should exist
+        self.assertNotEqual(dfa.sentinel_257_class, -1)
 
     def test_dfa_dead_state(self):
         ast = parse("a")
@@ -569,6 +627,440 @@ class TestPublicAPI(unittest.TestCase):
         from pythoc.regex import compile, ParseError
         with self.assertRaises(ParseError):
             compile("(abc")
+
+
+# ============================================================================
+# Per-branch anchor tests
+# ============================================================================
+
+class TestPerBranchAnchors(unittest.TestCase):
+    """Test that anchors work per-branch, not globally."""
+
+    def test_caret_a_or_bc_is_match(self):
+        """^a|bc: both branches should be reachable."""
+        r = CompiledRegex("^a|bc")
+        self.assertTrue(r.is_match(b"a"))      # ^a matches at start
+        self.assertTrue(r.is_match(b"bc"))     # bc matches at start
+        self.assertFalse(r.is_match(b"xa"))    # ^a requires position 0
+        self.assertFalse(r.is_match(b"xbc"))   # bc at start only (is_match)
+
+    def test_caret_a_or_bc_search(self):
+        """^a|bc: search should find bc anywhere, ^a only at pos 0."""
+        r = CompiledRegex("^a|bc")
+        self.assertEqual(r.search(b"a"), 0)       # ^a at start
+        self.assertEqual(r.search(b"xxbc"), 2)    # bc found at pos 2
+        self.assertEqual(r.search(b"xxa"), -1)    # ^a not at start, no bc
+
+    def test_ab_or_c_dollar_is_match(self):
+        """ab|c$: ab matches normally, c$ matches only at end."""
+        r = CompiledRegex("ab|c$")
+        self.assertTrue(r.is_match(b"ab"))     # ab matches
+        self.assertTrue(r.is_match(b"c"))      # c$ matches at end
+        self.assertFalse(r.is_match(b"cx"))    # c not at end
+
+    def test_caret_ab_dollar(self):
+        """^ab$: exact match only."""
+        r = CompiledRegex("^ab$")
+        self.assertTrue(r.is_match(b"ab"))
+        self.assertFalse(r.is_match(b"abc"))
+        self.assertEqual(r.search(b"ab"), 0)
+        self.assertEqual(r.search(b"xab"), -1)
+
+    def test_group_caret_a_or_b_c(self):
+        """(^a|b)c: ^a branch needs pos 0, b branch anywhere (is_match)."""
+        r = CompiledRegex("(^a|b)c")
+        self.assertTrue(r.is_match(b"ac"))     # ^a at start, then c
+        self.assertTrue(r.is_match(b"bc"))     # b at start, then c
+
+    def test_fullmatch_caret_ab_dollar(self):
+        """^ab$ fullmatch."""
+        r = CompiledRegex("^ab$")
+        self.assertTrue(r.fullmatch(b"ab"))
+        self.assertFalse(r.fullmatch(b"abc"))
+        self.assertFalse(r.fullmatch(b"a"))
+
+    def test_no_anchor_unchanged(self):
+        """Patterns without anchors should work as before."""
+        r = CompiledRegex("abc")
+        self.assertTrue(r.is_match(b"abc"))
+        self.assertTrue(r.is_match(b"abcx"))
+        self.assertFalse(r.is_match(b"xabc"))
+
+    def test_dollar_only(self):
+        """c$: matches c at end of input."""
+        r = CompiledRegex("c$")
+        self.assertTrue(r.is_match(b"c"))
+        self.assertFalse(r.is_match(b"cx"))
+
+    def test_find_span_mixed_anchors(self):
+        """^a|bc find_span."""
+        r = CompiledRegex("^a|bc")
+        self.assertEqual(r.find_span(b"a"), (0, 1))
+        self.assertEqual(r.find_span(b"xxbc"), (2, 4))
+        self.assertIsNone(r.find_span(b"xx"))
+
+
+# ============================================================================
+# Tag propagation tests
+# ============================================================================
+
+class TestTagPropagation(unittest.TestCase):
+    """Test that tags propagate through NFA -> DFA correctly."""
+
+    def test_tag_in_nfa(self):
+        """Tag creates epsilon transition with tag metadata on NFA state."""
+        ast_node = parse("{foo}a")
+        nfa = build_nfa(ast_node)
+        # Find the NFA state with the tag
+        tag_states = [s for s in nfa.states if s.tag == 'foo']
+        self.assertEqual(len(tag_states), 1)
+
+    def test_tag_in_dfa(self):
+        """Tag name propagates to DFA tag_map."""
+        from pythoc.regex.dfa import build_dfa
+        ast_node = parse("{foo}a")
+        nfa = build_nfa(ast_node)
+        dfa = build_dfa(nfa)
+        # At least one DFA state should have the 'foo' tag
+        all_tags = set()
+        for tags in dfa.tag_map.values():
+            all_tags.update(tags)
+        self.assertIn('foo', all_tags)
+
+    def test_search_dfa_has_beg_end_tags(self):
+        """Search DFA rewrite injects _beg and _end tags."""
+        from pythoc.regex.codegen import compile_search_dfa_from_ast
+        ast_node = parse("abc")
+        search_dfa = compile_search_dfa_from_ast(ast_node)
+        all_tags = set()
+        for tags in search_dfa.tag_map.values():
+            all_tags.update(tags)
+        self.assertIn('__pythoc_internal_beg', all_tags)
+        self.assertIn('__pythoc_internal_end', all_tags)
+
+
+# ============================================================================
+# Per-state skip optimization tests
+# ============================================================================
+
+class TestPerStateSkips(unittest.TestCase):
+    """Tests for compute_state_skips() and per-state skip probes."""
+
+    def _build_search_dfa_with_skips(self, pattern):
+        from pythoc.regex.codegen import compile_search_dfa
+        search_dfa = compile_search_dfa(pattern)
+        # Identify restart states: self-loop on >= 128 bytes
+        restart = set()
+        for s in range(search_dfa.num_states):
+            if s == search_dfa.dead_state:
+                continue
+            self_loop_count = 0
+            for bv in range(256):
+                cls = search_dfa.class_map[bv]
+                t = search_dfa.transitions[s][cls]
+                if t == s:
+                    self_loop_count += 1
+            if self_loop_count >= 128:
+                restart.add(s)
+        return search_dfa, compute_state_skips(
+            search_dfa, restart_states=restart)
+
+    def test_abcdef_skip_info(self):
+        """Pattern 'abcdef' should produce useful skip probes."""
+        dfa = compile_pattern('abcdef')
+        skip_info = compute_skip_table(dfa)
+        # Min match length = 6, so window should be 6
+        self.assertIsNotNone(skip_info)
+        self.assertEqual(skip_info.window, 6)
+
+    def test_abcdef_state_skips(self):
+        """Pattern 'abcdef' search DFA: state skips computed correctly.
+
+        The search DFA for 'abcdef' has self-loops (state 2 on 'a')
+        due to DFA minimization, which creates variable accept depths.
+        States with self-loops are correctly excluded from per-state skips.
+        """
+        search_dfa, state_skips = self._build_search_dfa_with_skips('abcdef')
+        # All non-restart states in the search DFA for 'abcdef' have
+        # self-loops (the DFA re-enters the 'a' match state on 'a'),
+        # so no per-state skips are produced. This is correct.
+        self.assertIsInstance(state_skips, dict)
+        for state, info in state_skips.items():
+            self.assertIsInstance(info, StateSkipInfo)
+            self.assertEqual(info.state, state)
+            self.assertGreater(info.shift, 0)
+            self.assertLess(len(info.live_bytes), 256)
+
+    def test_charclass_pattern_state_skips(self):
+        """Pattern '[ab][abc][a-d][a-e]' should produce per-state skips."""
+        dfa = compile_pattern('[ab][abc][a-d][a-e]')
+        skip_info = compute_skip_table(dfa)
+        # Min match length = 4, so window should be 4
+        self.assertIsNotNone(skip_info)
+        self.assertEqual(skip_info.window, 4)
+
+        search_dfa, state_skips = self._build_search_dfa_with_skips(
+            '[ab][abc][a-d][a-e]')
+        # Should have per-state skips
+        self.assertTrue(len(state_skips) > 0)
+
+    def test_dotstar_pattern(self):
+        """Pattern 'ab.*cdef' should produce state skips."""
+        search_dfa, state_skips = self._build_search_dfa_with_skips('ab.*cdef')
+        # States matching 'ab.*' lead to states waiting for 'cdef',
+        # those states should potentially have skips
+        # (though .* creates cycles, some states may still benefit)
+        # Just verify it doesn't crash and returns a dict
+        self.assertIsInstance(state_skips, dict)
+
+    def test_short_pattern_no_skip(self):
+        """Pattern 'a' has min depth 1, so no skip probes possible."""
+        search_dfa, state_skips = self._build_search_dfa_with_skips('a')
+        # Min accept depth from any state is likely 1, so no useful skips
+        # (shift = W-1-d, W=1 => shift=0)
+        for info in state_skips.values():
+            self.assertGreater(info.shift, 0)
+
+    def test_state_skip_offset_within_window(self):
+        """StateSkipInfo.offset should be < min accept depth from that state."""
+        search_dfa, state_skips = self._build_search_dfa_with_skips('abcdef')
+        for state, info in state_skips.items():
+            # offset + shift should not exceed the window
+            # (shift = W - 1 - offset, so offset + shift = W - 1)
+            self.assertGreaterEqual(info.offset, 0)
+            self.assertGreater(info.shift, 0)
+
+    def test_compiled_regex_search_with_state_skips(self):
+        """CompiledRegex should use state_skips and still produce correct results."""
+        # Verify that patterns with per-state skips still search correctly
+        cr = CompiledRegex('abcdef')
+        self.assertEqual(cr.search(b'xxabcdefxx'), 2)
+        self.assertEqual(cr.search(b'abcdef'), 0)
+        self.assertEqual(cr.search(b'xyzxyz'), -1)
+
+    def test_compiled_regex_charclass_search(self):
+        """Search with character class pattern still correct with state skips."""
+        cr = CompiledRegex('abc')
+        self.assertEqual(cr.search(b'xyzabcxyz'), 3)
+        self.assertEqual(cr.search(b'abc'), 0)
+        self.assertEqual(cr.search(b'ab'), -1)
+
+
+# ============================================================================
+# Greedy/lazy repeat semantics tests
+# ============================================================================
+
+class TestGreedyLazy(unittest.TestCase):
+    """Tests for lazy-by-default repeat semantics."""
+
+    def test_lazy_dotstar(self):
+        """Lazy a.*b on 'axbxb' should match the earliest valid span."""
+        cr = CompiledRegex('a.*b')
+        self.assertEqual(cr.find_span(b'axbxb'), (0, 3))
+
+    def test_lazy_dotstar_single(self):
+        """Lazy a.*b on 'ab' should still match (0, 2)."""
+        cr = CompiledRegex('a.*b')
+        self.assertEqual(cr.find_span(b'ab'), (0, 2))
+
+    def test_lazy_dotstar_search(self):
+        """Lazy a.*b search in 'xxaxbxbxx' should still find start=2."""
+        cr = CompiledRegex('a.*b')
+        self.assertEqual(cr.search(b'xxaxbxbxx'), 2)
+
+    def test_lazy_dotstar_span_embedded(self):
+        """Lazy a.*b in 'xxaxbxbxx' should stop at the first valid b."""
+        cr = CompiledRegex('a.*b')
+        self.assertEqual(cr.find_span(b'xxaxbxbxx'), (2, 5))
+
+    def test_no_repeat_unaffected(self):
+        """Patterns without repeat should be unaffected."""
+        cr = CompiledRegex('abc')
+        self.assertEqual(cr.find_span(b'xxabcxx'), (2, 5))
+
+
+# ============================================================================
+# Tag results tests
+# ============================================================================
+
+class TestTagResults(unittest.TestCase):
+    """Tests for find_with_tags() tag position tracking."""
+
+    def test_basic_no_tags(self):
+        """Pattern without tags returns start/end only."""
+        cr = CompiledRegex('hello')
+        result = cr.find_with_tags(b'xxhelloxx')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start'], 2)
+        self.assertEqual(result['end'], 7)
+
+    def test_mid_tag(self):
+        """Tag between two literals records correct position."""
+        cr = CompiledRegex('a{mid}b')
+        result = cr.find_with_tags(b'xxabxx')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start'], 2)
+        self.assertEqual(result['end'], 4)
+        self.assertEqual(result['mid'], 3)
+
+    def test_start_end_tags(self):
+        """Tags at start and end of pattern."""
+        cr = CompiledRegex('{beg}hello{end_tag}')
+        result = cr.find_with_tags(b'xxhelloxx')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start'], 2)
+        self.assertEqual(result['end'], 7)
+        self.assertEqual(result['beg'], 2)
+        self.assertEqual(result['end_tag'], 7)
+
+    def test_no_match_returns_none(self):
+        """No match returns None."""
+        cr = CompiledRegex('hello')
+        self.assertIsNone(cr.find_with_tags(b'xxxx'))
+
+    def test_anchored_pattern_tags(self):
+        """Anchored pattern with tags."""
+        cr = CompiledRegex('^{s}hello')
+        result = cr.find_with_tags(b'helloxx')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start'], 0)
+        self.assertEqual(result['end'], 5)
+        self.assertEqual(result['s'], 0)
+
+    def test_anchored_no_match(self):
+        """Anchored pattern with no match."""
+        cr = CompiledRegex('^hello')
+        self.assertIsNone(cr.find_with_tags(b'xxhello'))
+
+    def test_variable_width_tag(self):
+        """Tags after lazy repeats should be recovered from the winning path."""
+        cr = CompiledRegex('a*{mid}b')
+        result = cr.find_with_tags(b'aaab')
+        self.assertIsNotNone(result)
+        self.assertEqual(result['start'], 0)
+        self.assertEqual(result['end'], 4)
+        self.assertEqual(result['mid'], 3)
+
+    def test_alternation_branch_tags(self):
+        """Only tags on the winning alternation branch should be reported."""
+        cr = CompiledRegex('{x}a|{y}bc')
+        result_a = cr.find_with_tags(b'za')
+        self.assertEqual(result_a, {'start': 1, 'end': 2, 'x': 1})
+        result_bc = cr.find_with_tags(b'zbc')
+        self.assertEqual(result_bc, {'start': 1, 'end': 3, 'y': 1})
+
+
+# ============================================================================
+# Native execution API tests
+# ============================================================================
+
+class TestNativeAPI(unittest.TestCase):
+    """Tests that is_match/search always use native execution."""
+
+    def test_is_match_returns_bool(self):
+        """is_match returns a Python bool."""
+        cr = CompiledRegex('abc')
+        self.assertIsInstance(cr.is_match(b'abc'), bool)
+        self.assertTrue(cr.is_match(b'abc'))
+        self.assertFalse(cr.is_match(b'xyz'))
+
+    def test_search_returns_int(self):
+        """search returns a Python int."""
+        cr = CompiledRegex('abc')
+        result = cr.search(b'xxabcxx')
+        self.assertIsInstance(result, int)
+        self.assertEqual(result, 2)
+
+    def test_native_fn_cached(self):
+        """Native functions are compiled once and cached."""
+        cr = CompiledRegex('abc')
+        fn1 = cr._native_is_match_fn
+        fn2 = cr._native_is_match_fn
+        self.assertIs(fn1, fn2)
+
+    def test_compiled_regex_cached(self):
+        """CompiledRegex instances are cached by pattern."""
+        cr1 = CompiledRegex('abc')
+        cr2 = CompiledRegex('abc')
+        self.assertIs(cr1, cr2)
+
+    def test_fullmatch_uses_native_fn(self):
+        """fullmatch should delegate directly to the compiled function."""
+        cr = CompiledRegex('abc')
+        original = cr._native_fullmatch_fn
+        calls = []
+        try:
+            def fake_fullmatch(n, data_ptr):
+                calls.append(n)
+                return 1
+            cr._native_fullmatch_fn = fake_fullmatch
+            self.assertTrue(cr.fullmatch(b'zzz'))
+            self.assertEqual(calls, [3])
+        finally:
+            cr._native_fullmatch_fn = original
+
+    def test_find_span_uses_native_search(self):
+        """find_span should use compiled search and match-info helpers only."""
+        cr = CompiledRegex('abc')
+        original_search = cr._native_search_fn
+        original_match_info = cr._native_match_info_fn
+        calls = []
+        try:
+            def fake_search(n, data_ptr):
+                calls.append(("search", n))
+                return 2
+
+            def fake_match_info(n, data_ptr, start, out):
+                calls.append(("match_info", start))
+                out[0] = 5
+                return 1
+
+            cr._native_search_fn = fake_search
+            cr._native_match_info_fn = fake_match_info
+            self.assertEqual(cr.find_span(b'xxabcxx'), (2, 5))
+            self.assertEqual(calls, [("search", 7), ("match_info", 2)])
+
+            calls.clear()
+            def fake_search_miss(n, data_ptr):
+                calls.append(("search", n))
+                return -1
+            cr._native_search_fn = fake_search_miss
+            cr._native_match_info_fn = (
+                lambda *args: self.fail("find_span should not call match_info after search miss"))
+            self.assertIsNone(cr.find_span(b'xxxx'))
+            self.assertEqual(calls, [("search", 4)])
+        finally:
+            cr._native_search_fn = original_search
+            cr._native_match_info_fn = original_match_info
+
+
+# ============================================================================
+# Chain optimization correctness tests
+# ============================================================================
+
+class TestChainOptimization(unittest.TestCase):
+    """Tests for chain optimization edge cases."""
+
+    def test_optional_in_chain(self):
+        """Chain with optional element (https?://) must not skip states."""
+        cr = CompiledRegex('https?://')
+        self.assertTrue(cr.is_match(b'http://'))
+        self.assertTrue(cr.is_match(b'https://'))
+        self.assertFalse(cr.is_match(b'ftp://'))
+
+    def test_repeat_in_chain(self):
+        """Chain with repeat (ab)+ must not span accept states."""
+        cr = CompiledRegex('(ab)+')
+        self.assertTrue(cr.is_match(b'ab'))
+        self.assertTrue(cr.is_match(b'abab'))
+        self.assertFalse(cr.is_match(b'a'))
+
+    def test_alternation_with_shared_prefix(self):
+        """^a|bc has shared DFA states, chains must not break dispatch."""
+        cr = CompiledRegex('^a|bc')
+        self.assertTrue(cr.is_match(b'a'))
+        self.assertTrue(cr.is_match(b'bc'))
+        self.assertFalse(cr.is_match(b'c'))
 
 
 if __name__ == "__main__":

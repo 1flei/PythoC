@@ -4,7 +4,8 @@ Compile-time regex parser.
 Parses regex pattern strings into an AST representation.
 Supports: literals, concatenation, alternation, quantifiers (?*+),
 character classes ([abc], [a-z], [^abc]), dot (.), grouping (()),
-anchors (^$), escape sequences (\\d, \\w, \\s, \\\\, \\., etc.).
+anchors (^$), zero-width tags ({name}), escape sequences
+(\\d, \\w, \\s, \\\\, \\., etc.).
 """
 
 from __future__ import annotations
@@ -50,10 +51,12 @@ class Repeat:
     """Quantifier applied to a sub-expression.
 
     min_count / max_count: None means unbounded.
+    lazy: if True, prefer shortest match. Public syntax is lazy by default.
     """
     child: object
     min_count: int
     max_count: Optional[int]  # None = unbounded
+    lazy: bool = True
 
 @dataclass
 class Group:
@@ -64,6 +67,12 @@ class Group:
 class Anchor:
     """^ (start) or $ (end) anchor."""
     kind: str  # 'start' or 'end'
+
+
+@dataclass
+class Tag:
+    """Zero-width named position marker: {tag_name}."""
+    name: str
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +212,25 @@ class _Parser:
         pk = self._peek()
         if pk == '?':
             self._advance()
-            return Repeat(child=child, min_count=0, max_count=1)
+            if self._peek() == '?':
+                raise ParseError(
+                    f"Explicit lazy suffix '??' is not supported at position "
+                    f"{self.pos - 1} in /{self.pattern}/; '?' is already lazy by default")
+            return Repeat(child=child, min_count=0, max_count=1, lazy=True)
         elif pk == '*':
             self._advance()
-            return Repeat(child=child, min_count=0, max_count=None)
+            if self._peek() == '?':
+                raise ParseError(
+                    f"Explicit lazy suffix '*?' is not supported at position "
+                    f"{self.pos - 1} in /{self.pattern}/; '*' is already lazy by default")
+            return Repeat(child=child, min_count=0, max_count=None, lazy=True)
         elif pk == '+':
             self._advance()
-            return Repeat(child=child, min_count=1, max_count=None)
+            if self._peek() == '?':
+                raise ParseError(
+                    f"Explicit lazy suffix '+?' is not supported at position "
+                    f"{self.pos - 1} in /{self.pattern}/; '+' is already lazy by default")
+            return Repeat(child=child, min_count=1, max_count=None, lazy=True)
         return child
 
     def _parse_atom(self) -> object:
@@ -230,6 +251,8 @@ class _Parser:
         elif pk == '$':
             self._advance()
             return Anchor(kind='end')
+        elif pk == '{':
+            return self._parse_brace()
         elif pk == '\\':
             return self._parse_escape()
         elif pk in ('*', '+', '?', '|', ')'):
@@ -238,6 +261,35 @@ class _Parser:
         else:
             self._advance()
             return Literal(byte=ord(pk))
+
+    def _parse_brace(self) -> object:
+        """Parse {tag_name} or treat { as literal.
+
+        If the first char after { is alpha or underscore, parse as a tag
+        name until }. Numeric brace repeats are rejected explicitly in v1.
+        """
+        save_pos = self.pos
+        self._advance()  # consume '{'
+        pk = self._peek()
+        if pk is not None and pk.isdigit():
+            raise ParseError(
+                f"Numeric brace repeats are not supported at position {save_pos} "
+                f"in /{self.pattern}/; use {{name}} for zero-width tags")
+        if pk is not None and (pk.isalpha() or pk == '_'):
+            name_chars = []
+            while not self._at_end():
+                ch = self._peek()
+                if ch == '}':
+                    self._advance()  # consume '}'
+                    return Tag(name=''.join(name_chars))
+                if ch.isalnum() or ch == '_':
+                    name_chars.append(self._advance())
+                else:
+                    break
+        # Not a tag: restore position and treat { as literal.
+        self.pos = save_pos
+        self._advance()
+        return Literal(byte=ord('{'))
 
     def _parse_group(self) -> object:
         self._expect('(')
@@ -354,4 +406,35 @@ def parse(pattern: str) -> object:
 
     Raises ParseError on invalid patterns.
     """
-    return _Parser(pattern).parse()
+    node = _Parser(pattern).parse()
+    _validate_tags(node, pattern)
+    return node
+
+
+def _validate_tags(node, pattern: str) -> None:
+    """Validate public tag naming rules on the parsed AST."""
+    seen = set()
+    reserved_prefix = "__pythoc_internal_"
+
+    def walk(cur):
+        if isinstance(cur, Tag):
+            if cur.name in seen:
+                raise ParseError(
+                    f"Duplicate tag {{{cur.name}}} in /{pattern}/")
+            if cur.name.startswith(reserved_prefix):
+                raise ParseError(
+                    f"Tag name {{{cur.name}}} uses reserved internal prefix "
+                    f"'{reserved_prefix}' in /{pattern}/")
+            seen.add(cur.name)
+            return
+        if isinstance(cur, Group):
+            walk(cur.child)
+            return
+        if isinstance(cur, Repeat):
+            walk(cur.child)
+            return
+        if isinstance(cur, (Concat, Alternate)):
+            for child in cur.children:
+                walk(child)
+
+    walk(node)
