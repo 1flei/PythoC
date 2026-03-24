@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1773587985007,
+  "lastUpdate": 1774338175696,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1170,6 +1170,40 @@ window.BENCHMARK_DATA = {
             "name": "compile_speed",
             "value": 1.211,
             "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "96bbeffcd0407ea241254222abceb53bdc254ba2",
+          "message": "Unify the bma codegen",
+          "timestamp": "2026-03-24T15:36:45+08:00",
+          "tree_id": "2a5cdad401f89b94709377871d9ea96b0bb70ebc",
+          "url": "https://github.com/1flei/PythoC/commit/96bbeffcd0407ea241254222abceb53bdc254ba2"
+        },
+        "date": 1774338175341,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.81,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
           }
         ]
       }
