@@ -5,14 +5,13 @@ Usage:
     from pythoc.regex import compile
 
     r = compile("ab+c")
-    r.is_match(b"abbc")        # True
-    r.search(b"xxabbcxx")      # 2
-    r.find_span(b"xxabbcxx")   # (2, 6)
-    r.fullmatch(b"abbc")       # True
+    r.match(b"abbc")            # (True, {})
+    r.search(b"xxabbcxx")       # (True, {'start': 2, 'end': 6})
 
-For @compile function generation:
-    is_match_fn = r.generate_is_match_fn()
-    search_fn = r.generate_search_fn()
+    # With tags:
+    r = compile("{s}a+{e}")
+    r.match(b"aaa")             # (True, {'s': 0, 'e': 3})
+    r.search(b"xxaaaxx")        # (True, {'start': 2, 'end': 5, 's': 2, 'e': 5})
 """
 
 from __future__ import annotations
@@ -26,9 +25,14 @@ def compile(pattern: str, mode: str = "both") -> CompiledRegex:
     Args:
         pattern: The regex pattern string (must be a compile-time constant).
         mode: Which execution modes to compile.
-            ``"match"``  — only ``is_match`` / ``fullmatch``
-            ``"search"`` — only ``search`` / ``find_span`` / ``find_with_tags``
+            ``"match"``  — only ``match()`` available (anchored)
+            ``"search"`` — only ``search()`` available (unanchored)
             ``"both"``   — (default) all methods available
+
+    Both ``match`` and ``search`` return ``(bool, dict)``.  The bool
+    indicates whether a match was found, and the dict maps tag names
+    to byte positions.  ``search`` additionally includes ``'start'``
+    and ``'end'`` keys in the result dict.
 
     Supported syntax:
       - Literal characters: a, b, 0
