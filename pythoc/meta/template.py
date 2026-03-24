@@ -370,7 +370,8 @@ class MetaTemplate:
     """
 
     def __init__(self, kind, source, template_ast, param_names,
-                 user_globals, origin_file=None, origin_line=None):
+                 user_globals, origin_file=None, origin_line=None,
+                 debug_source_enabled=True):
         self.kind = kind
         self.source = source
         self.template_ast = template_ast
@@ -378,6 +379,7 @@ class MetaTemplate:
         self.user_globals = dict(user_globals) if user_globals else {}
         self.origin_file = origin_file
         self.origin_line = origin_line
+        self.debug_source_enabled = debug_source_enabled
 
     def instantiate(self, *args, **kwargs):
         """Produce a MetaFragment by substituting holes with arguments.
@@ -440,13 +442,14 @@ class MetaTemplate:
 
         # Generate debug source
         debug_source = None
-        try:
-            if isinstance(result, list):
-                debug_source = '\n'.join(ast.unparse(n) for n in result)
-            else:
-                debug_source = ast.unparse(result)
-        except Exception:
-            pass
+        if self.debug_source_enabled:
+            try:
+                if isinstance(result, list):
+                    debug_source = '\n'.join(ast.unparse(n) for n in result)
+                else:
+                    debug_source = ast.unparse(result)
+            except Exception:
+                pass
 
         fragment = MetaFragment(
             kind=self.kind,
@@ -494,7 +497,7 @@ def _capture_caller_globals(depth=2):
         del frame
 
 
-def _make_template(func, kind):
+def _make_template(func, kind, debug_source=True):
     """Internal: create a MetaTemplate from a decorated function.
 
     The function's parameters define the template holes. The body
@@ -582,6 +585,7 @@ def _make_template(func, kind):
         user_globals=user_globals,
         origin_file=origin_file,
         origin_line=origin_line,
+        debug_source_enabled=debug_source,
     )
 
 
@@ -602,9 +606,9 @@ def quote_expr(func=None, *, debug_source=True):
     """
     if func is None:
         def decorator(f):
-            return _make_template(f, FragmentKind.EXPR)
+            return _make_template(f, FragmentKind.EXPR, debug_source=debug_source)
         return decorator
-    return _make_template(func, FragmentKind.EXPR)
+    return _make_template(func, FragmentKind.EXPR, debug_source=debug_source)
 
 
 def quote_stmt(func=None, *, debug_source=True):
@@ -614,9 +618,9 @@ def quote_stmt(func=None, *, debug_source=True):
     """
     if func is None:
         def decorator(f):
-            return _make_template(f, FragmentKind.STMT)
+            return _make_template(f, FragmentKind.STMT, debug_source=debug_source)
         return decorator
-    return _make_template(func, FragmentKind.STMT)
+    return _make_template(func, FragmentKind.STMT, debug_source=debug_source)
 
 
 def quote_stmts(func=None, *, debug_source=True):
@@ -633,9 +637,9 @@ def quote_stmts(func=None, *, debug_source=True):
     """
     if func is None:
         def decorator(f):
-            return _make_template(f, FragmentKind.STMTS)
+            return _make_template(f, FragmentKind.STMTS, debug_source=debug_source)
         return decorator
-    return _make_template(func, FragmentKind.STMTS)
+    return _make_template(func, FragmentKind.STMTS, debug_source=debug_source)
 
 
 def quote_func(func=None, *, debug_source=True):
@@ -655,9 +659,9 @@ def quote_func(func=None, *, debug_source=True):
     """
     if func is None:
         def decorator(f):
-            return _make_template(f, FragmentKind.FUNC)
+            return _make_template(f, FragmentKind.FUNC, debug_source=debug_source)
         return decorator
-    return _make_template(func, FragmentKind.FUNC)
+    return _make_template(func, FragmentKind.FUNC, debug_source=debug_source)
 
 
 def quote_module(func=None, *, debug_source=True):
@@ -667,6 +671,6 @@ def quote_module(func=None, *, debug_source=True):
     """
     if func is None:
         def decorator(f):
-            return _make_template(f, FragmentKind.MODULE)
+            return _make_template(f, FragmentKind.MODULE, debug_source=debug_source)
         return decorator
-    return _make_template(func, FragmentKind.MODULE)
+    return _make_template(func, FragmentKind.MODULE, debug_source=debug_source)

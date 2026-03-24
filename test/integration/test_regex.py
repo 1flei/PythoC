@@ -263,6 +263,11 @@ class TestRegexTags(unittest.TestCase):
         self.assertEqual(r.find_with_tags(b"za"), {"start": 1, "end": 2, "x": 1})
         self.assertEqual(r.find_with_tags(b"zbc"), {"start": 1, "end": 3, "y": 1})
 
+    def test_loop_phase_tags(self):
+        r = regex_compile("(ab)*{mid}cde")
+        self.assertEqual(r.find_with_tags(b"zzababcdezz"),
+                         {"start": 2, "end": 9, "mid": 6})
+
 
 class TestRegexComplex(unittest.TestCase):
     """Test complex/real-world-like patterns."""

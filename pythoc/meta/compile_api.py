@@ -43,6 +43,7 @@ def compile_ast(
     debug_source=None,
     effect_suffix=None,
     effect_scope=None,
+    copy_ast=True,
 ):
     """Compile an ast.FunctionDef through the standard @compile lifecycle.
 
@@ -75,8 +76,9 @@ def compile_ast(
             "compile_ast expects ast.FunctionDef, got {}".format(type(fn_ast).__name__)
         )
 
-    # Deep-copy the AST so we don't mutate the caller's node
-    fn_ast = copy.deepcopy(fn_ast)
+    # Deep-copy the AST unless the caller guarantees ownership of a fresh node.
+    if copy_ast:
+        fn_ast = copy.deepcopy(fn_ast)
 
     # Apply name override
     if name is not None:
@@ -394,6 +396,7 @@ def compile_generated(
         source_file=source_file,
         source_code=fn.debug_source,
         start_line=fn.start_line,
+        copy_ast=False,
     )
 
 
