@@ -13,26 +13,25 @@ ast constructor boilerplate.
 
 from __future__ import annotations
 import ast
+import copy
 import ctypes
 import hashlib
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
+from functools import lru_cache
+from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from pythoc import meta
+from pythoc.meta.template import _coerce_to_ast as _meta_coerce_to_ast
 from pythoc.builtin_entities.types import i8, i32, i64, u8, u64, ptr
 from pythoc.builtin_entities.scoped_label import label, goto, goto_end
 
 from .dfa import DFA
 from .parse import (
-    parse, Dot, Concat, Repeat, Anchor, Tag,
+    parse, Dot, Concat, Repeat, Tag,
 )
-from .nfa import build_nfa, NFA
+from .nfa import build_nfa
 from .dfa import build_dfa
-from .analysis import (analyze_pattern, compute_accept_depths,
-                       find_linear_chains, compute_skip_table,
-                       compute_state_skips,
-                       PatternInfo, AcceptDepthInfo, LinearChain, SkipInfo,
-                       StateSkipInfo)
+from . import opcs
 
 
 INTERNAL_TAG_PREFIX = "__pythoc_internal_"
@@ -95,24 +94,27 @@ def compile_search_dfa_from_ast(re_ast):
     return build_dfa(nfa)
 
 
-def compile_reverse_dfa(pattern: str):
-    """Build a reverse DFA for start-position recovery.
+def _filter_tag_runtime_slots(tag_runtime: opcs.DFATagRuntime,
+                              excluded_slots: FrozenSet[int]) -> opcs.DFATagRuntime:
+    """Keep the slot layout but remove dynamic writes for selected slots."""
+    if not excluded_slots:
+        return tag_runtime
 
-    The reverse DFA matches pattern content backward over real bytes.
-    Anchor sentinels (256=^, 257=$) are positional constraints already
-    enforced by the forward search DFA, so reverse_nfa skips them.
-    """
-    re_ast = parse(pattern)
-    nfa = build_nfa(re_ast)
-    rev_nfa = reverse_nfa(nfa)
-    return build_dfa(rev_nfa)
-
-
-def compile_reverse_dfa_from_ast(re_ast):
-    """Build a reverse DFA from AST."""
-    nfa = build_nfa(re_ast)
-    rev_nfa = reverse_nfa(nfa)
-    return build_dfa(rev_nfa)
+    return opcs.DFATagRuntime(
+        tag_names=tag_runtime.tag_names,
+        public_tag_names=tag_runtime.public_tag_names,
+        tag_slots=tag_runtime.tag_slots,
+        transition_tag_slots={
+            key: tuple(slot for slot in slots if slot not in excluded_slots)
+            for key, slots in tag_runtime.transition_tag_slots.items()
+            if any(slot not in excluded_slots for slot in slots)
+        },
+        accept_tag_slots={
+            state: tuple(slot for slot in slots if slot not in excluded_slots)
+            for state, slots in tag_runtime.accept_tag_slots.items()
+            if any(slot not in excluded_slots for slot in slots)
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,46 +181,9 @@ def _tpl_lt(lhs, rhs):
     return lhs < rhs
 
 
-@meta.quote_expr
-def _tpl_data_byte_at(idx_expr):
-    return i32(data[idx_expr]) & 0xFF
-
-
 # ---------------------------------------------------------------------------
 # Quasi-quote structural templates (large skeletons)
 # ---------------------------------------------------------------------------
-
-@meta.quote_stmts
-def _tpl_state_machine(start_state_val, dead_state_val, i_start,
-                        dispatch, accept_check):
-    """DFA state machine that breaks on dead state.
-
-    accept_check is spliced between dispatch and dead-state break,
-    allowing early return when an accept state is reached mid-scan.
-    """
-    state: i32 = i32(start_state_val)
-    i: u64 = i_start
-    while i < n:
-        ch: i32 = i32(data[i]) & 0xFF
-        dispatch
-        accept_check
-        if state == i32(dead_state_val):
-            break
-        i = i + 1
-
-
-@meta.quote_stmts
-def _tpl_existing_state_machine(dead_state_val, i_start, dispatch, accept_check):
-    """State machine loop when `state` is initialized externally."""
-    i: u64 = i_start
-    while i < n:
-        ch: i32 = i32(data[i]) & 0xFF
-        dispatch
-        accept_check
-        if state == i32(dead_state_val):
-            return u8(0)
-        i = i + 1
-
 
 @meta.quote_stmt
 def _tpl_if(test_expr, then_body):
@@ -260,61 +225,9 @@ def _tpl_goto(label_name):
     goto(label_name)
 
 
-@meta.quote_stmts
-def _tpl_goto_state_preamble(done_label_name):
-    """Bounds check + byte load for a goto FSM state block."""
-    if i >= n:
-        goto(done_label_name)
-    ch: i32 = i32(data[i]) & 0xFF
-
-
-@meta.quote_stmts
-def _tpl_advance_goto(label_name):
-    """Advance i by 1 and jump to label_name."""
-    i = i + u64(1)
-    goto(label_name)
-
-
-@meta.quote_stmts
-def _tpl_accept_1pass(neg_depth):
-    """1-pass search accept: advance i, return start = i - depth."""
-    i = i + u64(1)
-    return i64(i + neg_depth)
-
-
-@meta.quote_stmts
-def _tpl_accept_return_match_start():
-    """1-pass search accept: return tracked match_start."""
-    return match_start
-
-
-@meta.quote_stmts
-def _tpl_set_match_start():
-    """Set match_start = i64(i) at restart-to-pattern transition."""
-    match_start = i64(i)
-
-
-@meta.quote_stmts
-def _tpl_skip_advance(skip_dist_val, label_name):
-    """Advance i by skip distance and jump to label_name."""
-    i = i + u64(skip_dist_val)
-    goto(label_name)
-
-
 @meta.quote_stmt
 def _tpl_pass():
     pass
-
-
-@meta.quote_stmts
-def _tpl_goto_search_program(init_match_start, goto_start, label_blocks, miss_return):
-    """Top-level skeleton for goto-based search codegen."""
-    i: u64 = u64(0)
-    match_start: i64 = i64(-1)
-    init_match_start
-    goto_start
-    label_blocks
-    miss_return
 
 
 @meta.quote_stmts
@@ -331,6 +244,22 @@ def _tpl_load_byte_as(var_name, idx_expr):
     var_name: i32 = i32(data[idx_expr]) & 0xFF
 
 
+@meta.quote_stmts
+def _tpl_bma_fsm_program(init_body, goto_start, label_blocks, fallback_return):
+    init_body
+    goto_start
+    label_blocks
+    fallback_return
+
+
+# These templates are instantiated heavily during regex codegen; skip
+# fragment-level debug_source synthesis to keep Python-side build time low.
+for _tpl_name, _tpl in list(globals().items()):
+    if _tpl_name.startswith('_tpl_') and hasattr(_tpl, 'debug_source_enabled'):
+        _tpl.debug_source_enabled = False
+del _tpl_name, _tpl
+
+
 # ---------------------------------------------------------------------------
 # Convenience wrappers (template call -> raw AST node)
 # ---------------------------------------------------------------------------
@@ -340,72 +269,123 @@ def _q(template, *args):
     return template(*args).node
 
 
+def _coerce_expr(value) -> ast.expr:
+    """Coerce a template helper or AST node into a fresh expression node."""
+    if isinstance(value, ast.AST):
+        return copy.deepcopy(value)
+    return _meta_coerce_to_ast(value, {})
+
+
+def _raw_call(func_name: str, *args) -> ast.Call:
+    return ast.Call(
+        func=ast.Name(id=func_name, ctx=ast.Load()),
+        args=[_coerce_expr(arg) for arg in args],
+        keywords=[],
+    )
+
+
 def _q_i32(v):
     """i32(v) expression."""
-    return _q(_tpl_i32, meta.const(v))
+    return _raw_call('i32', v)
 
 
 def _q_u8(v):
     """u8(v) expression."""
-    return _q(_tpl_u8, meta.const(v))
+    return _raw_call('u8', v)
 
 
 def _q_i64(v):
     """i64(v) expression."""
-    return _q(_tpl_i64, v)
+    return _raw_call('i64', v)
 
 
 def _q_eq(lhs, rhs):
     """lhs == rhs expression."""
-    return _q(_tpl_eq, lhs, rhs)
+    return ast.Compare(
+        left=_coerce_expr(lhs),
+        ops=[ast.Eq()],
+        comparators=[_coerce_expr(rhs)],
+    )
 
 
 def _q_lte(lhs, rhs):
     """lhs <= rhs expression."""
-    return _q(_tpl_lte, lhs, rhs)
+    return ast.Compare(
+        left=_coerce_expr(lhs),
+        ops=[ast.LtE()],
+        comparators=[_coerce_expr(rhs)],
+    )
 
 
 def _q_gte(lhs, rhs):
     """lhs >= rhs expression."""
-    return _q(_tpl_gte, lhs, rhs)
+    return ast.Compare(
+        left=_coerce_expr(lhs),
+        ops=[ast.GtE()],
+        comparators=[_coerce_expr(rhs)],
+    )
 
 
 def _q_add(lhs, rhs):
     """lhs + rhs expression."""
-    return _q(_tpl_add, lhs, rhs)
+    return ast.BinOp(
+        left=_coerce_expr(lhs),
+        op=ast.Add(),
+        right=_coerce_expr(rhs),
+    )
 
 
 def _q_and(lhs, rhs):
     """lhs and rhs expression."""
-    return _q(_tpl_and, lhs, rhs)
+    return ast.BoolOp(
+        op=ast.And(),
+        values=[_coerce_expr(lhs), _coerce_expr(rhs)],
+    )
 
 
 def _q_sub(lhs, rhs):
     """lhs - rhs expression."""
-    return _q(_tpl_sub, lhs, rhs)
+    return ast.BinOp(
+        left=_coerce_expr(lhs),
+        op=ast.Sub(),
+        right=_coerce_expr(rhs),
+    )
 
 
 def _q_lt(lhs, rhs):
     """lhs < rhs expression."""
-    return _q(_tpl_lt, lhs, rhs)
+    return ast.Compare(
+        left=_coerce_expr(lhs),
+        ops=[ast.Lt()],
+        comparators=[_coerce_expr(rhs)],
+    )
 
 
 def _q_or_chain(parts):
     """Chain parts with 'or'. Returns single part if length 1."""
-    result = parts[0]
+    result = _coerce_expr(parts[0])
     for p in parts[1:]:
-        result = _q(_tpl_or, result, p)
+        result = ast.BoolOp(
+            op=ast.Or(),
+            values=[result, _coerce_expr(p)],
+        )
     return result
 
 
 def _q_return(val):
     """return val statement."""
-    return _q(_tpl_return, val)
+    return ast.Return(value=_coerce_expr(val))
 
 
 def _q_assign(target, value):
     """target = value statement."""
-    return _q(_tpl_assign, target, value)
+    target_expr = _coerce_expr(target)
+    if hasattr(target_expr, 'ctx'):
+        target_expr.ctx = ast.Store()
+    return ast.Assign(
+        targets=[target_expr],
+        value=_coerce_expr(value),
+    )
 
 
 def _splice(stmts):
@@ -421,31 +401,6 @@ def _q_label_block(label_name: str, body: List[ast.stmt]):
 def _q_goto(label_name: str):
     """goto(label_name) statement."""
     return _q(_tpl_goto, meta.const(label_name))
-
-
-def _q_advance_goto(label_name: str):
-    """i = i + u64(1); goto(label_name)"""
-    return _q(_tpl_advance_goto, meta.const(label_name))
-
-
-def _q_accept_1pass(depth: int):
-    """i = i + u64(1); return i64(i + (-depth))"""
-    return _q(_tpl_accept_1pass, meta.const(-depth))
-
-
-def _q_accept_return_match_start():
-    """return match_start"""
-    return _q(_tpl_accept_return_match_start)
-
-
-def _q_set_match_start():
-    """match_start = i64(i)"""
-    return _q(_tpl_set_match_start)
-
-
-def _q_skip_advance(skip_dist: int, label_name: str):
-    """i = i + u64(skip_dist); goto(label_name)"""
-    return _q(_tpl_skip_advance, meta.const(skip_dist), meta.const(label_name))
 
 
 def _q_pass():
@@ -470,21 +425,6 @@ def _body_or_pass(node_or_nodes) -> List[ast.stmt]:
     return [_q_pass()]
 
 
-def _q_compile_time_if(flag: bool, body) -> ast.stmt:
-    """Emit a compile-time-constant if statement."""
-    return _q(_tpl_if, meta.const(bool(flag)), _splice(_body_or_pass(body)))
-
-
-def _q_compile_time_if_else(flag: bool, then_body, else_body) -> ast.stmt:
-    """Emit a compile-time-constant if/else statement."""
-    return _q(
-        _tpl_if_else,
-        meta.const(bool(flag)),
-        _splice(_body_or_pass(then_body)),
-        _splice(_body_or_pass(else_body)),
-    )
-
-
 def _raw_name(name: str, ctx) -> ast.Name:
     return ast.Name(id=name, ctx=ctx)
 
@@ -501,6 +441,15 @@ def _q_ptr_assign(ptr_name: str, idx_expr: ast.expr, value_expr: ast.expr) -> as
     return ast.Assign(
         targets=[_raw_subscript(ptr_name, idx_expr, ast.Store())],
         value=value_expr,
+    )
+
+
+def _raw_if(test_expr: ast.expr, then_body, else_body=None) -> ast.If:
+    """Construct a raw ``ast.If`` without template instantiation overhead."""
+    return ast.If(
+        test=test_expr,
+        body=_body_or_pass(then_body),
+        orelse=_stmt_list(else_body),
     )
 
 
@@ -522,344 +471,26 @@ def _if_elif_chain(branches, else_body=None):
     for idx in range(len(branches) - 1, -1, -1):
         test, body = branches[idx]
         if result is None and not else_body:
-            result = _q(_tpl_if, test, _splice(body))
+            result = _raw_if(test, body)
         elif result is None:
-            result = _q(_tpl_if_else, test, _splice(body),
-                        _splice(list(else_body)))
+            result = _raw_if(test, body, list(else_body))
         else:
-            result = _q(_tpl_if_else, test, _splice(body),
-                        _splice([result]))
+            result = _raw_if(test, body, [result])
     return result
-
-
-# ---------------------------------------------------------------------------
-# Label/goto helpers (for goto FSM state machine)
-# ---------------------------------------------------------------------------
-
-def _state_label(state: int) -> str:
-    """Label name for a DFA state."""
-    return "s{}".format(state)
-
-
-# ---------------------------------------------------------------------------
-# Goto FSM builder for forward search
-# ---------------------------------------------------------------------------
-
-def _build_goto_forward_search(search_dfa: DFA,
-                                accept_depths: AcceptDepthInfo = None,
-                                skip_info: SkipInfo = None,
-                                state_skips: Dict[int, StateSkipInfo] = None,
-                                restart_states: Set[int] = None,
-                                ) -> List[ast.stmt]:
-    """Build goto-based forward search FSM for search DFA.
-
-    Each DFA state becomes a labeled block with direct goto transitions.
-    This compiles to LLVM basic blocks with br instructions -- no state
-    variable, no if/elif dispatch overhead.
-
-    Uses restart-state classification to track match_start at runtime.
-    Restart states are search DFA states with self-loops on >= 128 bytes
-    (the .*? prefix). When transitioning from restart to non-restart,
-    match_start = i64(i).
-
-    When skip_info is available (W >= 2), state 0 gets a skip-probe
-    prefix that enables O(n/W) scanning.
-    """
-    if restart_states is None:
-        restart_states = set()
-
-    # Compute effective start after sentinel 256 (compile-time)
-    effective_start = search_dfa.transitions[search_dfa.start_state][search_dfa.sentinel_256_class]
-
-    if effective_start in search_dfa.accept_states:
-        return [_q_return(_q_i64(meta.const(0)))]
-    if effective_start == search_dfa.dead_state:
-        return [_q_return(_q_i64(meta.const(-1)))]
-
-    active_states = _get_active_states(search_dfa)
-    done_label = "rx_done"
-
-    # Ensure effective_start is in active_states
-    if effective_start not in active_states and effective_start != search_dfa.dead_state:
-        active_states.append(effective_start)
-        active_states.sort()
-
-    init_match_start = _q_compile_time_if(
-        effective_start not in restart_states,
-        [_q_assign(meta.ref('match_start'), _q_i64(meta.const(0)))],
-    )
-
-    goto_start = _q_goto(_state_label(effective_start))
-
-    label_blocks = []
-    for s in active_states:
-        label_name = _state_label(s)
-        body = _build_goto_state_body(
-            search_dfa, s, active_states, done_label,
-            skip_info=skip_info if s == search_dfa.start_state else None,
-            state_skip=state_skips.get(s) if state_skips else None,
-            restart_states=restart_states,
-        )
-        label_blocks.append(_q_label_block(label_name, body))
-
-    label_blocks.append(_q_label_block(done_label, [_q_pass()]))
-
-    return _q(
-        _tpl_goto_search_program,
-        _splice([init_match_start]),
-        _splice([goto_start]),
-        _splice(label_blocks),
-        _splice([_q_return(_q_i64(meta.const(-1)))]),
-    )
-
-
-def _build_goto_state_body(dfa: DFA, state: int,
-                            active_states: List[int],
-                            done_label: str,
-                            skip_info: SkipInfo = None,
-                            state_skip: StateSkipInfo = None,
-                            restart_states: Set[int] = None,
-                            ) -> List[ast.stmt]:
-    """Build the body of a single state's label block in the goto FSM.
-
-    The body: bounds check (with sentinel 257 check), optional skip probe,
-    byte load, transitions with match_start tracking, accept handling.
-
-    Restart-state tracking: when transitioning from a restart state to a
-    non-restart state, emits match_start = i64(i) before the goto.
-    On accept: returns match_start immediately.
-
-    skip_info: global skip table (Boyer-Moore, start state only).
-    state_skip: per-state skip probe from compute_state_skips().
-    """
-    if restart_states is None:
-        restart_states = set()
-
-    state_is_restart = state in restart_states
-    skip_probe_stmt = _q_compile_time_if_else(
-        skip_info is not None and skip_info.window >= 2,
-        _build_skip_probe(dfa, state, skip_info) if skip_info is not None else [],
-        _build_state_skip_probe(dfa, state, state_skip) if state_skip is not None else [],
-    )
-
-    # --- Bounds check: when i >= n, check sentinel 257 then done ---
-    end_target = dfa.transitions[state][dfa.sentinel_257_class]
-    eof_guard_stmt = _q_compile_time_if_else(
-        end_target in dfa.accept_states,
-        [_q(_tpl_if, _q_gte(meta.ref('i'), meta.ref('n')),
-            _splice([_q_return(meta.ref('match_start'))]))],
-        [_q(_tpl_if, _q_gte(meta.ref('i'), meta.ref('n')),
-            _splice([_q_goto(done_label)]))],
-    )
-
-    load_byte_stmt = _q(_tpl_load_byte_as, meta.ident('ch'), meta.ref('i'))
-
-    # --- Byte transitions ---
-    trans = _byte_transitions_for_state(dfa, state)
-    t_branches = []
-    for target, byte_vals in trans.items():
-        cond = _byte_condition(byte_vals, 'ch')
-        target_label = _state_label(target)
-        target_is_restart = target in restart_states
-        set_match_start = _q_compile_time_if(
-            state_is_restart and not target_is_restart,
-            _q_set_match_start(),
-        )
-
-        if target in dfa.accept_states:
-            # Accept state reached
-            # If transitioning from restart to non-restart (accept),
-            # set match_start first
-            t_body = [set_match_start]
-            t_body.extend(_stmt_list(_q_accept_return_match_start()))
-        elif target == dfa.dead_state:
-            # Dead state: partial match failed
-            t_body = [_q_goto(done_label)]
-        elif target in active_states:
-            # Normal transition: track match_start, advance i, goto target
-            t_body = [set_match_start]
-            t_body.extend(_stmt_list(_q_advance_goto(target_label)))
-        else:
-            # Target not in active states -> dead
-            t_body = [_q_goto(done_label)]
-
-        t_branches.append((cond, t_body))
-
-    default_transition_body = _stmt_list(_q_compile_time_if_else(
-        state == dfa.start_state,
-        _q_advance_goto(_state_label(dfa.start_state)),
-        [_q_goto(_state_label(dfa.start_state))],
-    ))
-    transition_chain_body = (
-        [_if_elif_chain(t_branches, else_body=default_transition_body)]
-        if t_branches else
-        [_q_pass()]
-    )
-
-    transition_stmt = _q_compile_time_if_else(
-        bool(t_branches),
-        transition_chain_body,
-        [_q_goto(done_label)],
-    )
-
-    return _q(
-        _tpl_goto_state_program,
-        _splice([skip_probe_stmt]),
-        _splice([eof_guard_stmt]),
-        _splice([load_byte_stmt]),
-        _splice([transition_stmt]),
-    )
-
-
-def _build_skip_probe(dfa: DFA, state: int,
-                       skip_info: SkipInfo) -> List[ast.stmt]:
-    """Build skip-table probe code for state 0 of the goto FSM.
-
-    Probes data[i + W-1] and uses the skip table to jump ahead when
-    the probe byte cannot appear at the last position of any match window.
-
-    The probe is wrapped in a bounds check: if i + W <= n.
-    """
-    W = skip_info.window
-    skip_table = skip_info.skip_table
-    state_label = _state_label(state)
-
-    # Group bytes by skip distance
-    skip_groups: Dict[int, List[int]] = {}
-    for byte_val in range(256):
-        skip_dist = skip_table[byte_val]
-        skip_groups.setdefault(skip_dist, []).append(byte_val)
-
-    # If no bytes have skip > 0, skip probe is useless
-    has_useful_skip = any(d > 0 for d in skip_groups)
-    if not has_useful_skip:
-        return []
-
-    # Find the most common skip distance (for the else branch)
-    max_count_dist = max(skip_groups, key=lambda d: len(skip_groups[d]))
-
-    # Build probe body
-    probe_body = []
-
-    # probe: i32 = i32(data[i + u64(W-1)]) & 0xFF
-    probe_idx = _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(W - 1)))
-    probe_body.append(_q(_tpl_load_byte_as, meta.ident('probe'), probe_idx))
-
-    # Build if/elif chain on probe byte, grouped by skip distance
-    # Put skip==0 as fall-through (pass), non-zero skips branch back to s0
-    branches = []
-    for skip_dist in sorted(skip_groups.keys()):
-        if skip_dist == max_count_dist:
-            continue  # this goes in the else branch
-        byte_vals = skip_groups[skip_dist]
-        cond = _byte_condition(byte_vals, 'probe')
-        if skip_dist == 0:
-            # Fall through to normal processing
-            branch_body = [ast.Pass()]
-        else:
-            branch_body = _q_skip_advance(skip_dist, state_label)
-        branches.append((cond, branch_body))
-
-    # Else branch: the most common skip distance
-    if max_count_dist == 0:
-        else_body = [ast.Pass()]
-    else:
-        else_body = _q_skip_advance(max_count_dist, state_label)
-
-    if branches:
-        probe_body.append(_if_elif_chain(branches, else_body=else_body))
-    else:
-        # Only the default skip distance exists
-        probe_body.extend(else_body)
-
-    # Wrap in bounds check: if i + u64(W) <= n:
-    bounds = _q_lte(
-        _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(W))),
-        meta.ref('n'))
-
-    return [_q(_tpl_if, bounds, _splice(probe_body))]
-
-
-def _build_state_skip_probe(dfa: DFA, state: int,
-                             state_skip: StateSkipInfo) -> List[ast.stmt]:
-    """Build per-state skip probe code for the goto FSM.
-
-    Similar to _build_skip_probe but uses StateSkipInfo from
-    compute_state_skips() instead of the global SkipInfo.
-
-    Probes data[i + offset] and checks if the byte is in live_bytes.
-    If not, advances i by shift and gotos back to the same state label.
-    """
-    offset = state_skip.offset
-    shift = state_skip.shift
-    live_bytes = state_skip.live_bytes
-    state_lbl = _state_label(state)
-
-    if shift <= 0 or len(live_bytes) >= 256:
-        return []
-
-    # Build probe body
-    probe_body = []
-
-    # probe: i32 = i32(data[i + u64(offset)]) & 0xFF
-    probe_idx = _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(offset)))
-    probe_body.append(_q(_tpl_load_byte_as, meta.ident('probe'), probe_idx))
-
-    # Build condition: probe NOT in live_bytes -> skip ahead
-    # We check the complement: if probe is in live_bytes, fall through.
-    # Otherwise, advance by shift and goto back to this state.
-    dead_bytes = sorted(set(range(256)) - live_bytes)
-    if not dead_bytes:
-        return []
-
-    dead_cond = _byte_condition(dead_bytes, 'probe')
-    skip_body = _q_skip_advance(shift, state_lbl)
-    probe_body.append(_q(_tpl_if, dead_cond, _splice(skip_body)))
-
-    # Wrap in bounds check: if i + u64(offset + 1) <= n:
-    bounds = _q_lte(
-        _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(offset + 1))),
-        meta.ref('n'))
-
-    return [_q(_tpl_if, bounds, _splice(probe_body))]
-
-
-def _byte_transitions_for_state(dfa: DFA, state: int) -> Dict[int, List[int]]:
-    """For a DFA state, return {target_state: [byte_values...]} mapping.
-
-    Only includes non-dead transitions. byte_values are the actual byte
-    values (0-255) that lead to the target state.
-    """
-    class_to_target = {}
-    for cls in range(dfa.num_classes):
-        target = dfa.transitions[state][cls]
-        if target != dfa.dead_state:
-            class_to_target[cls] = target
-
-    target_to_bytes: Dict[int, List[int]] = {}
-    for byte_val in range(256):
-        cls = dfa.class_map[byte_val]
-        if cls in class_to_target:
-            target = class_to_target[cls]
-            target_to_bytes.setdefault(target, []).append(byte_val)
-
-    return target_to_bytes
 
 
 # ---------------------------------------------------------------------------
 # Byte-condition builder
 # ---------------------------------------------------------------------------
 
-def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
-    """Build condition that checks if ch_name is in byte_values.
-
-    Uses range checks for contiguous ranges, individual comparisons
-    for small sets.
-    """
+@lru_cache(maxsize=None)
+def _byte_condition_template(byte_values: Tuple[int, ...],
+                             ch_name: str = "ch") -> ast.expr:
+    """Build and cache a byte-membership condition template."""
     if not byte_values:
         return meta.const(False)
 
-    sorted_vals = sorted(byte_values)
+    sorted_vals = list(byte_values)
 
     # Find contiguous ranges
     ranges = []
@@ -891,647 +522,482 @@ def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
     return _q_or_chain(parts)
 
 
-# ---------------------------------------------------------------------------
-# State dispatch builder (the dynamic if/elif part of the state machine)
-# ---------------------------------------------------------------------------
+def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
+    """Build condition that checks if ch_name is in byte_values.
 
-def _build_dispatch(dfa: DFA, active_states: List[int],
-                    state_var: str = 'state',
-                    ch_var: str = 'ch',
-                    chains: List[LinearChain] = None) -> ast.stmt:
-    """Build the state dispatch if/elif chain for the DFA loop body.
-
-    If chains is provided, chain start states emit memcmp-style
-    multi-byte comparisons instead of single-byte dispatch.
+    Uses range checks for contiguous ranges, individual comparisons
+    for small sets.
     """
-    # Build chain lookup: start_state -> chain
-    chain_map: Dict[int, LinearChain] = {}
-    chain_internal: Set[int] = set()
-    if chains:
-        # First, compute internal states and chain membership for each chain
-        chain_internals_map: Dict[int, Set[int]] = {}  # chain_start -> internal states
-        chain_members_map: Dict[int, Set[int]] = {}    # chain_start -> all member states
-        for c in chains:
-            internals = set()
-            members = {c.start_state}
-            current = c.start_state
-            for b_val in c.byte_sequence[:-1]:
-                target = dfa.transitions[current][dfa.class_map[b_val]]
-                if target != dfa.dead_state and target != current:
-                    internals.add(target)
-                    members.add(target)
-                    current = target
-            chain_internals_map[c.start_state] = internals
-            chain_members_map[c.start_state] = members
-
-        # Check each chain: if ANY internal state has incoming edges from
-        # outside the chain, the entire chain must be invalidated (not used
-        # for memcmp optimization).
-        incoming: Dict[int, Set[int]] = {}
-        all_internals = set()
-        for internals in chain_internals_map.values():
-            all_internals |= internals
-        for s in all_internals:
-            incoming[s] = set()
-        for src in range(dfa.num_states):
-            if src == dfa.dead_state:
-                continue
-            seen_targets: Set[int] = set()
-            for cls in range(dfa.num_classes):
-                target = dfa.transitions[src][cls]
-                if target in all_internals and target not in seen_targets:
-                    seen_targets.add(target)
-                    incoming[target].add(src)
-
-        valid_chains = []
-        for c in chains:
-            internals = chain_internals_map[c.start_state]
-            members = chain_members_map[c.start_state]
-            chain_valid = True
-            for s in internals:
-                if incoming[s] - members:
-                    chain_valid = False
-                    break
-            if chain_valid:
-                chain_map[c.start_state] = c
-                chain_internal |= internals
-                valid_chains.append(c)
-        chains = valid_chains
-
-    state_ref = meta.ref(state_var)
-    state_branches = []
-    for s in active_states:
-        # Skip chain-internal states
-        if s in chain_internal:
-            continue
-
-        test = _q_eq(state_ref, _q_i32(s))
-
-        if s in chain_map:
-            # Emit memcmp-style comparison for this chain
-            chain = chain_map[s]
-            body = _build_chain_compare(chain, dfa, state_var, ch_var)
-        else:
-            trans = _byte_transitions_for_state(dfa, s)
-            if not trans:
-                body = [_q_assign(meta.ref(state_var),
-                                  _q_i32(dfa.dead_state))]
-            else:
-                t_branches = []
-                for target, byte_vals in trans.items():
-                    cond = _byte_condition(byte_vals, ch_var)
-                    t_body = [_q_assign(meta.ref(state_var), _q_i32(target))]
-                    t_branches.append((cond, t_body))
-                t_else = [_q_assign(meta.ref(state_var),
-                                    _q_i32(dfa.dead_state))]
-                body = [_if_elif_chain(t_branches, else_body=t_else)]
-
-        state_branches.append((test, body))
-
-    state_else = [_q_assign(meta.ref(state_var), _q_i32(dfa.dead_state))]
-    return _if_elif_chain(state_branches, else_body=state_else)
-
-
-def _build_chain_compare(chain: LinearChain, dfa: DFA,
-                          state_var: str, ch_var: str) -> List[ast.stmt]:
-    """Build memcmp-style comparison for a linear chain.
-
-    Generates code like:
-        if ch == b0 and i + chain_len <= n:
-            if i32(data[i+1]) & 0xFF == b1 and
-               i32(data[i+2]) & 0xFF == b2 ...:
-                state = end_state
-                i = i + (chain_len - 1)
-            else:
-                state = dead
-        else:
-            state = dead
-    """
-    byte_seq = chain.byte_sequence
-    chain_len = len(byte_seq)
-
-    # First byte check (using ch which is already loaded)
-    first_byte_check = _q_eq(meta.ref(ch_var), meta.const(byte_seq[0]))
-
-    # Bounds check: i + chain_len <= n
-    bounds_check = _q_lte(
-        _q_add(meta.ref('i'), meta.const(chain_len)),
-        meta.ref('n'))
-
-    # Combined first-byte + bounds check
-    outer_test = _q_and(first_byte_check, bounds_check)
-
-    dead_body = [_q_assign(meta.ref(state_var), _q_i32(dfa.dead_state))]
-
-    if chain_len == 1:
-        # Single byte chain (shouldn't happen, chains are >= 2, but handle)
-        match_body = [
-            _q_assign(meta.ref(state_var), _q_i32(chain.end_state)),
-        ]
-        return [_q(_tpl_if_else, outer_test,
-                    _splice(match_body), _splice(dead_body))]
-
-    # Build remaining byte checks: data[i+1] == b1, data[i+2] == b2, ...
-    remaining_checks = []
-    for offset in range(1, chain_len):
-        idx_expr = _q_add(meta.ref('i'), meta.const(offset))
-        data_byte = _q(_tpl_data_byte_at, idx_expr)
-        remaining_checks.append(
-            _q_eq(data_byte, meta.const(byte_seq[offset])))
-
-    inner_test = remaining_checks[0]
-    for check in remaining_checks[1:]:
-        inner_test = _q_and(inner_test, check)
-
-    # On full match: state = end_state, i += chain_len - 1
-    match_body = [
-        _q_assign(meta.ref(state_var), _q_i32(chain.end_state)),
-        _q_assign(meta.ref('i'),
-                  _q_add(meta.ref('i'), meta.const(chain_len - 1))),
-    ]
-
-    inner_stmt = _q(_tpl_if_else, inner_test,
-                     _splice(match_body), _splice(dead_body))
-
-    return [_q(_tpl_if_else, outer_test,
-               _splice([inner_stmt]), _splice(dead_body))]
-
-
-# ---------------------------------------------------------------------------
-# Accept-check builder
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-# State machine builder
-# ---------------------------------------------------------------------------
-
-def _build_state_machine(dfa: DFA, i_start=None,
-                         accept_check_stmts=None,
-                         chains: List[LinearChain] = None) -> List[ast.stmt]:
-    """Build the full state machine using a quasi-quote skeleton.
-
-    Args:
-        dfa: The DFA.
-        i_start: AST expression for initial i value (default: u64(0)).
-        accept_check_stmts: Optional list of AST stmts inserted between
-            dispatch and dead-state break, for early accept detection.
-        chains: Optional list of LinearChains for memcmp optimization.
-    """
-    active_states = _get_active_states(dfa)
-
-    if not active_states:
-        dispatch = _q_assign(meta.ref('state'), _q_i32(dfa.dead_state))
-    else:
-        dispatch = _build_dispatch(dfa, active_states, chains=chains)
-
-    if i_start is None:
-        i_start = _q(_tpl_u64, meta.const(0))
-
-    if accept_check_stmts is None:
-        accept_check_stmts = []
-
-    return _q(_tpl_state_machine,
-              meta.const(dfa.start_state),
-              meta.const(dfa.dead_state),
-              i_start,
-              _splice([dispatch]),
-              _splice(accept_check_stmts))
-
-
-def _get_active_states(dfa: DFA) -> List[int]:
-    """Get sorted list of active (non-dead) DFA states."""
-    active_states = []
-    for s in range(dfa.num_states):
-        if s == dfa.dead_state:
-            continue
-        if _byte_transitions_for_state(dfa, s):
-            active_states.append(s)
-    for s in dfa.accept_states:
-        if s != dfa.dead_state and s not in active_states:
-            active_states.append(s)
-    active_states.sort()
-    return active_states
-
-
-# ---------------------------------------------------------------------------
-# Body builders: is_match
-
-# ---------------------------------------------------------------------------
-# Body builders: is_match
-# ---------------------------------------------------------------------------
-
-def _build_is_match_body(dfa: DFA,
-                          chains: List[LinearChain] = None,
-                          info: PatternInfo = None) -> List[ast.stmt]:
-    """Build the full body for an is_match function.
-
-    Uses sentinel protocol:
-    1. Compute effective_start = transitions[start][sentinel_256_class] (compile-time)
-    2. Run state machine from effective_start
-    3. After loop, check sentinel 257 transition for $ accept
-    """
-    stmts = []
-
-    # Compute effective start state after sentinel 256 (compile-time constant)
-    effective_start = dfa.transitions[dfa.start_state][dfa.sentinel_256_class]
-
-    # If effective start is dead, pattern can never match
-    if effective_start == dfa.dead_state:
-        return [_q_return(_q_u8(0))]
-
-    # If effective start is an accept state, matches empty string
-    if effective_start in dfa.accept_states:
-        return [_q_return(_q_u8(1))]
-
-    # Build in-loop accept check: if state reaches an accept state mid-scan
-    accept_check_stmts = []
-    state_ref = meta.ref('state')
-    accept_list = sorted(dfa.accept_states)
-    if accept_list:
-        branches = []
-        for s in accept_list:
-            branches.append((_q_eq(state_ref, _q_i32(s)),
-                             [_q_return(_q_u8(1))]))
-        accept_check_stmts = [_if_elif_chain(branches)]
-
-    # Build state machine starting from effective_start
-    active_states = _get_active_states(dfa)
-    dispatch = _build_dispatch(dfa, active_states, chains=chains) if active_states else \
-        _q_assign(meta.ref('state'), _q_i32(dfa.dead_state))
-
-    stmts.extend(_q(_tpl_state_machine,
-                     meta.const(effective_start),
-                     meta.const(dfa.dead_state),
-                     _q(_tpl_u64, meta.const(0)),
-                     _splice([dispatch]),
-                     _splice(accept_check_stmts)))
-
-    # After loop: check sentinel 257 transition per-state
-    # Must check ALL non-dead states, not just active_states, because
-    # some states (like the final state before $) may have no real byte
-    # transitions but do have a sentinel 257 transition to accept.
-    end_accept_branches = []
-    for s in range(dfa.num_states):
-        if s == dfa.dead_state:
-            continue
-        end_target = dfa.transitions[s][dfa.sentinel_257_class]
-        if end_target in dfa.accept_states:
-            end_accept_branches.append(
-                (_q_eq(state_ref, _q_i32(s)),
-                 [_q_return(_q_u8(1))]))
-    if end_accept_branches:
-        stmts.append(_if_elif_chain(end_accept_branches))
-
-    stmts.append(_q_return(_q_u8(0)))
-    return stmts
-
-
-def _build_fullmatch_body(dfa: DFA,
-                          chains: List[LinearChain] = None) -> List[ast.stmt]:
-    """Build the full body for a fullmatch function."""
-    stmts = []
-    effective_start = dfa.transitions[dfa.start_state][dfa.sentinel_256_class]
-
-    if effective_start == dfa.dead_state:
-        return [_q_return(_q_u8(0))]
-
-    active_states = _get_active_states(dfa)
-    dispatch = _build_dispatch(dfa, active_states, chains=chains) if active_states else \
-        _q_assign(meta.ref('state'), _q_i32(dfa.dead_state))
-
-    stmts.extend(_q(_tpl_state_machine,
-                     meta.const(effective_start),
-                     meta.const(dfa.dead_state),
-                     _q(_tpl_u64, meta.const(0)),
-                     _splice([dispatch]),
-                     _splice([])))
-
-    end_accept_branches = []
-    state_ref = meta.ref('state')
-    for s in range(dfa.num_states):
-        if s == dfa.dead_state:
-            continue
-        end_target = dfa.transitions[s][dfa.sentinel_257_class]
-        if end_target in dfa.accept_states:
-            end_accept_branches.append(
-                (_q_eq(state_ref, _q_i32(s)),
-                 [_q_return(_q_u8(1))]))
-    if end_accept_branches:
-        stmts.append(_if_elif_chain(end_accept_branches))
-
-    stmts.append(_q_return(_q_u8(0)))
-    return stmts
-
-
-def _emit_tag_slot_writes(tag_slots: Tuple[int, ...], pos_expr: ast.expr) -> List[ast.stmt]:
-    """Emit writes of i64(pos_expr) into out[1 + slot]."""
-    stmts: List[ast.stmt] = []
-    value_expr = _q_i64(pos_expr)
-    for slot in tag_slots:
-        stmts.append(_q_ptr_assign(
-            'out',
-            ast.Constant(1 + slot),
-            value_expr,
-        ))
-    return stmts
-
-
-def _emit_match_success(tag_runtime: DFATagRuntime, accept_state: int,
-                        end_pos_expr: ast.expr) -> List[ast.stmt]:
-    stmts: List[ast.stmt] = []
-    stmts.extend(_emit_tag_slot_writes(
-        tag_runtime.accept_tag_slots.get(accept_state, ()),
-        end_pos_expr,
+    if not byte_values:
+        return meta.const(False)
+    return copy.deepcopy(_byte_condition_template(
+        tuple(sorted(byte_values)),
+        ch_name,
     ))
-    stmts.append(_q_ptr_assign('out', ast.Constant(0), _q_i64(end_pos_expr)))
-    stmts.append(_q_return(_q_u8(1)))
-    return stmts
 
 
-def _tagged_transition_groups_for_state(dfa: DFA, state: int,
-                                        tag_runtime: DFATagRuntime
-                                        ) -> Dict[Tuple[int, Tuple[int, ...]], List[int]]:
-    """Group bytes by (target_state, transition_tag_slots)."""
-    groups: Dict[Tuple[int, Tuple[int, ...]], List[int]] = {}
-    for byte_val in range(256):
-        cls = dfa.class_map[byte_val]
-        target = dfa.transitions[state][cls]
-        if target == dfa.dead_state:
+def _compute_search_restart_states(search_dfa: DFA) -> FrozenSet[int]:
+    """Identify the `.*?`-prefix restart states in the search DFA."""
+    if search_dfa.sentinel_256_class < 0:
+        return frozenset()
+
+    effective_start = search_dfa.transitions[
+        search_dfa.start_state][search_dfa.sentinel_256_class]
+    if effective_start == search_dfa.dead_state:
+        return frozenset()
+
+    broad_self_loop = set()
+    for state in range(search_dfa.num_states):
+        if state == search_dfa.dead_state:
             continue
-        slots = tag_runtime.transition_tag_slots.get((state, cls), ())
-        groups.setdefault((target, slots), []).append(byte_val)
-    return groups
+        self_count = 0
+        for byte_val in range(256):
+            cls = search_dfa.class_map[byte_val]
+            if search_dfa.transitions[state][cls] == state:
+                self_count += 1
+        if self_count >= 128:
+            broad_self_loop.add(state)
+
+    restart_states: Set[int] = set()
+    frontier: Set[int] = set()
+    if effective_start in broad_self_loop:
+        restart_states.add(effective_start)
+        frontier.add(effective_start)
+    else:
+        to_bsl = 0
+        for byte_val in range(256):
+            cls = search_dfa.class_map[byte_val]
+            if search_dfa.transitions[effective_start][cls] in broad_self_loop:
+                to_bsl += 1
+        if to_bsl >= 128:
+            restart_states.add(effective_start)
+            frontier.add(effective_start)
+
+    visited = set(frontier)
+    while frontier:
+        next_frontier = set()
+        for state in frontier:
+            seen = set()
+            for byte_val in range(256):
+                cls = search_dfa.class_map[byte_val]
+                target = search_dfa.transitions[state][cls]
+                if target in seen or target == search_dfa.dead_state:
+                    continue
+                seen.add(target)
+                if target in broad_self_loop and target not in visited:
+                    restart_states.add(target)
+                    visited.add(target)
+                    next_frontier.add(target)
+        frontier = next_frontier
+
+    return frozenset(restart_states)
 
 
-def _build_tagged_dispatch(dfa: DFA, tag_runtime: DFATagRuntime,
-                           active_states: List[int]) -> ast.stmt:
-    """Build state dispatch that also writes dynamic tag positions."""
-    state_ref = meta.ref('state')
-    state_branches = []
+# ---------------------------------------------------------------------------
+# OPCS-BMA codegen
+# ---------------------------------------------------------------------------
 
-    for s in active_states:
-        test = _q_eq(state_ref, _q_i32(s))
-        trans = _tagged_transition_groups_for_state(dfa, s, tag_runtime)
-        if not trans:
-            body = [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))]
-        else:
-            t_branches = []
-            for (target, slots), byte_vals in trans.items():
-                cond = _byte_condition(byte_vals, 'ch')
-                t_body = []
-                t_body.extend(_emit_tag_slot_writes(slots, meta.ref('i')))
-                t_body.append(_q_assign(meta.ref('state'), _q_i32(target)))
-                t_branches.append((cond, t_body))
-            t_else = [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))]
-            body = [_if_elif_chain(t_branches, else_body=t_else)]
-        state_branches.append((test, body))
-
-    state_else = [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))]
-    return _if_elif_chain(state_branches, else_body=state_else)
-
-
-def _build_match_info_body(dfa: DFA, tag_runtime: DFATagRuntime) -> List[ast.stmt]:
-    """Build compiled span/tag recovery from a known start position."""
-    effective_start = dfa.transitions[dfa.start_state][dfa.sentinel_256_class]
-
-    # Initialize output: out[0] = end, out[1:] = user-visible tag positions.
-    output_init = [
-        _q_ptr_assign('out', ast.Constant(idx), _q_i64(meta.const(-1)))
-        for idx in range(1 + len(tag_runtime.tag_names))
-    ]
-
-    state_init = _q(_tpl_assign_typed, meta.ident('state'),
-                    meta.type_expr(i32), _q_i32(dfa.start_state))
-
-    start_guards = [
-        _q(_tpl_if, _q_lt(meta.ref('n'), meta.ref('start')),
-           _splice([_q_return(_q_u8(0))])),
-        _q(_tpl_if, _q_eq(meta.ref('start'), _q(_tpl_u64, meta.const(0))),
-           _splice([_q_assign(meta.ref('state'), _q_i32(effective_start))])),
-        _q(_tpl_if, _q_eq(meta.ref('state'), _q_i32(dfa.dead_state)),
-           _splice([_q_return(_q_u8(0))])),
-    ]
-
-    initial_accept_branches = []
-    for s in sorted(dfa.accept_states):
-        initial_accept_branches.append(
-            (_q_eq(meta.ref('state'), _q_i32(s)),
-             _emit_match_success(tag_runtime, s, meta.ref('start'))))
-    initial_accept_stmt = _q_compile_time_if(
-        bool(initial_accept_branches),
-        [_if_elif_chain(initial_accept_branches)] if initial_accept_branches else [],
+def _bma_tag_pos_expr(base_expr: ast.expr, delta: int) -> ast.expr:
+    """Build ``base + delta`` for one tag write."""
+    if delta == 0:
+        return base_expr
+    return _q_add(
+        base_expr,
+        _q(_tpl_u64, meta.const(delta)),
     )
 
-    active_states = _get_active_states(dfa)
-    dispatch = _q_compile_time_if_else(
-        bool(active_states),
-        [_build_tagged_dispatch(dfa, tag_runtime, active_states)] if active_states else [],
-        [_q_assign(meta.ref('state'), _q_i32(dfa.dead_state))],
-    )
 
-    consumed_pos = _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(1)))
-    in_loop_accept_branches = []
-    for s in sorted(dfa.accept_states):
-        in_loop_accept_branches.append(
-            (_q_eq(meta.ref('state'), _q_i32(s)),
-             _emit_match_success(tag_runtime, s, consumed_pos)))
-    loop_accept_stmt = _q_compile_time_if(
-        bool(in_loop_accept_branches),
-        [_if_elif_chain(in_loop_accept_branches)] if in_loop_accept_branches else [],
-    )
-
-    loop_body = _q(
-        _tpl_existing_state_machine,
-        meta.const(dfa.dead_state),
-        meta.ref('start'),
-        _splice([dispatch]),
-        _splice([loop_accept_stmt]),
-    )
-
-    eof_branches = []
-    if dfa.sentinel_257_class >= 0:
-        for s in range(dfa.num_states):
-            if s == dfa.dead_state:
-                continue
-            end_target = dfa.transitions[s][dfa.sentinel_257_class]
-            if end_target not in dfa.accept_states:
-                continue
-            branch_body = []
-            branch_body.extend(_emit_tag_slot_writes(
-                tag_runtime.transition_tag_slots.get((s, dfa.sentinel_257_class), ()),
-                meta.ref('i'),
+def _emit_bma_tag_writes(tag_writes: Tuple[opcs.TagWrite, ...],
+                         base_expr: ast.expr,
+                         with_tags: bool,
+                         tracked_slots: Dict[int, str] = None) -> List[ast.stmt]:
+    """Emit the final per-slot effect of one deterministic tag action list."""
+    stmts: List[ast.stmt] = []
+    for write in opcs._collapse_tag_writes(tag_writes):
+        pos_expr = _bma_tag_pos_expr(base_expr, write.delta)
+        if with_tags:
+            stmts.append(_q_ptr_assign(
+                'out',
+                ast.Constant(write.slot),
+                _q_i64(pos_expr),
             ))
-            branch_body.extend(_emit_match_success(tag_runtime, end_target, meta.ref('i')))
-            eof_branches.append((_q_eq(meta.ref('state'), _q_i32(s)), branch_body))
-    eof_accept_stmt = _q_compile_time_if(
-        bool(eof_branches),
-        [_if_elif_chain(eof_branches)] if eof_branches else [],
-    )
-
-    return (
-        output_init +
-        [state_init] +
-        start_guards +
-        [initial_accept_stmt] +
-        _stmt_list(loop_body) +
-        [eof_accept_stmt, _q_return(_q_u8(0))]
-    )
-
-
-def _build_search_body(dfa: DFA,
-                       search_dfa: DFA = None,
-                       accept_depths: AcceptDepthInfo = None,
-                       chains: List[LinearChain] = None,
-                       search_chains: List[LinearChain] = None,
-                       info: PatternInfo = None,
-                       skip_info: SkipInfo = None,
-                       has_start_anchor: bool = False,
-                       state_skips: Dict[int, StateSkipInfo] = None,
-                       restart_states: Set[int] = None,
-                       ) -> List[ast.stmt]:
-    """Build the full body for a search function.
-
-    Uses 1-pass search with restart-state match_start tracking.
-
-    dfa: original DFA (for anchor checks and anchored search).
-    skip_info: optional skip table for O(n/W) scanning.
-    has_start_anchor: True if all branches start with ^.
-    state_skips: optional per-state skip probes for non-start states.
-    restart_states: set of search DFA states that are restart (.*? prefix).
-    """
-    search_impl_dfa = search_dfa if search_dfa is not None else dfa
-    return [_q_compile_time_if_else(
-        has_start_anchor,
-        _build_anchored_search(dfa, chains=chains),
-        _build_goto_forward_search(
-            search_impl_dfa, accept_depths=accept_depths,
-            skip_info=skip_info, state_skips=state_skips,
-            restart_states=restart_states),
-    )]
-
-
-def _build_anchored_search(dfa: DFA,
-                            chains: List[LinearChain] = None) -> List[ast.stmt]:
-    """Build search body for all-start-anchored pattern.
-
-    Uses sentinel protocol: compute effective_start from sentinel 256,
-    run DFA, check sentinel 257 at end.
-    """
-    stmts = []
-
-    # Compute effective start after sentinel 256
-    effective_start = dfa.transitions[dfa.start_state][dfa.sentinel_256_class]
-
-    if effective_start == dfa.dead_state:
-        return [_q_return(_q_i64(meta.const(-1)))]
-
-    if effective_start in dfa.accept_states:
-        return [_q_return(_q_i64(meta.const(0)))]
-
-    # Build in-loop accept check
-    accept_check_stmts = []
-    state_ref = meta.ref('state')
-    accept_list = sorted(dfa.accept_states)
-    if accept_list:
-        branches = []
-        for s in accept_list:
-            branches.append((_q_eq(state_ref, _q_i32(s)),
-                             [_q_return(_q_i64(meta.const(0)))]))
-        accept_check_stmts = [_if_elif_chain(branches)]
-
-    # Build state machine from effective_start
-    active_states = _get_active_states(dfa)
-    dispatch = _build_dispatch(dfa, active_states, chains=chains) if active_states else \
-        _q_assign(meta.ref('state'), _q_i32(dfa.dead_state))
-
-    stmts.extend(_q(_tpl_state_machine,
-                     meta.const(effective_start),
-                     meta.const(dfa.dead_state),
-                     _q(_tpl_u64, meta.const(0)),
-                     _splice([dispatch]),
-                     _splice(accept_check_stmts)))
-
-    # After loop: check sentinel 257 per-state (all non-dead states)
-    end_accept_branches = []
-    for s in range(dfa.num_states):
-        if s == dfa.dead_state:
-            continue
-        end_target = dfa.transitions[s][dfa.sentinel_257_class]
-        if end_target in dfa.accept_states:
-            end_accept_branches.append(
-                (_q_eq(state_ref, _q_i32(s)),
-                 [_q_return(_q_i64(meta.const(0)))]))
-    if end_accept_branches:
-        stmts.append(_if_elif_chain(end_accept_branches))
-
-    stmts.append(_q_return(_q_i64(meta.const(-1))))
+        if tracked_slots and write.slot in tracked_slots:
+            stmts.append(_q_assign(
+                meta.ref(tracked_slots[write.slot]),
+                _q_i64(pos_expr),
+            ))
     return stmts
 
 
-def _build_compiled_fn(dfa: DFA, digest: str, kind: str,
-                       search_dfa: DFA = None,
-                       accept_depths: AcceptDepthInfo = None,
-                       chains: List[LinearChain] = None,
-                       search_chains: List[LinearChain] = None,
-                       info: PatternInfo = None,
-                       skip_info: SkipInfo = None,
-                       has_start_anchor: bool = False,
-                       state_skips: Dict[int, StateSkipInfo] = None,
-                       restart_states: Set[int] = None):
-    """Generate a @compile function using pythoc.meta.
+@dataclass(frozen=True)
+class _BMARuntimeState:
+    """Backend-local runtime state view derived only from TaggedOPCSBMA."""
 
-    Args:
-        dfa: The original DFA.
-        digest: Pattern digest for unique naming.
-        kind: "is_match", "fullmatch", or "search".
-        search_dfa: Optional search DFA for O(n) unanchored search.
-        accept_depths: Optional accept depth info for 1-pass search.
-        chains: Optional linear chains for the DFA.
-        search_chains: Optional linear chains for the search DFA.
-        info: Optional pattern info.
-        skip_info: Optional skip table for O(n/W) scanning.
-        has_start_anchor: True if all branches start with ^.
-        state_skips: Optional per-state skip probes.
-        restart_states: Set of search DFA restart states.
+    id: int
+    label_name: str
+    probe_offset: int
+    edges: Tuple[opcs.OPCSEdge, ...]
+    accepting: bool
+    eof_accept: bool
+    eof_tag_writes: Tuple[opcs.TagWrite, ...]
+    is_dead: bool = False
 
-    Returns:
-        The compiled function.
+
+@dataclass(frozen=True)
+class _BMARuntime:
+    """Normalized executable BMA graph used by the FSM backend."""
+
+    states: Tuple[_BMARuntimeState, ...]
+    state_by_id: Dict[int, _BMARuntimeState]
+    start_state: int
+    dead_state: int
+    start_label: str
+    dead_label: str
+    initial_tag_writes: Tuple[opcs.TagWrite, ...]
+    initial_accepting: bool
+
+
+def _bma_state_label(state_id: int) -> str:
+    """Stable label name for one executable BMA state."""
+    return "bma_s{}".format(state_id)
+
+
+def _normalize_bma_runtime(bma: opcs.TaggedOPCSBMA) -> _BMARuntime:
+    """Freeze one executable runtime view from TaggedOPCSBMA only.
+
+    The backend intentionally ignores producer-side metadata such as
+    `control_state`, `block_len`, `known_bytes`, and target summaries.
+    Only executable states/edges, accept flags, shifts, and tag writes
+    survive into the lowering boundary.
     """
-    # label/goto/goto_end needed in required_globals for goto FSM
+    accept_states = set(bma.accept_states)
+    executable_states: List[_BMARuntimeState] = []
+    state_by_id: Dict[int, _BMARuntimeState] = {}
+
+    for state in bma.states:
+        if state.kind == "control_shadow":
+            continue
+        runtime_state = _BMARuntimeState(
+            id=state.id,
+            label_name=_bma_state_label(state.id),
+            probe_offset=state.probe_offset,
+            edges=state.edges,
+            accepting=state.id in accept_states,
+            eof_accept=state.eof_accept,
+            eof_tag_writes=state.eof_tag_writes,
+            is_dead=state.id == bma.dead_state,
+        )
+        executable_states.append(runtime_state)
+        state_by_id[state.id] = runtime_state
+
+    if bma.start_state not in state_by_id:
+        raise ValueError("BMA start_state is not executable")
+    if bma.dead_state not in state_by_id:
+        raise ValueError("BMA dead_state is not executable")
+
+    for state in executable_states:
+        for edge in state.edges:
+            if edge.target not in state_by_id:
+                raise ValueError(
+                    "BMA edge target {} is not executable".format(edge.target)
+                )
+
+    return _BMARuntime(
+        states=tuple(executable_states),
+        state_by_id=state_by_id,
+        start_state=bma.start_state,
+        dead_state=bma.dead_state,
+        start_label=state_by_id[bma.start_state].label_name,
+        dead_label=state_by_id[bma.dead_state].label_name,
+        initial_tag_writes=bma.initial_tag_writes,
+        initial_accepting=bma.initial_accepting,
+    )
+
+
+def _build_bma_fsm_edge_body(runtime: _BMARuntime,
+                             edge: opcs.OPCSEdge,
+                             with_tags: bool,
+                             tracked_slots: Dict[int, str]) -> List[ast.stmt]:
+    """Lower one BMA edge into direct tag/update/goto statements."""
+    branch_body: List[ast.stmt] = []
+    if edge.tag_writes:
+        branch_body.extend(_emit_bma_tag_writes(
+            edge.tag_writes,
+            meta.ref('i'),
+            with_tags=with_tags,
+            tracked_slots=tracked_slots,
+        ))
+    if edge.shift:
+        branch_body.append(_q_assign(
+            meta.ref('i'),
+            _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(edge.shift))),
+        ))
+    branch_body.append(_q_goto(runtime.state_by_id[edge.target].label_name))
+    return branch_body
+
+
+def _build_bma_eof_success_body(state: _BMARuntimeState,
+                                success_return_expr: ast.expr,
+                                with_tags: bool,
+                                tracked_slots: Dict[int, str],
+                                fullmatch: bool) -> Optional[List[ast.stmt]]:
+    """Build the success branch taken when execution reaches EOF."""
+    if fullmatch and state.accepting:
+        return [_q_return(success_return_expr)]
+    if not state.eof_accept:
+        return None
+
+    body: List[ast.stmt] = []
+    if state.eof_tag_writes and (with_tags or tracked_slots):
+        body.extend(_emit_bma_tag_writes(
+            state.eof_tag_writes,
+            meta.ref('i'),
+            with_tags=with_tags,
+            tracked_slots=tracked_slots,
+        ))
+    body.append(_q_return(success_return_expr))
+    return body
+
+
+def _build_bma_fsm_state_body(runtime: _BMARuntime,
+                              state: _BMARuntimeState,
+                              success_return_expr: ast.expr,
+                              fail_return_expr: ast.expr,
+                              with_tags: bool,
+                              tracked_slots: Dict[int, str],
+                              eager_accept: bool,
+                              fullmatch: bool) -> List[ast.stmt]:
+    """Lower one normalized runtime state into one label block body."""
+    if state.is_dead:
+        return [_q_return(fail_return_expr)]
+
+    if eager_accept and state.accepting:
+        return [_q_return(success_return_expr)]
+
+    eof_success = _build_bma_eof_success_body(
+        state,
+        success_return_expr,
+        with_tags=with_tags,
+        tracked_slots=tracked_slots,
+        fullmatch=fullmatch,
+    )
+    eof_guard = _raw_if(
+        _q_gte(meta.ref('i'), meta.ref('n')),
+        eof_success if eof_success is not None else [_q_goto(runtime.dead_label)],
+    )
+
+    probe_idx: ast.expr = meta.ref('i')
+    probe_guard: List[ast.stmt] = []
+    if state.probe_offset:
+        probe_idx = _q_add(
+            meta.ref('i'),
+            _q(_tpl_u64, meta.const(state.probe_offset)),
+        )
+        probe_guard.append(_raw_if(
+            _q_gte(probe_idx, meta.ref('n')),
+            [_q_goto(runtime.dead_label)],
+        ))
+
+    load_byte_stmt = _q(
+        _tpl_load_byte_as,
+        meta.ident('ch'),
+        probe_idx,
+    )
+
+    edge_branches = [
+        (
+            _byte_condition(list(edge.byte_values), 'ch'),
+            _build_bma_fsm_edge_body(
+                runtime,
+                edge,
+                with_tags=with_tags,
+                tracked_slots=tracked_slots,
+            ),
+        )
+        for edge in state.edges
+    ]
+    transitions_stmt = (
+        _if_elif_chain(edge_branches, else_body=[_q_goto(runtime.dead_label)])
+        if edge_branches else
+        _q_goto(runtime.dead_label)
+    )
+
+    return _stmt_list(_q(
+        _tpl_goto_state_program,
+        _splice(_body_or_pass(probe_guard)),
+        _splice([eof_guard]),
+        _splice([load_byte_stmt]),
+        _splice([transitions_stmt]),
+    ))
+
+
+def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
+                        init_body: List[ast.stmt],
+                        success_return_expr: ast.expr,
+                        fail_return_expr: ast.expr,
+                        with_tags: bool,
+                        tracked_slots: Dict[int, str],
+                        eager_accept: bool,
+                        fullmatch: bool) -> List[ast.stmt]:
+    """Lower a frozen TaggedOPCSBMA into one goto/FSM runner."""
+    runtime = _normalize_bma_runtime(bma)
+    program_init = list(init_body)
+    if eager_accept and runtime.initial_accepting:
+        program_init.append(_q_return(success_return_expr))
+
+    label_blocks = [
+        _q_label_block(
+            state.label_name,
+            _build_bma_fsm_state_body(
+                runtime,
+                state,
+                success_return_expr=success_return_expr,
+                fail_return_expr=fail_return_expr,
+                with_tags=with_tags,
+                tracked_slots=tracked_slots,
+                eager_accept=eager_accept,
+                fullmatch=fullmatch,
+            ),
+        )
+        for state in runtime.states
+    ]
+
+    return _stmt_list(_q(
+        _tpl_bma_fsm_program,
+        _splice(_body_or_pass(program_init)),
+        _splice([_q_goto(runtime.start_label)]),
+        _splice(label_blocks),
+        _splice([_q_return(fail_return_expr)]),
+    ))
+
+
+def _build_bma_bool_body(bma: opcs.TaggedOPCSBMA,
+                         fullmatch: bool) -> List[ast.stmt]:
+    """Build a bool-returning goto/FSM runner from the unified BMA artifact."""
+    init = [
+        _q(_tpl_assign_typed, meta.ident('i'), meta.type_expr(u64),
+           _q(_tpl_u64, meta.const(0))),
+    ]
+    return _build_bma_fsm_body(
+        bma,
+        init_body=init,
+        success_return_expr=_q_u8(1),
+        fail_return_expr=_q_u8(0),
+        with_tags=False,
+        tracked_slots={},
+        eager_accept=not fullmatch,
+        fullmatch=fullmatch,
+    )
+
+
+def _build_bma_search_init_stmts(bma: opcs.TaggedOPCSBMA,
+                                 with_tags: bool,
+                                 tracked_slots: Dict[int, str]) -> List[ast.stmt]:
+    """Build search-local variable setup plus initial BMA tag writes."""
+    init_stmts: List[ast.stmt] = [
+        _q(_tpl_assign_typed, meta.ident('i'), meta.type_expr(u64),
+           _q(_tpl_u64, meta.const(0))),
+        _q(_tpl_assign_typed, meta.ident('match_beg'), meta.type_expr(i64),
+           _q_i64(meta.const(-1))),
+    ]
+
+    if bma.initial_tag_writes and (with_tags or tracked_slots):
+        init_stmts.extend(_emit_bma_tag_writes(
+            bma.initial_tag_writes,
+            meta.ref('i'),
+            with_tags=with_tags,
+            tracked_slots=tracked_slots,
+        ))
+    return init_stmts
+
+
+def _build_bma_search_body(bma: opcs.TaggedOPCSBMA) -> List[ast.stmt]:
+    """Build an i64-returning goto/FSM search runner from the BMA artifact."""
+    entry_slot = bma.tag_slots.get(INTERNAL_BEG_TAG)
+    tracked_slots = (
+        {}
+        if entry_slot is None else
+        {entry_slot: 'match_beg'}
+    )
+    init_body = _build_bma_search_init_stmts(
+        bma,
+        with_tags=False,
+        tracked_slots=tracked_slots,
+    )
+    return _build_bma_fsm_body(
+        bma,
+        init_body=init_body,
+        success_return_expr=meta.ref('match_beg'),
+        fail_return_expr=_q_i64(meta.const(-1)),
+        with_tags=False,
+        tracked_slots=tracked_slots,
+        eager_accept=True,
+        fullmatch=False,
+    )
+
+
+def _build_bma_tag_body(bma: opcs.TaggedOPCSBMA) -> List[ast.stmt]:
+    """Build a single-pass tagged goto/FSM search runner from the BMA artifact."""
+    entry_slot = bma.tag_slots.get(INTERNAL_BEG_TAG)
+    tracked_slots = (
+        {}
+        if entry_slot is None else
+        {entry_slot: 'match_beg'}
+    )
+    init_body = [
+        _q_ptr_assign('out', ast.Constant(slot), _q_i64(meta.const(-1)))
+        for slot in range(len(bma.tag_names))
+    ]
+    init_body.extend(_build_bma_search_init_stmts(
+        bma,
+        with_tags=True,
+        tracked_slots=tracked_slots,
+    ))
+    return _build_bma_fsm_body(
+        bma,
+        init_body=init_body,
+        success_return_expr=meta.ref('match_beg'),
+        fail_return_expr=_q_i64(meta.const(-1)),
+        with_tags=True,
+        tracked_slots=tracked_slots,
+        eager_accept=True,
+        fullmatch=False,
+    )
+
+
+def _build_bma_fn(bma: opcs.TaggedOPCSBMA,
+                  digest: str,
+                  kind: str):
+    """Compile one public regex runner from the unified BMA backend."""
     if kind == "is_match":
         func_name = "regex_is_match"
-        suffix = digest
+        params = [("n", u64), ("data", ptr[i8])]
         return_type = u8
-        body_stmts = _build_is_match_body(dfa, chains=chains,
-                                           info=info)
+        body_stmts = _build_bma_bool_body(bma, fullmatch=False)
     elif kind == "fullmatch":
         func_name = "regex_fullmatch"
-        suffix = digest + "_fullmatch"
+        params = [("n", u64), ("data", ptr[i8])]
         return_type = u8
-        body_stmts = _build_fullmatch_body(dfa, chains=chains)
+        body_stmts = _build_bma_bool_body(bma, fullmatch=True)
     elif kind == "search":
         func_name = "regex_search"
-        suffix = digest + "_search"
+        params = [("n", u64), ("data", ptr[i8])]
         return_type = i64
-        body_stmts = _build_search_body(dfa,
-                                         search_dfa=search_dfa,
-                                         accept_depths=accept_depths,
-                                         chains=chains,
-                                         search_chains=search_chains,
-                                         info=info,
-                                         skip_info=skip_info,
-                                         has_start_anchor=has_start_anchor,
-                                         state_skips=state_skips,
-                                        restart_states=restart_states)
+        body_stmts = _build_bma_search_body(bma)
+    elif kind == "search_info":
+        func_name = "regex_search_info"
+        params = [("n", u64), ("data", ptr[i8]), ("out", ptr[i64])]
+        return_type = i64
+        body_stmts = _build_bma_tag_body(bma)
     else:
-        raise ValueError("Unknown kind: {}".format(kind))
+        raise ValueError("Unknown BMA kind: {}".format(kind))
 
     for node in body_stmts:
         ast.fix_missing_locations(node)
 
     gf = meta.func(
         name=func_name,
-        params=[("n", u64), ("data", ptr[i8])],
+        params=params,
         return_type=return_type,
         body=body_stmts,
         required_globals={
@@ -1540,182 +1006,9 @@ def _build_compiled_fn(dfa: DFA, digest: str, kind: str,
             'label': label, 'goto': goto, 'goto_end': goto_end,
         },
         source_file=__file__,
+        debug_source=f"# regex {kind} {digest}",
     )
-
-    return meta.compile_generated(gf, suffix=suffix)
-
-
-def _build_match_info_fn(dfa: DFA, digest: str,
-                         tag_runtime: DFATagRuntime):
-    """Build a compiled tagged-DFA helper from a known match start."""
-    body_stmts = _build_match_info_body(dfa, tag_runtime)
-    for node in body_stmts:
-        ast.fix_missing_locations(node)
-
-    gf = meta.func(
-        name="regex_match_info",
-        params=[("n", u64), ("data", ptr[i8]), ("start", u64), ("out", ptr[i64])],
-        return_type=u8,
-        body=body_stmts,
-        required_globals={
-            'i8': i8, 'i32': i32, 'i64': i64,
-            'u8': u8, 'u64': u64, 'ptr': ptr,
-            'label': label, 'goto': goto, 'goto_end': goto_end,
-        },
-        source_file=__file__,
-    )
-
-    return meta.compile_generated(gf, suffix=digest + "_match_info")
-
-
-# ---------------------------------------------------------------------------
-# Anchor analysis helpers
-# ---------------------------------------------------------------------------
-
-def _all_branches_start_anchored(node) -> bool:
-    """Check if every branch of the pattern starts with ^.
-
-    Returns True only if ALL top-level alternatives begin with ^.
-    Used to decide if search needs a search DFA or can just run
-    the match DFA at position 0.
-    """
-    from .parse import Anchor, Concat, Alternate, Group
-    if isinstance(node, Anchor):
-        return node.kind == 'start'
-    if isinstance(node, Concat):
-        if not node.children:
-            return False
-        return _all_branches_start_anchored(node.children[0])
-    if isinstance(node, Alternate):
-        return all(_all_branches_start_anchored(c) for c in node.children)
-    if isinstance(node, Group):
-        return _all_branches_start_anchored(node.child)
-    return False
-
-
-def _any_branch_end_anchored(node) -> bool:
-    """Check if any branch of the pattern ends with $.
-
-    Used to decide end-of-input checking behavior.
-    """
-    from .parse import Anchor, Concat, Alternate, Group
-    if isinstance(node, Anchor):
-        return node.kind == 'end'
-    if isinstance(node, Concat):
-        if not node.children:
-            return False
-        return _any_branch_end_anchored(node.children[-1])
-    if isinstance(node, Alternate):
-        return any(_any_branch_end_anchored(c) for c in node.children)
-    if isinstance(node, Group):
-        return _any_branch_end_anchored(node.child)
-    return False
-
-
-# ---------------------------------------------------------------------------
-# DFA tag runtime helpers
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True)
-class DFATagRuntime:
-    """Compile-time tag actions for a DFA."""
-    tag_names: Tuple[str, ...]
-    tag_slots: Dict[str, int]
-    transition_tag_slots: Dict[Tuple[int, int], Tuple[int, ...]]
-    accept_tag_slots: Dict[int, Tuple[int, ...]]
-
-
-def _reverse_epsilon_graph(nfa: NFA) -> Dict[int, Set[int]]:
-    rev: Dict[int, Set[int]] = {s.id: set() for s in nfa.states}
-    for state in nfa.states:
-        for target in state.epsilon:
-            rev[target].add(state.id)
-    return rev
-
-
-def _class_representatives(dfa: DFA) -> Dict[int, int]:
-    reps: Dict[int, int] = {}
-    for byte_val in range(256):
-        reps.setdefault(dfa.class_map[byte_val], byte_val)
-    if dfa.sentinel_257_class >= 0:
-        reps[dfa.sentinel_257_class] = 257
-    return reps
-
-
-def _collect_user_tag_names(nfa: NFA) -> Tuple[str, ...]:
-    seen = set()
-    ordered: List[str] = []
-    for state in nfa.states:
-        tag = state.tag
-        if tag is None or tag.startswith(INTERNAL_TAG_PREFIX) or tag in seen:
-            continue
-        seen.add(tag)
-        ordered.append(tag)
-    return tuple(ordered)
-
-
-def _collect_reverse_reachable_tags(nfa: NFA, closure, target_states,
-                                    reverse_eps: Dict[int, Set[int]],
-                                    tag_slots: Dict[str, int]) -> Tuple[int, ...]:
-    if not target_states:
-        return ()
-
-    allowed = set(closure)
-    stack = list(target_states)
-    seen = set(target_states)
-    tag_slots_seen = set()
-
-    while stack:
-        cur = stack.pop()
-        state_obj = nfa.states[cur]
-        if state_obj.tag is not None and state_obj.tag in tag_slots:
-            tag_slots_seen.add(tag_slots[state_obj.tag])
-        for prev in reverse_eps[cur]:
-            if prev in allowed and prev not in seen:
-                seen.add(prev)
-                stack.append(prev)
-
-    return tuple(sorted(tag_slots_seen))
-
-
-def _compute_dfa_tag_runtime(nfa: NFA, dfa: DFA) -> DFATagRuntime:
-    """Compute dynamic DFA tag actions for user-visible tags."""
-    tag_names = _collect_user_tag_names(nfa)
-    tag_slots = {name: idx for idx, name in enumerate(tag_names)}
-    reverse_eps = _reverse_epsilon_graph(nfa)
-    reps = _class_representatives(dfa)
-
-    transition_tag_slots: Dict[Tuple[int, int], Tuple[int, ...]] = {}
-    accept_tag_slots: Dict[int, Tuple[int, ...]] = {}
-
-    for state_id, closure in enumerate(dfa.state_closures):
-        if state_id in dfa.accept_states:
-            slots = _collect_reverse_reachable_tags(
-                nfa, closure, {nfa.accept}, reverse_eps, tag_slots)
-            if slots:
-                accept_tag_slots[state_id] = slots
-
-        for class_id, representative in reps.items():
-            if state_id >= len(dfa.transitions):
-                continue
-            target = dfa.transitions[state_id][class_id]
-            if target == dfa.dead_state:
-                continue
-            byte_sources = {
-                nfa_state for nfa_state in closure
-                if representative in nfa.states[nfa_state].byte_transitions
-            }
-            slots = _collect_reverse_reachable_tags(
-                nfa, closure, byte_sources, reverse_eps, tag_slots)
-            if slots:
-                transition_tag_slots[(state_id, class_id)] = slots
-
-    return DFATagRuntime(
-        tag_names=tag_names,
-        tag_slots=tag_slots,
-        transition_tag_slots=transition_tag_slots,
-        accept_tag_slots=accept_tag_slots,
-    )
+    return meta.compile_generated(gf, suffix=digest)
 
 
 # ---------------------------------------------------------------------------
@@ -1743,7 +1036,7 @@ class CompiledRegex:
     """Holds a compiled regex pattern and provides match/search operations.
 
     Eagerly compiles native PythoC functions for is_match(), fullmatch(),
-    search(), and tagged span recovery.
+    search(), and tagged search/span recovery.
     Must be created before native execution starts (i.e., at module level
     or during @compile decoration phase).
 
@@ -1751,9 +1044,9 @@ class CompiledRegex:
     the same pattern returns the same object.  This avoids recompilation
     errors when the same pattern is used in multiple places.
 
-    For unanchored patterns, uses a search DFA (prepending lazy .*) for
-    O(n) start-position search. Once the winning start is known, a second
-    native DFA helper walks the original DFA and dynamically records tags.
+    All public execution APIs lower through one BMA-style compiled engine
+    family. `search`/`find_span`/`find_with_tags` use the search-normalized
+    BMA with hidden begin/end tags in its canonical tag layout.
     """
 
     _cache: Dict[str, 'CompiledRegex'] = {}
@@ -1772,131 +1065,48 @@ class CompiledRegex:
         self._initialized = True
         self.pattern = pattern
         self._re_ast = parse(pattern)
+        self._digest = _pattern_digest(pattern)
+
+        # Match/fullmatch share the same original control DFA -> OPCS BMA core.
         self._nfa = build_nfa(self._re_ast)
         self.dfa = build_dfa(self._nfa)
-        self._digest = _pattern_digest(pattern)
-        self._info = analyze_pattern(self._re_ast)
+        self._match_bma = opcs.build_tagged_opcs_bma(self.dfa)
 
-        self._accept_depths = compute_accept_depths(self.dfa)
-        self._chains = find_linear_chains(self.dfa)
-        self._tag_runtime = _compute_dfa_tag_runtime(self._nfa, self.dfa)
-        self._match_info_slots = 1 + len(self._tag_runtime.tag_names)
+        # Search/tag queries use one tagged search-normalized core with
+        # hidden begin/end tags inside the canonical slot layout.
+        self._search_ast = rewrite_for_search(self._re_ast)
+        self._search_nfa = build_nfa(self._search_ast)
+        self._search_dfa = build_dfa(self._search_nfa)
+        self._search_tag_runtime = opcs.compute_dfa_tag_runtime(
+            self._search_nfa,
+            self._search_dfa,
+            include_internal=True,
+        )
+        self._beg_slot = self._search_tag_runtime.tag_slots[INTERNAL_BEG_TAG]
+        self._search_tag_runtime = _filter_tag_runtime_slots(
+            self._search_tag_runtime,
+            frozenset({self._beg_slot}),
+        )
+        self._search_restart_states = _compute_search_restart_states(
+            self._search_dfa)
+        self._search_bma = opcs.build_tagged_opcs_bma(
+            self._search_dfa,
+            self._search_tag_runtime,
+            search_restart_controls=self._search_restart_states,
+            search_entry_slot=self._beg_slot,
+        )
+        self._search_result_slots = len(self._search_bma.tag_names)
+        self._search_tag_slots = self._search_bma.tag_slots
+        self._beg_slot = self._search_tag_slots[INTERNAL_BEG_TAG]
+        self._end_slot = self._search_tag_slots[INTERNAL_END_TAG]
 
-        # Determine if pattern uses anchors (for search behavior)
-        self._has_start_anchor = self._pattern_has_start_anchor()
-
-        # Build search DFA for unanchored/mixed patterns.
-        if not self._has_start_anchor:
-            self._search_dfa = compile_search_dfa(pattern)
-            self._search_chains = find_linear_chains(self._search_dfa)
-            self._search_depths = compute_accept_depths(self._search_dfa)
-            # Compute skip table from original DFA for O(n/W) scanning
-            self._skip_info = compute_skip_table(self.dfa)
-            # Compute per-state skip probes for non-start states.
-            # Identify "restart" states: the .* loop states in the search DFA.
-            # These are states that self-loop on >= 128 bytes (more than half).
-            # Transitions to restart states represent "restart search" rather
-            # than forward progress, so they should not make bytes count as live.
-            # Identify "restart" states: the .*? prefix states in the
-            # search DFA.  These are the states reachable from the
-            # effective start that form the .*? scanning loop BEFORE
-            # the actual pattern begins.
-            #
-            # Criterion: BFS from effective_start, following only
-            # transitions to states with broad self-loops (>= 128
-            # self-transitions).  States with broad self-loops that
-            # appear INSIDE the pattern (e.g., .* in a.*b) are NOT
-            # included because they aren't reachable from effective_start
-            # without first going through a non-restart state.
-            #
-            # The effective start itself is also restart if the majority
-            # of its transitions go to broad-self-loop states.
-            sdfa = self._search_dfa
-            eff = sdfa.transitions[sdfa.start_state][sdfa.sentinel_256_class]
-
-            # Step 1: identify broad-self-loop states
-            broad_self_loop = set()
-            for s in range(sdfa.num_states):
-                if s == sdfa.dead_state:
-                    continue
-                self_count = 0
-                for bv in range(256):
-                    cls = sdfa.class_map[bv]
-                    if sdfa.transitions[s][cls] == s:
-                        self_count += 1
-                if self_count >= 128:
-                    broad_self_loop.add(s)
-
-            # Step 2: BFS from effective_start through broad-self-loop
-            # states only.  Include effective_start if it fans out
-            # mostly to broad-self-loop states.
-            self._restart_states = set()
-            frontier = set()
-
-            # Check if effective start should be restart
-            if eff in broad_self_loop:
-                self._restart_states.add(eff)
-                frontier.add(eff)
-            elif eff != sdfa.dead_state:
-                to_bsl = 0
-                for bv in range(256):
-                    cls = sdfa.class_map[bv]
-                    t = sdfa.transitions[eff][cls]
-                    if t in broad_self_loop:
-                        to_bsl += 1
-                if to_bsl >= 128:
-                    self._restart_states.add(eff)
-                    frontier.add(eff)
-
-            # BFS: from restart states, add broad-self-loop neighbors
-            visited = set(frontier)
-            while frontier:
-                next_frontier = set()
-                for s in frontier:
-                    seen = set()
-                    for bv in range(256):
-                        cls = sdfa.class_map[bv]
-                        t = sdfa.transitions[s][cls]
-                        if t in seen or t == sdfa.dead_state:
-                            continue
-                        seen.add(t)
-                        if t in broad_self_loop and t not in visited:
-                            self._restart_states.add(t)
-                            visited.add(t)
-                            next_frontier.add(t)
-                frontier = next_frontier
-            # Per-state skip probes are computed but currently only used
-            # for analysis/debugging. The search goto FSM only uses the
-            # global skip table (for the start state), since per-state
-            # skips in the search FSM would need to account for potential
-            # match restarts at skipped positions.
-            self._state_skips = compute_state_skips(
-                self._search_dfa,
-                restart_states=self._restart_states)
-        else:
-            self._search_dfa = None
-            self._search_chains = []
-            self._search_depths = None
-            self._skip_info = None
-            self._state_skips = {}
-            self._restart_states = set()
-
-        # Eagerly compile native functions — these are always used
-        # by the public API. Compilation must happen before native
-        # execution starts; calling CompiledRegex() after that is an error.
+        # Eagerly compile native functions before native execution starts.
+        # All public runners lower through the same BMA-to-FSM backend, but
+        # keep distinct entrypoints so runtime costs stay mode-specific.
         self._native_is_match_fn = self.generate_is_match_fn()
         self._native_fullmatch_fn = self.generate_fullmatch_fn()
         self._native_search_fn = self.generate_search_fn()
-        self._native_match_info_fn = self.generate_match_info_fn()
-
-    def _pattern_has_start_anchor(self) -> bool:
-        """Check if all branches of the pattern start with ^.
-
-        Returns True only if EVERY top-level alternative begins with ^,
-        meaning the pattern can only match at position 0.
-        """
-        from .parse import Anchor, Concat, Alternate, Group
-        return _all_branches_start_anchored(self._re_ast)
+        self._native_search_info_fn = self.generate_search_info_fn()
 
     def is_match(self, data: bytes) -> bool:
         """Test if the pattern matches at the beginning of data.
@@ -1925,20 +1135,22 @@ class CompiledRegex:
         n, ptr_val, buf = _bytes_to_native_args(data)
         return int(self._native_search_fn(n, ptr_val))
 
-    def _match_info_at(self, data: bytes, start_pos: int):
-        """Run the native tagged-DFA helper from a known start position."""
+    def _search_info(self, data: bytes):
+        """Run one compiled tagged search pass and recover span/tags."""
         n, ptr_val, buf = _bytes_to_native_args(data)
-        out = (ctypes.c_int64 * self._match_info_slots)()
-        matched = self._native_match_info_fn(n, ptr_val, start_pos, out)
-        if not matched:
+        out = (ctypes.c_int64 * self._search_result_slots)()
+        match_start = int(self._native_search_info_fn(n, ptr_val, out))
+        if match_start < 0:
             return None
 
         result = {
-            'start': start_pos,
-            'end': int(out[0]),
+            'start': match_start,
+            'end': int(out[self._end_slot]),
         }
-        for idx, tag_name in enumerate(self._tag_runtime.tag_names):
-            tag_pos = int(out[1 + idx])
+        for idx, tag_name in enumerate(self._search_bma.tag_names):
+            if tag_name.startswith(INTERNAL_TAG_PREFIX):
+                continue
+            tag_pos = int(out[idx])
             if tag_pos >= 0:
                 result[tag_name] = tag_pos
         return result
@@ -1947,10 +1159,8 @@ class CompiledRegex:
         """Find the span (start, end) of the first match.
 
         Returns (start, end) tuple or None if no match.
-        The start boundary comes from the native search path; the end
-        boundary comes from the native tagged-DFA recovery helper.
         """
-        result = self._search_span(data)
+        result = self._search_info(data)
         if result is None:
             return None
         return (result['start'], result['end'])
@@ -1967,14 +1177,7 @@ class CompiledRegex:
             cr.find_with_tags(b'xxabxx')
             # -> {'start': 2, 'end': 4, 'mid': 3}
         """
-        return self._search_span(data)
-
-    def _search_span(self, data: bytes):
-        """Recover full match info from the native search start position."""
-        match_start = self.search(data)
-        if match_start < 0:
-            return None
-        return self._match_info_at(data, match_start)
+        return self._search_info(data)
 
     # -----------------------------------------------------------------
     # @compile function generation
@@ -1986,9 +1189,7 @@ class CompiledRegex:
         Returns a PythoC compiled function:
             is_match(n: u64, data: ptr[i8]) -> u8
         """
-        return _build_compiled_fn(self.dfa, self._digest, "is_match",
-                                  chains=self._chains,
-                                  info=self._info)
+        return _build_bma_fn(self._match_bma, self._digest, "is_match")
 
     def generate_fullmatch_fn(self):
         """Generate a @compile function for fullmatch.
@@ -1996,8 +1197,7 @@ class CompiledRegex:
         Returns a PythoC compiled function:
             fullmatch(n: u64, data: ptr[i8]) -> u8
         """
-        return _build_compiled_fn(self.dfa, self._digest, "fullmatch",
-                                  chains=self._chains)
+        return _build_bma_fn(self._match_bma, self._digest, "fullmatch")
 
     def generate_search_fn(self):
         """Generate a @compile function for search.
@@ -2005,20 +1205,12 @@ class CompiledRegex:
         Returns a PythoC compiled function:
             search(n: u64, data: ptr[i8]) -> i64
         """
-        return _build_compiled_fn(self.dfa, self._digest, "search",
-                                  search_dfa=self._search_dfa,
-                                  accept_depths=self._accept_depths,
-                                  chains=self._chains,
-                                  search_chains=self._search_chains,
-                                  info=self._info,
-                                  skip_info=self._skip_info,
-                                  has_start_anchor=self._has_start_anchor,
-                                  restart_states=self._restart_states)
+        return _build_bma_fn(self._search_bma, self._digest, "search")
 
-    def generate_match_info_fn(self):
-        """Generate a @compile function for native span/tag recovery.
+    def generate_search_info_fn(self):
+        """Generate a @compile function for native search/tag recovery.
 
         Returns a PythoC compiled function:
-            match_info(n: u64, data: ptr[i8], start: u64, out: ptr[i64]) -> u8
+            search_info(n: u64, data: ptr[i8], out: ptr[i64]) -> i64
         """
-        return _build_match_info_fn(self.dfa, self._digest, self._tag_runtime)
+        return _build_bma_fn(self._search_bma, self._digest, "search_info")

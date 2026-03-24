@@ -5,9 +5,11 @@ Unit tests for regex internals: parser, NFA, DFA.
 These are pure Python tests — no @compile needed.
 """
 
+import ctypes
 import unittest
 import sys
 import os
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
@@ -17,7 +19,7 @@ from pythoc.regex.parse import (
 )
 from pythoc.regex.nfa import build_nfa, epsilon_closure, NFA
 from pythoc.regex.dfa import build_dfa, DFA
-from pythoc.regex.codegen import CompiledRegex, compile_pattern
+from pythoc.regex.codegen import CompiledRegex, compile_pattern, _pattern_digest
 from pythoc.regex.analysis import (
     analyze_pattern, compute_accept_depths, find_linear_chains,
     compute_skip_table, compute_state_skips,
@@ -941,6 +943,22 @@ class TestTagResults(unittest.TestCase):
         self.assertEqual(result['end'], 4)
         self.assertEqual(result['mid'], 3)
 
+    def test_internal_beg_end_tags_match_search_span(self):
+        """Internal search span tags should agree with the native match span."""
+        cr = CompiledRegex('a*{mid}b')
+        data = b'aaab'
+        n = len(data)
+        buf = ctypes.create_string_buffer(data, n)
+        ptr_val = ctypes.cast(buf, ctypes.c_void_p).value
+        out = (ctypes.c_int64 * cr._search_result_slots)()
+
+        start = int(cr._native_search_info_fn(n, ptr_val, out))
+
+        self.assertEqual(start, 0)
+        self.assertEqual(int(out[cr._beg_slot]), 0)
+        self.assertEqual(int(out[cr._end_slot]), 4)
+        self.assertEqual(int(out[cr._search_tag_slots['mid']]), 3)
+
     def test_alternation_branch_tags(self):
         """Only tags on the winning alternation branch should be reported."""
         cr = CompiledRegex('{x}a|{y}bc')
@@ -948,6 +966,110 @@ class TestTagResults(unittest.TestCase):
         self.assertEqual(result_a, {'start': 1, 'end': 2, 'x': 1})
         result_bc = cr.find_with_tags(b'zbc')
         self.assertEqual(result_bc, {'start': 1, 'end': 3, 'y': 1})
+
+
+class TestOPCSBMAArtifacts(unittest.TestCase):
+    """Structural checks for the unified OPCS-BMA artifact."""
+
+    def test_literal_match_bma_has_root_gadget(self):
+        cr = CompiledRegex('abcd')
+        bma = cr._match_bma
+        root_control = bma.effective_start_control
+        self.assertEqual(len(bma.shadow_control_states), cr.dfa.num_states)
+        self.assertNotEqual(
+            bma.control_entry_states[root_control],
+            bma.runtime_control_states[root_control],
+        )
+        root_state = bma.states[bma.control_entry_states[root_control]]
+        gadget_controls = {
+            state.control_state
+            for state in bma.states
+            if state.kind == 'gadget'
+        }
+        self.assertEqual(root_state.kind, 'gadget')
+        self.assertEqual(root_state.block_len, 4)
+        self.assertEqual(gadget_controls, {root_control})
+        self.assertEqual(cr.search(b'zzabcdzz'), 2)
+        self.assertEqual(cr.find_span(b'zzabcdzz'), (2, 6))
+
+    def test_loop_match_bma_has_block_local_gadgets(self):
+        cr = CompiledRegex('(ab)*cde')
+        bma = cr._match_bma
+        root_control = bma.effective_start_control
+        root_state = bma.states[bma.control_entry_states[root_control]]
+        loop_gadgets = [
+            state for state in bma.states
+            if state.kind == 'gadget' and state.control_state == root_control
+        ]
+        self.assertEqual(root_state.kind, 'gadget')
+        self.assertEqual(root_state.block_len, 3)
+        self.assertGreaterEqual(len(loop_gadgets), 3)
+        self.assertTrue(cr.is_match(b'ababcde'))
+        self.assertTrue(cr.fullmatch(b'ababcde'))
+
+    def test_literal_search_bma_has_root_gadget_with_tags(self):
+        """Search-normalized literal BMA should keep its root gadget with tags."""
+        cr = CompiledRegex('needle')
+        bma = cr._search_bma
+        root_control = bma.effective_start_control
+        root_state = bma.states[bma.control_entry_states[root_control]]
+        gadget_controls = {
+            state.control_state
+            for state in bma.states
+            if state.kind == 'gadget'
+        }
+        self.assertEqual(root_state.kind, 'gadget')
+        self.assertEqual(root_state.block_len, 6)
+        self.assertEqual(gadget_controls, {root_control})
+
+        data = b'xxxxxxxxxxneedle'
+        n = len(data)
+        buf = ctypes.create_string_buffer(data, n)
+        ptr_val = ctypes.cast(buf, ctypes.c_void_p).value
+        out = (ctypes.c_int64 * cr._search_result_slots)()
+
+        start = int(cr._native_search_info_fn(n, ptr_val, out))
+
+        self.assertEqual(start, 10)
+        self.assertEqual(int(out[cr._beg_slot]), 10)
+        self.assertEqual(int(out[cr._end_slot]), 16)
+
+    def test_literal_bma_codegen_all_entrypoints_lower_to_fsm_blocks(self):
+        """All compiled BMA entrypoints should lower to FSM blocks."""
+        CompiledRegex('needle')
+        digest = _pattern_digest('needle')
+        ir_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__),
+            '../../build/pythoc/regex',
+            'codegen.meta.{}.ll'.format(digest),
+        ))
+        self.assertTrue(os.path.exists(ir_path))
+        with open(ir_path, 'r', encoding='utf-8') as f:
+            ir = f.read()
+        self.assertIn('define i8 @regex_is_match_', ir)
+        self.assertIn('define i8 @regex_fullmatch_', ir)
+        self.assertIn('define i64 @regex_search_', ir)
+        self.assertIn('define i64 @regex_search_info_', ir)
+        self.assertIn('label_bma_s', ir)
+        self.assertNotIn('while_true_body', ir)
+        self.assertNotIn('switch i32 %state_addr', ir)
+
+    def test_generate_entrypoints_funnel_through_unified_bma_builder(self):
+        """All public native entrypoints should compile through `_build_bma_fn`."""
+        cr = CompiledRegex('needle')
+        cases = [
+            ('generate_is_match_fn', cr._match_bma, 'is_match'),
+            ('generate_fullmatch_fn', cr._match_bma, 'fullmatch'),
+            ('generate_search_fn', cr._search_bma, 'search'),
+            ('generate_search_info_fn', cr._search_bma, 'search_info'),
+        ]
+        for method_name, bma, kind in cases:
+            sentinel = object()
+            with mock.patch('pythoc.regex.codegen._build_bma_fn',
+                            return_value=sentinel) as build_bma_fn:
+                result = getattr(cr, method_name)()
+                self.assertIs(result, sentinel)
+                build_bma_fn.assert_called_once_with(bma, cr._digest, kind)
 
 
 # ============================================================================
@@ -1000,38 +1122,35 @@ class TestNativeAPI(unittest.TestCase):
             cr._native_fullmatch_fn = original
 
     def test_find_span_uses_native_search(self):
-        """find_span should use compiled search and match-info helpers only."""
+        """find_span should use one compiled search-info pass."""
         cr = CompiledRegex('abc')
         original_search = cr._native_search_fn
-        original_match_info = cr._native_match_info_fn
+        original_search_info = cr._native_search_info_fn
         calls = []
         try:
-            def fake_search(n, data_ptr):
-                calls.append(("search", n))
+            def fake_search_info(n, data_ptr, out):
+                calls.append(("search_info", n))
+                out[cr._end_slot] = 5
                 return 2
 
-            def fake_match_info(n, data_ptr, start, out):
-                calls.append(("match_info", start))
-                out[0] = 5
-                return 1
-
-            cr._native_search_fn = fake_search
-            cr._native_match_info_fn = fake_match_info
+            cr._native_search_fn = (
+                lambda *args: self.fail("find_span should not call search()"))
+            cr._native_search_info_fn = fake_search_info
             self.assertEqual(cr.find_span(b'xxabcxx'), (2, 5))
-            self.assertEqual(calls, [("search", 7), ("match_info", 2)])
+            self.assertEqual(calls, [("search_info", 7)])
 
             calls.clear()
-            def fake_search_miss(n, data_ptr):
-                calls.append(("search", n))
+            def fake_search_info_miss(n, data_ptr, out):
+                calls.append(("search_info", n))
                 return -1
-            cr._native_search_fn = fake_search_miss
-            cr._native_match_info_fn = (
-                lambda *args: self.fail("find_span should not call match_info after search miss"))
+            cr._native_search_fn = (
+                lambda *args: self.fail("find_span should not call search()"))
+            cr._native_search_info_fn = fake_search_info_miss
             self.assertIsNone(cr.find_span(b'xxxx'))
-            self.assertEqual(calls, [("search", 4)])
+            self.assertEqual(calls, [("search_info", 4)])
         finally:
             cr._native_search_fn = original_search
-            cr._native_match_info_fn = original_match_info
+            cr._native_search_info_fn = original_search_info
 
 
 # ============================================================================
