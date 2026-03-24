@@ -7,8 +7,9 @@ native code where DFA states become explicit if/elif branches.
 
 Pipeline: pattern -> DFA -> AST -> meta.compile_generated -> LLVM native code.
 
-Uses pythoc.meta quasi-quote templates to generate AST, avoiding raw
-ast constructor boilerplate.
+Universal ABI:  run(n: u64, data: ptr[i8], out: ptr[i64]) -> u8
+Both match and search share the same native calling convention.  The u8
+return is 1/0 (matched / not), and tag slot values are written to *out*.
 """
 
 from __future__ import annotations
@@ -38,13 +39,6 @@ from . import opcs
 INTERNAL_TAG_PREFIX = "__pythoc_internal_"
 INTERNAL_BEG_TAG = INTERNAL_TAG_PREFIX + "beg"
 INTERNAL_END_TAG = INTERNAL_TAG_PREFIX + "end"
-
-
-def _make_tag_struct(tag_names: Tuple[str, ...]) -> type:
-    """Build a PythoC struct type with one i64 field per tag slot."""
-    field_types = [i64] * len(tag_names)
-    field_name_list = [name for name in tag_names]
-    return create_struct_type(field_types, field_names=field_name_list)
 
 
 def _make_ctypes_tag_struct(tag_names: Tuple[str, ...]) -> type:
@@ -261,8 +255,6 @@ def _tpl_bma_fsm_program(init_body, goto_start, label_blocks, fallback_return):
     fallback_return
 
 
-# These templates are instantiated heavily during regex codegen; skip
-# fragment-level debug_source synthesis to keep Python-side build time low.
 for _tpl_name, _tpl in list(globals().items()):
     if _tpl_name.startswith('_tpl_') and hasattr(_tpl, 'debug_source_enabled'):
         _tpl.debug_source_enabled = False
@@ -294,22 +286,18 @@ def _raw_call(func_name: str, *args) -> ast.Call:
 
 
 def _q_i32(v):
-    """i32(v) expression."""
     return _raw_call('i32', v)
 
 
 def _q_u8(v):
-    """u8(v) expression."""
     return _raw_call('u8', v)
 
 
 def _q_i64(v):
-    """i64(v) expression."""
     return _raw_call('i64', v)
 
 
 def _q_eq(lhs, rhs):
-    """lhs == rhs expression."""
     return ast.Compare(
         left=_coerce_expr(lhs),
         ops=[ast.Eq()],
@@ -318,7 +306,6 @@ def _q_eq(lhs, rhs):
 
 
 def _q_lte(lhs, rhs):
-    """lhs <= rhs expression."""
     return ast.Compare(
         left=_coerce_expr(lhs),
         ops=[ast.LtE()],
@@ -327,7 +314,6 @@ def _q_lte(lhs, rhs):
 
 
 def _q_gte(lhs, rhs):
-    """lhs >= rhs expression."""
     return ast.Compare(
         left=_coerce_expr(lhs),
         ops=[ast.GtE()],
@@ -336,7 +322,6 @@ def _q_gte(lhs, rhs):
 
 
 def _q_add(lhs, rhs):
-    """lhs + rhs expression."""
     return ast.BinOp(
         left=_coerce_expr(lhs),
         op=ast.Add(),
@@ -345,7 +330,6 @@ def _q_add(lhs, rhs):
 
 
 def _q_and(lhs, rhs):
-    """lhs and rhs expression."""
     return ast.BoolOp(
         op=ast.And(),
         values=[_coerce_expr(lhs), _coerce_expr(rhs)],
@@ -353,7 +337,6 @@ def _q_and(lhs, rhs):
 
 
 def _q_sub(lhs, rhs):
-    """lhs - rhs expression."""
     return ast.BinOp(
         left=_coerce_expr(lhs),
         op=ast.Sub(),
@@ -362,7 +345,6 @@ def _q_sub(lhs, rhs):
 
 
 def _q_lt(lhs, rhs):
-    """lhs < rhs expression."""
     return ast.Compare(
         left=_coerce_expr(lhs),
         ops=[ast.Lt()],
@@ -382,12 +364,10 @@ def _q_or_chain(parts):
 
 
 def _q_return(val):
-    """return val statement."""
     return ast.Return(value=_coerce_expr(val))
 
 
 def _q_assign(target, value):
-    """target = value statement."""
     target_expr = _coerce_expr(target)
     if hasattr(target_expr, 'ctx'):
         target_expr.ctx = ast.Store()
@@ -398,27 +378,22 @@ def _q_assign(target, value):
 
 
 def _splice(stmts):
-    """Shorthand for meta.splice_stmts."""
     return meta.splice_stmts(stmts)
 
 
 def _q_label_block(label_name: str, body: List[ast.stmt]):
-    """with label(label_name): <body>"""
     return _q(_tpl_with_label, meta.const(label_name), _splice(body))
 
 
 def _q_goto(label_name: str):
-    """goto(label_name) statement."""
     return _q(_tpl_goto, meta.const(label_name))
 
 
 def _q_pass():
-    """pass statement."""
     return _q(_tpl_pass)
 
 
 def _stmt_list(node_or_nodes) -> List[ast.stmt]:
-    """Normalize a stmt or stmt-list into a list."""
     if node_or_nodes is None:
         return []
     if isinstance(node_or_nodes, list):
@@ -427,7 +402,6 @@ def _stmt_list(node_or_nodes) -> List[ast.stmt]:
 
 
 def _body_or_pass(node_or_nodes) -> List[ast.stmt]:
-    """Ensure a non-empty statement body for splicing into templates."""
     stmts = _stmt_list(node_or_nodes)
     if stmts:
         return stmts
@@ -454,7 +428,6 @@ def _q_ptr_assign(ptr_name: str, idx_expr: ast.expr, value_expr: ast.expr) -> as
 
 
 def _raw_if(test_expr: ast.expr, then_body, else_body=None) -> ast.If:
-    """Construct a raw ``ast.If`` without template instantiation overhead."""
     return ast.If(
         test=test_expr,
         body=_body_or_pass(then_body),
@@ -467,12 +440,6 @@ def _raw_if(test_expr: ast.expr, then_body, else_body=None) -> ast.If:
 # ---------------------------------------------------------------------------
 
 def _if_elif_chain(branches, else_body=None):
-    """Build if/elif/else chain from list of (test, body) pairs.
-
-    Uses quasi-quote templates internally. Variable-length branching
-    can't be expressed as a single template, so this builds the chain
-    iteratively from the tail.
-    """
     if not branches:
         raise ValueError("At least one branch required")
 
@@ -495,13 +462,10 @@ def _if_elif_chain(branches, else_body=None):
 @lru_cache(maxsize=None)
 def _byte_condition_template(byte_values: Tuple[int, ...],
                              ch_name: str = "ch") -> ast.expr:
-    """Build and cache a byte-membership condition template."""
     if not byte_values:
         return meta.const(False)
 
     sorted_vals = list(byte_values)
-
-    # Find contiguous ranges
     ranges = []
     start = sorted_vals[0]
     end = sorted_vals[0]
@@ -532,11 +496,6 @@ def _byte_condition_template(byte_values: Tuple[int, ...],
 
 
 def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
-    """Build condition that checks if ch_name is in byte_values.
-
-    Uses range checks for contiguous ranges, individual comparisons
-    for small sets.
-    """
     if not byte_values:
         return meta.const(False)
     return copy.deepcopy(_byte_condition_template(
@@ -546,7 +505,7 @@ def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
 
 
 def _compute_search_restart_states(search_dfa: DFA) -> FrozenSet[int]:
-    """Identify the `.*?`-prefix restart states in the search DFA."""
+    """Identify the ``.*?``-prefix restart states in the search DFA."""
     if search_dfa.sentinel_256_class < 0:
         return frozenset()
 
@@ -603,11 +562,10 @@ def _compute_search_restart_states(search_dfa: DFA) -> FrozenSet[int]:
 
 
 # ---------------------------------------------------------------------------
-# OPCS-BMA codegen
+# OPCS-BMA codegen — unified backend
 # ---------------------------------------------------------------------------
 
 def _bma_tag_pos_expr(base_expr: ast.expr, delta: int) -> ast.expr:
-    """Build ``base + delta`` for one tag write."""
     if delta == 0:
         return base_expr
     return _q_add(
@@ -618,30 +576,23 @@ def _bma_tag_pos_expr(base_expr: ast.expr, delta: int) -> ast.expr:
 
 def _emit_bma_tag_writes(tag_writes: Tuple[opcs.TagWrite, ...],
                          base_expr: ast.expr,
-                         with_tags: bool,
-                         tracked_slots: Dict[int, str] = None) -> List[ast.stmt]:
-    """Emit the final per-slot effect of one deterministic tag action list."""
+                         with_tags: bool) -> List[ast.stmt]:
+    """Emit per-slot writes to the ``out`` buffer."""
+    if not with_tags:
+        return []
     stmts: List[ast.stmt] = []
     for write in opcs._collapse_tag_writes(tag_writes):
         pos_expr = _bma_tag_pos_expr(base_expr, write.delta)
-        if with_tags:
-            stmts.append(_q_ptr_assign(
-                'out',
-                ast.Constant(write.slot),
-                _q_i64(pos_expr),
-            ))
-        if tracked_slots and write.slot in tracked_slots:
-            stmts.append(_q_assign(
-                meta.ref(tracked_slots[write.slot]),
-                _q_i64(pos_expr),
-            ))
+        stmts.append(_q_ptr_assign(
+            'out',
+            ast.Constant(write.slot),
+            _q_i64(pos_expr),
+        ))
     return stmts
 
 
 @dataclass(frozen=True)
 class _BMARuntimeState:
-    """Backend-local runtime state view derived only from TaggedOPCSBMA."""
-
     id: int
     label_name: str
     probe_offset: int
@@ -654,8 +605,6 @@ class _BMARuntimeState:
 
 @dataclass(frozen=True)
 class _BMARuntime:
-    """Normalized executable BMA graph used by the FSM backend."""
-
     states: Tuple[_BMARuntimeState, ...]
     state_by_id: Dict[int, _BMARuntimeState]
     start_state: int
@@ -667,18 +616,10 @@ class _BMARuntime:
 
 
 def _bma_state_label(state_id: int) -> str:
-    """Stable label name for one executable BMA state."""
     return "bma_s{}".format(state_id)
 
 
 def _normalize_bma_runtime(bma: opcs.TaggedOPCSBMA) -> _BMARuntime:
-    """Freeze one executable runtime view from TaggedOPCSBMA only.
-
-    The backend intentionally ignores producer-side metadata such as
-    `control_state`, `block_len`, `known_bytes`, and target summaries.
-    Only executable states/edges, accept flags, shifts, and tag writes
-    survive into the lowering boundary.
-    """
     accept_states = set(bma.accept_states)
     executable_states: List[_BMARuntimeState] = []
     state_by_id: Dict[int, _BMARuntimeState] = {}
@@ -725,17 +666,11 @@ def _normalize_bma_runtime(bma: opcs.TaggedOPCSBMA) -> _BMARuntime:
 
 def _build_bma_fsm_edge_body(runtime: _BMARuntime,
                              edge: opcs.OPCSEdge,
-                             with_tags: bool,
-                             tracked_slots: Dict[int, str]) -> List[ast.stmt]:
-    """Lower one BMA edge into direct tag/update/goto statements."""
+                             with_tags: bool) -> List[ast.stmt]:
     branch_body: List[ast.stmt] = []
     if edge.tag_writes:
         branch_body.extend(_emit_bma_tag_writes(
-            edge.tag_writes,
-            meta.ref('i'),
-            with_tags=with_tags,
-            tracked_slots=tracked_slots,
-        ))
+            edge.tag_writes, meta.ref('i'), with_tags=with_tags))
     if edge.shift:
         branch_body.append(_q_assign(
             meta.ref('i'),
@@ -746,50 +681,32 @@ def _build_bma_fsm_edge_body(runtime: _BMARuntime,
 
 
 def _build_bma_eof_success_body(state: _BMARuntimeState,
-                                success_return_expr: ast.expr,
-                                with_tags: bool,
-                                tracked_slots: Dict[int, str],
-                                fullmatch: bool) -> Optional[List[ast.stmt]]:
+                                with_tags: bool) -> Optional[List[ast.stmt]]:
     """Build the success branch taken when execution reaches EOF."""
-    if fullmatch and state.accepting:
-        return [_q_return(success_return_expr)]
+    if state.accepting:
+        return [_q_return(_q_u8(1))]
     if not state.eof_accept:
         return None
 
     body: List[ast.stmt] = []
-    if state.eof_tag_writes and (with_tags or tracked_slots):
+    if state.eof_tag_writes:
         body.extend(_emit_bma_tag_writes(
-            state.eof_tag_writes,
-            meta.ref('i'),
-            with_tags=with_tags,
-            tracked_slots=tracked_slots,
-        ))
-    body.append(_q_return(success_return_expr))
+            state.eof_tag_writes, meta.ref('i'), with_tags=with_tags))
+    body.append(_q_return(_q_u8(1)))
     return body
 
 
 def _build_bma_fsm_state_body(runtime: _BMARuntime,
                               state: _BMARuntimeState,
-                              success_return_expr: ast.expr,
-                              fail_return_expr: ast.expr,
                               with_tags: bool,
-                              tracked_slots: Dict[int, str],
-                              eager_accept: bool,
-                              fullmatch: bool) -> List[ast.stmt]:
-    """Lower one normalized runtime state into one label block body."""
+                              eager_accept: bool) -> List[ast.stmt]:
     if state.is_dead:
-        return [_q_return(fail_return_expr)]
+        return [_q_return(_q_u8(0))]
 
     if eager_accept and state.accepting:
-        return [_q_return(success_return_expr)]
+        return [_q_return(_q_u8(1))]
 
-    eof_success = _build_bma_eof_success_body(
-        state,
-        success_return_expr,
-        with_tags=with_tags,
-        tracked_slots=tracked_slots,
-        fullmatch=fullmatch,
-    )
+    eof_success = _build_bma_eof_success_body(state, with_tags=with_tags)
     eof_guard = _raw_if(
         _q_gte(meta.ref('i'), meta.ref('n')),
         eof_success if eof_success is not None else [_q_goto(runtime.dead_label)],
@@ -816,12 +733,7 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
     edge_branches = [
         (
             _byte_condition(list(edge.byte_values), 'ch'),
-            _build_bma_fsm_edge_body(
-                runtime,
-                edge,
-                with_tags=with_tags,
-                tracked_slots=tracked_slots,
-            ),
+            _build_bma_fsm_edge_body(runtime, edge, with_tags=with_tags),
         )
         for edge in state.edges
     ]
@@ -842,30 +754,21 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
 
 def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
                         init_body: List[ast.stmt],
-                        success_return_expr: ast.expr,
-                        fail_return_expr: ast.expr,
                         with_tags: bool,
-                        tracked_slots: Dict[int, str],
-                        eager_accept: bool,
-                        fullmatch: bool) -> List[ast.stmt]:
-    """Lower a frozen TaggedOPCSBMA into one goto/FSM runner."""
+                        eager_accept: bool) -> List[ast.stmt]:
+    """Lower a TaggedOPCSBMA into one u8-returning goto/FSM runner."""
     runtime = _normalize_bma_runtime(bma)
     program_init = list(init_body)
     if eager_accept and runtime.initial_accepting:
-        program_init.append(_q_return(success_return_expr))
+        program_init.append(_q_return(_q_u8(1)))
 
     label_blocks = [
         _q_label_block(
             state.label_name,
             _build_bma_fsm_state_body(
-                runtime,
-                state,
-                success_return_expr=success_return_expr,
-                fail_return_expr=fail_return_expr,
+                runtime, state,
                 with_tags=with_tags,
-                tracked_slots=tracked_slots,
                 eager_accept=eager_accept,
-                fullmatch=fullmatch,
             ),
         )
         for state in runtime.states
@@ -876,149 +779,78 @@ def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
         _splice(_body_or_pass(program_init)),
         _splice([_q_goto(runtime.start_label)]),
         _splice(label_blocks),
-        _splice([_q_return(fail_return_expr)]),
+        _splice([_q_return(_q_u8(0))]),
     ))
 
 
-def _build_bma_bool_body(bma: opcs.TaggedOPCSBMA,
-                         fullmatch: bool) -> List[ast.stmt]:
-    """Build a bool-returning goto/FSM runner from the unified BMA artifact."""
-    init = [
-        _q(_tpl_assign_typed, meta.ident('i'), meta.type_expr(u64),
-           _q(_tpl_u64, meta.const(0))),
-    ]
-    return _build_bma_fsm_body(
-        bma,
-        init_body=init,
-        success_return_expr=_q_u8(1),
-        fail_return_expr=_q_u8(0),
-        with_tags=False,
-        tracked_slots={},
-        eager_accept=not fullmatch,
-        fullmatch=fullmatch,
-    )
+def _build_bma_body(bma: opcs.TaggedOPCSBMA,
+                    with_tags: bool,
+                    eager_accept: bool = True) -> List[ast.stmt]:
+    """Build the unified u8-returning FSM body.
 
-
-def _build_bma_search_init_stmts(bma: opcs.TaggedOPCSBMA,
-                                 with_tags: bool,
-                                 tracked_slots: Dict[int, str]) -> List[ast.stmt]:
-    """Build search-local variable setup plus initial BMA tag writes."""
+    If ``with_tags`` is True the generated code expects an ``out``
+    parameter (``ptr[i64]``) and writes tag slot values into it.
+    """
+    num_slots = len(bma.tag_names) if with_tags else 0
     init_stmts: List[ast.stmt] = [
         _q(_tpl_assign_typed, meta.ident('i'), meta.type_expr(u64),
            _q(_tpl_u64, meta.const(0))),
-        _q(_tpl_assign_typed, meta.ident('match_beg'), meta.type_expr(i64),
-           _q_i64(meta.const(-1))),
     ]
-
-    if bma.initial_tag_writes and (with_tags or tracked_slots):
+    for slot in range(num_slots):
+        init_stmts.append(
+            _q_ptr_assign('out', ast.Constant(slot), _q_i64(meta.const(-1))))
+    if bma.initial_tag_writes and with_tags:
         init_stmts.extend(_emit_bma_tag_writes(
-            bma.initial_tag_writes,
-            meta.ref('i'),
-            with_tags=with_tags,
-            tracked_slots=tracked_slots,
-        ))
-    return init_stmts
+            bma.initial_tag_writes, meta.ref('i'), with_tags=True))
 
-
-def _build_bma_search_body(bma: opcs.TaggedOPCSBMA) -> List[ast.stmt]:
-    """Build an i64-returning goto/FSM search runner from the BMA artifact."""
-    entry_slot = bma.tag_slots.get(INTERNAL_BEG_TAG)
-    tracked_slots = (
-        {}
-        if entry_slot is None else
-        {entry_slot: 'match_beg'}
-    )
-    init_body = _build_bma_search_init_stmts(
-        bma,
-        with_tags=False,
-        tracked_slots=tracked_slots,
-    )
     return _build_bma_fsm_body(
         bma,
-        init_body=init_body,
-        success_return_expr=meta.ref('match_beg'),
-        fail_return_expr=_q_i64(meta.const(-1)),
-        with_tags=False,
-        tracked_slots=tracked_slots,
-        eager_accept=True,
-        fullmatch=False,
-    )
-
-
-def _build_bma_tag_body(bma: opcs.TaggedOPCSBMA) -> List[ast.stmt]:
-    """Build a single-pass tagged goto/FSM search runner from the BMA artifact."""
-    entry_slot = bma.tag_slots.get(INTERNAL_BEG_TAG)
-    tracked_slots = (
-        {}
-        if entry_slot is None else
-        {entry_slot: 'match_beg'}
-    )
-    init_body = [
-        _q_ptr_assign('out', ast.Constant(slot), _q_i64(meta.const(-1)))
-        for slot in range(len(bma.tag_names))
-    ]
-    init_body.extend(_build_bma_search_init_stmts(
-        bma,
-        with_tags=True,
-        tracked_slots=tracked_slots,
-    ))
-    return _build_bma_fsm_body(
-        bma,
-        init_body=init_body,
-        success_return_expr=meta.ref('match_beg'),
-        fail_return_expr=_q_i64(meta.const(-1)),
-        with_tags=True,
-        tracked_slots=tracked_slots,
-        eager_accept=True,
-        fullmatch=False,
+        init_body=init_stmts,
+        with_tags=with_tags,
+        eager_accept=eager_accept,
     )
 
 
 def _build_bma_fn(bma: opcs.TaggedOPCSBMA,
                   digest: str,
-                  kind: str,
-                  tag_struct_type=None):
-    """Compile one public regex runner from the unified BMA backend."""
-    extra_globals: Dict[str, object] = {}
-    if kind == "is_match":
-        func_name = "regex_is_match"
+                  kind: str):
+    """Compile one public regex runner.
+
+    ``kind`` values:
+        ``"match"``  — no tags, ``(n, data) -> u8``
+        ``"match_tagged"`` — match BMA with tags, ``(n, data, out) -> u8``
+        ``"search"`` — search BMA with tags, ``(n, data, out) -> u8``
+
+    All return ``u8`` (1 = matched, 0 = not).
+    """
+    if kind == "match":
+        func_name = "regex_match"
         params = [("n", u64), ("data", ptr[i8])]
-        return_type = u8
-        body_stmts = _build_bma_bool_body(bma, fullmatch=False)
-    elif kind == "fullmatch":
-        func_name = "regex_fullmatch"
-        params = [("n", u64), ("data", ptr[i8])]
-        return_type = u8
-        body_stmts = _build_bma_bool_body(bma, fullmatch=True)
+        body_stmts = _build_bma_body(bma, with_tags=False, eager_accept=True)
+    elif kind == "match_tagged":
+        func_name = "regex_match_tagged"
+        params = [("n", u64), ("data", ptr[i8]), ("out", ptr[i64])]
+        body_stmts = _build_bma_body(bma, with_tags=True, eager_accept=True)
     elif kind == "search":
         func_name = "regex_search"
-        params = [("n", u64), ("data", ptr[i8])]
-        return_type = i64
-        body_stmts = _build_bma_search_body(bma)
-    elif kind == "search_info":
-        func_name = "regex_search_info"
         params = [("n", u64), ("data", ptr[i8]), ("out", ptr[i64])]
-        return_type = i64
-        body_stmts = _build_bma_tag_body(bma)
+        body_stmts = _build_bma_body(bma, with_tags=True, eager_accept=True)
     else:
         raise ValueError("Unknown BMA kind: {}".format(kind))
 
     for node in body_stmts:
         ast.fix_missing_locations(node)
 
-    required_globals = {
-        'i8': i8, 'i32': i32, 'i64': i64,
-        'u8': u8, 'u64': u64, 'ptr': ptr,
-        'label': label, 'goto': goto, 'goto_end': goto_end,
-    }
-    required_globals.update(extra_globals)
-
     gf = meta.func(
         name=func_name,
         params=params,
-        return_type=return_type,
+        return_type=u8,
         body=body_stmts,
-        required_globals=required_globals,
+        required_globals={
+            'i8': i8, 'i32': i32, 'i64': i64,
+            'u8': u8, 'u64': u64, 'ptr': ptr,
+            'label': label, 'goto': goto, 'goto_end': goto_end,
+        },
         source_file=__file__,
         debug_source=f"# regex {kind} {digest}",
     )
@@ -1030,12 +862,6 @@ def _build_bma_fn(bma: opcs.TaggedOPCSBMA,
 # ---------------------------------------------------------------------------
 
 def _bytes_to_native_args(data: bytes):
-    """Convert bytes to (n, ptr_val, buf) for native regex fns.
-
-    Returns (n, ptr_val, buf).  buf must be kept alive for the
-    duration of the native call to prevent the GC from freeing
-    the underlying memory.
-    """
     n = len(data)
     buf = ctypes.create_string_buffer(data, n)
     ptr_val = ctypes.cast(buf, ctypes.c_void_p).value
@@ -1047,20 +873,17 @@ def _bytes_to_native_args(data: bytes):
 # ---------------------------------------------------------------------------
 
 class CompiledRegex:
-    """Holds a compiled regex pattern and provides match/search operations.
+    """Holds a compiled regex pattern and provides ``match``/``search``.
 
-    Eagerly compiles native PythoC functions for is_match(), fullmatch(),
-    search(), and tagged search/span recovery.
-    Must be created before native execution starts (i.e., at module level
-    or during @compile decoration phase).
+    Both methods share the same universal ABI:
+        ``run(n: u64, data: ptr[i8], out: ptr[i64]) -> u8``
 
-    Instances are cached by pattern string, so creating CompiledRegex with
-    the same pattern returns the same object.  This avoids recompilation
-    errors when the same pattern is used in multiple places.
+    ``match`` runs the BMA on the original pattern (anchored at start).
+    ``search`` runs the BMA on ``.*?{_beg}pattern{_end}`` (unanchored).
 
-    All public execution APIs lower through one BMA-style compiled engine
-    family. `search`/`find_span`/`find_with_tags` use the search-normalized
-    BMA with hidden begin/end tags in its canonical tag layout.
+    Both return ``(bool, dict)`` where the dict maps tag names to
+    byte-offset positions.  For ``search``, the dict always contains
+    ``'start'`` and ``'end'`` keys derived from internal tags.
     """
 
     VALID_MODES = frozenset({"match", "search", "both"})
@@ -1089,26 +912,28 @@ class CompiledRegex:
 
         self._match_bma: Optional[opcs.TaggedOPCSBMA] = None
         self._search_bma: Optional[opcs.TaggedOPCSBMA] = None
-        self._native_is_match_fn = None
-        self._native_fullmatch_fn = None
+        self._native_match_fn = None
         self._native_search_fn = None
-        self._native_search_info_fn = None
-        self._search_result_slots = 0
-        self._search_tag_slots: Dict[str, int] = {}
-        self._beg_slot = -1
-        self._end_slot = -1
-        self._tag_struct_type = None
-        self._ctypes_tag_struct = None
+        self._match_ctypes_struct = None
+        self._search_ctypes_struct = None
 
         need_match = mode in ("match", "both")
         need_search = mode in ("search", "both")
 
         if need_match:
-            nfa = build_nfa(self._re_ast)
-            self.dfa = build_dfa(nfa)
-            self._match_bma = opcs.build_tagged_opcs_bma(self.dfa)
-            self._native_is_match_fn = self.generate_is_match_fn()
-            self._native_fullmatch_fn = self.generate_fullmatch_fn()
+            match_nfa = build_nfa(self._re_ast)
+            self.dfa = build_dfa(match_nfa)
+            match_tag_runtime = opcs.compute_dfa_tag_runtime(
+                match_nfa, self.dfa, include_internal=False)
+            has_match_tags = bool(match_tag_runtime.tag_names)
+            if has_match_tags:
+                self._match_bma = opcs.build_tagged_opcs_bma(
+                    self.dfa, match_tag_runtime)
+                self._match_ctypes_struct = _make_ctypes_tag_struct(
+                    self._match_bma.tag_names)
+            else:
+                self._match_bma = opcs.build_tagged_opcs_bma(self.dfa)
+            self._native_match_fn = self._compile_match_fn()
 
         if need_search:
             search_ast = rewrite_for_search(self._re_ast)
@@ -1124,137 +949,114 @@ class CompiledRegex:
                 search_dfa, search_tag_runtime,
                 search_restart_controls=search_restart_states,
                 search_entry_slot=beg_slot)
-            self._search_result_slots = len(self._search_bma.tag_names)
-            self._search_tag_slots = self._search_bma.tag_slots
-            self._beg_slot = self._search_tag_slots[INTERNAL_BEG_TAG]
-            self._end_slot = self._search_tag_slots[INTERNAL_END_TAG]
-            if self._search_bma.tag_names:
-                self._tag_struct_type = _make_tag_struct(
-                    self._search_bma.tag_names)
-                self._ctypes_tag_struct = _make_ctypes_tag_struct(
-                    self._search_bma.tag_names)
-            self._native_search_fn = self.generate_search_fn()
-            self._native_search_info_fn = self.generate_search_info_fn()
+            self._search_ctypes_struct = _make_ctypes_tag_struct(
+                self._search_bma.tag_names)
+            self._native_search_fn = self._compile_search_fn()
 
-    def _require_match(self):
-        if self._native_is_match_fn is None:
+    # -----------------------------------------------------------------
+    # Public API
+    # -----------------------------------------------------------------
+
+    def match(self, data: bytes) -> Tuple[bool, dict]:
+        """Anchored match at position 0.
+
+        Returns ``(matched, tags)`` where *tags* is a dict mapping
+        user-defined tag names to byte positions.  When the pattern
+        has no user tags the dict is empty.
+        """
+        if self._native_match_fn is None:
             raise RuntimeError(
-                f"is_match/fullmatch unavailable: CompiledRegex was built "
-                f"with mode='{self.mode}'; use mode='match' or 'both'")
+                f"match unavailable: compiled with mode='{self.mode}'")
+        n, ptr_val, buf = _bytes_to_native_args(data)
+        if self._match_ctypes_struct is not None:
+            out = self._match_ctypes_struct()
+            matched = bool(self._native_match_fn(n, ptr_val, ctypes.pointer(out)))
+            if not matched:
+                return (False, {})
+            tags: dict = {}
+            for tag_name in self._match_bma.tag_names:
+                val = int(getattr(out, tag_name))
+                if val >= 0:
+                    tags[tag_name] = val
+            return (True, tags)
+        else:
+            matched = bool(self._native_match_fn(n, ptr_val))
+            return (matched, {})
 
-    def _require_search(self):
+    def search(self, data: bytes) -> Tuple[bool, dict]:
+        """Unanchored search — find the first occurrence anywhere.
+
+        Returns ``(found, info)`` where *info* contains ``'start'``
+        and ``'end'`` keys plus any user-defined tags.
+        """
         if self._native_search_fn is None:
             raise RuntimeError(
-                f"search/find_span/find_with_tags unavailable: CompiledRegex "
-                f"was built with mode='{self.mode}'; use mode='search' or 'both'")
-
-    def is_match(self, data: bytes) -> bool:
-        """Test if the pattern matches at the beginning of data.
-
-        Semantics match Python's re.match: anchored at the start,
-        but the pattern does not need to consume the entire input
-        (unless the pattern contains $ anchor on relevant branches).
-        """
-        self._require_match()
+                f"search unavailable: compiled with mode='{self.mode}'")
         n, ptr_val, buf = _bytes_to_native_args(data)
-        return bool(self._native_is_match_fn(n, ptr_val))
-
-    def fullmatch(self, data: bytes) -> bool:
-        """Test if the entire data matches the pattern."""
-        self._require_match()
-        n, ptr_val, buf = _bytes_to_native_args(data)
-        return bool(self._native_fullmatch_fn(n, ptr_val))
-
-    def search(self, data: bytes) -> int:
-        """Search for pattern in data.
-
-        Returns the start position of the first match, or -1 if not found.
-        """
-        self._require_search()
-        n, ptr_val, buf = _bytes_to_native_args(data)
-        return int(self._native_search_fn(n, ptr_val))
-
-    def _search_info(self, data: bytes):
-        """Run one compiled tagged search pass and recover span/tags."""
-        self._require_search()
-        n, ptr_val, buf = _bytes_to_native_args(data)
-        out = self._ctypes_tag_struct()
-        match_start = int(self._native_search_info_fn(
-            n, ptr_val, ctypes.pointer(out)))
-        if match_start < 0:
-            return None
-
-        result = {
-            'start': match_start,
-            'end': int(getattr(out, self._search_bma.tag_names[self._end_slot])),
+        out = self._search_ctypes_struct()
+        matched = bool(self._native_search_fn(n, ptr_val, ctypes.pointer(out)))
+        if not matched:
+            return (False, {})
+        beg_slot = self._search_bma.tag_slots[INTERNAL_BEG_TAG]
+        end_slot = self._search_bma.tag_slots[INTERNAL_END_TAG]
+        beg_name = self._search_bma.tag_names[beg_slot]
+        end_name = self._search_bma.tag_names[end_slot]
+        result: dict = {
+            'start': int(getattr(out, beg_name)),
+            'end': int(getattr(out, end_name)),
         }
         for tag_name in self._search_bma.tag_names:
             if tag_name.startswith(INTERNAL_TAG_PREFIX):
                 continue
-            tag_pos = int(getattr(out, tag_name))
-            if tag_pos >= 0:
-                result[tag_name] = tag_pos
-        return result
-
-    def find_span(self, data: bytes):
-        """Find the span (start, end) of the first match.
-
-        Returns (start, end) tuple or None if no match.
-        """
-        result = self._search_info(data)
-        if result is None:
-            return None
-        return (result['start'], result['end'])
-
-    def find_with_tags(self, data: bytes):
-        """Find first match and return tag positions.
-
-        Returns a dict mapping tag names to input positions, plus
-        'start' and 'end' keys for the match span.  Returns None
-        if no match.
-
-        Example:
-            cr = CompiledRegex('a{mid}b')
-            cr.find_with_tags(b'xxabxx')
-            # -> {'start': 2, 'end': 4, 'mid': 3}
-        """
-        return self._search_info(data)
+            val = int(getattr(out, tag_name))
+            if val >= 0:
+                result[tag_name] = val
+        return (True, result)
 
     # -----------------------------------------------------------------
-    # @compile function generation
+    # Native function compilation
     # -----------------------------------------------------------------
 
-    def generate_is_match_fn(self):
-        """Generate a @compile function for is_match.
+    def _compile_match_fn(self):
+        kind = "match_tagged" if self._match_ctypes_struct else "match"
+        return _build_bma_fn(self._match_bma, self._digest, kind)
 
-        Returns a PythoC compiled function:
-            is_match(n: u64, data: ptr[i8]) -> u8
-        """
-        return _build_bma_fn(self._match_bma, self._digest, "is_match")
-
-    def generate_fullmatch_fn(self):
-        """Generate a @compile function for fullmatch.
-
-        Returns a PythoC compiled function:
-            fullmatch(n: u64, data: ptr[i8]) -> u8
-        """
-        return _build_bma_fn(self._match_bma, self._digest, "fullmatch")
-
-    def generate_search_fn(self):
-        """Generate a @compile function for search.
-
-        Returns a PythoC compiled function:
-            search(n: u64, data: ptr[i8]) -> i64
-        """
+    def _compile_search_fn(self):
         return _build_bma_fn(self._search_bma, self._digest, "search")
 
-    def generate_search_info_fn(self):
-        """Generate a @compile function for native search/tag recovery.
+    def generate_match_fn(self):
+        """Return the compiled match native function.
 
-        Returns a PythoC compiled function:
-            search_info(n: u64, data: ptr[i8], out: ptr[RegexTagResult]) -> i64
+        Signature depends on whether the pattern contains user tags:
+            no tags:  ``(n: u64, data: ptr[i8]) -> u8``
+            tags:     ``(n: u64, data: ptr[i8], out: ptr[i64]) -> u8``
+
+        Intended for embedding inside ``@compile`` functions.
         """
-        return _build_bma_fn(
-            self._search_bma, self._digest, "search_info",
-            tag_struct_type=self._tag_struct_type,
-        )
+        if self._native_match_fn is None:
+            raise RuntimeError(
+                f"match unavailable: compiled with mode='{self.mode}'")
+        return self._native_match_fn
+
+    def generate_search_fn(self):
+        """Return the compiled search native function.
+
+        Signature: ``(n: u64, data: ptr[i8], out: ptr[i64]) -> u8``
+
+        The ``out`` buffer must have room for all tag slots (including
+        internal ``_beg``/``_end``).  Use ``search_num_slots`` for the
+        required size.
+
+        Intended for embedding inside ``@compile`` functions.
+        """
+        if self._native_search_fn is None:
+            raise RuntimeError(
+                f"search unavailable: compiled with mode='{self.mode}'")
+        return self._native_search_fn
+
+    @property
+    def search_num_slots(self) -> int:
+        """Number of i64 slots needed for the search output buffer."""
+        if self._search_bma is None:
+            return 0
+        return len(self._search_bma.tag_names)
