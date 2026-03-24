@@ -22,8 +22,8 @@ class NFAState:
     id: int
     # byte_value -> set of target state ids
     byte_transitions: Dict[int, Set[int]] = field(default_factory=dict)
-    # epsilon (empty) transitions
-    epsilon: Set[int] = field(default_factory=set)
+    # epsilon transitions — ordered list encoding priority (first = preferred)
+    epsilon: List[int] = field(default_factory=list)
     # Optional tag name for position markers
     tag: Optional[str] = None
 
@@ -31,7 +31,8 @@ class NFAState:
         self.byte_transitions.setdefault(byte_val, set()).add(target)
 
     def add_epsilon(self, target: int):
-        self.epsilon.add(target)
+        if target not in self.epsilon:
+            self.epsilon.append(target)
 
 
 @dataclass
@@ -162,34 +163,34 @@ class NFABuilder:
             return self._build_bounded_repeat(node)
 
     def _build_optional(self, child_node) -> _Fragment:
-        """a? – zero or one"""
+        """a? – zero or one (lazy: prefer skip before entering body)"""
         s = self._new_state()
         a = self._new_state()
         frag = self._build_node(child_node)
-        self.states[s].add_epsilon(frag.start)
-        self.states[s].add_epsilon(a)
+        self.states[s].add_epsilon(a)          # prefer skip (lazy)
+        self.states[s].add_epsilon(frag.start)  # then try body
         self.states[frag.accept].add_epsilon(a)
         return _Fragment(s, a)
 
     def _build_star(self, child_node) -> _Fragment:
-        """a* – zero or more"""
+        """a* – zero or more (lazy: prefer exit before repeating)"""
         s = self._new_state()
         a = self._new_state()
         frag = self._build_node(child_node)
-        self.states[s].add_epsilon(frag.start)
-        self.states[s].add_epsilon(a)
-        self.states[frag.accept].add_epsilon(frag.start)
-        self.states[frag.accept].add_epsilon(a)
+        self.states[s].add_epsilon(a)          # prefer exit (lazy)
+        self.states[s].add_epsilon(frag.start)  # then try body
+        self.states[frag.accept].add_epsilon(a)          # prefer exit (lazy)
+        self.states[frag.accept].add_epsilon(frag.start)  # then repeat
         return _Fragment(s, a)
 
     def _build_plus(self, child_node) -> _Fragment:
-        """a+ – one or more"""
+        """a+ – one or more (lazy: after first, prefer exit before repeating)"""
         s = self._new_state()
         a = self._new_state()
         frag = self._build_node(child_node)
         self.states[s].add_epsilon(frag.start)
-        self.states[frag.accept].add_epsilon(frag.start)
-        self.states[frag.accept].add_epsilon(a)
+        self.states[frag.accept].add_epsilon(a)          # prefer exit (lazy)
+        self.states[frag.accept].add_epsilon(frag.start)  # then repeat
         return _Fragment(s, a)
 
     def _build_bounded_repeat(self, node: ast.Repeat) -> _Fragment:
@@ -262,67 +263,3 @@ def build_nfa(ast_node) -> NFA:
     """Build an NFA from a regex AST node."""
     builder = NFABuilder()
     return builder.build(ast_node)
-
-
-def build_search_nfa(nfa: NFA) -> NFA:
-    """Build an unanchored search NFA by prepending .* to the original NFA.
-
-    Adds a new start state with a self-loop on all 256 bytes and an
-    epsilon transition to the original start state. This allows the DFA
-    built from this NFA to match the pattern at any position in a single
-    forward pass (O(n) instead of O(n^2)).
-    """
-    # Deep-copy existing states with shifted IDs (+1)
-    new_states: List[NFAState] = []
-    offset = 1
-    for old_s in nfa.states:
-        ns = NFAState(id=old_s.id + offset)
-        for bval, targets in old_s.byte_transitions.items():
-            ns.byte_transitions[bval] = {t + offset for t in targets}
-        ns.epsilon = {t + offset for t in old_s.epsilon}
-        new_states.append(ns)
-
-    # Create new start state (id=0) with self-loop on all bytes
-    new_start = NFAState(id=0)
-    for b in range(256):
-        new_start.add_byte(b, 0)
-    new_start.add_epsilon(nfa.start + offset)
-
-    all_states = [new_start] + new_states
-    return NFA(states=all_states, start=0, accept=nfa.accept + offset)
-
-
-def reverse_nfa(nfa: NFA) -> NFA:
-    """Reverse an NFA: swap start and accept, reverse all transitions.
-
-    Used to build a reverse DFA for leftmost-start-position recovery.
-    The reversed NFA, when run backward on the input from the match end,
-    finds the leftmost match start position.
-
-    Anchor sentinel transitions (byte values 256=^, 257=$) are skipped
-    and replaced with epsilon transitions.  Anchors express positional
-    constraints already enforced by the forward pass; the reverse DFA
-    only needs to match actual byte content.
-
-    Note: Thompson NFA has a single accept state. The reversed NFA uses
-    the original start as accept, the original accept as start.
-    Epsilon transitions and byte transitions are all reversed.
-    """
-    n_states = len(nfa.states)
-    new_states = [NFAState(id=i) for i in range(n_states)]
-
-    for old_s in nfa.states:
-        # Reverse byte transitions
-        for bval, targets in old_s.byte_transitions.items():
-            if bval >= 256:
-                # Sentinel: treat as epsilon in the reversed NFA
-                for t in targets:
-                    new_states[t].add_epsilon(old_s.id)
-                continue
-            for t in targets:
-                new_states[t].add_byte(bval, old_s.id)
-        # Reverse epsilon transitions
-        for t in old_s.epsilon:
-            new_states[t].add_epsilon(old_s.id)
-
-    return NFA(states=new_states, start=nfa.accept, accept=nfa.start)

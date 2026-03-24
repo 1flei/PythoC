@@ -24,6 +24,7 @@ from pythoc import meta
 from pythoc.meta.template import _coerce_to_ast as _meta_coerce_to_ast
 from pythoc.builtin_entities.types import i8, i32, i64, u8, u64, ptr
 from pythoc.builtin_entities.scoped_label import label, goto, goto_end
+from pythoc.builtin_entities.struct import create_struct_type
 
 from .dfa import DFA
 from .parse import (
@@ -37,6 +38,19 @@ from . import opcs
 INTERNAL_TAG_PREFIX = "__pythoc_internal_"
 INTERNAL_BEG_TAG = INTERNAL_TAG_PREFIX + "beg"
 INTERNAL_END_TAG = INTERNAL_TAG_PREFIX + "end"
+
+
+def _make_tag_struct(tag_names: Tuple[str, ...]) -> type:
+    """Build a PythoC struct type with one i64 field per tag slot."""
+    field_types = [i64] * len(tag_names)
+    field_name_list = [name for name in tag_names]
+    return create_struct_type(field_types, field_names=field_name_list)
+
+
+def _make_ctypes_tag_struct(tag_names: Tuple[str, ...]) -> type:
+    """Build a ctypes.Structure matching the PythoC tag struct layout."""
+    fields = [(name, ctypes.c_int64) for name in tag_names]
+    return type("RegexTagResult", (ctypes.Structure,), {"_fields_": fields})
 
 
 def _pattern_digest(pattern: str) -> str:
@@ -62,8 +76,6 @@ def compile_pattern_from_ast(re_ast):
 def rewrite_for_search(ast_node) -> object:
     """Prepend lazy .* to pattern AST for unanchored search.
 
-    Produces the same DFA as the old NFA-level build_search_nfa().
-
     Injects internal begin/end tags around the pattern body so the
     search entry mode shares the same tagged core shape as ordinary
     matching.
@@ -77,10 +89,7 @@ def rewrite_for_search(ast_node) -> object:
 
 
 def compile_search_dfa(pattern: str):
-    """Build a search DFA (prepend .*?) for unanchored O(n) matching.
-
-    Uses AST-level rewrite instead of NFA-level build_search_nfa().
-    """
+    """Build a search DFA (prepend .*?) for unanchored O(n) matching."""
     re_ast = parse(pattern)
     search_ast = rewrite_for_search(re_ast)
     nfa = build_nfa(search_ast)
@@ -967,8 +976,10 @@ def _build_bma_tag_body(bma: opcs.TaggedOPCSBMA) -> List[ast.stmt]:
 
 def _build_bma_fn(bma: opcs.TaggedOPCSBMA,
                   digest: str,
-                  kind: str):
+                  kind: str,
+                  tag_struct_type=None):
     """Compile one public regex runner from the unified BMA backend."""
+    extra_globals: Dict[str, object] = {}
     if kind == "is_match":
         func_name = "regex_is_match"
         params = [("n", u64), ("data", ptr[i8])]
@@ -995,16 +1006,19 @@ def _build_bma_fn(bma: opcs.TaggedOPCSBMA,
     for node in body_stmts:
         ast.fix_missing_locations(node)
 
+    required_globals = {
+        'i8': i8, 'i32': i32, 'i64': i64,
+        'u8': u8, 'u64': u64, 'ptr': ptr,
+        'label': label, 'goto': goto, 'goto_end': goto_end,
+    }
+    required_globals.update(extra_globals)
+
     gf = meta.func(
         name=func_name,
         params=params,
         return_type=return_type,
         body=body_stmts,
-        required_globals={
-            'i8': i8, 'i32': i32, 'i64': i64,
-            'u8': u8, 'u64': u64, 'ptr': ptr,
-            'label': label, 'goto': goto, 'goto_end': goto_end,
-        },
+        required_globals=required_globals,
         source_file=__file__,
         debug_source=f"# regex {kind} {digest}",
     )
@@ -1049,64 +1063,90 @@ class CompiledRegex:
     BMA with hidden begin/end tags in its canonical tag layout.
     """
 
-    _cache: Dict[str, 'CompiledRegex'] = {}
+    VALID_MODES = frozenset({"match", "search", "both"})
 
-    def __new__(cls, pattern: str):
-        if pattern in cls._cache:
-            return cls._cache[pattern]
+    _cache: Dict[Tuple[str, str], 'CompiledRegex'] = {}
+
+    def __new__(cls, pattern: str, mode: str = "both"):
+        key = (pattern, mode)
+        if key in cls._cache:
+            return cls._cache[key]
         instance = super().__new__(cls)
-        cls._cache[pattern] = instance
+        cls._cache[key] = instance
         return instance
 
-    def __init__(self, pattern: str):
-        # Skip re-init if already initialized (returned from cache)
+    def __init__(self, pattern: str, mode: str = "both"):
         if hasattr(self, '_initialized'):
             return
+        if mode not in self.VALID_MODES:
+            raise ValueError(
+                f"Invalid mode '{mode}'; expected one of {sorted(self.VALID_MODES)}")
         self._initialized = True
         self.pattern = pattern
+        self.mode = mode
         self._re_ast = parse(pattern)
         self._digest = _pattern_digest(pattern)
 
-        # Match/fullmatch share the same original control DFA -> OPCS BMA core.
-        self._nfa = build_nfa(self._re_ast)
-        self.dfa = build_dfa(self._nfa)
-        self._match_bma = opcs.build_tagged_opcs_bma(self.dfa)
+        self._match_bma: Optional[opcs.TaggedOPCSBMA] = None
+        self._search_bma: Optional[opcs.TaggedOPCSBMA] = None
+        self._native_is_match_fn = None
+        self._native_fullmatch_fn = None
+        self._native_search_fn = None
+        self._native_search_info_fn = None
+        self._search_result_slots = 0
+        self._search_tag_slots: Dict[str, int] = {}
+        self._beg_slot = -1
+        self._end_slot = -1
+        self._tag_struct_type = None
+        self._ctypes_tag_struct = None
 
-        # Search/tag queries use one tagged search-normalized core with
-        # hidden begin/end tags inside the canonical slot layout.
-        self._search_ast = rewrite_for_search(self._re_ast)
-        self._search_nfa = build_nfa(self._search_ast)
-        self._search_dfa = build_dfa(self._search_nfa)
-        self._search_tag_runtime = opcs.compute_dfa_tag_runtime(
-            self._search_nfa,
-            self._search_dfa,
-            include_internal=True,
-        )
-        self._beg_slot = self._search_tag_runtime.tag_slots[INTERNAL_BEG_TAG]
-        self._search_tag_runtime = _filter_tag_runtime_slots(
-            self._search_tag_runtime,
-            frozenset({self._beg_slot}),
-        )
-        self._search_restart_states = _compute_search_restart_states(
-            self._search_dfa)
-        self._search_bma = opcs.build_tagged_opcs_bma(
-            self._search_dfa,
-            self._search_tag_runtime,
-            search_restart_controls=self._search_restart_states,
-            search_entry_slot=self._beg_slot,
-        )
-        self._search_result_slots = len(self._search_bma.tag_names)
-        self._search_tag_slots = self._search_bma.tag_slots
-        self._beg_slot = self._search_tag_slots[INTERNAL_BEG_TAG]
-        self._end_slot = self._search_tag_slots[INTERNAL_END_TAG]
+        need_match = mode in ("match", "both")
+        need_search = mode in ("search", "both")
 
-        # Eagerly compile native functions before native execution starts.
-        # All public runners lower through the same BMA-to-FSM backend, but
-        # keep distinct entrypoints so runtime costs stay mode-specific.
-        self._native_is_match_fn = self.generate_is_match_fn()
-        self._native_fullmatch_fn = self.generate_fullmatch_fn()
-        self._native_search_fn = self.generate_search_fn()
-        self._native_search_info_fn = self.generate_search_info_fn()
+        if need_match:
+            nfa = build_nfa(self._re_ast)
+            self.dfa = build_dfa(nfa)
+            self._match_bma = opcs.build_tagged_opcs_bma(self.dfa)
+            self._native_is_match_fn = self.generate_is_match_fn()
+            self._native_fullmatch_fn = self.generate_fullmatch_fn()
+
+        if need_search:
+            search_ast = rewrite_for_search(self._re_ast)
+            search_nfa = build_nfa(search_ast)
+            search_dfa = build_dfa(search_nfa)
+            search_tag_runtime = opcs.compute_dfa_tag_runtime(
+                search_nfa, search_dfa, include_internal=True)
+            beg_slot = search_tag_runtime.tag_slots[INTERNAL_BEG_TAG]
+            search_tag_runtime = _filter_tag_runtime_slots(
+                search_tag_runtime, frozenset({beg_slot}))
+            search_restart_states = _compute_search_restart_states(search_dfa)
+            self._search_bma = opcs.build_tagged_opcs_bma(
+                search_dfa, search_tag_runtime,
+                search_restart_controls=search_restart_states,
+                search_entry_slot=beg_slot)
+            self._search_result_slots = len(self._search_bma.tag_names)
+            self._search_tag_slots = self._search_bma.tag_slots
+            self._beg_slot = self._search_tag_slots[INTERNAL_BEG_TAG]
+            self._end_slot = self._search_tag_slots[INTERNAL_END_TAG]
+            if self._search_bma.tag_names:
+                self._tag_struct_type = _make_tag_struct(
+                    self._search_bma.tag_names)
+                self._ctypes_tag_struct = _make_ctypes_tag_struct(
+                    self._search_bma.tag_names)
+            self._native_search_fn = self.generate_search_fn()
+            self._native_search_info_fn = self.generate_search_info_fn()
+
+    def _require_match(self):
+        if self._native_is_match_fn is None:
+            raise RuntimeError(
+                f"is_match/fullmatch unavailable: CompiledRegex was built "
+                f"with mode='{self.mode}'; use mode='match' or 'both'")
+
+    def _require_search(self):
+        if self._native_search_fn is None:
+            raise RuntimeError(
+                f"search/find_span/find_with_tags unavailable: CompiledRegex "
+                f"was built with mode='{self.mode}'; use mode='search' or 'both'")
 
     def is_match(self, data: bytes) -> bool:
         """Test if the pattern matches at the beginning of data.
@@ -1114,14 +1154,14 @@ class CompiledRegex:
         Semantics match Python's re.match: anchored at the start,
         but the pattern does not need to consume the entire input
         (unless the pattern contains $ anchor on relevant branches).
-
-        Uses native compiled execution.
         """
+        self._require_match()
         n, ptr_val, buf = _bytes_to_native_args(data)
         return bool(self._native_is_match_fn(n, ptr_val))
 
     def fullmatch(self, data: bytes) -> bool:
         """Test if the entire data matches the pattern."""
+        self._require_match()
         n, ptr_val, buf = _bytes_to_native_args(data)
         return bool(self._native_fullmatch_fn(n, ptr_val))
 
@@ -1129,28 +1169,29 @@ class CompiledRegex:
         """Search for pattern in data.
 
         Returns the start position of the first match, or -1 if not found.
-
-        Uses native compiled execution.
         """
+        self._require_search()
         n, ptr_val, buf = _bytes_to_native_args(data)
         return int(self._native_search_fn(n, ptr_val))
 
     def _search_info(self, data: bytes):
         """Run one compiled tagged search pass and recover span/tags."""
+        self._require_search()
         n, ptr_val, buf = _bytes_to_native_args(data)
-        out = (ctypes.c_int64 * self._search_result_slots)()
-        match_start = int(self._native_search_info_fn(n, ptr_val, out))
+        out = self._ctypes_tag_struct()
+        match_start = int(self._native_search_info_fn(
+            n, ptr_val, ctypes.pointer(out)))
         if match_start < 0:
             return None
 
         result = {
             'start': match_start,
-            'end': int(out[self._end_slot]),
+            'end': int(getattr(out, self._search_bma.tag_names[self._end_slot])),
         }
-        for idx, tag_name in enumerate(self._search_bma.tag_names):
+        for tag_name in self._search_bma.tag_names:
             if tag_name.startswith(INTERNAL_TAG_PREFIX):
                 continue
-            tag_pos = int(out[idx])
+            tag_pos = int(getattr(out, tag_name))
             if tag_pos >= 0:
                 result[tag_name] = tag_pos
         return result
@@ -1211,6 +1252,9 @@ class CompiledRegex:
         """Generate a @compile function for native search/tag recovery.
 
         Returns a PythoC compiled function:
-            search_info(n: u64, data: ptr[i8], out: ptr[i64]) -> i64
+            search_info(n: u64, data: ptr[i8], out: ptr[RegexTagResult]) -> i64
         """
-        return _build_bma_fn(self._search_bma, self._digest, "search_info")
+        return _build_bma_fn(
+            self._search_bma, self._digest, "search_info",
+            tag_struct_type=self._tag_struct_type,
+        )
