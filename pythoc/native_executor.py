@@ -332,13 +332,14 @@ class MultiSOExecutor:
                 self._libc = libc
             
             def __getattr__(self, name):
-                # Avoid recursion for private attributes
-                if name.startswith('_'):
+                # Avoid recursion for Python dunder attributes (__dict__, __class__, etc.)
+                if name.startswith('__') and name.endswith('__'):
                     raise AttributeError(name)
                 
-                # Check cache
-                if name in self._func_cache:
-                    return self._func_cache[name]
+                # Check cache first (access via __dict__ to avoid recursion)
+                func_cache = self.__dict__.get('_func_cache', {})
+                if name in func_cache:
+                    return func_cache[name]
                 
                 # Look up symbol using dlsym
                 self._libc.dlsym.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
@@ -358,7 +359,7 @@ class MultiSOExecutor:
                 func._address = addr
                 
                 # Cache and return
-                self._func_cache[name] = func
+                func_cache[name] = func
                 return func
         
         return LibraryHandle(handle, abs_path)
