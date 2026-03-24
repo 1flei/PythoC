@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1774338175696,
+  "lastUpdate": 1774351675313,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1204,6 +1204,45 @@ window.BENCHMARK_DATA = {
             "name": "nsieve",
             "value": 1.04,
             "unit": "PC/C ratio"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "1249b8061e37f839d357dcf698b9b564e3d98c82",
+          "message": "Unify API and ABI",
+          "timestamp": "2026-03-24T19:22:06+08:00",
+          "tree_id": "e4c52d49f9d63eb31dca8e39825860e63128ca97",
+          "url": "https://github.com/1flei/PythoC/commit/1249b8061e37f839d357dcf698b9b564e3d98c82"
+        },
+        "date": 1774351674489,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.74,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.07,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.47,
+            "unit": "seconds/test"
           }
         ]
       }
