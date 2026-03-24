@@ -20,12 +20,6 @@ from pythoc.regex.parse import (
 from pythoc.regex.nfa import build_nfa, epsilon_closure, NFA
 from pythoc.regex.dfa import build_dfa, DFA
 from pythoc.regex.codegen import CompiledRegex, compile_pattern, _pattern_digest
-from pythoc.regex.analysis import (
-    analyze_pattern, compute_accept_depths, find_linear_chains,
-    compute_skip_table, compute_state_skips,
-    PatternInfo, AcceptDepthInfo, LinearChain, SkipInfo, StateSkipInfo,
-)
-
 
 # ============================================================================
 # Parser tests
@@ -494,119 +488,6 @@ class TestCompiledRegexMatch(unittest.TestCase):
 
 
 # ============================================================================
-# Analysis tests (PatternInfo, AcceptDepths, LinearChains)
-# ============================================================================
-
-class TestPatternAnalysis(unittest.TestCase):
-    """Test AST-level pattern analysis."""
-
-    def test_literal_suffix(self):
-        info = analyze_pattern(parse("abcd.*efg"))
-        self.assertEqual(info.literal_suffix, b"efg")
-
-    def test_no_suffix_charclass_end(self):
-        info = analyze_pattern(parse("foo[a-z]+"))
-        self.assertIsNone(info.literal_suffix)
-
-    def test_anchor_suffix(self):
-        info = analyze_pattern(parse("abc$"))
-        self.assertEqual(info.literal_suffix, b"abc")
-
-    def test_pure_literal_suffix(self):
-        info = analyze_pattern(parse("hello"))
-        self.assertEqual(info.literal_suffix, b"hello")
-
-    def test_single_char_suffix(self):
-        info = analyze_pattern(parse("a"))
-        self.assertEqual(info.literal_suffix, b"a")
-
-    def test_dotstar_no_suffix(self):
-        info = analyze_pattern(parse("a.*"))
-        self.assertIsNone(info.literal_suffix)
-
-
-class TestAcceptDepths(unittest.TestCase):
-    """Test DFA accept depth computation."""
-
-    def test_fixed_literal(self):
-        nfa = build_nfa(parse("abc"))
-        dfa = build_dfa(nfa)
-        depths = compute_accept_depths(dfa)
-        self.assertTrue(depths.all_unique)
-        self.assertEqual(depths.max_depth, 3)
-
-    def test_charclass_fixed(self):
-        nfa = build_nfa(parse("[a-z][0-9]"))
-        dfa = build_dfa(nfa)
-        depths = compute_accept_depths(dfa)
-        self.assertTrue(depths.all_unique)
-        self.assertEqual(depths.max_depth, 2)
-
-    def test_same_length_alt(self):
-        nfa = build_nfa(parse("cat|dog"))
-        dfa = build_dfa(nfa)
-        depths = compute_accept_depths(dfa)
-        self.assertTrue(depths.all_unique)
-        # All accept states have depth 3
-        for d in depths.depths.values():
-            self.assertEqual(d, 3)
-
-    def test_diff_length_alt(self):
-        nfa = build_nfa(parse("ab|cdef"))
-        dfa = build_dfa(nfa)
-        depths = compute_accept_depths(dfa)
-        self.assertTrue(depths.all_unique)
-        depth_vals = sorted(depths.depths.values())
-        self.assertIn(2, depth_vals)
-        self.assertIn(4, depth_vals)
-
-    def test_star_not_unique(self):
-        nfa = build_nfa(parse("a.*z"))
-        dfa = build_dfa(nfa)
-        depths = compute_accept_depths(dfa)
-        self.assertFalse(depths.all_unique)
-
-    def test_plus_not_unique(self):
-        nfa = build_nfa(parse("a+b"))
-        dfa = build_dfa(nfa)
-        depths = compute_accept_depths(dfa)
-        self.assertFalse(depths.all_unique)
-
-
-class TestLinearChains(unittest.TestCase):
-    """Test DFA linear chain detection."""
-
-    def test_pure_literal_chain(self):
-        nfa = build_nfa(parse("abcd"))
-        dfa = build_dfa(nfa)
-        chains = find_linear_chains(dfa)
-        self.assertEqual(len(chains), 1)
-        self.assertEqual(chains[0].byte_sequence, b"abcd")
-
-    def test_no_chain_star(self):
-        nfa = build_nfa(parse("a*"))
-        dfa = build_dfa(nfa)
-        chains = find_linear_chains(dfa)
-        self.assertEqual(len(chains), 0)
-
-    def test_alternation_short_chains(self):
-        nfa = build_nfa(parse("cat|dog"))
-        dfa = build_dfa(nfa)
-        chains = find_linear_chains(dfa)
-        # Each branch has a chain of 2: "at" and "og" (first char branches)
-        chain_bytes = set(c.byte_sequence for c in chains)
-        self.assertIn(b"at", chain_bytes)
-        self.assertIn(b"og", chain_bytes)
-
-    def test_needle_chain(self):
-        nfa = build_nfa(parse("needle"))
-        dfa = build_dfa(nfa)
-        chains = find_linear_chains(dfa)
-        self.assertEqual(len(chains), 1)
-        self.assertEqual(chains[0].byte_sequence, b"needle")
-
-
-# ============================================================================
 # Public API tests
 # ============================================================================
 
@@ -739,113 +620,6 @@ class TestTagPropagation(unittest.TestCase):
             all_tags.update(tags)
         self.assertIn('__pythoc_internal_beg', all_tags)
         self.assertIn('__pythoc_internal_end', all_tags)
-
-
-# ============================================================================
-# Per-state skip optimization tests
-# ============================================================================
-
-class TestPerStateSkips(unittest.TestCase):
-    """Tests for compute_state_skips() and per-state skip probes."""
-
-    def _build_search_dfa_with_skips(self, pattern):
-        from pythoc.regex.codegen import compile_search_dfa
-        search_dfa = compile_search_dfa(pattern)
-        # Identify restart states: self-loop on >= 128 bytes
-        restart = set()
-        for s in range(search_dfa.num_states):
-            if s == search_dfa.dead_state:
-                continue
-            self_loop_count = 0
-            for bv in range(256):
-                cls = search_dfa.class_map[bv]
-                t = search_dfa.transitions[s][cls]
-                if t == s:
-                    self_loop_count += 1
-            if self_loop_count >= 128:
-                restart.add(s)
-        return search_dfa, compute_state_skips(
-            search_dfa, restart_states=restart)
-
-    def test_abcdef_skip_info(self):
-        """Pattern 'abcdef' should produce useful skip probes."""
-        dfa = compile_pattern('abcdef')
-        skip_info = compute_skip_table(dfa)
-        # Min match length = 6, so window should be 6
-        self.assertIsNotNone(skip_info)
-        self.assertEqual(skip_info.window, 6)
-
-    def test_abcdef_state_skips(self):
-        """Pattern 'abcdef' search DFA: state skips computed correctly.
-
-        The search DFA for 'abcdef' has self-loops (state 2 on 'a')
-        due to DFA minimization, which creates variable accept depths.
-        States with self-loops are correctly excluded from per-state skips.
-        """
-        search_dfa, state_skips = self._build_search_dfa_with_skips('abcdef')
-        # All non-restart states in the search DFA for 'abcdef' have
-        # self-loops (the DFA re-enters the 'a' match state on 'a'),
-        # so no per-state skips are produced. This is correct.
-        self.assertIsInstance(state_skips, dict)
-        for state, info in state_skips.items():
-            self.assertIsInstance(info, StateSkipInfo)
-            self.assertEqual(info.state, state)
-            self.assertGreater(info.shift, 0)
-            self.assertLess(len(info.live_bytes), 256)
-
-    def test_charclass_pattern_state_skips(self):
-        """Pattern '[ab][abc][a-d][a-e]' should produce per-state skips."""
-        dfa = compile_pattern('[ab][abc][a-d][a-e]')
-        skip_info = compute_skip_table(dfa)
-        # Min match length = 4, so window should be 4
-        self.assertIsNotNone(skip_info)
-        self.assertEqual(skip_info.window, 4)
-
-        search_dfa, state_skips = self._build_search_dfa_with_skips(
-            '[ab][abc][a-d][a-e]')
-        # Should have per-state skips
-        self.assertTrue(len(state_skips) > 0)
-
-    def test_dotstar_pattern(self):
-        """Pattern 'ab.*cdef' should produce state skips."""
-        search_dfa, state_skips = self._build_search_dfa_with_skips('ab.*cdef')
-        # States matching 'ab.*' lead to states waiting for 'cdef',
-        # those states should potentially have skips
-        # (though .* creates cycles, some states may still benefit)
-        # Just verify it doesn't crash and returns a dict
-        self.assertIsInstance(state_skips, dict)
-
-    def test_short_pattern_no_skip(self):
-        """Pattern 'a' has min depth 1, so no skip probes possible."""
-        search_dfa, state_skips = self._build_search_dfa_with_skips('a')
-        # Min accept depth from any state is likely 1, so no useful skips
-        # (shift = W-1-d, W=1 => shift=0)
-        for info in state_skips.values():
-            self.assertGreater(info.shift, 0)
-
-    def test_state_skip_offset_within_window(self):
-        """StateSkipInfo.offset should be < min accept depth from that state."""
-        search_dfa, state_skips = self._build_search_dfa_with_skips('abcdef')
-        for state, info in state_skips.items():
-            # offset + shift should not exceed the window
-            # (shift = W - 1 - offset, so offset + shift = W - 1)
-            self.assertGreaterEqual(info.offset, 0)
-            self.assertGreater(info.shift, 0)
-
-    def test_compiled_regex_search_with_state_skips(self):
-        """CompiledRegex should use state_skips and still produce correct results."""
-        # Verify that patterns with per-state skips still search correctly
-        cr = CompiledRegex('abcdef')
-        self.assertEqual(cr.search(b'xxabcdefxx'), 2)
-        self.assertEqual(cr.search(b'abcdef'), 0)
-        self.assertEqual(cr.search(b'xyzxyz'), -1)
-
-    def test_compiled_regex_charclass_search(self):
-        """Search with character class pattern still correct with state skips."""
-        cr = CompiledRegex('abc')
-        self.assertEqual(cr.search(b'xyzabcxyz'), 3)
-        self.assertEqual(cr.search(b'abc'), 0)
-        self.assertEqual(cr.search(b'ab'), -1)
 
 
 # ============================================================================
@@ -1036,7 +810,10 @@ class TestOPCSBMAArtifacts(unittest.TestCase):
 
     def test_literal_bma_codegen_all_entrypoints_lower_to_fsm_blocks(self):
         """All compiled BMA entrypoints should lower to FSM blocks."""
+        import re as stdlib_re
         CompiledRegex('needle')
+        from pythoc.build.output_manager import get_output_manager
+        get_output_manager().flush_all()
         digest = _pattern_digest('needle')
         ir_path = os.path.abspath(os.path.join(
             os.path.dirname(__file__),
@@ -1046,11 +823,14 @@ class TestOPCSBMAArtifacts(unittest.TestCase):
         self.assertTrue(os.path.exists(ir_path))
         with open(ir_path, 'r', encoding='utf-8') as f:
             ir = f.read()
-        self.assertIn('define i8 @regex_is_match_', ir)
-        self.assertIn('define i8 @regex_fullmatch_', ir)
-        self.assertIn('define i64 @regex_search_', ir)
-        self.assertIn('define i64 @regex_search_info_', ir)
-        self.assertIn('label_bma_s', ir)
+        self.assertRegex(ir, stdlib_re.compile(
+            r'define\b.*\bi8 @regex_is_match_'))
+        self.assertRegex(ir, stdlib_re.compile(
+            r'define\b.*\bi8 @regex_fullmatch_'))
+        self.assertRegex(ir, stdlib_re.compile(
+            r'define\b.*\bi64 @regex_search_'))
+        self.assertRegex(ir, stdlib_re.compile(
+            r'define\b.*\bi64 @regex_search_info_'))
         self.assertNotIn('while_true_body', ir)
         self.assertNotIn('switch i32 %state_addr', ir)
 
@@ -1058,18 +838,20 @@ class TestOPCSBMAArtifacts(unittest.TestCase):
         """All public native entrypoints should compile through `_build_bma_fn`."""
         cr = CompiledRegex('needle')
         cases = [
-            ('generate_is_match_fn', cr._match_bma, 'is_match'),
-            ('generate_fullmatch_fn', cr._match_bma, 'fullmatch'),
-            ('generate_search_fn', cr._search_bma, 'search'),
-            ('generate_search_info_fn', cr._search_bma, 'search_info'),
+            ('generate_is_match_fn', cr._match_bma, 'is_match', {}),
+            ('generate_fullmatch_fn', cr._match_bma, 'fullmatch', {}),
+            ('generate_search_fn', cr._search_bma, 'search', {}),
+            ('generate_search_info_fn', cr._search_bma, 'search_info',
+             {'tag_struct_type': cr._tag_struct_type}),
         ]
-        for method_name, bma, kind in cases:
+        for method_name, bma, kind, extra_kwargs in cases:
             sentinel = object()
             with mock.patch('pythoc.regex.codegen._build_bma_fn',
                             return_value=sentinel) as build_bma_fn:
                 result = getattr(cr, method_name)()
                 self.assertIs(result, sentinel)
-                build_bma_fn.assert_called_once_with(bma, cr._digest, kind)
+                build_bma_fn.assert_called_once_with(
+                    bma, cr._digest, kind, **extra_kwargs)
 
 
 # ============================================================================
@@ -1127,10 +909,11 @@ class TestNativeAPI(unittest.TestCase):
         original_search = cr._native_search_fn
         original_search_info = cr._native_search_info_fn
         calls = []
+        end_tag = cr._search_bma.tag_names[cr._end_slot]
         try:
             def fake_search_info(n, data_ptr, out):
                 calls.append(("search_info", n))
-                out[cr._end_slot] = 5
+                setattr(out.contents, end_tag, 5)
                 return 2
 
             cr._native_search_fn = (

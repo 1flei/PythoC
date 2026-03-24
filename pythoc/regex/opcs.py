@@ -574,6 +574,27 @@ def _build_suffix_gadget(dfa: DFA,
             return next(iter(outcomes))
         return ()
 
+    restart_or_dead = search_restart_controls | {dfa.dead_state}
+
+    def _try_overlap_finalize(child_outcomes, entry_writes):
+        """Try to finalize when all outcomes land in restart/dead states.
+
+        When every concrete completion of the remaining unknown positions
+        leads to a restart or dead control state, the block cannot produce
+        a match.  Tag writes from the failed attempt are irrelevant since
+        they will be overwritten when a new match begins, so we can
+        collapse all outcomes into a single restart target and skip the
+        remaining probes.
+        """
+        target_controls = {tc for tc, _tw in child_outcomes}
+        if not target_controls.issubset(restart_or_dead):
+            return None
+        preferred = next(
+            (t for t in target_controls if t in search_restart_controls),
+            min(target_controls),
+        )
+        return ("final", preferred, tuple(entry_writes))
+
     def build_state(known_bytes: Tuple[int, ...]) -> None:
         if known_bytes in temp_states:
             return
@@ -626,10 +647,14 @@ def _build_suffix_gadget(dfa: DFA,
                     build_state(child_key)
                     outcome = ("next", child_key, entry_writes)
             else:
-                if _known_probe_offset(child_key) < 0:
+                overlap = _try_overlap_finalize(child_outcomes, entry_writes)
+                if overlap is not None:
+                    outcome = overlap
+                elif _known_probe_offset(child_key) < 0:
                     raise RuntimeError("concrete block stayed ambiguous")
-                build_state(child_key)
-                outcome = ("next", child_key, entry_writes)
+                else:
+                    build_state(child_key)
+                    outcome = ("next", child_key, entry_writes)
 
             outcomes.setdefault(outcome, []).append(class_id)
 
@@ -802,27 +827,31 @@ def build_tagged_opcs_bma(dfa: DFA,
     for control_state, (temp_states, _root_key, block_len) in gadget_defs.items():
         for known_classes, temp_state in temp_states.items():
             bma_state_id = gadget_state_ids[(control_state, known_classes)]
-            edges: List[OPCSEdge] = []
+            edge_groups: Dict[Tuple[int, int, Tuple[TagWrite, ...]], List[int]] = {}
             for branch in temp_state.branches:
                 if branch.next_key is not None:
                     target_state = gadget_state_ids[(control_state, branch.next_key)]
                     shift = 0
-                    tag_writes = ()
+                    tw = ()
                 else:
                     assert branch.final_control is not None
                     target_state = control_entry_states[branch.final_control]
                     shift = block_len
-                    tag_writes = branch.tag_writes
-                edges.append(OPCSEdge(
-                    byte_values=tuple(
-                        byte_val
-                        for class_id in branch.class_ids
-                        for byte_val in class_bytes[class_id]
-                    ),
+                    tw = branch.tag_writes
+                key = (target_state, shift, tw)
+                bv = edge_groups.setdefault(key, [])
+                for class_id in branch.class_ids:
+                    bv.extend(class_bytes[class_id])
+            edges: List[OPCSEdge] = [
+                OPCSEdge(
+                    byte_values=tuple(sorted(bv)),
                     target=target_state,
                     shift=shift,
-                    tag_writes=tag_writes,
-                ))
+                    tag_writes=tw,
+                )
+                for (target_state, shift, tw), bv
+                in sorted(edge_groups.items(), key=lambda item: item[1][0])
+            ]
 
             known_bytes = _materialize_known_bytes(
                 known_classes,

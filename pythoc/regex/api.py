@@ -20,11 +20,15 @@ from __future__ import annotations
 from .codegen import CompiledRegex
 
 
-def compile(pattern: str) -> CompiledRegex:
+def compile(pattern: str, mode: str = "both") -> CompiledRegex:
     """Compile a regex pattern at compile time.
 
-    The pattern must be a compile-time constant string.
-    Returns a CompiledRegex object with match/search methods.
+    Args:
+        pattern: The regex pattern string (must be a compile-time constant).
+        mode: Which execution modes to compile.
+            ``"match"``  — only ``is_match`` / ``fullmatch``
+            ``"search"`` — only ``search`` / ``find_span`` / ``find_with_tags``
+            ``"both"``   — (default) all methods available
 
     Supported syntax:
       - Literal characters: a, b, 0
@@ -38,4 +42,4 @@ def compile(pattern: str) -> CompiledRegex:
       - Zero-width tags: {name}
       - Escape sequences: \\d, \\w, \\s, \\., \\\\, etc.
     """
-    return CompiledRegex(pattern)
+    return CompiledRegex(pattern, mode=mode)
