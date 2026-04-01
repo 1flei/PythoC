@@ -16,7 +16,25 @@ Usage:
 """
 
 from .api import compile
-from .codegen import CompiledRegex
+from .codegen import (
+    CompiledRegex,
+    compile_search_tdfa,
+    compile_tdfa,
+)
 from .parse import ParseError
+from .tnfa import TNFA, build_tnfa
+from .tdfa import TDFA, format_search_result, run_tdfa, run_tnfa
 
-__all__ = ['compile', 'CompiledRegex', 'ParseError']
+__all__ = [
+    'compile',
+    'CompiledRegex',
+    'ParseError',
+    'TNFA',
+    'TDFA',
+    'build_tnfa',
+    'compile_tdfa',
+    'compile_search_tdfa',
+    'run_tdfa',
+    'run_tnfa',
+    'format_search_result',
+]

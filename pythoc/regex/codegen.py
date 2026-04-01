@@ -17,6 +17,7 @@ import ast
 import copy
 import ctypes
 import hashlib
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
@@ -29,11 +30,13 @@ from pythoc.builtin_entities.struct import create_struct_type
 
 from .dfa import DFA
 from .parse import (
-    parse, Dot, Concat, Repeat, Tag,
+    parse, Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor, Tag,
 )
 from .nfa import build_nfa
+from .tnfa import build_tnfa
 from .dfa import build_dfa
 from . import opcs
+from .tdfa import build_tdfa as _build_tdfa
 
 
 INTERNAL_TAG_PREFIX = "__pythoc_internal_"
@@ -67,6 +70,19 @@ def compile_pattern_from_ast(re_ast):
     return build_dfa(nfa)
 
 
+def compile_tdfa(pattern: str, include_internal: bool = False):
+    """Full pipeline: pattern string -> TDFA."""
+    re_ast = parse(pattern)
+    tnfa = build_tnfa(re_ast)
+    return _build_tdfa(tnfa, include_internal=include_internal)
+
+
+def compile_tdfa_from_ast(re_ast, include_internal: bool = False):
+    """Full pipeline: AST node -> TDFA."""
+    tnfa = build_tnfa(re_ast)
+    return _build_tdfa(tnfa, include_internal=include_internal)
+
+
 def rewrite_for_search(ast_node) -> object:
     """Prepend lazy .* to pattern AST for unanchored search.
 
@@ -97,27 +113,154 @@ def compile_search_dfa_from_ast(re_ast):
     return build_dfa(nfa)
 
 
-def _filter_tag_runtime_slots(tag_runtime: opcs.DFATagRuntime,
-                              excluded_slots: FrozenSet[int]) -> opcs.DFATagRuntime:
-    """Keep the slot layout but remove dynamic writes for selected slots."""
-    if not excluded_slots:
-        return tag_runtime
+def compile_search_tdfa(pattern: str):
+    """Build a search TDFA (prepend .*?) for unanchored matching."""
+    re_ast = parse(pattern)
+    search_ast = rewrite_for_search(re_ast)
+    tnfa = build_tnfa(search_ast)
+    return _build_tdfa(tnfa, include_internal=True)
 
-    return opcs.DFATagRuntime(
-        tag_names=tag_runtime.tag_names,
-        public_tag_names=tag_runtime.public_tag_names,
-        tag_slots=tag_runtime.tag_slots,
-        transition_tag_slots={
-            key: tuple(slot for slot in slots if slot not in excluded_slots)
-            for key, slots in tag_runtime.transition_tag_slots.items()
-            if any(slot not in excluded_slots for slot in slots)
-        },
-        accept_tag_slots={
-            state: tuple(slot for slot in slots if slot not in excluded_slots)
-            for state, slots in tag_runtime.accept_tag_slots.items()
-            if any(slot not in excluded_slots for slot in slots)
-        },
-    )
+
+def compile_search_tdfa_from_ast(re_ast):
+    """Build a search TDFA from AST (prepend .*?)."""
+    search_ast = rewrite_for_search(re_ast)
+    tnfa = build_tnfa(search_ast)
+    return _build_tdfa(tnfa, include_internal=True)
+
+
+def _fixed_length(ast_node) -> Optional[int]:
+    if isinstance(ast_node, (Literal, Dot, CharClass)):
+        return 1
+    if isinstance(ast_node, (Anchor, Tag)):
+        return 0
+    if isinstance(ast_node, Group):
+        return _fixed_length(ast_node.child)
+    if isinstance(ast_node, Concat):
+        total = 0
+        for child in ast_node.children:
+            child_len = _fixed_length(child)
+            if child_len is None:
+                return None
+            total += child_len
+        return total
+    if isinstance(ast_node, Alternate):
+        branch_lengths = {_fixed_length(child) for child in ast_node.children}
+        if len(branch_lengths) == 1:
+            return branch_lengths.pop()
+        return None
+    if isinstance(ast_node, Repeat):
+        if ast_node.max_count is None or ast_node.max_count != ast_node.min_count:
+            return None
+        child_len = _fixed_length(ast_node.child)
+        if child_len is None:
+            return None
+        return child_len * ast_node.min_count
+    return None
+
+
+def _collect_tag_names(ast_node) -> FrozenSet[str]:
+    names: Set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, Tag):
+            names.add(node.name)
+            return
+        if isinstance(node, Group):
+            walk(node.child)
+            return
+        if isinstance(node, Repeat):
+            walk(node.child)
+            return
+        if isinstance(node, (Concat, Alternate)):
+            for child in node.children:
+                walk(child)
+
+    walk(ast_node)
+    return frozenset(names)
+
+
+def _collect_sliding_user_tags(ast_node, tail_fixed: Optional[int] = 0) -> FrozenSet[str]:
+    warned: Set[str] = set()
+
+    def visit(node, current_tail_fixed: Optional[int]) -> None:
+        if isinstance(node, Tag):
+            if current_tail_fixed is None:
+                warned.add(node.name)
+            return
+        if isinstance(node, Group):
+            visit(node.child, current_tail_fixed)
+            return
+        if isinstance(node, Concat):
+            running_tail = current_tail_fixed
+            for child in reversed(node.children):
+                visit(child, running_tail)
+                child_len = _fixed_length(child)
+                if running_tail is None or child_len is None:
+                    running_tail = None
+                else:
+                    running_tail += child_len
+            return
+        if isinstance(node, Alternate):
+            for child in node.children:
+                visit(child, current_tail_fixed)
+            return
+        if isinstance(node, Repeat):
+            if node.max_count is None or node.max_count != node.min_count:
+                warned.update(_collect_tag_names(node.child))
+                return
+            visit(node.child, current_tail_fixed)
+
+    visit(ast_node, tail_fixed)
+    return frozenset(warned)
+
+
+def _starts_with_sliding_repeat(ast_node) -> bool:
+    if isinstance(ast_node, Group):
+        return _starts_with_sliding_repeat(ast_node.child)
+    if isinstance(ast_node, Concat):
+        for child in ast_node.children:
+            child_len = _fixed_length(child)
+            if child_len == 0:
+                continue
+            return _starts_with_sliding_repeat(child)
+        return False
+    if isinstance(ast_node, Repeat):
+        return ast_node.max_count is None or ast_node.max_count != ast_node.min_count
+    return False
+
+
+def _tag_warning_label(tag_name: str) -> str:
+    if tag_name == INTERNAL_BEG_TAG:
+        return "search start boundary"
+    if tag_name == INTERNAL_END_TAG:
+        return "search end boundary"
+    return f"tag {{{tag_name}}}"
+
+
+def _warn_multi_write_slots(pattern: str,
+                            mode: str,
+                            tag_runtime: opcs.DFATagRuntime,
+                            re_ast) -> None:
+    """Warn when a tag may be rewritten by the compiled model."""
+    sliding_user_tags = _collect_sliding_user_tags(re_ast)
+    warn_search_start = _starts_with_sliding_repeat(re_ast)
+
+    for slot in sorted(tag_runtime.multi_write_slots):
+        tag_name = tag_runtime.tag_names[slot]
+        if tag_name == INTERNAL_END_TAG:
+            continue
+        if tag_name == INTERNAL_BEG_TAG and not warn_search_start:
+            continue
+        if (not tag_name.startswith(INTERNAL_TAG_PREFIX) and
+                tag_name not in sliding_user_tags):
+            continue
+        warnings.warn(
+            f"Regex /{pattern}/ {mode} may rewrite "
+            f"{_tag_warning_label(tag_name)} multiple times "
+            f"under the deterministic tagged model; the reported position uses "
+            f"the final write produced by the compiled automaton.",
+            stacklevel=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -504,63 +647,6 @@ def _byte_condition(byte_values: List[int], ch_name: str = "ch") -> ast.expr:
     ))
 
 
-def _compute_search_restart_states(search_dfa: DFA) -> FrozenSet[int]:
-    """Identify the ``.*?``-prefix restart states in the search DFA."""
-    if search_dfa.sentinel_256_class < 0:
-        return frozenset()
-
-    effective_start = search_dfa.transitions[
-        search_dfa.start_state][search_dfa.sentinel_256_class]
-    if effective_start == search_dfa.dead_state:
-        return frozenset()
-
-    broad_self_loop = set()
-    for state in range(search_dfa.num_states):
-        if state == search_dfa.dead_state:
-            continue
-        self_count = 0
-        for byte_val in range(256):
-            cls = search_dfa.class_map[byte_val]
-            if search_dfa.transitions[state][cls] == state:
-                self_count += 1
-        if self_count >= 128:
-            broad_self_loop.add(state)
-
-    restart_states: Set[int] = set()
-    frontier: Set[int] = set()
-    if effective_start in broad_self_loop:
-        restart_states.add(effective_start)
-        frontier.add(effective_start)
-    else:
-        to_bsl = 0
-        for byte_val in range(256):
-            cls = search_dfa.class_map[byte_val]
-            if search_dfa.transitions[effective_start][cls] in broad_self_loop:
-                to_bsl += 1
-        if to_bsl >= 128:
-            restart_states.add(effective_start)
-            frontier.add(effective_start)
-
-    visited = set(frontier)
-    while frontier:
-        next_frontier = set()
-        for state in frontier:
-            seen = set()
-            for byte_val in range(256):
-                cls = search_dfa.class_map[byte_val]
-                target = search_dfa.transitions[state][cls]
-                if target in seen or target == search_dfa.dead_state:
-                    continue
-                seen.add(target)
-                if target in broad_self_loop and target not in visited:
-                    restart_states.add(target)
-                    visited.add(target)
-                    next_frontier.add(target)
-        frontier = next_frontier
-
-    return frozenset(restart_states)
-
-
 # ---------------------------------------------------------------------------
 # OPCS-BMA codegen — unified backend
 # ---------------------------------------------------------------------------
@@ -574,20 +660,48 @@ def _bma_tag_pos_expr(base_expr: ast.expr, delta: int) -> ast.expr:
     )
 
 
-def _emit_bma_tag_writes(tag_writes: Tuple[opcs.TagWrite, ...],
-                         base_expr: ast.expr,
-                         with_tags: bool) -> List[ast.stmt]:
-    """Emit per-slot writes to the ``out`` buffer."""
+def _bma_reg_name(reg_id: int) -> str:
+    return "bma_r{}".format(reg_id)
+
+
+def _emit_bma_commands(commands: Tuple[opcs.OPCSCommand, ...],
+                       base_expr: ast.expr,
+                       with_tags: bool) -> List[ast.stmt]:
+    """Emit one ordered register-command sequence."""
     if not with_tags:
         return []
     stmts: List[ast.stmt] = []
-    for write in opcs._collapse_tag_writes(tag_writes):
-        pos_expr = _bma_tag_pos_expr(base_expr, write.delta)
-        stmts.append(_q_ptr_assign(
-            'out',
-            ast.Constant(write.slot),
-            _q_i64(pos_expr),
-        ))
+    for command in commands:
+        if command.kind == "set":
+            pos_expr = _bma_tag_pos_expr(base_expr, command.delta)
+            stmts.append(_q_assign(
+                meta.ref(_bma_reg_name(command.lhs)),
+                _q_i64(pos_expr),
+            ))
+        elif command.kind == "copy":
+            stmts.append(_q_assign(
+                meta.ref(_bma_reg_name(command.lhs)),
+                meta.ref(_bma_reg_name(command.rhs)),
+            ))
+        elif command.kind == "add":
+            raise NotImplementedError("BMA lowering does not support history-tag add commands yet")
+        else:
+            raise ValueError("Unknown OPCS command kind: {}".format(command.kind))
+    return stmts
+
+
+def _emit_bma_output_flush(output_registers: Tuple[int, ...],
+                           with_tags: bool) -> List[ast.stmt]:
+    if not with_tags:
+        return []
+    stmts: List[ast.stmt] = []
+    for slot, reg_id in enumerate(output_registers):
+        value_expr = (
+            _q_i64(meta.const(-1))
+            if reg_id <= 0 else
+            _q_i64(meta.ref(_bma_reg_name(reg_id)))
+        )
+        stmts.append(_q_ptr_assign('out', ast.Constant(slot), value_expr))
     return stmts
 
 
@@ -598,8 +712,9 @@ class _BMARuntimeState:
     probe_offset: int
     edges: Tuple[opcs.OPCSEdge, ...]
     accepting: bool
+    accept_commands: Tuple[opcs.OPCSCommand, ...]
     eof_accept: bool
-    eof_tag_writes: Tuple[opcs.TagWrite, ...]
+    eof_commands: Tuple[opcs.OPCSCommand, ...]
     is_dead: bool = False
 
 
@@ -611,8 +726,11 @@ class _BMARuntime:
     dead_state: int
     start_label: str
     dead_label: str
-    initial_tag_writes: Tuple[opcs.TagWrite, ...]
+    register_count: int
+    output_registers: Tuple[int, ...]
+    initial_commands: Tuple[opcs.OPCSCommand, ...]
     initial_accepting: bool
+    initial_accept_commands: Tuple[opcs.OPCSCommand, ...]
 
 
 def _bma_state_label(state_id: int) -> str:
@@ -633,8 +751,9 @@ def _normalize_bma_runtime(bma: opcs.TaggedOPCSBMA) -> _BMARuntime:
             probe_offset=state.probe_offset,
             edges=state.edges,
             accepting=state.id in accept_states,
+            accept_commands=state.accept_commands,
             eof_accept=state.eof_accept,
-            eof_tag_writes=state.eof_tag_writes,
+            eof_commands=state.eof_commands,
             is_dead=state.id == bma.dead_state,
         )
         executable_states.append(runtime_state)
@@ -659,8 +778,11 @@ def _normalize_bma_runtime(bma: opcs.TaggedOPCSBMA) -> _BMARuntime:
         dead_state=bma.dead_state,
         start_label=state_by_id[bma.start_state].label_name,
         dead_label=state_by_id[bma.dead_state].label_name,
-        initial_tag_writes=bma.initial_tag_writes,
+        register_count=bma.register_count,
+        output_registers=bma.output_registers,
+        initial_commands=bma.initial_commands,
         initial_accepting=bma.initial_accepting,
+        initial_accept_commands=bma.initial_accept_commands,
     )
 
 
@@ -668,9 +790,9 @@ def _build_bma_fsm_edge_body(runtime: _BMARuntime,
                              edge: opcs.OPCSEdge,
                              with_tags: bool) -> List[ast.stmt]:
     branch_body: List[ast.stmt] = []
-    if edge.tag_writes:
-        branch_body.extend(_emit_bma_tag_writes(
-            edge.tag_writes, meta.ref('i'), with_tags=with_tags))
+    if edge.commands:
+        branch_body.extend(_emit_bma_commands(
+            edge.commands, meta.ref('i'), with_tags=with_tags))
     if edge.shift:
         branch_body.append(_q_assign(
             meta.ref('i'),
@@ -681,17 +803,25 @@ def _build_bma_fsm_edge_body(runtime: _BMARuntime,
 
 
 def _build_bma_eof_success_body(state: _BMARuntimeState,
+                                runtime: _BMARuntime,
                                 with_tags: bool) -> Optional[List[ast.stmt]]:
     """Build the success branch taken when execution reaches EOF."""
     if state.accepting:
-        return [_q_return(_q_u8(1))]
+        body: List[ast.stmt] = []
+        if state.accept_commands:
+            body.extend(_emit_bma_commands(
+                state.accept_commands, meta.ref('i'), with_tags=with_tags))
+        body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
+        body.append(_q_return(_q_u8(1)))
+        return body
     if not state.eof_accept:
         return None
 
     body: List[ast.stmt] = []
-    if state.eof_tag_writes:
-        body.extend(_emit_bma_tag_writes(
-            state.eof_tag_writes, meta.ref('i'), with_tags=with_tags))
+    if state.eof_commands:
+        body.extend(_emit_bma_commands(
+            state.eof_commands, meta.ref('i'), with_tags=with_tags))
+    body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
     body.append(_q_return(_q_u8(1)))
     return body
 
@@ -704,9 +834,15 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
         return [_q_return(_q_u8(0))]
 
     if eager_accept and state.accepting:
-        return [_q_return(_q_u8(1))]
+        body: List[ast.stmt] = []
+        if state.accept_commands:
+            body.extend(_emit_bma_commands(
+                state.accept_commands, meta.ref('i'), with_tags=with_tags))
+        body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
+        body.append(_q_return(_q_u8(1)))
+        return body
 
-    eof_success = _build_bma_eof_success_body(state, with_tags=with_tags)
+    eof_success = _build_bma_eof_success_body(state, runtime, with_tags=with_tags)
     eof_guard = _raw_if(
         _q_gte(meta.ref('i'), meta.ref('n')),
         eof_success if eof_success is not None else [_q_goto(runtime.dead_label)],
@@ -759,7 +895,15 @@ def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
     """Lower a TaggedOPCSBMA into one u8-returning goto/FSM runner."""
     runtime = _normalize_bma_runtime(bma)
     program_init = list(init_body)
+    if runtime.initial_commands:
+        program_init.extend(_emit_bma_commands(
+            runtime.initial_commands, meta.ref('i'), with_tags=with_tags))
     if eager_accept and runtime.initial_accepting:
+        if runtime.initial_accept_commands:
+            program_init.extend(_emit_bma_commands(
+                runtime.initial_accept_commands, meta.ref('i'), with_tags=with_tags))
+        program_init.extend(_emit_bma_output_flush(
+            runtime.output_registers, with_tags=with_tags))
         program_init.append(_q_return(_q_u8(1)))
 
     label_blocks = [
@@ -796,12 +940,16 @@ def _build_bma_body(bma: opcs.TaggedOPCSBMA,
         _q(_tpl_assign_typed, meta.ident('i'), meta.type_expr(u64),
            _q(_tpl_u64, meta.const(0))),
     ]
+    if with_tags:
+        for reg_id in range(1, bma.register_count + 1):
+            init_stmts.append(
+                _q(_tpl_assign_typed,
+                   meta.ident(_bma_reg_name(reg_id)),
+                   meta.type_expr(i64),
+                   _q_i64(meta.const(-1))))
     for slot in range(num_slots):
         init_stmts.append(
             _q_ptr_assign('out', ast.Constant(slot), _q_i64(meta.const(-1))))
-    if bma.initial_tag_writes and with_tags:
-        init_stmts.extend(_emit_bma_tag_writes(
-            bma.initial_tag_writes, meta.ref('i'), with_tags=True))
 
     return _build_bma_fsm_body(
         bma,
@@ -912,6 +1060,8 @@ class CompiledRegex:
 
         self._match_bma: Optional[opcs.TaggedOPCSBMA] = None
         self._search_bma: Optional[opcs.TaggedOPCSBMA] = None
+        self._match_tdfa = None
+        self._search_tdfa = None
         self._native_match_fn = None
         self._native_search_fn = None
         self._match_ctypes_struct = None
@@ -925,14 +1075,12 @@ class CompiledRegex:
             self.dfa = build_dfa(match_nfa)
             match_tag_runtime = opcs.compute_dfa_tag_runtime(
                 match_nfa, self.dfa, include_internal=False)
-            has_match_tags = bool(match_tag_runtime.tag_names)
-            if has_match_tags:
-                self._match_bma = opcs.build_tagged_opcs_bma(
-                    self.dfa, match_tag_runtime)
+            _warn_multi_write_slots(pattern, "match", match_tag_runtime, self._re_ast)
+            self._match_tdfa = compile_tdfa_from_ast(self._re_ast, include_internal=False)
+            self._match_bma = opcs.build_tagged_opcs_bma(self._match_tdfa)
+            if self._match_bma.tag_names:
                 self._match_ctypes_struct = _make_ctypes_tag_struct(
                     self._match_bma.tag_names)
-            else:
-                self._match_bma = opcs.build_tagged_opcs_bma(self.dfa)
             self._native_match_fn = self._compile_match_fn()
 
         if need_search:
@@ -941,14 +1089,9 @@ class CompiledRegex:
             search_dfa = build_dfa(search_nfa)
             search_tag_runtime = opcs.compute_dfa_tag_runtime(
                 search_nfa, search_dfa, include_internal=True)
-            beg_slot = search_tag_runtime.tag_slots[INTERNAL_BEG_TAG]
-            search_tag_runtime = _filter_tag_runtime_slots(
-                search_tag_runtime, frozenset({beg_slot}))
-            search_restart_states = _compute_search_restart_states(search_dfa)
-            self._search_bma = opcs.build_tagged_opcs_bma(
-                search_dfa, search_tag_runtime,
-                search_restart_controls=search_restart_states,
-                search_entry_slot=beg_slot)
+            _warn_multi_write_slots(pattern, "search", search_tag_runtime, self._re_ast)
+            self._search_tdfa = compile_search_tdfa_from_ast(self._re_ast)
+            self._search_bma = opcs.build_tagged_opcs_bma(self._search_tdfa)
             self._search_ctypes_struct = _make_ctypes_tag_struct(
                 self._search_bma.tag_names)
             self._native_search_fn = self._compile_search_fn()
