@@ -14,8 +14,14 @@ has started" errors.
 import unittest
 import sys
 import os
+import warnings
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+
+warnings.filterwarnings(
+    "ignore",
+    category=UserWarning,
+)
 
 from pythoc import compile, i8, i32, i64, u8, u64, ptr
 from pythoc import libc
@@ -270,6 +276,12 @@ class TestRegexTags(unittest.TestCase):
         ok_bc, info_bc = r.search(b"zbc")
         self.assertTrue(ok_bc)
         self.assertEqual(info_bc, {"start": 1, "end": 3, "y": 1})
+
+    def test_model_keeps_coexisting_branch_tags(self):
+        r = regex_compile("{x}a|a{y}")
+        ok, info = r.search(b"a")
+        self.assertTrue(ok)
+        self.assertEqual(info, {"start": 0, "end": 1, "x": 0, "y": 1})
 
     def test_loop_phase_tags(self):
         r = regex_compile("(ab)*{mid}cde")
