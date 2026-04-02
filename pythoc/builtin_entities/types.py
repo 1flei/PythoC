@@ -305,7 +305,7 @@ class ptr(BuiltinType):
         if right.is_python_value():
             right = visitor.type_converter.convert(right, i64)
         
-        # Decide by ValueRef.kind and PC type hints only
+        # Pointer arithmetic operates on runtime pcvalues plus their type hints.
         gep_result = visitor.builder.gep(ensure_ir(left), [ensure_ir(right)])
         return wrap_value(gep_result, kind="value", type_hint=left.type_hint)
 

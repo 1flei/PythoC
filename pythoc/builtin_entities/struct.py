@@ -517,20 +517,19 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                         node=node, exc_type=TypeError)
         
         # Priority 1: Check if base has an address (for lvalue support)
-        if base.kind == "address":
+        if base.has_place():
             # base is a loaded value with address (common case for variables)
-            struct_ptr = base.address
+            struct_ptr = base.require_place()
         else:
             # Priority 2: base is a pure struct value without address
             # Use extract_value (no lvalue support)
-            base_ir_type = get_type(base)
-            if isinstance(base_ir_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
+            if base.is_struct_value():
                 struct_value = ensure_ir(base)
                 field_value = visitor.builder.extract_value(struct_value, llvm_field_index)
                 # For struct values without address, we can't provide lvalue
                 return wrap_value(field_value, kind="value", type_hint=field_type)
             else:
-                logger.error(f"Cannot access field '{attr_name}' on non-struct type {base_ir_type}",
+                logger.error(f"Cannot access field '{attr_name}' on non-struct type {base.type_hint}",
                             node=node, exc_type=ValueError)
         
         # Use GEP to get field address
@@ -599,9 +598,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             logger.error(f"Zero-sized field [{index_val}] has no LLVM representation",
                         node=node, exc_type=TypeError)
         
-        # Priority: if base has address, use GEP for lvalue support
-        # Otherwise, if base is a struct value, use extract_value
-        base_ir_type = get_type(base)
+        # Priority: if base has address, use GEP for lvalue support.
+        # Otherwise, if base is a struct value, use extract_value.
 
         # Compute extended linear path for result
         base_var_name = getattr(base, 'var_name', None)
@@ -613,12 +611,12 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             result_var_name = None
             result_linear_path = None
         
-        if base.kind == "pointer":
+        if base.is_pointer_typed():
             struct_ptr = ensure_ir(base)
-        elif base.address:
+        elif base.has_place():
             # Base is a loaded struct value with address - use GEP on address
-            struct_ptr = base.address
-        elif isinstance(base_ir_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
+            struct_ptr = base.require_place()
+        elif base.is_struct_value():
             # Base is a struct value without address (e.g., function return value)
             # Use extract_value - this cannot be used as lvalue
             struct_value = ensure_ir(base)

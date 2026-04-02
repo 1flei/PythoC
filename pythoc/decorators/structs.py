@@ -103,22 +103,21 @@ def add_struct_handle_call(cls):
         field_type = struct_info.get_field_type_hint(attr_name, visitor.type_resolver)
         
         # Priority 1: Check if base has an address (for lvalue support)
-        if base.kind == "pointer":
+        if base.is_pointer_typed():
             # base is a pointer to struct
             struct_ptr = ensure_ir(base)
-        elif hasattr(base, 'address') and base.address is not None:
+        elif base.has_place():
             # base is a loaded value with address (common case for variables)
-            struct_ptr = base.address
+            struct_ptr = base.require_place()
         else:
             # Priority 2: base is a pure struct value without address
             # Use extract_value (no lvalue support)
-            base_ir_type = get_type(base)
-            if isinstance(base_ir_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
+            if base.is_struct_value():
                 struct_value = ensure_ir(base)
                 field_value = visitor.builder.extract_value(struct_value, field_index)
                 return wrap_value(field_value, kind="value", type_hint=field_type)
             else:
-                raise ValueError(f"Cannot access field '{attr_name}' on non-struct type {base_ir_type}")
+                raise ValueError(f"Cannot access field '{attr_name}' on non-struct type {base.type_hint}")
         
         # Use GEP to get field address
         zero = ir.Constant(ir.IntType(32), 0)

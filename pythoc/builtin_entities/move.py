@@ -64,18 +64,5 @@ class move(BuiltinFunction):
         # This ensures the assignment treats it as a fresh value, not a variable reference
         # The ownership has already been transferred from the source by visit_Call
         
-        # Handle different kinds appropriately
-        if arg_value.kind == 'address':
-            return wrap_value(
-                arg_value.value,
-                kind='address',
-                type_hint=arg_value.type_hint,
-                address=arg_value.address
-            )
-        else:
-            return wrap_value(
-                arg_value.value,
-                kind=arg_value.kind,
-                type_hint=arg_value.type_hint
-            )
-        # Note: We intentionally do NOT copy var_name or linear_path
+        # Preserve ValueRef storage semantics but drop tracking metadata.
+        return arg_value.clone(var_name=None, linear_path=None)

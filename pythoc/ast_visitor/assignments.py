@@ -209,11 +209,7 @@ class AssignmentsMixin:
                 # Set type_hint on the value_ref
                 rvalue_copy = rvalue
                 if rvalue_copy.type_hint is None:
-                    rvalue_copy = wrap_value(
-                        rvalue.value,
-                        kind=rvalue.kind,
-                        type_hint=pc_type
-                    )
+                    rvalue_copy = rvalue.clone(type_hint=pc_type)
                 
                 var_info = VariableInfo(
                     name=var_name,
@@ -245,14 +241,7 @@ class AssignmentsMixin:
             lvalue_linear_path = getattr(lvalue, 'linear_path', None)
             
             if lvalue_var_name and lvalue_linear_path is not None:
-                # Check if rvalue is undefined
-                from llvmlite import ir as llvm_ir
-                is_undefined = (
-                    rvalue.kind == 'value' and 
-                    isinstance(rvalue.value, llvm_ir.Constant) and
-                    hasattr(rvalue.value, 'constant') and
-                    rvalue.value.constant == llvm_ir.Undefined
-                )
+                is_undefined = rvalue.is_undefined_pcvalue()
                 
                 if hasattr(rvalue, 'var_name') and rvalue.var_name:
                     # Variable reference - transfer ownership
@@ -452,13 +441,7 @@ class AssignmentsMixin:
         
         # Handle linear token registration for the new variable
         if self._is_linear_type(pc_type):
-            # Check if rvalue is undefined
-            from llvmlite import ir as llvm_ir
-            is_undefined = (
-                rvalue.kind == 'value' and 
-                isinstance(rvalue.value, llvm_ir.Constant) and
-                rvalue.value.constant == llvm_ir.Undefined
-            )
+            is_undefined = rvalue.is_undefined_pcvalue()
             
             if hasattr(rvalue, 'var_name') and rvalue.var_name:
                 # Variable reference - transfer ownership

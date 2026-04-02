@@ -63,7 +63,7 @@ class assume(BuiltinFunction):
         is_multi_param_form = False
         
         if isinstance(last_arg, ValueRef):
-            if last_arg.kind == 'python' and last_arg.value is not None and callable(last_arg.value):
+            if last_arg.is_python_value() and last_arg.value is not None and callable(last_arg.value):
                 predicate = last_arg.value
                 import inspect
                 try:
@@ -73,7 +73,7 @@ class assume(BuiltinFunction):
                         is_multi_param_form = True
                 except:
                     pass
-            elif last_arg.kind == 'pointer':
+            elif last_arg.is_pointer_typed():
                 arg_idx = len(args) - 1
                 if arg_idx < len(node.args):
                     arg_node = node.args[arg_idx]
@@ -108,9 +108,9 @@ class assume(BuiltinFunction):
             predicate_arg = args[-1]
             
             if isinstance(predicate_arg, ValueRef):
-                if predicate_arg.kind == 'python' and predicate_arg.value is not None:
+                if predicate_arg.is_python_value() and predicate_arg.value is not None:
                     pred_callable = predicate_arg.value
-                elif predicate_arg.kind == 'pointer':
+                elif predicate_arg.is_pointer_typed():
                     pred_callable = predicate
                 else:
                     logger.error("assume() last argument must be a predicate", node=node, exc_type=TypeError)
@@ -125,9 +125,9 @@ class assume(BuiltinFunction):
         constraint_args = []
         for arg in args[1:]:
             if isinstance(arg, ValueRef):
-                if arg.kind == 'python' and arg.value is not None:
+                if arg.is_python_value() and arg.value is not None:
                     constraint_args.append(arg.value)
-                elif arg.kind == 'pointer':
+                elif arg.is_pointer_typed():
                     arg_idx = len(constraint_args) + 1
                     if arg_idx < len(node.args):
                         arg_node = node.args[arg_idx]

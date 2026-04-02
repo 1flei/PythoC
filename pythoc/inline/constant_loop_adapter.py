@@ -209,12 +209,7 @@ class ConstantLoopAdapter:
         """Convert iteration element to ValueRef"""
         # If already ValueRef, use it (but create fresh copy without var_name)
         if isinstance(element, ValueRef):
-            return wrap_value(
-                element.value,
-                kind=element.kind,
-                type_hint=element.type_hint,
-                address=getattr(element, 'address', None)
-            )
+            return element.clone(var_name=None, linear_path=None)
         
         # Wrap Python value
         from ..builtin_entities.python_type import PythonType

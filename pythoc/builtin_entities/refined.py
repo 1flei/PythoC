@@ -367,11 +367,9 @@ class RefinedType(CompositeType):
             )
         
         base_ir = ensure_ir(base)
-        base_with_underlying_type = wrap_value(
-            base_ir,
-            kind=base.kind,
+        base_with_underlying_type = base.clone(
+            value=base_ir,
             type_hint=underlying_type,
-            address=base.address if hasattr(base, 'address') else None
         )
         return underlying_type.handle_subscript(visitor, base_with_underlying_type, index, node)
     
@@ -415,7 +413,7 @@ class RefinedType(CompositeType):
         for i, arg in enumerate(args_list):
             # Unwrap ValueRef to get actual value
             if isinstance(arg, ValueRef):
-                if arg.kind == 'python' and arg.value is not None:
+                if arg.is_python_value() and arg.value is not None:
                     arg_value = arg.value
                 else:
                     logger.error(f"refined argument must be a type, predicate, or string tag", node=node, exc_type=TypeError)
@@ -527,11 +525,9 @@ class RefinedType(CompositeType):
             underlying_type = cls._base_type
             if underlying_type and hasattr(underlying_type, 'handle_attribute'):
                 base_ir = ensure_ir(base)
-                base_with_underlying_type = wrap_value(
-                    base_ir,
-                    kind=base.kind,
+                base_with_underlying_type = base.clone(
+                    value=base_ir,
                     type_hint=underlying_type,
-                    address=base.address if hasattr(base, 'address') else None
                 )
                 return underlying_type.handle_attribute(visitor, base_with_underlying_type, attr_name, node)
             else:

@@ -21,7 +21,7 @@ _SCOPE_NOT_PROVIDED = object()
 
 from ..compiler import LLVMCompiler
 from ..registry import register_struct_from_class, _unified_registry
-from ..context import FunctionCompileState
+from ..context import FunctionBindingState
 
 from .structs import (
     add_struct_handle_call as _add_struct_handle_call,
@@ -63,7 +63,8 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
     Returns:
         Materialized wrapper with compilation queued
     """
-    state = template_wrapper._state
+    state = getattr(template_wrapper, '_binding', template_wrapper._state)
+    func_info = getattr(template_wrapper, '_func_info', None)
     if effect_key in state.effect_specialized_cache:
         return state.effect_specialized_cache[effect_key]
 
@@ -73,7 +74,7 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
         om.queue_compilation(
             state.group_key,
             state.template_compile_callback,
-            state.func_info,
+            func_info,
         )
         state.is_template = False
         state.effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
@@ -221,7 +222,8 @@ def _compile_impl(func_or_class,
 
     @wraps(func)
     def wrapper(*args, **kwargs):
-        if getattr(wrapper, '_state', None) and wrapper._state.is_template:
+        binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+        if binding and binding.is_template:
             materialize_specialization(wrapper, DEFAULT_EFFECT_KEY, {})
 
         if not hasattr(wrapper, '_native_func'):
@@ -333,6 +335,21 @@ def _compile_impl(func_or_class,
                 if param_type:
                     param_type_hints[arg.arg] = param_type
 
+    param_names = [arg.arg for arg in func_ast.args.args]
+    from ..ast_visitor.varargs import resolve_varargs
+    resolved_varargs = resolve_varargs(func_ast, type_resolver)
+    varargs_kind = resolved_varargs.kind
+    varargs_name = resolved_varargs.param_name
+    if varargs_kind == 'struct' and varargs_name in param_type_hints:
+        del param_type_hints[varargs_name]
+
+    for i, elem_pc_type in enumerate(resolved_varargs.element_types):
+        if varargs_kind != 'struct':
+            break
+        expanded_param_name = f'{varargs_name}_elem{i}'
+        param_names.append(expanded_param_name)
+        param_type_hints[expanded_param_name] = elem_pc_type
+
     # Build mangled name: name_{compile_suffix}_{effect_suffix}
     # compile_suffix comes first, then effect_suffix
     mangled_name = None
@@ -345,38 +362,6 @@ def _compile_impl(func_or_class,
     if suffix_parts:
         combined_suffix = '_'.join(suffix_parts)
         mangled_name = func.__name__ + '_' + combined_suffix
-
-    param_names = [arg.arg for arg in func_ast.args.args]
-    
-    # Detect varargs expansion
-    from ..ast_visitor.varargs import detect_varargs
-    varargs_kind, element_types, varargs_name = detect_varargs(func_ast, type_resolver)
-    if varargs_kind == 'struct':
-        if varargs_name in param_type_hints:
-            del param_type_hints[varargs_name]
-        
-        element_pc_types = []
-        if element_types:
-            for elem_type in element_types:
-                if hasattr(elem_type, 'get_llvm_type'):
-                    element_pc_types.append(elem_type)
-                else:
-                    elem_pc_type = type_resolver.parse_annotation(elem_type)
-                    element_pc_types.append(elem_pc_type)
-        else:
-            if func_ast.args.vararg and func_ast.args.vararg.annotation:
-                annotation = func_ast.args.vararg.annotation
-                parsed_type = type_resolver.parse_annotation(annotation)
-                if hasattr(parsed_type, '_struct_fields'):
-                    for field_name, field_type in parsed_type._struct_fields:
-                        element_pc_types.append(field_type)
-                elif hasattr(parsed_type, '_field_types'):
-                    element_pc_types = parsed_type._field_types
-        
-        for i in range(len(element_pc_types)):
-            expanded_param_name = f'{varargs_name}_elem{i}'
-            param_names.append(expanded_param_name)
-            param_type_hints[expanded_param_name] = element_pc_types[i]
 
     if mangled_name:
         import copy
@@ -452,21 +437,10 @@ def _compile_impl(func_or_class,
         return_type_hint=return_type_hint,
         param_type_hints=param_type_hints,
         param_names=param_names,
-        mangled_name=mangled_name,
         overload_enabled=False,
-        so_file=so_file,
         fn_attrs=fn_attrs or set(),
-        has_llvm_varargs=(varargs_name is not None and varargs_kind in ('union', 'enum', 'none')),
+        has_llvm_varargs=resolved_varargs.has_llvm_varargs,
     )
-    
-    # Associate wrapper with func_info early (before registration)
-    # This ensures mutual recursion can find the wrapper via func_info
-    func_info.wrapper = wrapper
-    wrapper._func_info = func_info
-
-    # Store user_globals as a mutable dict on func_info
-    # This will be augmented with group scope at flush time for recursion support
-    func_info.compilation_globals = dict(user_globals)
 
     group_compiler = compiler
     
@@ -482,9 +456,30 @@ def _compile_impl(func_or_class,
     from ..effect import push_compilation_context, pop_compilation_context
     _captured_effect_context = capture_effect_context()
 
+    binding_state = FunctionBindingState(
+        compiler=compiler,
+        so_file=so_file,
+        source_file=source_file,
+        mangled_name=mangled_name,
+        original_name=func.__name__,
+        actual_func_name=actual_func_name,
+        group_key=group_key,
+        compile_suffix=compile_suffix,
+        effect_suffix=effect_suffix,
+        captured_effect_context=_captured_effect_context,
+        captured_symbols=captured_symbols,
+        compilation_globals=dict(user_globals),
+        wrapper=wrapper,
+    )
+    func_info.binding_state = binding_state
+    wrapper._func_info = func_info
+    wrapper._signature = func_info
+    wrapper._binding = binding_state
+    wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
+
     # Always queue compilation callback - cache check is done at flush time
     # These closure locals are needed because they are AST/source artifacts
-    # that don't belong on FunctionCompileState (they are compilation inputs,
+    # that don't belong on FunctionBindingState (they are compilation inputs,
     # not per-function state).
     _func_ast = func_ast
     _func_source = func_source
@@ -495,10 +490,10 @@ def _compile_impl(func_or_class,
     def compile_callback(comp):
         """Deferred compilation callback.
 
-        Reads phase-1 state from wrapper._state (the FunctionCompileState),
+        Reads phase-1 state from wrapper._binding (the FunctionBindingState),
         not from closure locals that duplicate the same data.
         """
-        st = wrapper._state
+        st = wrapper._binding
         start_effect_tracking()
 
         if st.effect_suffix:
@@ -514,7 +509,7 @@ def _compile_impl(func_or_class,
                     reset_module=False,
                     param_type_hints=_param_type_hints,
                     return_type_hint=_return_type_hint,
-                    user_globals=st.func_info.compilation_globals,
+                    user_globals=st.compilation_globals,
                     group_key=st.group_key,
                     func_state=st,
                 )
@@ -524,7 +519,7 @@ def _compile_impl(func_or_class,
 
         effect_deps = stop_effect_tracking()
         if effect_deps:
-            st.func_info.effect_dependencies = effect_deps
+            func_info.effect_dependencies = effect_deps
             logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
 
             from ..build.deps import get_dependency_tracker
@@ -544,46 +539,29 @@ def _compile_impl(func_or_class,
                            and compile_suffix is None)
 
     if _should_be_template:
-        wrapper._state = FunctionCompileState(
-            compiler=compiler, so_file=so_file, source_file=source_file,
-            mangled_name=mangled_name, original_name=func.__name__,
-            actual_func_name=actual_func_name, group_key=group_key,
-            compile_suffix=compile_suffix, effect_suffix=effect_suffix,
-            func_info=func_info, captured_effect_context=_captured_effect_context,
-            captured_symbols=captured_symbols,
-            is_template=True,
-            template_compile_callback=compile_callback,
-        )
+        binding_state.is_template = True
+        binding_state.template_compile_callback = compile_callback
         logger.debug(f"@compile {func.__name__}: created as template (suppress active)")
     else:
         output_manager.queue_compilation(group_key, compile_callback, func_info)
-        wrapper._state = FunctionCompileState(
-            compiler=compiler, so_file=so_file, source_file=source_file,
-            mangled_name=mangled_name, original_name=func.__name__,
-            actual_func_name=actual_func_name, group_key=group_key,
-            compile_suffix=compile_suffix, effect_suffix=effect_suffix,
-            func_info=func_info, captured_effect_context=_captured_effect_context,
-            captured_symbols=captured_symbols,
-            is_template=False,
-        )
-    # Note: wrapper._func_info and func_info.wrapper are set earlier (before registration)
+        binding_state.is_template = False
 
     # Backward-compat aliases for external consumers (tests, etc.)
-    wrapper._so_file = wrapper._state.so_file
-    wrapper._source_file = wrapper._state.source_file
-    wrapper._compiler = wrapper._state.compiler
-    wrapper._original_name = wrapper._state.original_name
-    wrapper._actual_func_name = wrapper._state.actual_func_name
-    wrapper._mangled_name = wrapper._state.mangled_name
-    wrapper._group_key = wrapper._state.group_key
-    wrapper._compile_suffix = wrapper._state.compile_suffix
-    wrapper._effect_suffix = wrapper._state.effect_suffix
+    wrapper._so_file = wrapper._binding.so_file
+    wrapper._source_file = wrapper._binding.source_file
+    wrapper._compiler = wrapper._binding.compiler
+    wrapper._original_name = wrapper._binding.original_name
+    wrapper._actual_func_name = wrapper._binding.actual_func_name
+    wrapper._mangled_name = wrapper._binding.mangled_name
+    wrapper._group_key = wrapper._binding.group_key
+    wrapper._compile_suffix = wrapper._binding.compile_suffix
+    wrapper._effect_suffix = wrapper._binding.effect_suffix
 
     output_manager.add_wrapper_to_group(group_key, wrapper)
     
     def get_effect_specialized(target_effect_suffix, effect_overrides):
         """Get or create an effect-specialized version of this wrapper."""
-        if wrapper._state.effect_suffix == target_effect_suffix:
+        if wrapper._binding.effect_suffix == target_effect_suffix:
             return wrapper
 
         return materialize_specialization(wrapper, target_effect_suffix, effect_overrides)
@@ -599,7 +577,7 @@ def _compile_impl(func_or_class,
         
         # Record dependency: caller -> callee (at call time, not from LLVM IR)
         caller_group_key = getattr(visitor, 'current_group_key', None)
-        callee_group_key = wrapper._state.group_key
+        callee_group_key = wrapper._binding.group_key
         if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
             dep_tracker = get_dependency_tracker()
             dep_tracker.record_group_dependency(caller_group_key, callee_group_key, "function_call")

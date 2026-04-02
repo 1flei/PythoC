@@ -5,7 +5,8 @@ Enhanced version with modular architecture and comprehensive functionality
 
 import ast
 import sys
-from typing import List
+from dataclasses import dataclass
+from typing import Any, Dict, List
 from llvmlite import ir, binding
 from .ast_visitor import LLVMIRVisitor
 from .registry import get_unified_registry, register_struct_from_class
@@ -23,6 +24,21 @@ binding.initialize_native_asmprinter()
 
 # Detect pass manager API: llvmlite <0.45 uses legacy PM, >=0.45 uses new PM.
 _USE_NEW_PM = not hasattr(binding, 'create_function_pass_manager')
+
+
+@dataclass
+class _ResolvedFunctionDeclaration:
+    """Compiler-local callable declaration data."""
+    param_names: List[str]
+    param_type_hints: Dict[str, Any]
+    return_type_hint: Any
+    param_llvm_types: List[ir.Type]
+    return_llvm_type: ir.Type
+    varargs: Any
+
+    @property
+    def has_llvm_varargs(self) -> bool:
+        return self.varargs.has_llvm_varargs
 
 class LLVMCompiler:
     """Enhanced LLVM compiler using llvmlite"""
@@ -76,11 +92,14 @@ class LLVMCompiler:
                 type_name = pc_type.name
                 return self.module.context.get_identified_type(type_name)
             return pc_type
-        
-        # Handle ptr types (check class attribute first)
-        if hasattr(pc_type, 'pointee_type') and pc_type.pointee_type is not None:
-            pointee = self._recreate_type_in_context(pc_type.pointee_type)
-            return ir.PointerType(pointee)
+
+        if hasattr(pc_type, 'get_llvm_type'):
+            try:
+                return pc_type.get_llvm_type(self.module.context)
+            except TypeError as e:
+                if "positional argument" in str(e) or "takes" in str(e):
+                    return pc_type.get_llvm_type()
+                raise
         
         # Handle struct types by name
         if hasattr(pc_type, '__name__'):
@@ -88,9 +107,8 @@ class LLVMCompiler:
             if get_unified_registry().has_struct(type_name):
                 # Get struct type from current module's context
                 return self.module.context.get_identified_type(type_name)
-        
-        # Handle basic types with get_llvm_type method
-        return pc_type.get_llvm_type(self.module.context)
+
+        raise TypeError(f"Cannot recreate LLVM type for {pc_type}")
     
     def _declare_extern_function(self, func_name, extern_info=None):
         """Declare a specific extern function when it's actually called
@@ -167,6 +185,95 @@ class LLVMCompiler:
 
         self.extern_functions[func_name] = extern_func
         return extern_func
+
+    def _resolve_function_declaration(
+        self,
+        ast_node: ast.FunctionDef,
+        param_type_hints: dict = None,
+        return_type_hint=None,
+        user_globals: dict = None,
+    ) -> _ResolvedFunctionDeclaration:
+        """Resolve one function declaration into PC and LLVM types once."""
+        from .ast_visitor.varargs import resolve_varargs
+        from .builtin_entities.types import void
+
+        user_globals = user_globals or self.user_globals
+        type_resolver = TypeResolver(self.module.context, user_globals=user_globals)
+
+        resolved_param_type_hints: Dict[str, Any] = {}
+        param_names: List[str] = []
+
+        for arg in ast_node.args.args:
+            if param_type_hints and arg.arg in param_type_hints:
+                pc_type = param_type_hints[arg.arg]
+            elif arg.annotation:
+                pc_type = type_resolver.parse_annotation(arg.annotation)
+            else:
+                raise TypeError(f"Parameter '{arg.arg}' has no type annotation")
+
+            if pc_type is None:
+                raise TypeError(f"Parameter '{arg.arg}' has invalid type annotation")
+
+            resolved_param_type_hints[arg.arg] = pc_type
+            param_names.append(arg.arg)
+
+        if return_type_hint is not None:
+            resolved_return_type = return_type_hint
+        elif ast_node.returns:
+            resolved_return_type = type_resolver.parse_annotation(ast_node.returns)
+        else:
+            resolved_return_type = void
+
+        if resolved_return_type is None:
+            resolved_return_type = void
+
+        varargs = resolve_varargs(ast_node, type_resolver)
+        if varargs.kind == 'struct' and varargs.param_name is not None:
+            resolved_param_type_hints.pop(varargs.param_name, None)
+            for index, elem_pc_type in enumerate(varargs.element_types):
+                expanded_name = f"{varargs.param_name}_elem{index}"
+                param_names.append(expanded_name)
+                resolved_param_type_hints[expanded_name] = elem_pc_type
+
+        param_llvm_types = [
+            self._recreate_type_in_context(resolved_param_type_hints[name])
+            for name in param_names
+        ]
+        return_llvm_type = self._recreate_type_in_context(resolved_return_type)
+
+        return _ResolvedFunctionDeclaration(
+            param_names=param_names,
+            param_type_hints=resolved_param_type_hints,
+            return_type_hint=resolved_return_type,
+            param_llvm_types=param_llvm_types,
+            return_llvm_type=return_llvm_type,
+            varargs=varargs,
+        )
+
+    def _build_func_type_hints(
+        self,
+        ast_node: ast.FunctionDef,
+        resolved_decl: _ResolvedFunctionDeclaration,
+        sret_info=None,
+        param_coercion_info=None,
+    ) -> Dict[str, Any]:
+        """Build visitor function type hints from resolved declaration data."""
+        func_type_hints: Dict[str, Any] = {}
+        if sret_info:
+            func_type_hints['_sret_info'] = sret_info
+        if param_coercion_info:
+            func_type_hints['_param_coercion_info'] = param_coercion_info
+
+        normal_param_hints = {}
+        for arg in ast_node.args.args:
+            if arg.arg in resolved_decl.param_type_hints:
+                normal_param_hints[arg.arg] = resolved_decl.param_type_hints[arg.arg]
+
+        func_type_hints[ast_node.name] = {
+            'return': resolved_decl.return_type_hint,
+            'params': normal_param_hints,
+        }
+        return func_type_hints
     
     def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None, func_state = None) -> ir.Function:
         """
@@ -200,89 +307,28 @@ class LLVMCompiler:
             pass
 
         user_globals = user_globals or self.user_globals
-        type_resolver = TypeResolver(self.module.context, user_globals=user_globals)
-        
-        # First, create function declaration
-        param_types = []
-        for arg in ast_node.args.args:
-            # Use pre-parsed type hints if available (for meta-programming)
-            if param_type_hints and arg.arg in param_type_hints:
-                pc_type = param_type_hints[arg.arg]
-                if hasattr(pc_type, 'get_llvm_type'):
-                    # All PC types now accept module_context parameter
-                    param_type = pc_type.get_llvm_type(self.module.context)
-                else:
-                    raise TypeError(f"Invalid type for parameter '{arg.arg}'")
-            elif arg.annotation:
-                param_type = self._parse_type_annotation(arg.annotation)
-            else:
-                raise TypeError(f"Parameter '{arg}' has no type annotation")
-            param_types.append(param_type)
-        
-        # Get return type (default to void if no annotation)
-        if return_type_hint:
-            # Use pre-parsed return type hint (for meta-programming)
-            if hasattr(return_type_hint, 'get_llvm_type'):
-                # All PC types now accept module_context parameter
-                return_type = return_type_hint.get_llvm_type(self.module.context)
-            else:
-                return_type = ir.VoidType()
-        elif ast_node.returns:
-            return_type = self._parse_type_annotation(ast_node.returns)
-        else:
-            return_type = ir.VoidType()  # Default to void
-        
-        # Detect varargs type (only call once and save results)
-        from .ast_visitor.varargs import detect_varargs
-        varargs_kind, element_types, varargs_name = detect_varargs(ast_node, type_resolver)
-        
-        # For struct varargs with a @compile decorated class (e.g., *args: Data),
-        # element_types will be empty. Extract field types from the struct class.
-        if varargs_kind == 'struct' and not element_types and ast_node.args.vararg:
-            annotation = ast_node.args.vararg.annotation
-            parsed_type = type_resolver.parse_annotation(annotation)
-            if hasattr(parsed_type, '_field_types'):
-                # For struct[...] created types, use _field_types
-                element_types = list(parsed_type._field_types)
-            elif hasattr(parsed_type, '_struct_fields'):
-                # Create AST nodes for each field type (for consistency)
-                element_types = []
-                for field_name, field_type in parsed_type._struct_fields:
-                    # We'll store the PC type directly since we have it
-                    # This is a bit of a hack but avoids AST node creation
-                    element_types.append(field_type)
-        
-        # Determine LLVM varargs flag and actual parameter types
-        # - struct varargs: expand into individual parameters, no LLVM varargs
-        # - union/enum/none varargs: use LLVM varargs (va_list)
-        has_llvm_varargs = varargs_name is not None and varargs_kind in ('union', 'enum', 'none')
-        
-        # For struct varargs, expand parameter types
-        if varargs_kind == 'struct':
-            # Add each struct element as a separate parameter
-            for elem_type in element_types:
-                # elem_type might be either an AST node or a PC type directly
-                if hasattr(elem_type, 'get_llvm_type'):
-                    # It's a PC type directly
-                    elem_pc_type = elem_type
-                else:
-                    # It's an AST node, parse it
-                    elem_pc_type = type_resolver.parse_annotation(elem_type)
-                
-                if hasattr(elem_pc_type, 'get_llvm_type'):
-                    param_types.append(elem_pc_type.get_llvm_type(self.module.context))
-                else:
-                    raise TypeError(f"Invalid varargs element type: {elem_type}")
+        resolved_decl = self._resolve_function_declaration(
+            ast_node,
+            param_type_hints=param_type_hints,
+            return_type_hint=return_type_hint,
+            user_globals=user_globals,
+        )
+        varargs_kind = resolved_decl.varargs.kind
+        varargs_name = resolved_decl.varargs.param_name
         
         # Use builder to declare function with C ABI for interop with C code
         # pythoc functions must use C ABI so they can be called from C via function pointers
         from .builder import LLVMBuilder, FunctionWrapper
         temp_builder = LLVMBuilder()
-        logger.debug(f"declare_function: {ast_node.name}, param_types={param_types}, return_type={return_type}, existing_func={existing_func}")
+        logger.debug(
+            f"declare_function: {ast_node.name}, "
+            f"param_types={resolved_decl.param_llvm_types}, "
+            f"return_type={resolved_decl.return_llvm_type}, existing_func={existing_func}"
+        )
         func_wrapper = temp_builder.declare_function(
             self.module, ast_node.name,
-            param_types, return_type,
-            var_arg=has_llvm_varargs,
+            resolved_decl.param_llvm_types, resolved_decl.return_llvm_type,
+            var_arg=resolved_decl.has_llvm_varargs,
             existing_func=existing_func
         )
         logger.debug(f"After declare_function: ir_function.args types={[a.type for a in func_wrapper.ir_function.args]}")
@@ -291,87 +337,45 @@ class LLVMCompiler:
         sret_info = func_wrapper.sret_info
         
         # Set parameter names (user parameters only, sret is handled internally)
-        param_names = [arg.arg for arg in ast_node.args.args]
-        if varargs_kind == 'struct':
-            # Add synthetic parameter names for expanded struct elements
-            for i in range(len(element_types)):
-                param_names.append(f'{varargs_name}_elem{i}')
-        
-        for i, param_name in enumerate(param_names):
+        for i, param_name in enumerate(resolved_decl.param_names):
             func_wrapper.get_user_arg(i).name = param_name
         
         # Now compile the function body
         # Build func_type_hints dict for the single function
-        func_type_hints = {}
-        # Store sret info for use in return statement
-        if sret_info:
-            func_type_hints['_sret_info'] = sret_info
-        # Store param coercion info for parameter unpacking
-        if func_wrapper.param_coercion_info:
-            func_type_hints['_param_coercion_info'] = func_wrapper.param_coercion_info
-        # Return type
-        if return_type_hint is not None:
-            func_type_hints[ast_node.name] = {'return': return_type_hint}
-        elif ast_node.returns:
-            rt = type_resolver.parse_annotation(ast_node.returns)
-            if rt:
-                func_type_hints[ast_node.name] = {'return': rt}
-        # Param types
-        param_hints = {}
-        for arg in ast_node.args.args:
-            if param_type_hints and arg.arg in param_type_hints:
-                param_hints[arg.arg] = param_type_hints[arg.arg]
-            elif arg.annotation:
-                pt = type_resolver.parse_annotation(arg.annotation)
-                if pt:
-                    param_hints[arg.arg] = pt
-        if func_type_hints.get(ast_node.name):
-            func_type_hints[ast_node.name]['params'] = param_hints
-        else:
-            func_type_hints[ast_node.name] = {'params': param_hints}
+        func_type_hints = self._build_func_type_hints(
+            ast_node,
+            resolved_decl,
+            sret_info=sret_info,
+            param_coercion_info=func_wrapper.param_coercion_info,
+        )
         
         visitor = LLVMIRVisitor(self.module, None, func_type_hints, None, compiler=self, user_globals=user_globals)
 
-        # Set up FunctionCompileState (Phase 2 fields)
-        # If func_state is provided (from @compile wrapper), populate it.
-        # Otherwise create a minimal one for the legacy code path.
+        # Set up long-lived binding state and this compilation's active frame.
         if func_state is None:
-            from .context import FunctionCompileState
-            func_state = FunctionCompileState(group_key=group_key)
-        func_state.current_function = llvm_function
-        func_state.all_inlined_stmts = []
-        visitor.func_state = func_state
+            from .context import FunctionBindingState
+            func_state = FunctionBindingState(group_key=group_key)
+        from .context import ActiveCompileFrame
+        compile_frame = ActiveCompileFrame(current_function=llvm_function)
+        visitor.func_state = compile_frame
+        visitor.binding_state = func_state
         visitor.current_function = llvm_function
         visitor.current_group_key = group_key  # For dependency tracking at call time
         
         # Store varargs information for this function (using results from earlier detection)
         visitor.current_varargs_info = None
         if varargs_kind != 'none':
-            # Parse element types
-            element_pc_types = []
-            if element_types:
-                for elem_type in element_types:
-                    # elem_type might be either an AST node or a PC type directly
-                    if hasattr(elem_type, 'get_llvm_type'):
-                        # It's a PC type directly
-                        pc_type = elem_type
-                    else:
-                        # It's an AST node, parse it
-                        pc_type = visitor.type_resolver.parse_annotation(elem_type)
-                    if pc_type:
-                        element_pc_types.append(pc_type)
-
             # Store varargs info
             # - For struct varargs: used for len(args) constant folding
             # - For union/enum varargs: used for va_arg access
             visitor.current_varargs_info = {
                 'kind': varargs_kind,
                 'name': varargs_name,
-                'element_types': element_pc_types,
+                'element_types': list(resolved_decl.varargs.element_types),
                 'num_normal_params': len(ast_node.args.args),
                 'va_list': None  # Will be initialized on first access (union/enum only)
             }
-        func_state.varargs_info = visitor.current_varargs_info
+        compile_frame.varargs_info = visitor.current_varargs_info
         
         # Create entry block
         entry_block = llvm_function.append_basic_block('entry')
@@ -394,16 +398,12 @@ class LLVMCompiler:
         # Initialize parameters - they will be registered in variable registry
         # For struct varargs, we also initialize the expanded parameters AND create a struct
         normal_param_count = len(ast_node.args.args)
-        total_params = normal_param_count
-        if varargs_kind == 'struct':
-            total_params += len(element_types)
         
         # First, register all normal parameters
         # Use func_wrapper.get_user_arg_unpacked() to handle ABI coercion transparently
         for i in range(normal_param_count):
             arg = ast_node.args.args[i]
             param_name = arg.arg
-            param_annotation = arg.annotation
             
             # Get unpacked parameter value (handles ABI coercion transparently)
             param_val, param_type = func_wrapper.get_user_arg_unpacked(i, visitor.builder)
@@ -415,10 +415,8 @@ class LLVMCompiler:
             # Register parameter in variable registry (always), with best-effort type hint
             type_hint = None
             # Use pre-parsed type hints if available (for meta-programming)
-            if param_type_hints and param_name in param_type_hints:
-                type_hint = param_type_hints[param_name]
-            elif param_annotation:
-                type_hint = visitor.get_pc_type_from_annotation(param_annotation)
+            if param_name in resolved_decl.param_type_hints:
+                type_hint = resolved_decl.param_type_hints[param_name]
             
             # Create ValueRef with proper wrapper for function pointers
             from .context import VariableInfo
@@ -462,7 +460,7 @@ class LLVMCompiler:
             # Use get_user_arg_unpacked() to handle ABI coercion transparently
             expanded_values = []
             expanded_types_llvm = []
-            for elem_idx in range(len(element_types)):
+            for elem_idx in range(len(resolved_decl.varargs.element_types)):
                 param_idx = normal_param_count + elem_idx
                 param_val, param_type = func_wrapper.get_user_arg_unpacked(
                     param_idx, visitor.builder
@@ -489,18 +487,7 @@ class LLVMCompiler:
             # Determine the PC type hint for the varargs struct
             # If it's a named struct class, use that type
             # Otherwise, create an anonymous struct type hint
-            varargs_type_hint = None
-            if ast_node.args.vararg and ast_node.args.vararg.annotation:
-                parsed_type = visitor.type_resolver.parse_annotation(ast_node.args.vararg.annotation)
-                # Check if it's a struct class or a generic struct[...]
-                if hasattr(parsed_type, '_is_struct') and parsed_type._is_struct:
-                    varargs_type_hint = parsed_type
-                elif hasattr(parsed_type, '__origin__'):
-                    # It's a generic struct[...], use it directly
-                    varargs_type_hint = parsed_type
-                else:
-                    # Fallback: use parsed_type directly if it looks like a struct type
-                    varargs_type_hint = parsed_type
+            varargs_type_hint = resolved_decl.varargs.parsed_type
             
             # Register the varargs struct as a variable
             from .context import VariableInfo
@@ -531,9 +518,7 @@ class LLVMCompiler:
             from .valueref import wrap_value
             
             # Parse the varargs type annotation to get the enum/union type
-            varargs_type_hint = None
-            if ast_node.args.vararg and ast_node.args.vararg.annotation:
-                varargs_type_hint = visitor.type_resolver.parse_annotation(ast_node.args.vararg.annotation)
+            varargs_type_hint = resolved_decl.varargs.parsed_type
             
             # Create a placeholder ValueRef - the actual va_list is initialized lazily
             # We use kind='varargs' to indicate this is a special varargs placeholder
@@ -555,7 +540,7 @@ class LLVMCompiler:
             visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
         
         # Initialize list to accumulate all inlined statements (via func_state)
-        visitor._all_inlined_stmts = func_state.all_inlined_stmts
+        visitor._all_inlined_stmts = compile_frame.all_inlined_stmts
 
         # Emit LinearRegister events for linear parameters
         # This must happen after ControlFlowBuilder is created (visitor.builder)
@@ -633,6 +618,12 @@ class LLVMCompiler:
                 inline_count=len([s for s in visitor._all_inlined_stmts if isinstance(s, ast.While)]),
                 total_stmts=len(visitor._all_inlined_stmts)
             )
+
+        if getattr(func_state, 'wrapper', None) is not None:
+            func_info = getattr(func_state.wrapper, '_func_info', None)
+            if func_info is not None:
+                func_info.llvm_function = llvm_function
+                func_info.is_compiled = True
 
         self.compiled_functions.append(llvm_function)
         return llvm_function

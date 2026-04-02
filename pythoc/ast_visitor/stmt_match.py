@@ -375,7 +375,7 @@ class MatchStatementMixin:
             subject_type = subject.type_hint
             is_enum = hasattr(subject_type, '_is_enum') and subject_type._is_enum
             
-            if is_enum and isinstance(value, ValueRef) and value.kind == "python":
+            if is_enum and isinstance(value, ValueRef) and value.is_python_value():
                 # Comparing enum with a tag constant - only compare tag field
                 tag_field = self._subscript_access(subject, 0)
                 condition = self._compare_values(tag_field, value, ast.Eq())
@@ -607,7 +607,7 @@ class MatchStatementMixin:
                 # Extract the integer tag value
                 tag_int_val = None
                 if isinstance(tag_const_val, ValueRef):
-                    if tag_const_val.kind == "python":
+                    if tag_const_val.is_python_value():
                         # Python value - directly get the integer
                         tag_int_val = tag_const_val.value
                     elif isinstance(tag_const_val.value, ir.Constant):

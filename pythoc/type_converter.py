@@ -7,12 +7,13 @@ classes). Raw LLVM types are used only internally for IR instruction selection.
 Reverse inference from LLVM to PC is intentionally not supported.
 """
 
-from typing import Optional, Union, Any, Tuple
+from typing import Optional, Union, Any, Tuple, cast
 from llvmlite import ir
 
 from .valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from .type_check import is_struct_type, is_enum_type
 from .logger import logger
+from .builtin_entities.base import BuiltinType
 import ast
 
 
@@ -194,14 +195,7 @@ class TypeConverter:
         
         if stripped_source == stripped_target:
             # Types match after stripping qualifiers, just update type_hint
-            return wrap_value(
-                value.ir_value,
-                kind=value.kind,
-                type_hint=target_type,  # Keep original qualifiers
-                address=value.address,
-                var_name=value.var_name,
-                linear_path=value.linear_path
-            )
+            return value.clone(type_hint=target_type)
         
         # Step 0: Handle PythonType (pyconst) target - type checking only, no IR conversion
         from .builtin_entities.python_type import PythonType
@@ -470,10 +464,16 @@ class TypeConverter:
             ValueRef with func pointer type_hint
         """
         from .effect import get_current_compilation_context
-        from .builtin_entities import func as func_type_cls
         from llvmlite import ir
         
-        func_name = wrapper._state.original_name
+        binding_state = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+        if binding_state is None:
+            raise NameError(
+                "Function '{}' missing binding metadata".format(
+                    getattr(wrapper, '__name__', wrapper)
+                )
+            )
+        func_name = binding_state.original_name
         
         # Get func_info directly from wrapper (not from registry lookup)
         func_info = getattr(wrapper, '_func_info', None)
@@ -481,7 +481,7 @@ class TypeConverter:
             raise NameError(f"Function '{func_name}' missing _func_info attribute")
         
         # Determine actual function name
-        lookup_mangled = wrapper._state.mangled_name
+        lookup_mangled = binding_state.mangled_name
         actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
         
         # Handle transitive effect propagation
@@ -495,7 +495,7 @@ class TypeConverter:
 
         compilation_ctx = get_current_compilation_context()
 
-        callee_effect_suffix = wrapper._state.effect_suffix
+        callee_effect_suffix = binding_state.effect_suffix
 
         # Only propagate when the callee itself is not already effect-specialized.
         if compilation_ctx and callee_effect_suffix is None:
@@ -517,8 +517,8 @@ class TypeConverter:
                     # - If we don't know yet (callee not compiled / deps not loaded), be
                     #   conservative and specialize.
                     should_specialize = True
-                    callee_group_key = getattr(original_wrapper, '_state', None)
-                    callee_group_key = callee_group_key.group_key if callee_group_key else (wrapper._state.group_key if wrapper._state else None)
+                    callee_group_key = getattr(original_wrapper, '_binding', getattr(original_wrapper, '_state', None))
+                    callee_group_key = callee_group_key.group_key if callee_group_key else (binding_state.group_key if binding_state else None)
                     if callee_group_key:
                         try:
                             from .build.deps import get_dependency_tracker
@@ -534,13 +534,14 @@ class TypeConverter:
                         specialized_wrapper = original_wrapper.get_effect_specialized(
                             ctx_effect_suffix, ctx_effects
                         )
-                        func_info = specialized_wrapper._state.func_info
+                        func_info = specialized_wrapper._func_info
                         actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
                         logger.debug(f"Using transitive effect version: {actual_func_name}")
 
                         # Record dependency: caller_group -> specialized_wrapper_group
                         caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                        callee_group_key = specialized_wrapper._state.group_key if hasattr(specialized_wrapper, '_state') else None
+                        specialized_binding = getattr(specialized_wrapper, '_binding', getattr(specialized_wrapper, '_state', None))
+                        callee_group_key = specialized_binding.group_key if specialized_binding else None
                         if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
                             from .build.deps import get_dependency_tracker
                             dep_tracker = get_dependency_tracker()
@@ -552,7 +553,8 @@ class TypeConverter:
         # If the callee is still a template (not yet materialized), materialize
         # the default specialization so the symbol exists at link time.
         callee_w = func_info.wrapper if func_info else None
-        if callee_w and getattr(callee_w, '_state', None) and callee_w._state.is_template:
+        callee_binding = getattr(callee_w, '_binding', getattr(callee_w, '_state', None))
+        if callee_binding and callee_binding.is_template:
             from .decorators.compile import materialize_specialization, DEFAULT_EFFECT_KEY
             materialize_specialization(callee_w, DEFAULT_EFFECT_KEY, {})
 
@@ -565,7 +567,10 @@ class TypeConverter:
         # so the linker sees the correct provider.
         caller_group_key = getattr(self._visitor, 'current_group_key', None)
         callee_wrapper = getattr(func_info, 'wrapper', None) if func_info else None
-        callee_group_key = (callee_wrapper._state.group_key if callee_wrapper and hasattr(callee_wrapper, '_state') and callee_wrapper._state else None) or (wrapper._state.group_key if hasattr(wrapper, '_state') and wrapper._state else None)
+        callee_wrapper_binding = getattr(callee_wrapper, '_binding', getattr(callee_wrapper, '_state', None)) if callee_wrapper else None
+        callee_group_key = (
+            callee_wrapper_binding.group_key if callee_wrapper_binding else None
+        ) or (binding_state.group_key if binding_state else None)
         if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
             from .build.deps import get_dependency_tracker
             get_dependency_tracker().record_group_dependency(
@@ -608,14 +613,7 @@ class TypeConverter:
                 for attr in func_info.fn_attrs:
                     ir_func.attributes.add(attr)
         
-        # Build func type hint
-        param_types = [func_info.param_type_hints[p] for p in func_info.param_names]
-        if param_types:
-            func_type_hint = func_type_cls[param_types, func_info.return_type_hint]
-        else:
-            func_type_hint = func_type_cls[[], func_info.return_type_hint]
-        
-        return wrap_value(ir_func, kind='pointer', type_hint=func_type_hint)
+        return wrap_value(ir_func, kind='pointer', type_hint=func_info.callable_pc_type)
 
     def promote_to_pc_default(self, python_val) -> ValueRef:
         """Promote Python value to default PC type
@@ -639,6 +637,30 @@ class TypeConverter:
             return wrap_value(str_const, kind="value", type_hint=pc_type)
         else:
             raise TypeError(f"Cannot promote Python type {type(python_val).__name__} to PC type")
+
+    def _materialize_store_operand(
+        self,
+        value: ValueRef,
+        target_pc_type: type[BuiltinType],
+    ) -> ir.Value:
+        """Return an IR operand suitable for storing into target_pc_type.
+
+        Some runtime pcvalues, notably arrays, are represented by a pointer to
+        storage even when the semantic target is the aggregate value itself.
+        In that case we need to load once before the store.
+        """
+        value_ir = ensure_ir(value)
+        if value.is_python_value():
+            return value_ir
+
+        target_base_type = cast(type[BuiltinType], strip_qualifiers(target_pc_type))
+        if not target_base_type.is_array():
+            return value_ir
+
+        target_llvm_type = target_base_type.get_llvm_type(self._visitor.module.context)
+        if value.pointee() == target_llvm_type:
+            return self.builder.load(value_ir)
+        return value_ir
 
     def _convert_list_to_array(self, python_list, target_array_type):
         """Convert Python list/tuple to array constant.
@@ -869,13 +891,8 @@ class TypeConverter:
                     [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
                     inbounds=True
                 )
-                inner_ir = ensure_ir(inner_val)
-                # Load from inner_val's address if it's a pointer
-                if hasattr(inner_val, 'kind') and inner_val.kind == 'value':
-                    inner_loaded = self.builder.load(inner_ir)
-                    self.builder.store(inner_loaded, elem_ptr)
-                else:
-                    self.builder.store(inner_ir, elem_ptr)
+                store_value = self._materialize_store_operand(inner_val, inner_array_type)
+                self.builder.store(store_value, elem_ptr)
             
             return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
 
@@ -1263,8 +1280,8 @@ class TypeConverter:
             return wrap_value(elem_ptr, kind="value", type_hint=type_hint)
         
         # Fallback: use address field if available
-        if isinstance(value, ValueRef) and value.address is not None:
-            addr_ir = ensure_ir(value.address)
+        if isinstance(value, ValueRef) and value.has_place():
+            addr_ir = ensure_ir(value.require_place())
             if isinstance(addr_ir.type, ir.PointerType) and isinstance(addr_ir.type.pointee, ir.ArrayType):
                 zero = ir.Constant(ir.IntType(32), 0)
                 elem_ptr = self.builder.gep(addr_ir, [zero, zero], inbounds=True)
