@@ -245,9 +245,9 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None):
                 referenced_types = extract_type_names_from_annotation(type_str)
                 
                 for ref_type_name in referenced_types:
-                    def make_callback(idx, type_str_copy, namespace_copy):
+                    def make_callback(idx, type_str_copy, namespace_copy, ref_type_name_copy):
                         def callback(resolved_type_obj):
-                            namespace_copy[ref_type_name] = resolved_type_obj
+                            namespace_copy[ref_type_name_copy] = resolved_type_obj
                             from ..type_resolver import TypeResolver
                             type_resolver_cb = TypeResolver(user_globals=namespace_copy)
                             try:
@@ -260,7 +260,7 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None):
                     
                     register_forward_ref_callback(
                         ref_type_name,
-                        make_callback(field_index, type_str, type_namespace.copy())
+                        make_callback(field_index, type_str, type_namespace.copy(), ref_type_name)
                     )
     
     # === LINK PYTHON CLASS TO UNIFIED TYPE ===

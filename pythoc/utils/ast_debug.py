@@ -86,15 +86,8 @@ class ASTDebugger:
     
     def _setup_output_dir(self):
         """Setup output directory for debug files"""
-        from pythoc.utils.path_utils import get_build_paths
-        try:
-            build_dir, _ = get_build_paths()
-            self.output_dir = Path(build_dir) / "debug_ast"
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-        except:
-            # Fallback to current directory
-            self.output_dir = Path("build/debug_ast")
-            self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = Path("build/debug_ast")
+        self.output_dir.mkdir(parents=True, exist_ok=True)
     
     def capture(self, name: str, node: Union[ast.AST, List[ast.stmt]], **metadata):
         """

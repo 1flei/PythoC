@@ -221,13 +221,3 @@ class InlineBodyTransformer(ast.NodeTransformer):
             returns=node.returns,
             type_comment=node.type_comment if hasattr(node, 'type_comment') else None
         )
-        
-        new_orelse = self.transform(node.orelse) if node.orelse else []
-        new_finalbody = self.transform(node.finalbody) if node.finalbody else []
-        
-        return ast.Try(
-            body=new_body,
-            handlers=new_handlers,
-            orelse=new_orelse,
-            finalbody=new_finalbody
-        )

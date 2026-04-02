@@ -38,6 +38,8 @@ def get_compiler(source_file):
 
 def clear_registry():
     _get_registry().clear_all()
+    from ..forward_ref import clear_forward_ref_state
+    clear_forward_ref_state()
     # Also clear the native executor cache
     from ..native_executor import get_multi_so_executor
     executor = get_multi_so_executor()

@@ -611,7 +611,7 @@ class MultiSOExecutor:
         actual_func_name = wrapper._state.actual_func_name or func_name
         
         # Check if we need to reload (e.g., after clear_registry())
-        if source_file in self.loaded_libs:
+        if so_file in self.loaded_libs:
             # Library is loaded, but check if wrapper's cache is invalidated
             if not hasattr(wrapper, '_native_func'):
                 # Cache was cleared, need to reload
@@ -620,8 +620,8 @@ class MultiSOExecutor:
             # Library not loaded but wrapper has cache - clear it
             delattr(wrapper, '_native_func')
         
-        # Check function cache using source_file:actual_func_name as key
-        cache_key = f"{source_file}:{actual_func_name}"
+        # Check function cache using shared-library path to match get_function().
+        cache_key = f"{so_file}:{actual_func_name}"
         if cache_key in self.function_cache:
             return self.function_cache[cache_key]
         
@@ -681,9 +681,11 @@ class MultiSOExecutor:
             if so_file in self.loaded_libs:
                 del self.loaded_libs[so_file]
                 # Also clear cached functions from this library
-                keys_to_remove = [k for k in self.function_cache.keys() if k.startswith(f"{source_file}:")]
+                keys_to_remove = [k for k in self.function_cache.keys() if k.startswith(f"{so_file}:")]
                 for key in keys_to_remove:
                     del self.function_cache[key]
+                if hasattr(wrapper, '_native_func'):
+                    delattr(wrapper, '_native_func')
             self.compile_source_to_so(obj_file, so_file, extra_link_libraries=extra_link_libraries)
 
         # Compile dependencies recursively if needed (non-Windows)

@@ -360,6 +360,34 @@ def f():
         else_assign = if_stmt.orelse[0]
         self.assertEqual(else_assign.targets[0].id, 'x_i1')
 
+    def test_nested_function_definition_transformation(self):
+        """
+        Rename nested function names and captured variables without rewriting
+        the nested function's return statement into inline exit handling.
+        """
+        code = """
+def f():
+    def helper():
+        return captured
+"""
+        body = self._parse_body(code)
+        rename_map = {
+            'helper': 'helper_inline_1',
+            'captured': 'captured_inline_1',
+        }
+        rule = ReturnExitRule(result_var='result')
+
+        transformer = InlineBodyTransformer(rule, rename_map)
+        new_body = transformer.transform(body)
+
+        nested_func = new_body[0]
+        self.assertIsInstance(nested_func, ast.FunctionDef)
+        self.assertEqual(nested_func.name, 'helper_inline_1')
+
+        nested_return = nested_func.body[0]
+        self.assertIsInstance(nested_return, ast.Return)
+        self.assertEqual(nested_return.value.id, 'captured_inline_1')
+
 
 if __name__ == '__main__':
     unittest.main()
