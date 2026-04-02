@@ -346,6 +346,16 @@ def test_compile_factory_cache():
     print("OK test_compile_factory_cache passed")
 
 
+def test_wrapper_binding_state_split():
+    """Compiled wrappers should expose semantic info and binding separately."""
+    assert hasattr(meta_add, "_binding")
+    assert meta_add._binding is meta_add._state
+    assert meta_add._signature is meta_add._func_info
+    assert meta_add._func_info.binding_state is meta_add._binding
+    assert not hasattr(meta_add._binding, "current_function")
+    print("OK test_wrapper_binding_state_split passed")
+
+
 # ============================================================================
 # Run all tests
 # ============================================================================
@@ -363,4 +373,5 @@ if __name__ == '__main__':
     test_quote_func_type_expr()
     test_compile_factory_basic()
     test_compile_factory_cache()
+    test_wrapper_binding_state_split()
     print("\nAll meta compile tests passed!")

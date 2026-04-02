@@ -38,15 +38,12 @@ from .valueref import ValueRef as EnhancedValueRef
 
 
 @dataclass
-class FunctionCompileState:
-    """Unified per-function state across decoration and compilation.
+class FunctionBindingState:
+    """Long-lived wrapper binding state.
 
-    Phase 1 fields: set at @compile decoration time.
-    Phase 2 fields: set during compile_function_from_ast().
-
-    wrapper._state and visitor.func_state point to the same object.
+    This tracks which compiled implementation a wrapper points to, along with
+    the effect/materialization data needed to continue specialization later.
     """
-    # --- Phase 1: set at @compile time ---
     source_file: Optional[str] = None
     original_name: Optional[str] = None
     actual_func_name: Optional[str] = None
@@ -56,17 +53,25 @@ class FunctionCompileState:
     effect_suffix: Optional[str] = None
     compiler: Optional[Any] = None
     so_file: Optional[str] = None
-    func_info: Optional[Any] = None
     is_template: bool = False
     captured_effect_context: Optional[Any] = None
     captured_symbols: Optional[Any] = None
     effect_specialized_cache: Dict[str, Any] = field(default_factory=dict)
     template_compile_callback: Optional[Any] = None
+    compilation_globals: Dict[str, Any] = field(default_factory=dict)
+    wrapper: Optional[Any] = None
 
-    # --- Phase 2: set during compilation ---
+
+@dataclass
+class ActiveCompileFrame:
+    """Ephemeral state for one compile_function_from_ast() invocation."""
     current_function: Optional[ir.Function] = None
     varargs_info: Optional[dict] = None
     all_inlined_stmts: list = field(default_factory=list)
+
+
+# Backward compatibility alias for older imports.
+FunctionCompileState = FunctionBindingState
 
 
 class CompilationContext:

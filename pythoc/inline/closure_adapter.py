@@ -149,12 +149,7 @@ class ClosureAdapter:
                 # Create a fresh ValueRef without var_name tracking
                 # This is critical for linear types: the ownership was already
                 # transferred when the caller evaluated the arguments
-                param_value = wrap_value(
-                    param_value.value,
-                    kind=param_value.kind,
-                    type_hint=param_value.type_hint,
-                    address=param_value.address if hasattr(param_value, 'address') else None
-                )
+                param_value = param_value.clone(var_name=None, linear_path=None)
             
             # Register temp variable WITHOUT alloca
             temp_info = VariableInfo(

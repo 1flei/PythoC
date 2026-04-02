@@ -16,6 +16,7 @@ from llvmlite import ir
 
 from .base import BuiltinType
 from ..logger import logger
+from ..valueref import ValueRef
 
 
 class CompositeType(BuiltinType):
@@ -90,8 +91,8 @@ class CompositeType(BuiltinType):
         return index_val
     
     @classmethod
-    def _get_value_address(cls, visitor, base):
-        """Get address from ValueRef or allocate and store
+    def _get_value_address(cls, visitor, base: ValueRef):
+        """Get address from a ValueRef or allocate and store
         
         This is a common pattern for composite types: we need a pointer to the value
         to perform GEP operations. If the value already has an address, use it.
@@ -104,10 +105,10 @@ class CompositeType(BuiltinType):
         Returns:
             LLVM pointer to the value
         """
-        from ..valueref import ValueRef, ensure_ir, get_type
+        from ..valueref import ensure_ir, get_type
         
-        if isinstance(base, ValueRef) and base.address is not None:
-            return base.address
+        if base.has_place():
+            return base.require_place()
         
         # Need to allocate and store the value
         value_ir = ensure_ir(base)

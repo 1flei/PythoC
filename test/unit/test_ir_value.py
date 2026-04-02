@@ -29,7 +29,8 @@ class TestValueRef(unittest.TestCase):
         i32_val = ir.Constant(ir.IntType(32), 42)
         ref = ValueRef(kind="value", value=i32_val, type_hint=i32)
         
-        self.assertEqual(ref.kind, "value")
+        self.assertTrue(ref.is_pcvalue())
+        self.assertFalse(ref.has_place())
         self.assertEqual(ref.ir_value, i32_val)
         self.assertEqual(ref.type, ir.IntType(32))
     
@@ -65,7 +66,7 @@ class TestValueRef(unittest.TestCase):
         from pythoc.builtin_entities import i32, ptr
         alloca = self.builder.alloca(ir.IntType(32))
         ptr_ref = ValueRef(kind="pointer", value=alloca, type_hint=ptr[i32])
-        self.assertTrue(ptr_ref.is_pointer())
+        self.assertTrue(ptr_ref.is_pointer_typed())
     
     def test_pointee(self):
         """Test getting pointee type"""
@@ -84,8 +85,20 @@ class TestValueRef(unittest.TestCase):
         ptr_ref = ValueRef(kind="pointer", value=alloca, type_hint=ptr[i32])
         
         loaded = ptr_ref.load(self.builder)
-        self.assertEqual(loaded.kind, "value")
+        self.assertTrue(loaded.is_pcvalue())
+        self.assertFalse(loaded.has_place())
         self.assertEqual(loaded.type_hint, i32)
+
+    def test_require_place_prefers_sidecar_place(self):
+        """Addressable values should expose the stored place, not the loaded value."""
+        from pythoc.builtin_entities import i32
+
+        alloca = self.builder.alloca(ir.IntType(32))
+        loaded = self.builder.load(alloca)
+        ref = ValueRef(kind="address", value=loaded, type_hint=i32, address=alloca)
+
+        self.assertTrue(ref.has_place())
+        self.assertIs(ref.require_place(), alloca)
     
     def test_ensure_ir(self):
         """Test ensure_ir helper function"""
@@ -119,9 +132,21 @@ class TestValueRef(unittest.TestCase):
         ref = wrap_value(i32_val, kind="value", type_hint=i32)
         
         self.assertIsInstance(ref, ValueRef)
-        self.assertEqual(ref.kind, "value")
+        self.assertTrue(ref.is_pcvalue())
         self.assertEqual(ref.ir_value, i32_val)
         self.assertEqual(ref.type_hint, i32)
+
+    def test_internal_storage_is_not_public(self):
+        """Direct access to internal storage tags should fail."""
+        from pythoc.builtin_entities import i32
+
+        i32_val = ir.Constant(ir.IntType(32), 42)
+        ref = ValueRef(kind="value", value=i32_val, type_hint=i32)
+
+        with self.assertRaises(AttributeError):
+            _ = ref.kind
+        with self.assertRaises(AttributeError):
+            _ = ref.address
     
     def test_repr(self):
         """Test string representation"""

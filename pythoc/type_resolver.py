@@ -166,7 +166,7 @@ class TypeResolver:
 
         if isinstance(value_ref, ValueRef):
             if not is_python_value(value_ref):
-                raise TypeError(f"Expected Python type ValueRef, got kind='{value_ref.kind}'")
+                raise TypeError(f"Expected Python type ValueRef, got {value_ref!r}")
             value = value_ref.value
         else:
             value = value_ref

@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     from typing import Any
 
 
+_UNSET = object()
+
+
 def extract_constant_index(index_value: 'ValueRef', context: str = "subscript") -> int:
     """Extract constant integer index from a ValueRef for subscript operations.
     
@@ -51,7 +54,7 @@ def extract_constant_index(index_value: 'ValueRef', context: str = "subscript") 
     
     return const_val
 
-@dataclass
+@dataclass(init=False)
 class ValueRef:
     """Wrapper around LLVM IR value or Python value with type metadata.
     
@@ -59,29 +62,44 @@ class ValueRef:
     Supports unified lvalue/rvalue by optionally carrying address alongside value.
     
     Attributes:
-        kind: 'address' | 'pointer' | 'value' | 'python'
-              - 'address': lvalue (can be assigned to, e.g., variable, field)
-              - 'pointer': pointer value (can be dereferenced)
-              - 'value': regular LLVM value (cannot be assigned to)
-              - 'python': Python runtime value (not compiled)
+        _kind: Internal storage tag.
         value: Union[ir.Value, Any] - LLVM IR value for PC types, Python object for Python types
         type_hint: Language-level type information (PC type or PythonType)
                    This is the single source of truth for type information.
                    LLVM types are derived from this via get_llvm_type().
-        address: Optional address (pointer) for lvalue operations
-                 When present, enables use in both lvalue and rvalue contexts
+        _address: Optional backend place for lvalue operations
+                  When present, enables use in both lvalue and rvalue contexts
         source_node: original AST node for debugging (optional)
         var_name: Optional variable name for linear tracking (lvalue only)
         linear_path: Optional index path for linear token tracking (lvalue only)
     """
-    kind: str
+    _kind: str
     value: Union[ir.Value, AnyType]  # Changed from ir_value to value
     type_hint: AnyType  # PC type or PythonType (BuiltinEntity subclass)
-    address: Optional[ir.Value] = None  # Address for lvalue operations
+    _address: Optional[ir.Value] = None  # Backend place for lvalue operations
     source_node: Optional[ast.AST] = None  # Source AST node
     var_name: Optional[str] = None  # Variable name for linear tracking
     linear_path: Optional[tuple] = None  # Index path for linear tracking
     vref_id: Optional[str] = None  # Unique ID for ValueRef tracking (replaces temp_linear_id)
+
+    def __init__(self,
+                 kind: str,
+                 value: Union[ir.Value, AnyType],
+                 type_hint: AnyType,
+                 address: Optional[ir.Value] = None,
+                 source_node: Optional[ast.AST] = None,
+                 var_name: Optional[str] = None,
+                 linear_path: Optional[tuple] = None,
+                 vref_id: Optional[str] = None):
+        self._kind = kind
+        self.value = value
+        self.type_hint = type_hint
+        self._address = address
+        self.source_node = source_node
+        self.var_name = var_name
+        self.linear_path = linear_path
+        self.vref_id = vref_id
+        self.__post_init__()
     
     def __post_init__(self):
         """Validate ValueRef after initialization."""
@@ -92,9 +110,22 @@ class ValueRef:
         if isinstance(self.value, ValueRef):
             raise TypeError(
                 f"BUG: ValueRef.value is another ValueRef (double-wrapping detected). "
-                f"inner.kind={self.value.kind}, inner.type_hint={self.value.type_hint}, "
-                f"outer.kind={self.kind}, outer.type_hint={self.type_hint}"
+                f"inner.kind={self.value._kind}, inner.type_hint={self.value.type_hint}, "
+                f"outer.kind={self._kind}, outer.type_hint={self.type_hint}"
             )
+
+    @property
+    def kind(self):
+        raise AttributeError(
+            "ValueRef.kind is internal; use predicates like "
+            "is_python_value(), is_pcvalue(), is_pointer_typed(), or has_place()."
+        )
+
+    @property
+    def address(self):
+        raise AttributeError(
+            "ValueRef.address is internal; use has_place(), get_place(), or require_place()."
+        )
     
     # Backward compatibility property
     @property
@@ -112,16 +143,24 @@ class ValueRef:
     def is_python_value(self) -> bool:
         """Check if this ValueRef holds a Python value."""
         # Check kind first - if explicitly marked as python, trust it
-        if self.kind == "python":
+        if self._kind == "python":
             return True
         # Otherwise check type_hint
         if self.type_hint and hasattr(self.type_hint, 'is_python_type'):
             return self.type_hint.is_python_type()
         return False
+
+    def is_pyconst(self) -> bool:
+        """Check if this ValueRef is a compile-time Python constant."""
+        return self.is_python_value()
+
+    def is_pcvalue(self) -> bool:
+        """Check if this ValueRef is a runtime/backend value."""
+        return not self.is_python_value()
     
     def is_llvm_value(self) -> bool:
         """Check if this ValueRef holds an LLVM IR value."""
-        return not self.is_python_value()
+        return self.is_pcvalue()
     
     def get_python_value(self) -> AnyType:
         """Get the Python value.
@@ -161,6 +200,10 @@ class ValueRef:
         """Check if this is a pointer-typed value.
         Prefer BuiltinType semantics when available, fallback to LLVM type.
         """
+        return self.is_pointer_typed()
+
+    def is_pointer_typed(self) -> bool:
+        """Check if this pcvalue has pointer type."""
         if self.is_python_value():
             return False
         if self.type_hint is not None:
@@ -168,6 +211,45 @@ class ValueRef:
             if hasattr(self.type_hint, '_is_pointer') and getattr(self.type_hint, '_is_pointer'):
                 return True
         return isinstance(self.value.type, ir.PointerType)
+
+    def has_place(self) -> bool:
+        """Check if this ValueRef can be used as an assignable place."""
+        return self._kind == "address" or self._address is not None
+
+    def get_place(self) -> Optional[ir.Value]:
+        """Get the backend place pointer/value used for lvalue operations."""
+        if self._address is not None:
+            return self._address
+        if self._kind == "address":
+            return self.value
+        return None
+
+    def require_place(self) -> ir.Value:
+        """Get the backend place, raising if this ValueRef is not addressable."""
+        place = self.get_place()
+        if place is None:
+            raise ValueError(f"ValueRef(kind={self._kind}) has no place")
+        return place
+
+    def clone(self,
+              *,
+              value=_UNSET,
+              type_hint=_UNSET,
+              source_node=_UNSET,
+              var_name=_UNSET,
+              linear_path=_UNSET,
+              vref_id=_UNSET) -> "ValueRef":
+        """Copy this ValueRef while preserving internal storage semantics."""
+        return ValueRef(
+            kind=self._kind,
+            value=self.value if value is _UNSET else value,
+            type_hint=self.type_hint if type_hint is _UNSET else type_hint,
+            address=self._address,
+            source_node=self.source_node if source_node is _UNSET else source_node,
+            var_name=self.var_name if var_name is _UNSET else var_name,
+            linear_path=self.linear_path if linear_path is _UNSET else linear_path,
+            vref_id=self.vref_id if vref_id is _UNSET else vref_id,
+        )
 
     def pointee(self) -> Optional[ir.Type]:
         """Get pointee type if this is a pointer."""
@@ -241,7 +323,7 @@ class ValueRef:
         if self.is_python_value():
             raise TypeError("Cannot bitcast Python value")
         casted = builder.bitcast(self.unwrap(), target_type)
-        kind = self.kind if isinstance(target_type, ir.PointerType) else "value"
+        kind = self._kind if isinstance(target_type, ir.PointerType) else "value"
         return ValueRef(
             kind=kind, 
             value=casted,
@@ -263,27 +345,27 @@ class ValueRef:
             TypeError: If this is a Python value
         """
         # Special case: pyconst_field is already an lvalue (with special semantics)
-        if self.kind == 'pyconst_field':
+        if self._kind == 'pyconst_field':
             return self
         
         if self.is_python_value():
             raise TypeError("Cannot convert Python value to lvalue")
-        if self.address is not None:
+        if self._address is not None:
             # Has explicit address field - use it
             return ValueRef(
                 kind='address',
-                value=self.address,
+                value=self._address,
                 type_hint=self.type_hint,
                 address=None,
                 source_node=self.source_node,
                 var_name=self.var_name,
                 linear_path=self.linear_path
             )
-        elif self.kind == 'address':
+        elif self._kind == 'address':
             # Already an lvalue - return as-is
             return self
         else:
-            raise ValueError(f"Cannot convert ValueRef with kind='{self.kind}' and no address to lvalue")
+            raise ValueError(f"Cannot convert ValueRef with kind='{self._kind}' and no place to lvalue")
     
     def __repr__(self) -> str:
         """String representation with type."""
@@ -296,16 +378,26 @@ class ValueRef:
         if self.is_python_value():
             value_str = f", py_value={repr(self.value)}"
         
-        addr_str = ", +addr" if self.address is not None else ""
-        return f"ValueRef(kind={self.kind}{type_str}{value_str}{addr_str})"
+        addr_str = ", +place" if self.has_place() else ""
+        return f"ValueRef(kind={self._kind}{type_str}{value_str}{addr_str})"
 
     def is_struct_value(self):
         return is_struct_type(self.type_hint)
 
+    def is_undefined_pcvalue(self) -> bool:
+        """Check whether this ValueRef is an LLVM undefined runtime value."""
+        if not self.is_pcvalue() or self.has_place():
+            return False
+        return (
+            isinstance(self.value, ir.Constant)
+            and hasattr(self.value, "constant")
+            and self.value.constant == ir.Undefined
+        )
+
     def get_pc_type(self):
         from .builtin_entities.python_type import pyconst
         # Consider different kind
-        if self.kind == 'python':
+        if self._kind == 'python':
             return pyconst[self.value]
         return self.type_hint
 
@@ -457,7 +549,7 @@ def wrap_value(value: Union[ir.Value, AnyType],
     if isinstance(value, ValueRef):
         raise TypeError(
             f"BUG: Attempting to wrap a ValueRef in another ValueRef. "
-            f"value.kind={value.kind}, value.type_hint={value.type_hint}, "
+            f"value.kind={value._kind}, value.type_hint={value.type_hint}, "
             f"requested kind={kind}, requested type_hint={type_hint}"
         )
 

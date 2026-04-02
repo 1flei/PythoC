@@ -87,7 +87,7 @@ class VariableInfo:
 
 @dataclass
 class FunctionInfo:
-    """Information about a compiled function"""
+    """Static semantic record for a compiled function wrapper."""
     name: str
     source_file: str
     ast_node: Optional[ast.FunctionDef] = None
@@ -97,25 +97,44 @@ class FunctionInfo:
     param_names: List[str] = field(default_factory=list)  # Ordered parameter names
     source_code: Optional[str] = None
     is_compiled: bool = False
-    mangled_name: Optional[str] = None  # For function overloading
     overload_enabled: bool = False  # Whether overloading is enabled for this function
-    so_file: Optional[str] = None  # Path to the .so file for this function
     # Effect system: track which effects this function uses (e.g., {'rng', 'd_impl'})
     # Used for transitive effect propagation - when a function with suffix calls
     # another function that uses an overridden effect, we generate a suffix version
     effect_dependencies: Set[str] = field(default_factory=set)
-    # The wrapper object for this function (used for on-demand suffix generation)
-    wrapper: Optional[Any] = None
-    # Compilation globals: user_globals dict used during compilation
-    # This is a mutable reference that gets augmented with group scope at flush time
-    # to support self/mutual recursion without name-based registry lookup
-    compilation_globals: Optional[Dict[str, Any]] = None
     # Whether this function uses LLVM-level varargs (union/enum/none varargs).
     # Struct varargs are expanded at compile time and do not set this flag.
     has_llvm_varargs: bool = False
     # LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
     # Applied to cross-module `declare` so the optimizer can treat calls as pure, etc.
     fn_attrs: Set[str] = field(default_factory=set)
+    binding_state: Optional[Any] = None
+
+    @property
+    def wrapper(self):
+        return self.binding_state.wrapper if self.binding_state else None
+
+    @property
+    def compilation_globals(self):
+        return self.binding_state.compilation_globals if self.binding_state else None
+
+    @property
+    def mangled_name(self):
+        return self.binding_state.mangled_name if self.binding_state else None
+
+    @property
+    def so_file(self):
+        return self.binding_state.so_file if self.binding_state else None
+
+    @property
+    def callable_pc_type(self):
+        """Expose the public callable PC type for this function."""
+        from .builtin_entities.func import func as func_type_cls
+
+        param_types = [self.param_type_hints[name] for name in self.param_names]
+        if param_types:
+            return func_type_cls[param_types, self.return_type_hint]
+        return func_type_cls[[], self.return_type_hint]
 
 
 @dataclass

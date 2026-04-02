@@ -85,7 +85,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.scope_manager.set_visitor(self)
 
         # Backward compatibility aliases
-        self.func_state = None  # FunctionCompileState, set by compiler.py
+        self.func_state = None  # ActiveCompileFrame, set by compiler.py
+        self.binding_state = None  # FunctionBindingState, set by compiler.py
         self._current_function = None
         self.label_counter = 0
         self.struct_types = self.ctx.struct_types
@@ -107,14 +108,14 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
     @property
     def current_group_key(self):
-        if self.func_state is not None:
-            return self.func_state.group_key
+        if self.binding_state is not None:
+            return self.binding_state.group_key
         return getattr(self, '_current_group_key', None)
 
     @current_group_key.setter
     def current_group_key(self, value):
-        if self.func_state is not None:
-            self.func_state.group_key = value
+        if self.binding_state is not None:
+            self.binding_state.group_key = value
         else:
             self._current_group_key = value
 
@@ -247,7 +248,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 # For @compile functions, get type hints from function annotations
                 type_hint = PythonType.wrap(python_obj, is_constant=True)
                 if hasattr(python_obj, '_is_compiled') and python_obj._is_compiled:
-                    if hasattr(python_obj, '__annotations__'):
+                    func_info = getattr(python_obj, '_func_info', None)
+                    if func_info is not None:
+                        type_hint = func_info.callable_pc_type
+                    elif hasattr(python_obj, '__annotations__'):
                         annotations = python_obj.__annotations__
                         param_type_hints = {}
                         return_type_hint = None

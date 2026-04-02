@@ -86,7 +86,7 @@ class SubscriptsMixin:
         
         # Special case: enum class attribute access (e.g., MyEnum.VARIANT)
         # Delegate to handle_attribute for proper type handling
-        if (result.kind == 'python' and 
+        if (result.is_python_value() and 
             isinstance(result.value, type) and 
             getattr(result.value, '_is_enum', False)):
             # Use handle_attribute if available

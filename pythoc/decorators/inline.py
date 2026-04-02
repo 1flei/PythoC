@@ -99,7 +99,7 @@ def inline(func=None, *, cls_method=False, method=False):
                     raise TypeError(f"{f.__name__}() missing self argument")
                 # args[0] is iterable (Python object or wrapped value)
                 # Extract the actual Python object
-                if hasattr(args[0], 'kind') and args[0].kind == 'python':
+                if hasattr(args[0], 'is_python_value') and args[0].is_python_value():
                     self_obj = args[0].get_python_value()
                 elif hasattr(args[0], 'value') and hasattr(args[0].value, '__class__'):
                     # Direct Python object

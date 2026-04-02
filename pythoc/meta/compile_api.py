@@ -14,7 +14,7 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from ..compiler import LLVMCompiler
-from ..context import FunctionCompileState
+from ..context import FunctionBindingState
 from ..registry import FunctionInfo, _unified_registry
 from ..build import get_output_manager
 from ..decorators.compile import get_compiler
@@ -48,7 +48,7 @@ def compile_ast(
     """Compile an ast.FunctionDef through the standard @compile lifecycle.
 
     This is a "headless @compile" -- it constructs the same wrapper, group key,
-    FunctionInfo, compile_callback, and FunctionCompileState as the @compile
+    FunctionInfo, compile_callback, and FunctionBindingState as the @compile
     decorator, but starts from a pre-built AST node instead of a decorated
     Python function.
 
@@ -199,9 +199,7 @@ def compile_ast(
         return_type_hint=return_type_hint,
         param_type_hints=param_type_hints,
         param_names=param_names,
-        mangled_name=mangled_name,
         overload_enabled=False,
-        so_file=so_file,
         fn_attrs=fn_attrs,
     )
 
@@ -213,11 +211,6 @@ def compile_ast(
         if not hasattr(wrapper, '_native_func'):
             wrapper._native_func = executor.execute_function(wrapper)
         return wrapper._native_func(*args)
-
-    # Associate wrapper <-> func_info early
-    func_info.wrapper = wrapper
-    wrapper._func_info = func_info
-    func_info.compilation_globals = dict(user_globals)
 
     # Get or create group
     group = output_manager.get_or_create_group(
@@ -232,6 +225,26 @@ def compile_ast(
     from ..effect import push_compilation_context, pop_compilation_context
     captured_effect_ctx = capture_effect_context()
 
+    binding_state = FunctionBindingState(
+        compiler=compiler,
+        so_file=so_file,
+        source_file=source_file,
+        mangled_name=mangled_name,
+        original_name=func_name,
+        actual_func_name=actual_func_name,
+        group_key=group_key,
+        compile_suffix=compile_suffix,
+        effect_suffix=effect_suffix,
+        captured_effect_context=captured_effect_ctx,
+        compilation_globals=dict(user_globals),
+        wrapper=wrapper,
+    )
+    func_info.binding_state = binding_state
+    wrapper._func_info = func_info
+    wrapper._signature = func_info
+    wrapper._binding = binding_state
+    wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
+
     # Closure locals for compile_callback
     _fn_ast = fn_ast
     _source_code = source_code
@@ -240,7 +253,7 @@ def compile_ast(
     _start_line = start_line
 
     def compile_callback(comp):
-        st = wrapper._state
+        st = wrapper._binding
         start_effect_tracking()
 
         if st.effect_suffix:
@@ -258,7 +271,7 @@ def compile_ast(
                     reset_module=False,
                     param_type_hints=_param_type_hints,
                     return_type_hint=_return_type_hint,
-                    user_globals=st.func_info.compilation_globals,
+                    user_globals=st.compilation_globals,
                     group_key=st.group_key,
                     func_state=st,
                 )
@@ -268,7 +281,7 @@ def compile_ast(
 
         effect_deps = stop_effect_tracking()
         if effect_deps:
-            st.func_info.effect_dependencies = effect_deps
+            func_info.effect_dependencies = effect_deps
             logger.debug(
                 "Function {} uses effects: {}".format(_fn_ast.name, effect_deps)
             )
@@ -279,32 +292,18 @@ def compile_ast(
 
     # Queue compilation and set state
     output_manager.queue_compilation(group_key, compile_callback, func_info)
-
-    wrapper._state = FunctionCompileState(
-        compiler=compiler,
-        so_file=so_file,
-        source_file=source_file,
-        mangled_name=mangled_name,
-        original_name=func_name,
-        actual_func_name=actual_func_name,
-        group_key=group_key,
-        compile_suffix=compile_suffix,
-        effect_suffix=effect_suffix,
-        func_info=func_info,
-        captured_effect_context=captured_effect_ctx,
-        is_template=False,
-    )
+    binding_state.is_template = False
 
     # Backward-compat aliases
-    wrapper._so_file = so_file
-    wrapper._source_file = source_file
-    wrapper._compiler = compiler
-    wrapper._original_name = func_name
-    wrapper._actual_func_name = actual_func_name
-    wrapper._mangled_name = mangled_name
-    wrapper._group_key = group_key
-    wrapper._compile_suffix = compile_suffix
-    wrapper._effect_suffix = effect_suffix
+    wrapper._so_file = binding_state.so_file
+    wrapper._source_file = binding_state.source_file
+    wrapper._compiler = binding_state.compiler
+    wrapper._original_name = binding_state.original_name
+    wrapper._actual_func_name = binding_state.actual_func_name
+    wrapper._mangled_name = binding_state.mangled_name
+    wrapper._group_key = binding_state.group_key
+    wrapper._compile_suffix = binding_state.compile_suffix
+    wrapper._effect_suffix = binding_state.effect_suffix
 
     output_manager.add_wrapper_to_group(group_key, wrapper)
 
@@ -316,7 +315,7 @@ def compile_ast(
         from ..build.deps import get_dependency_tracker
 
         caller_group_key = getattr(visitor, 'current_group_key', None)
-        callee_group_key = wrapper._state.group_key
+        callee_group_key = wrapper._binding.group_key
         if (caller_group_key and callee_group_key
                 and caller_group_key != callee_group_key):
             dep_tracker = get_dependency_tracker()
