@@ -104,7 +104,11 @@ def run_tests_serial(test_files: List[Path], quiet: bool = False) -> List[Tuple[
     return results
 
 
-def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[Tuple[str, bool, str, str, float, int]]:
+def run_tests_parallel(
+    test_files: List[Path],
+    max_workers: int = None,
+    quiet: bool = False,
+) -> List[Tuple[str, bool, str, str, float, int]]:
     """Run tests in parallel (for faster execution)"""
     if max_workers is None:
         # Limit default parallelism to avoid filesystem contention on Windows.
@@ -124,16 +128,44 @@ def run_tests_parallel(test_files: List[Path], max_workers: int = None) -> List[
             test_name = future_to_test[future]
             try:
                 name, success, stdout, stderr, duration, rc = future.result()
-                status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
-                print(f"{status} {name} ({duration:.2f}s)")
-                if not success:
+                if not quiet:
+                    status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
+                    print(f"{status} {name} ({duration:.2f}s)")
+                if not success and not quiet:
                     _print_failure_detail(stdout, stderr, rc)
                 results.append((name, success, stdout, stderr, duration, rc))
             except Exception as e:
-                print(f"{RED}FAIL{RESET} {test_name} (exception: {e})")
+                if not quiet:
+                    print(f"{RED}FAIL{RESET} {test_name} (exception: {e})")
                 results.append((test_name, False, "", str(e), 0, -1))
     
     return results
+
+
+def build_json_result(
+    total_tests: int,
+    passed: int,
+    failed: int,
+    wall_time: float,
+    total_cpu_time: float,
+    results: List[Tuple[str, bool, str, str, float, int]],
+) -> Dict[str, Any]:
+    """Build CI-friendly JSON output from integration test results."""
+    return {
+        'total': total_tests,
+        'passed': passed,
+        'failed': failed,
+        'wall_time_seconds': round(wall_time, 2),
+        'total_cpu_time_seconds': round(total_cpu_time, 2),
+        'tests': [
+            {
+                'name': name,
+                'passed': success,
+                'duration_seconds': round(duration, 3)
+            }
+            for name, success, _, _, duration, _ in results
+        ]
+    }
 
 
 def main():
@@ -147,8 +179,9 @@ def main():
                         help='Minimal output (for benchmarking)')
     args = parser.parse_args()
     
+    quiet_output = args.quiet or args.json
     mode = "Serial" if args.serial else "Parallel"
-    print_header(f"PC Compiler - Integration Test Suite ({mode})", args.quiet)
+    print_header(f"PC Compiler - Integration Test Suite ({mode})", quiet_output)
     
     # Find all test files in integration directory
     workspace = Path(__file__).parent.parent
@@ -160,7 +193,7 @@ def main():
             print(f"{YELLOW}No integration test files found{RESET}")
         return 0
     
-    if not args.quiet:
+    if not quiet_output:
         print(f"Found {len(test_files)} integration test files")
         if args.serial:
             print(f"Running tests serially...\n")
@@ -173,9 +206,9 @@ def main():
     
     # Run tests
     if args.serial:
-        results = run_tests_serial(test_files, args.quiet)
+        results = run_tests_serial(test_files, quiet_output)
     else:
-        results = run_tests_parallel(test_files)
+        results = run_tests_parallel(test_files, quiet=quiet_output)
     
     wall_time = time.time() - wall_start
     
@@ -189,28 +222,21 @@ def main():
     
     # Output JSON if requested
     if args.json:
-        json_result = {
-            'total': len(test_files),
-            'passed': passed,
-            'failed': failed,
-            'wall_time_seconds': round(wall_time, 2),
-            'total_cpu_time_seconds': round(total_cpu_time, 2),
-            'tests': [
-                {
-                    'name': name,
-                    'passed': success,
-                    'duration_seconds': round(duration, 3)
-                }
-                for name, success, _, _, duration in results
-            ]
-        }
+        json_result = build_json_result(
+            total_tests=len(test_files),
+            passed=passed,
+            failed=failed,
+            wall_time=wall_time,
+            total_cpu_time=total_cpu_time,
+            results=results,
+        )
         print(json.dumps(json_result, indent=2))
         return 0 if failed == 0 else 1
     
     # Print detailed summary
-    print_header("Test Summary", args.quiet)
+    print_header("Test Summary", quiet_output)
     
-    if not args.quiet:
+    if not quiet_output:
         for test_name, success, stdout, stderr, duration, rc in results:
             status = f"{GREEN}PASS{RESET}" if success else f"{RED}FAIL{RESET}"
             print(f"{status} {test_name}")
