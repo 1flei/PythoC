@@ -496,7 +496,7 @@ class BuiltinType(BuiltinEntity):
             logger.error(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
                         node=node, exc_type=TypeError)
         
-        arg = visitor.visit_expression(node.args[0])
+        arg = visitor.visit_rvalue_expression(node.args[0])
         # Note: TypeConverter will extract LLVM type from pythoc type with module_context
         # So we don't need to call get_llvm_type here - just pass the PC type class
         
@@ -542,8 +542,6 @@ class BuiltinType(BuiltinEntity):
     def handle_mul(cls, visitor, left, right, node: ast.BinOp):
         """Handle multiplication for numeric types"""
         from ..valueref import wrap_value, ensure_ir
-        left = visitor.visit_expression(node.left)
-        right = visitor.visit_expression(node.right)
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
         if is_float:

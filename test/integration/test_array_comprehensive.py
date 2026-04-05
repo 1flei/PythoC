@@ -333,6 +333,15 @@ def test_array_of_structs() -> i32:
 
 
 @compile
+def test_array_literal_from_local_structs() -> i32:
+    """Test array literal materializes local struct bindings as rvalues"""
+    left: struct[i32, i32] = (10, 20)
+    right: struct[i32, i32] = (30, 40)
+    arr: array[struct[i32, i32], 2] = [left, right]
+    return arr[0][0] + arr[0][1] + arr[1][0] + arr[1][1]  # 100
+
+
+@compile
 def test_struct_with_array() -> i32:
     """Test struct containing array"""
     s: struct[i32, array[i32, 3]] = struct[i32, array[i32, 3]]()
@@ -734,6 +743,9 @@ class TestArrayPointer(unittest.TestCase):
 class TestArrayStruct(unittest.TestCase):
     def test_array_of_structs(self):
         self.assertEqual(test_array_of_structs(), 21)
+
+    def test_array_literal_from_local_structs(self):
+        self.assertEqual(test_array_literal_from_local_structs(), 100)
     
     def test_struct_with_array(self):
         self.assertEqual(test_struct_with_array(), 106)

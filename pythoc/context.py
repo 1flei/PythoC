@@ -66,6 +66,11 @@ class FunctionBindingState:
 class ActiveCompileFrame:
     """Ephemeral state for one compile_function_from_ast() invocation."""
     current_function: Optional[ir.Function] = None
+    function_name: Optional[str] = None
+    return_type_hint: Optional[Any] = None
+    param_type_hints: Dict[str, Any] = field(default_factory=dict)
+    sret_info: Optional[dict] = None
+    param_coercion_info: Dict[int, Any] = field(default_factory=dict)
     varargs_info: Optional[dict] = None
     all_inlined_stmts: list = field(default_factory=list)
 

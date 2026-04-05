@@ -313,7 +313,7 @@ class AssignmentsMixin:
     def visit_Assign(self, node: ast.Assign):
         """Handle assignment statements with automatic type inference"""
         # Evaluate rvalue once
-        rvalue = self.visit_expression(node.value)
+        rvalue = self.visit_rvalue_expression(node.value)
         
         # Check if rvalue is an active linear token (forbid copy)
         self._check_linear_rvalue_copy(rvalue, node)
@@ -430,7 +430,7 @@ class AssignmentsMixin:
             undef_value = ir.Constant(llvm_type, ir.Undefined)
             rvalue = wrap_value(undef_value, kind="value", type_hint=pc_type)
         else:
-            rvalue = self.visit_expression(node.value)
+            rvalue = self.visit_rvalue_expression(node.value)
 
             # If the type of RHS does not match pc_type, convert it
             if rvalue.type_hint != pc_type:
@@ -466,7 +466,7 @@ class AssignmentsMixin:
         current_val_ref = wrap_value(current_value, kind="value", type_hint=target_addr.type_hint)
         
         # Evaluate the right-hand side
-        rhs_value = self.visit_expression(node.value)
+        rhs_value = self.visit_rvalue_expression(node.value)
         
         # Create a fake BinOp node to reuse binary operation logic
         fake_binop = ast.BinOp(

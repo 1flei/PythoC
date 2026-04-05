@@ -8,7 +8,6 @@ import operator
 from typing import Optional, Any
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
-from ..ir_helpers import safe_load
 from ..builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -45,98 +44,36 @@ class ExpressionsMixin:
     
     def visit_Name(self, node: ast.Name):
         """Handle variable references, returning ValueRef"""
-        
-        # Unified lookup: variables and functions
+
         var_info = self.lookup_variable(node.id)
         if var_info:
-            if var_info.value_ref:
-                # Check if value has handle_call (e.g., ExternFunctionWrapper)
-                if hasattr(var_info.value_ref.value, 'handle_call'):
-                    return var_info.value_ref
-            
-            # Check if it's a Python type - return Python value directly
-            # This handles pyconst variables that have alloca (zero-sized {})
-            # but should still return the original Python value
-            if var_info.type_hint and hasattr(var_info.type_hint, 'is_python_type'):
-                try:
-                    if var_info.type_hint.is_python_type():
-                        # Return Python value wrapped in ValueRef
-                        python_obj = var_info.type_hint.get_python_object()
-                        return wrap_value(
-                            python_obj,
-                            kind="python",
-                            type_hint=var_info.type_hint
-                        )
-                except Exception:
-                    pass
-            
-            var = var_info.alloca
-            
-            # If alloca is None, check if we have a value_ref
-            if var is None:
-                if var_info.value_ref:
-                    # Return the value_ref directly (e.g., for nullptr)
-                    return var_info.value_ref
-                logger.error(f"Variable '{node.id}' has no alloca and no value_ref", node=node, exc_type=RuntimeError)
+            from ..builtin_entities.python_type import PythonType
+
             type_hint = var_info.type_hint
-            # Ensure we have a type_hint
-            # Note: This fallback is expected for variables without explicit type annotations
+            if var_info.value_ref is not None:
+                return self._bind_name_reference(var_info.value_ref, node.id)
+
+            if isinstance(type_hint, PythonType):
+                return wrap_value(
+                    type_hint.get_python_object(),
+                    kind="python",
+                    type_hint=type_hint,
+                )
+
+            if var_info.alloca is None:
+                logger.error(f"Variable '{node.id}' has no alloca and no value_ref", node=node, exc_type=RuntimeError)
+
             if type_hint is None:
                 logger.error(f"Variable '{node.id}' has no type hint", node=node, exc_type=TypeError)
-            
-            # Special case: global function (source == "function")
-            if var_info.source == "function":
-                # Return function as pointer value (for function pointer assignment)
-                return wrap_value(var, kind="value", type_hint=type_hint)
-            
-            # Regular variable handling
-            if isinstance(var.type, ir.PointerType):
-                pointee_type = var.type.pointee
-                
-                # Check if type_hint is a pointer type (ptr[T])
-                # If so, load it and return as pointer
-                # Check for ptr class or subclass (SpecializedPtr)
-                from ..builtin_entities.types import ptr as ptr_class
-                is_ptr_type = (isinstance(type_hint, type) and issubclass(type_hint, ptr_class)) or \
-                              (hasattr(type_hint, 'get_name') and type_hint.get_name() == 'ptr')
-                if node.id == 'node':
-                    pass
-                if is_ptr_type:
-                    loaded_val = safe_load(self.builder, ensure_ir(var), type_hint, name=f"{node.id}_val")
-                    result_ref = wrap_value(loaded_val, kind="address", type_hint=type_hint, address=var,
-                                          var_name=node.id, linear_path=())
-                    if node.id == 'node':
-                        pass
-                    return result_ref
-                
-                # Do NOT auto-decay arrays here. Keep array variables as their alloca pointer.
-                # But DO auto-load union types (which are represented as arrays)
-                if isinstance(pointee_type, ir.ArrayType):
-                    # Check if this is a union type (unions use ArrayType for storage)
-                    # Use _is_union attribute instead of issubclass check
-                    # because @union decorated classes don't inherit from union
-                    if isinstance(type_hint, type) and getattr(type_hint, '_is_union', False):
-                        # Union type: load the value for passing to functions
-                        loaded_val = safe_load(self.builder, ensure_ir(var), type_hint, name=f"{node.id}_val")
-                        return wrap_value(loaded_val, kind="address", type_hint=type_hint, address=var,
-                                        var_name=node.id, linear_path=())
-                    # Regular array: keep as pointer, array is its own address
-                    return wrap_value(var, kind="address", type_hint=type_hint, address=var,
-                                    var_name=node.id, linear_path=())
-                
-                # Tuple (struct) variables: load the value
-                # Note: For tuple subscript access, visit_subscript will handle it
-                # For tuple as whole (e.g., function parameter), load it
-                if isinstance(pointee_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-                    loaded_val = safe_load(self.builder, ensure_ir(var), type_hint, name=f"{node.id}_val")
-                    return wrap_value(loaded_val, kind="address", type_hint=type_hint, address=var,
-                                    var_name=node.id, linear_path=())
-                
-                loaded_val = safe_load(self.builder, ensure_ir(var), type_hint, name=f"{node.id}_val")
-                return wrap_value(loaded_val, kind="address", type_hint=type_hint, address=var,
-                                var_name=node.id, linear_path=())
-            else:
-                return wrap_value(var, kind="value", type_hint=type_hint)
+
+            return wrap_value(
+                var_info.alloca,
+                kind="address",
+                type_hint=type_hint,
+                address=var_info.alloca,
+                var_name=node.id,
+                linear_path=(),
+            )
         
         # Check if it's in user's global namespace (constants, type aliases, etc.)
         if node.id in self.ctx.user_globals:
@@ -157,6 +94,8 @@ class ExpressionsMixin:
                 return self._wrap_python_to_valueref(node.id, value)
         
         # Otherwise raise error
+        if self.is_constexpr():
+            raise NameError(f"Variable '{node.id}' not defined")
         logger.error(f"Variable '{node.id}' not defined", node=node, exc_type=NameError)
     
 
@@ -171,8 +110,8 @@ class ExpressionsMixin:
 
     def visit_BinOp(self, node: ast.BinOp):
         """Handle enhanced binary operations with unified protocol support"""
-        left = self.visit_expression(node.left)
-        right = self.visit_expression(node.right)
+        left = self.visit_rvalue_expression(node.left)
+        right = self.visit_rvalue_expression(node.right)
         
         # Check if both operands are PythonType values
         from ..builtin_entities.python_type import PythonType
@@ -244,7 +183,7 @@ class ExpressionsMixin:
 
     def visit_UnaryOp(self, node: ast.UnaryOp):
         """Handle unary operations with table-driven dispatch"""
-        operand = self.visit_expression(node.operand)
+        operand = self.visit_rvalue_expression(node.operand)
 
         # Before dispatching, check if operand is a PythonType value
         from ..builtin_entities.python_type import PythonType
@@ -332,14 +271,14 @@ class ExpressionsMixin:
 
     def visit_Compare(self, node: ast.Compare):
         """Handle enhanced comparison operations with table-driven dispatch"""
-        left = self.visit_expression(node.left)
+        left = self.visit_rvalue_expression(node.left)
         
         # Handle multiple comparisons (a < b < c)
         result = None
         current_left = left
         
         for op, comparator in zip(node.ops, node.comparators):
-            right = self.visit_expression(comparator)
+            right = self.visit_rvalue_expression(comparator)
             cmp_result = self._perform_comparison(op, current_left, right, comparator)
             
             # Chain comparisons with AND
@@ -595,13 +534,13 @@ class ExpressionsMixin:
         
         # Generate then block
         self.builder.position_at_end(then_block)
-        then_val = self.visit_expression(node.body)
+        then_val = self.visit_rvalue_expression(node.body)
         then_block = self.builder.block  # Update in case of nested blocks
         self.builder.branch(merge_block)
         
         # Generate else block
         self.builder.position_at_end(else_block)
-        else_val = self.visit_expression(node.orelse)
+        else_val = self.visit_rvalue_expression(node.orelse)
         else_block = self.builder.block  # Update in case of nested blocks
         self.builder.branch(merge_block)
         
@@ -663,7 +602,7 @@ class ExpressionsMixin:
         from ..builtin_entities.pc_list import pc_list, PCListType
         from ..builtin_entities.base import BuiltinEntity
     
-        elements = [self.visit_expression(elt) for elt in node.elts]
+        elements = [self.visit_rvalue_expression(elt) for elt in node.elts]
 
         # In constexpr mode, return Python list directly (for type subscripts)
         if self.is_constexpr():
@@ -797,7 +736,7 @@ class ExpressionsMixin:
         from ..builtin_entities.python_type import PythonType
         
         # Evaluate all elements
-        elements = [self.visit_expression(elt) for elt in node.elts]
+        elements = [self.visit_rvalue_expression(elt) for elt in node.elts]
         
         # In constexpr mode, return Python tuple directly
         if self.is_constexpr():
@@ -853,6 +792,9 @@ class ExpressionsMixin:
 
     def _to_boolean(self, value, node: ast.AST = None):
         """Convert value to boolean (i1)"""
+        if isinstance(value, ValueRef):
+            value = self.read_rvalue(value, name=getattr(value, "var_name", None))
+
         # Handle Python values - convert to IR first
         if isinstance(value, ValueRef) and value.is_python_value():
             # Convert Python value to i1 (bool)

@@ -45,7 +45,7 @@ class SubscriptsMixin:
         # Struct varargs are now handled as normal struct, no special case needed
         if isinstance(node.value, ast.Name):
             var_name = node.value.id
-            if hasattr(self, 'current_varargs_info') and self.current_varargs_info:
+            if self.current_varargs_info:
                 if var_name == self.current_varargs_info['name']:
                     # Only handle union/enum varargs specially (they use va_list)
                     if self.current_varargs_info['kind'] in ('union', 'enum'):
@@ -53,9 +53,11 @@ class SubscriptsMixin:
         
         # Get the subscriptable object (evaluates node.value)
         result = self.visit_expression(node.value)
+        if isinstance(result, ValueRef):
+            result = self.prepare_protocol_base(result)
         
         # ALWAYS visit index - unified handling
-        index = self.visit_expression(node.slice)
+        index = self.visit_rvalue_expression(node.slice)
         
         # Delegate to type_hint's handle_subscript
         if result.type_hint and hasattr(result.type_hint, 'handle_subscript'):
@@ -83,6 +85,8 @@ class SubscriptsMixin:
         
         # Evaluate the base expression
         result = self.visit_expression(node.value)
+        if isinstance(result, ValueRef):
+            result = self.prepare_protocol_base(result)
         
         # Special case: enum class attribute access (e.g., MyEnum.VARIANT)
         # Delegate to handle_attribute for proper type handling

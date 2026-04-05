@@ -240,7 +240,7 @@ class ValueRef:
               linear_path=_UNSET,
               vref_id=_UNSET) -> "ValueRef":
         """Copy this ValueRef while preserving internal storage semantics."""
-        return ValueRef(
+        cloned = ValueRef(
             kind=self._kind,
             value=self.value if value is _UNSET else value,
             type_hint=self.type_hint if type_hint is _UNSET else type_hint,
@@ -250,6 +250,22 @@ class ValueRef:
             linear_path=self.linear_path if linear_path is _UNSET else linear_path,
             vref_id=self.vref_id if vref_id is _UNSET else vref_id,
         )
+
+        core_fields = {
+            '_kind',
+            'value',
+            'type_hint',
+            '_address',
+            'source_node',
+            'var_name',
+            'linear_path',
+            'vref_id',
+        }
+        for attr_name, attr_value in self.__dict__.items():
+            if attr_name not in core_fields:
+                setattr(cloned, attr_name, attr_value)
+
+        return cloned
 
     def pointee(self) -> Optional[ir.Type]:
         """Get pointee type if this is a pointer."""

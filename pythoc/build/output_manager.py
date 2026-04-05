@@ -108,14 +108,6 @@ class OutputManager:
                     self._flushed_groups.remove(group_key)
                 self._pending_groups[group_key] = group
 
-                # Same logic as in queue_compilation: only skip force_recompile
-                # when the group was flushed via cache-hit (previous run's .o
-                # already contains all functions).
-                if group_key in self._cached_compilations:
-                    group['force_recompile'] = False
-                else:
-                    group['force_recompile'] = True
-
                 # Restore cached compilations back to pending. These are functions
                 # that were skipped due to cache hit but now need to be recompiled
                 # together with the new functions to create a complete .o file.
@@ -190,24 +182,6 @@ class OutputManager:
 
             self._pending_groups[group_key] = group
 
-            # Decide whether to force recompilation.
-            #
-            # When the group was flushed via a *cache hit* earlier in this
-            # process (i.e. the `.o` from a previous run was reused without
-            # recompilation), the function being registered now was already
-            # compiled into that `.o` in a previous process.  In that case we
-            # should NOT force recompile — let the normal cache check handle it.
-            #
-            # When the group was flushed via *actual compilation* in this
-            # process, the new function was NOT in that `.o`, so we must force
-            # recompile to include it.
-            if group_key in self._cached_compilations:
-                # Cache-hit path: the .o already has all functions from
-                # a previous run.  Don't force recompile.
-                group['force_recompile'] = False
-            else:
-                group['force_recompile'] = True
-
             # If we previously cached skipped compilations for this group (cache hit),
             # restore them so we rebuild a complete object file.
             if group_key in self._cached_compilations:
@@ -216,6 +190,53 @@ class OutputManager:
 
         from ..logger import logger
         logger.debug(f"queue_compilation: {func_info.name}, group_key={group_key}, total_pending={len(self._pending_compilations[group_key])}")
+
+    def _get_pending_symbols(self, group_key):
+        """Return symbol names currently expected to be materialized for a group."""
+        pending = self._pending_compilations.get(group_key, [])
+        return {
+            func_info.mangled_name or func_info.name
+            for _, func_info in pending
+        }
+
+    def _get_cached_compiled_symbols(self, group_key, group):
+        """Load the compiled symbol set for a group's current object file."""
+        compiled_symbols = group.get('compiled_symbols')
+        if compiled_symbols:
+            return set(compiled_symbols)
+
+        obj_file = group.get('obj_file')
+        if not obj_file:
+            return set()
+
+        dep_tracker = get_dependency_tracker()
+        deps = dep_tracker.load_deps(obj_file)
+        if not deps or not getattr(deps, 'compiled_symbols', None):
+            return set()
+
+        compiled_symbols = set(deps.compiled_symbols)
+        group['compiled_symbols'] = compiled_symbols
+        return compiled_symbols
+
+    def _cached_object_covers_pending_symbols(self, group_key, group):
+        """Check whether cached object metadata covers all currently pending defs."""
+        pending_symbols = self._get_pending_symbols(group_key)
+        if not pending_symbols:
+            return True
+
+        compiled_symbols = self._get_cached_compiled_symbols(group_key, group)
+        if not compiled_symbols:
+            return False
+
+        missing_symbols = pending_symbols - compiled_symbols
+        if missing_symbols:
+            from ..logger import logger
+            logger.debug(
+                f"Cache miss for {group_key}: object missing pending symbols {sorted(missing_symbols)}"
+            )
+            return False
+
+        return True
     
     def _forward_declare_function(self, compiler, func_info):
         """
@@ -280,10 +301,11 @@ class OutputManager:
             group: Group info dict
 
         Returns:
-            int: Number of functions compiled
+            tuple[int, set[str]]: Number of newly compiled functions and the
+            symbol names compiled during this flush.
         """
         if not group:
-            return 0
+            return 0, set()
 
         compiler = group['compiler']
         from ..logger import logger
@@ -292,6 +314,7 @@ class OutputManager:
         # Track all compiled func_infos to avoid re-compilation
         compiled_funcs = set()
         total_compiled = 0
+        compiled_symbols = set()
 
         # Loop until no more pending compilations for this group
         # This handles transitive effect propagation where compiling one function
@@ -311,6 +334,7 @@ class OutputManager:
                 if func_key not in compiled_funcs:
                     new_pending.append((callback, func_info))
                     compiled_funcs.add(func_key)
+                    compiled_symbols.add(func_key)
 
             if not new_pending:
                 break
@@ -345,7 +369,7 @@ class OutputManager:
             for callback, func_info in new_pending:
                 callback(compiler)
 
-        return total_compiled
+        return total_compiled, compiled_symbols
     
     def flush_all(self):
         """
@@ -401,7 +425,6 @@ class OutputManager:
             
             obj_file = group['obj_file']
             source_file = group.get('source_file')
-            force_recompile = bool(group.get('force_recompile', False))
 
             # File lock covers the entire cache-check -> compile -> write cycle.
             # This ensures that when multiple processes need the same .o on a
@@ -412,21 +435,21 @@ class OutputManager:
             with file_lock(lockfile_path):
                 # Check cache inside the lock so that waiting processes
                 # see the .o written by the winner and skip compilation.
-                if (not force_recompile) and source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
-                    self._restore_deps_from_cache(group_key, group)
-                    self._flushed_groups.add(group_key)
+                if source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
+                    if self._cached_object_covers_pending_symbols(group_key, group):
+                        self._restore_deps_from_cache(group_key, group)
+                        self._flushed_groups.add(group_key)
 
-                    group['force_recompile'] = False
-                    if group_key in self._pending_compilations:
-                        self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
-                    group['wrappers'] = []
+                        if group_key in self._pending_compilations:
+                            self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
+                        group['wrappers'] = []
 
-                    logger.debug(f"Cache hit for {group_key}, skipping compilation")
-                    continue
+                        logger.debug(f"Cache hit for {group_key}, skipping compilation")
+                        continue
 
                 # Cache miss — this process is the first to compile this .o.
                 try:
-                    compiled_count = self._compile_pending_for_group(group_key, group)
+                    compiled_count, compiled_symbols = self._compile_pending_for_group(group_key, group)
                 except Exception:
                     group['compilation_failed'] = True
                     raise
@@ -442,6 +465,8 @@ class OutputManager:
                     continue
 
                 compiler = group['compiler']
+                existing_symbols = set(group.get('compiled_symbols', set()))
+                compiled_symbols = existing_symbols | compiled_symbols
 
                 if not compiler.verify_module():
                     raise RuntimeError(f"Module verification failed for group {group_key}")
@@ -461,11 +486,11 @@ class OutputManager:
                 compiler.compile_to_object(tmp_obj)
                 _atomic_replace(tmp_obj, obj_file)
 
-                self._save_group_deps(group_key, compiler, obj_file, group)
+                group['compiled_symbols'] = compiled_symbols
+                self._save_group_deps(group_key, compiler, obj_file, group, compiled_symbols=compiled_symbols)
 
             # Mark this group as flushed
             self._flushed_groups.add(group_key)
-            group['force_recompile'] = False
             group['wrappers'] = []
         
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
@@ -488,6 +513,8 @@ class OutputManager:
         dep_tracker = get_dependency_tracker()
         deps = dep_tracker.load_deps(obj_file)
         if deps:
+            group['compiled_symbols'] = set(getattr(deps, 'compiled_symbols', []))
+
             # Restore imported_user_functions from group-level deps
             if not hasattr(compiler, 'imported_user_functions'):
                 compiler.imported_user_functions = {}
@@ -510,7 +537,7 @@ class OutputManager:
 
 
     
-    def _save_group_deps(self, group_key, compiler, obj_file, group=None):
+    def _save_group_deps(self, group_key, compiler, obj_file, group=None, compiled_symbols=None):
         """
         Save dependency information for a compiled group.
 
@@ -523,6 +550,7 @@ class OutputManager:
             compiler: LLVMCompiler with compilation results
             obj_file: Path to .o file
             group: Optional group info dict (for accessing wrappers)
+            compiled_symbols: Optional complete symbol set for the current .o
         """
         from .deps import get_dependency_tracker
         from ..registry import get_unified_registry
@@ -552,6 +580,9 @@ class OutputManager:
             if obj not in group_deps.link_objects:
                 group_deps.link_objects.append(obj)
         
+        if compiled_symbols is not None:
+            group_deps.compiled_symbols = sorted(compiled_symbols)
+
         # Propagate transitive effects from dependent groups.
         # If this group calls functions in groups that use effects (e.g., c_ast uses
         # effect.mem), those effects should be reflected in this group's effects_used

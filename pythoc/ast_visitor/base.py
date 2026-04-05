@@ -7,6 +7,7 @@ import builtins
 from typing import Optional, Any, List, Tuple, TYPE_CHECKING
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
+from ..ir_helpers import safe_load
 from ..type_converter import TypeConverter, ImplicitCoercer
 from ..context import (
     VariableInfo,
@@ -30,6 +31,7 @@ from ..builtin_entities import (
     is_signed_int,
     is_unsigned_int,
 )
+from ..builtin_entities.base import BuiltinType
 from ..builtin_entities import bool as pc_bool
 from ..registry import get_unified_registry, infer_struct_from_access
 from ..type_resolver import TypeResolver
@@ -48,7 +50,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
     """
     
     def __init__(self, module: ir.Module = None, builder: ir.IRBuilder = None,
-                 func_type_hints: dict = None, struct_types: dict = None,
+                 struct_types: dict = None,
                  source_globals: dict = None, compiler=None, user_globals: dict = None,
                  backend: "AbstractBackend" = None):
         # Support both legacy (module/builder) and new (backend) initialization
@@ -65,7 +67,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
             # Legacy context initialization
             self.ctx = CompilationContext(module, builder, user_globals=user_globals)
         
-        self.func_type_hints = func_type_hints or {}
         self.ctx.struct_types = struct_types or {}
         self.ctx.source_globals = source_globals or {}
         
@@ -118,6 +119,49 @@ class LLVMIRVisitor(ast.NodeVisitor):
             self.binding_state.group_key = value
         else:
             self._current_group_key = value
+
+    @property
+    def current_function_name(self):
+        if self.func_state is not None:
+            return self.func_state.function_name
+        return None
+
+    @property
+    def current_return_type_hint(self):
+        if self.func_state is not None:
+            return self.func_state.return_type_hint
+        return None
+
+    @property
+    def current_param_type_hints(self):
+        if self.func_state is not None:
+            return self.func_state.param_type_hints
+        return {}
+
+    @property
+    def current_sret_info(self):
+        if self.func_state is not None:
+            return self.func_state.sret_info
+        return None
+
+    @property
+    def current_param_coercion_info(self):
+        if self.func_state is not None:
+            return self.func_state.param_coercion_info
+        return {}
+
+    @property
+    def current_varargs_info(self):
+        if self.func_state is not None:
+            return self.func_state.varargs_info
+        return None
+
+    @current_varargs_info.setter
+    def current_varargs_info(self, value):
+        if self.func_state is not None:
+            self.func_state.varargs_info = value
+        else:
+            self._current_varargs_info = value
 
     @property
     def backend(self) -> Optional["AbstractBackend"]:
@@ -240,54 +284,21 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if self.ctx.user_globals and name in self.ctx.user_globals:
             python_obj = self.ctx.user_globals[name]
             from ..valueref import ValueRef, wrap_value
-            
-            # 2a. Objects with handle_call (ExternFunctionWrapper, @compile wrapper, etc.)
-            if hasattr(python_obj, 'handle_call') and callable(python_obj.handle_call):
-                from ..builtin_entities.python_type import PythonType
-                
-                # For @compile functions, get type hints from function annotations
-                type_hint = PythonType.wrap(python_obj, is_constant=True)
-                if hasattr(python_obj, '_is_compiled') and python_obj._is_compiled:
-                    func_info = getattr(python_obj, '_func_info', None)
-                    if func_info is not None:
-                        type_hint = func_info.callable_pc_type
-                    elif hasattr(python_obj, '__annotations__'):
-                        annotations = python_obj.__annotations__
-                        param_type_hints = {}
-                        return_type_hint = None
-                        
-                        for key, value in annotations.items():
-                            if key == 'return':
-                                return_type_hint = value
-                            else:
-                                param_type_hints[key] = value
-                        
-                        if return_type_hint is not None:
-                            from ..builtin_entities import func
-                            param_types = list(param_type_hints.values())
-                            type_hint = func[param_types, return_type_hint] if param_types else func[[], return_type_hint]
-                
-                return VariableInfo(
-                    name=name,
-                    value_ref=wrap_value(value=python_obj, kind='python', type_hint=type_hint),
-                    alloca=None,
-                    source="python_global",
-                    is_global=True,
-                    is_mutable=False,
-                )
-            
-            # 2b. BuiltinEntity types (i32, ptr, etc.)
+
+            # 2a. BuiltinEntity types (i32, ptr, etc.)
             from ..builtin_entities import BuiltinEntity, BuiltinType, BuiltinFunction
+            from ..builtin_entities.python_type import PythonType
             if isinstance(python_obj, type):
                 try:
                     if issubclass(python_obj, BuiltinEntity):
                         if issubclass(python_obj, (BuiltinType, BuiltinFunction)):
+                            python_type = PythonType.wrap(python_obj, is_constant=True)
                             return VariableInfo(
                                 name=name,
                                 value_ref=wrap_value(
                                     kind='python',
                                     value=python_obj,
-                                    type_hint=python_obj,
+                                    type_hint=python_type,
                                 ),
                                 alloca=None,
                                 source="builtin_entity",
@@ -301,7 +312,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 if hasattr(python_obj, '_is_struct') and python_obj._is_struct:
                     return None
             
-            # 2d. Already a ValueRef (like nullptr)
+            # 2b. Already a ValueRef (like nullptr)
             if isinstance(python_obj, ValueRef):
                 return VariableInfo(
                     name=name,
@@ -312,7 +323,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     is_mutable=False,
                 )
             
-            # 2e. Generic Python object
+            # 2c. Generic Python object
             from ..builtin_entities.python_type import PythonType
             python_type = PythonType.wrap(python_obj, is_constant=True)
             return VariableInfo(
@@ -366,6 +377,80 @@ class LLVMIRVisitor(ast.NodeVisitor):
             return result
 
         return result
+
+    def _bind_name_reference(self, value_ref: ValueRef, name: str) -> ValueRef:
+        """Attach top-level variable tracking metadata to a binding reference."""
+        if value_ref.is_python_value():
+            return value_ref
+
+        if value_ref.has_place():
+            place = value_ref.require_place()
+            if value_ref.value is place:
+                return value_ref.clone(var_name=name, linear_path=())
+
+        return value_ref
+
+    def read_rvalue(self, value_ref: ValueRef, *, name: Optional[str] = None) -> ValueRef:
+        """Explicitly materialize a binding into its rvalue form when needed."""
+        if value_ref.is_python_value() or not value_ref.has_place():
+            return value_ref
+
+        place = value_ref.require_place()
+        if value_ref.value is not place:
+            return value_ref
+
+        from ..type_converter import get_base_type
+
+        base_type = get_base_type(value_ref.type_hint)
+        if (
+            base_type is not None
+            and isinstance(base_type, type)
+            and issubclass(base_type, BuiltinType)
+            and base_type.is_array()
+        ):
+            return value_ref
+
+        loaded_val = safe_load(
+            self.builder,
+            ensure_ir(place),
+            value_ref.type_hint,
+            name=name or getattr(value_ref, "var_name", "") or "",
+        )
+        return wrap_value(
+            loaded_val,
+            kind="address",
+            type_hint=value_ref.type_hint,
+            address=place,
+            source_node=value_ref.source_node,
+            var_name=value_ref.var_name,
+            linear_path=value_ref.linear_path,
+            vref_id=value_ref.vref_id,
+        )
+
+    def visit_rvalue_expression(self, expr):
+        """Visit an expression in value context."""
+        result = self.visit_expression(expr)
+        if isinstance(result, ValueRef):
+            name = expr.id if isinstance(expr, ast.Name) else None
+            return self.read_rvalue(result, name=name)
+        return result
+
+    def prepare_protocol_base(self, value_ref: ValueRef) -> ValueRef:
+        """Prepare a base ValueRef for attribute/subscript protocol dispatch."""
+        if value_ref.is_python_value():
+            return value_ref
+
+        from ..type_converter import get_base_type
+
+        base_type = get_base_type(value_ref.type_hint)
+        if (
+            base_type is not None
+            and isinstance(base_type, type)
+            and issubclass(base_type, BuiltinType)
+            and base_type.is_pointer()
+        ):
+            return self.read_rvalue(value_ref, name=getattr(value_ref, "var_name", None))
+        return value_ref
     
     # ========================================================================
     # Linear Token Tracking

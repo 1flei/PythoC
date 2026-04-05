@@ -282,7 +282,7 @@ class ptr(BuiltinType):
         if len(node.args) != 1:
             logger.error(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)", node=node, exc_type=TypeError)
 
-        arg = visitor.visit_expression(node.args[0])
+        arg = visitor.visit_rvalue_expression(node.args[0])
         # Note: TypeConverter will extract LLVM type from pythoc type with module_context
         # So we don't need to call get_llvm_type here
         
