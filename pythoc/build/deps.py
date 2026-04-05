@@ -166,9 +166,11 @@ class GroupDeps:
     
     # Effect system support (group-level)
     effects_used: Set[str] = field(default_factory=set)  # All effects used by this group
-    
 
-    
+    # Symbols materialized into the current object file for this group.
+    # Used to decide whether an up-to-date .o fully covers current pending defs.
+    compiled_symbols: List[str] = field(default_factory=list)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization with compressed group keys."""
         # Collect all unique group keys
@@ -199,9 +201,10 @@ class GroupDeps:
         # Add effects if any
         if self.effects_used:
             result['effects_used'] = list(self.effects_used)
-        
 
-        
+        if self.compiled_symbols:
+            result['compiled_symbols'] = sorted(self.compiled_symbols)
+
         # Add group keys table if we have any
         if unique_group_keys:
             result['group_keys'] = unique_group_keys
@@ -240,7 +243,8 @@ class GroupDeps:
         
         # Parse effects
         effects_used = set(d.get('effects_used', []))
-        
+        compiled_symbols = d.get('compiled_symbols', [])
+
         return cls(
             version=d.get('version', DEPS_VERSION),
             group_key=group_key,
@@ -249,6 +253,7 @@ class GroupDeps:
             link_objects=d.get('link_objects', []),
             link_libraries=d.get('link_libraries', []),
             effects_used=effects_used,
+            compiled_symbols=compiled_symbols,
         )
 
     

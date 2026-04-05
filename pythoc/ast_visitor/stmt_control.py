@@ -52,16 +52,13 @@ class ControlFlowMixin:
         cf = self._get_cf_builder()
         
         # Only add return if block is not already terminated
-        expected_pc_type = None
-        for name, hint in self.func_type_hints.items():
-            if name != '_sret_info':  # Skip internal sret info
-                expected_pc_type = hint.get("return")
+        expected_pc_type = self.current_return_type_hint
         if not cf.is_terminated():
             # Evaluate return value first (before executing defers)
             value = None
             if node.value:
                 # Evaluate the return value first to get ValueRef with tracking info
-                value = self.visit_expression(node.value)
+                value = self.visit_rvalue_expression(node.value)
                 
                 # Transfer linear ownership using ValueRef tracking info
                 # This consumes all active linear paths in the returned value

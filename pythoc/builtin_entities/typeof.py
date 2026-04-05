@@ -73,7 +73,7 @@ class typeof(BuiltinFunction):
         except:
             pass
         
-        value_ref = visitor.visit_expression(arg_node)
+        value_ref = visitor.visit_rvalue_expression(arg_node)
         
         if value_ref.is_python_value():
             from .python_type import PythonType

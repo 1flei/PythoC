@@ -43,10 +43,10 @@ class MatchStatementMixin:
         # In Python AST, this becomes a Tuple node
         if isinstance(node.subject, ast.Tuple):
             # Multiple subjects - evaluate each one
-            subjects = [self.visit_expression(elt) for elt in node.subject.elts]
+            subjects = [self.visit_rvalue_expression(elt) for elt in node.subject.elts]
         else:
             # Single subject
-            subjects = [self.visit_expression(node.subject)]
+            subjects = [self.visit_rvalue_expression(node.subject)]
 
         # Get subject types for exhaustiveness checking
         subject_types = [s.type_hint for s in subjects]
@@ -278,7 +278,7 @@ class MatchStatementMixin:
                             self._bind_match_variable(var_name, var_value)
 
                         # Evaluate guard
-                        guard_result = self.visit_expression(case.guard)
+                        guard_result = self.visit_rvalue_expression(case.guard)
 
                         # Use process_condition for guard check
                         def guard_then():
@@ -368,7 +368,7 @@ class MatchStatementMixin:
         
         elif isinstance(pattern, ast.MatchValue):
             # Literal value pattern: compare subject with literal
-            value = self.visit_expression(pattern.value)
+            value = self.visit_rvalue_expression(pattern.value)
             
             # Special case: if subject is enum and value is a tag constant,
             # only compare the tag field (subject[0]) instead of the whole enum
@@ -598,7 +598,7 @@ class MatchStatementMixin:
                 else:
                     tag_const_node = first_pattern
                 
-                tag_const_val = self.visit_expression(tag_const_node)
+                tag_const_val = self.visit_rvalue_expression(tag_const_node)
                 
                 # Try to find which variant this tag corresponds to
                 variant_idx = None

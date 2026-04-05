@@ -250,31 +250,6 @@ class LLVMCompiler:
             varargs=varargs,
         )
 
-    def _build_func_type_hints(
-        self,
-        ast_node: ast.FunctionDef,
-        resolved_decl: _ResolvedFunctionDeclaration,
-        sret_info=None,
-        param_coercion_info=None,
-    ) -> Dict[str, Any]:
-        """Build visitor function type hints from resolved declaration data."""
-        func_type_hints: Dict[str, Any] = {}
-        if sret_info:
-            func_type_hints['_sret_info'] = sret_info
-        if param_coercion_info:
-            func_type_hints['_param_coercion_info'] = param_coercion_info
-
-        normal_param_hints = {}
-        for arg in ast_node.args.args:
-            if arg.arg in resolved_decl.param_type_hints:
-                normal_param_hints[arg.arg] = resolved_decl.param_type_hints[arg.arg]
-
-        func_type_hints[ast_node.name] = {
-            'return': resolved_decl.return_type_hint,
-            'params': normal_param_hints,
-        }
-        return func_type_hints
-    
     def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None, func_state = None) -> ir.Function:
         """
         Compile a function directly from an AST node (meta-programming support)
@@ -293,6 +268,10 @@ class LLVMCompiler:
             The compiled LLVM function
         """
         logger.debug(f"compile_function_from_ast: {ast_node.name}")
+
+        # Any new body added to the module invalidates previously cached optimized IR.
+        self._optimized_ir = None
+
         # Only create a fresh module if requested or if no module exists
         if reset_module or self.module is None:
             self.module = self.create_module()
@@ -340,42 +319,47 @@ class LLVMCompiler:
         for i, param_name in enumerate(resolved_decl.param_names):
             func_wrapper.get_user_arg(i).name = param_name
         
-        # Now compile the function body
-        # Build func_type_hints dict for the single function
-        func_type_hints = self._build_func_type_hints(
-            ast_node,
-            resolved_decl,
-            sret_info=sret_info,
-            param_coercion_info=func_wrapper.param_coercion_info,
+        visitor = LLVMIRVisitor(
+            module=self.module,
+            builder=None,
+            struct_types=None,
+            compiler=self,
+            user_globals=user_globals,
         )
-        
-        visitor = LLVMIRVisitor(self.module, None, func_type_hints, None, compiler=self, user_globals=user_globals)
+
+        normal_param_hints = {}
+        for arg in ast_node.args.args:
+            if arg.arg in resolved_decl.param_type_hints:
+                normal_param_hints[arg.arg] = resolved_decl.param_type_hints[arg.arg]
+
+        varargs_info = None
+        if varargs_kind != 'none':
+            varargs_info = {
+                'kind': varargs_kind,
+                'name': varargs_name,
+                'element_types': list(resolved_decl.varargs.element_types),
+                'num_normal_params': len(ast_node.args.args),
+                'va_list': None,
+            }
 
         # Set up long-lived binding state and this compilation's active frame.
         if func_state is None:
             from .context import FunctionBindingState
             func_state = FunctionBindingState(group_key=group_key)
         from .context import ActiveCompileFrame
-        compile_frame = ActiveCompileFrame(current_function=llvm_function)
+        compile_frame = ActiveCompileFrame(
+            current_function=llvm_function,
+            function_name=ast_node.name,
+            return_type_hint=resolved_decl.return_type_hint,
+            param_type_hints=normal_param_hints,
+            sret_info=sret_info,
+            param_coercion_info=func_wrapper.param_coercion_info or {},
+            varargs_info=varargs_info,
+        )
         visitor.func_state = compile_frame
         visitor.binding_state = func_state
         visitor.current_function = llvm_function
         visitor.current_group_key = group_key  # For dependency tracking at call time
-        
-        # Store varargs information for this function (using results from earlier detection)
-        visitor.current_varargs_info = None
-        if varargs_kind != 'none':
-            # Store varargs info
-            # - For struct varargs: used for len(args) constant folding
-            # - For union/enum varargs: used for va_arg access
-            visitor.current_varargs_info = {
-                'kind': varargs_kind,
-                'name': varargs_name,
-                'element_types': list(resolved_decl.varargs.element_types),
-                'num_normal_params': len(ast_node.args.args),
-                'va_list': None  # Will be initialized on first access (union/enum only)
-            }
-        compile_frame.varargs_info = visitor.current_varargs_info
         
         # Create entry block
         entry_block = llvm_function.append_basic_block('entry')
@@ -387,8 +371,7 @@ class LLVMCompiler:
         visitor.scope_manager.reset_label_tracking()
 
         # Set ABI context for struct returns
-        sret_info = func_type_hints.get('_sret_info') if func_type_hints else None
-        real_builder.set_return_abi_context(llvm_function, sret_info)
+        real_builder.set_return_abi_context(llvm_function, compile_frame.sret_info)
 
         # Create ControlFlowBuilder wrapping real_builder and set as visitor.builder
         # This must happen before parameter initialization which uses visitor.builder

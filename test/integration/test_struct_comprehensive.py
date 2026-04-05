@@ -264,6 +264,20 @@ def test_struct_return_use() -> i32:
 
 
 @compile
+def test_struct_tuple_return() -> struct[struct[i32, i32], i32]:
+    """Test tuple construction from a local struct binding"""
+    s: struct[i32, i32] = (7, 11)
+    return s, 13
+
+
+@compile
+def test_struct_tuple_return_use() -> i32:
+    """Test consuming tuple return with nested local struct value"""
+    result: struct[struct[i32, i32], i32] = test_struct_tuple_return()
+    return result[0][0] + result[0][1] + result[1]  # 31
+
+
+@compile
 def test_struct_param(s: struct[i32, i32]) -> i32:
     """Test struct as parameter"""
     return s[0] + s[1]
@@ -625,6 +639,9 @@ class TestStructAssignment(unittest.TestCase):
     
     def test_return_use(self):
         self.assertEqual(test_struct_return_use(), 66)
+
+    def test_tuple_return_use(self):
+        self.assertEqual(test_struct_tuple_return_use(), 31)
     
     def test_param_call(self):
         self.assertEqual(test_struct_param_call(), 30)

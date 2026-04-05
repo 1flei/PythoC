@@ -310,7 +310,7 @@ class PythonType(_PythonTypeBase):
                 continue
             
             # Otherwise, evaluate the expression
-            valref = visitor.visit_expression(arg_node)
+            valref = visitor.visit_rvalue_expression(arg_node)
             
             # Extract appropriate value based on ValueRef kind
             if hasattr(valref, 'is_python_value') and valref.is_python_value():

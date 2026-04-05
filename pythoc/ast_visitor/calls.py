@@ -54,7 +54,7 @@ class CallsMixin:
                 expanded_args = self._expand_starred_struct(arg.value)
                 args.extend(expanded_args)
             else:
-                arg_value = self.visit_expression(arg)
+                arg_value = self.visit_rvalue_expression(arg)
                 args.append(arg_value)
         
         # Check if this callable defers linear transfer (e.g., defer intrinsic)
@@ -86,6 +86,8 @@ class CallsMixin:
         """
         # Evaluate the callable expression
         result = self.visit_expression(func_node)
+        if isinstance(result, ValueRef):
+            result = self.read_rvalue(result, name=getattr(func_node, 'id', None))
         
         # Check if result is a type class (not ValueRef) with handle_call
         # This happens for type expressions like array[T, N], struct[...], etc.
@@ -117,7 +119,7 @@ class CallsMixin:
             List of ValueRef objects for each field
         """
         # Evaluate the struct instance
-        struct_val = self.visit_expression(struct_expr)
+        struct_val = self.visit_rvalue_expression(struct_expr)
         
         # Get struct type information
         struct_type_hint = struct_val.type_hint
