@@ -27,7 +27,7 @@ class char(BuiltinFunction):
         return True
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle char(value) call
         
         Args:

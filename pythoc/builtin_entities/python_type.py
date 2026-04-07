@@ -222,14 +222,18 @@ class PythonType(_PythonTypeBase):
         
         # Assignment is valid but is a no-op (zero-sized field)
     
+    @property
+    def defer_linear_transfer(self):
+        return getattr(self._python_object, 'defer_linear_transfer', False)
+
     def handle_call(self, visitor, func_ref, args, node: ast.Call):
-        """Handle calling a Python object.
+        """Handle calling a Python-backed callable.
         
         Strategy:
-        1. If the Python object has a 'handle_call' attribute (function): 
-           call it with (visitor, func_ref, args, node) - allows custom IR generation
-        2. Otherwise, if constant and callable: evaluate at compile time using constant args
-        3. Otherwise: raise error with helpful message
+        1. If the Python object is a type-like entity with handle_type_call, treat this as type call
+        2. Otherwise, if the Python object has handle_call, use its value-call protocol
+        3. Otherwise, if constant and callable, evaluate at compile time using constant args
+        4. Otherwise, raise a helpful error
         
         Args:
             visitor: AST visitor
@@ -237,15 +241,18 @@ class PythonType(_PythonTypeBase):
             args: Pre-evaluated arguments (list of ValueRef)
             node: ast.Call node
         """
-        if self._is_constant and callable(self._python_object):
-            # Check if the callable has a custom handle_call method
-            if hasattr(self._python_object, 'handle_call') and callable(self._python_object.handle_call):
-                # Call the custom handler with visitor, func_ref, args, and node
-                # This allows Python functions to generate IR directly
-                return self._python_object.handle_call(visitor, func_ref, args, node)
-            
-            # Default behavior: compile-time evaluation
-            return self._eval_call(visitor, node, self._python_object)
+        if self._is_constant:
+            if isinstance(self._python_object, type):
+                handle_type_call = getattr(self._python_object, 'handle_type_call', None)
+                if callable(handle_type_call):
+                    return handle_type_call(visitor, func_ref, args, node)
+
+            handle_call = getattr(self._python_object, 'handle_call', None)
+            if callable(handle_call):
+                return handle_call(visitor, func_ref, args, node)
+
+            if callable(self._python_object):
+                return self._eval_call(visitor, node, self._python_object)
         
         logger.error(
             f"Cannot call Python object '{self._python_type.__name__}' in compiled code.\n"

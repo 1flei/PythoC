@@ -8,7 +8,7 @@ from ..logger import set_source_context
 
 
 def add_struct_handle_call(cls):
-    def handle_call(visitor, func_ref, args, node):
+    def handle_type_call(visitor, func_ref, args, node):
         """Handle struct construction with new protocol
         
         Args:
@@ -128,7 +128,7 @@ def add_struct_handle_call(cls):
         loaded_value = visitor.builder.load(field_ptr)
         return wrap_value(loaded_value, kind="value", type_hint=field_type, address=field_ptr)
     
-    cls.handle_call = staticmethod(handle_call)
+    cls.handle_type_call = staticmethod(handle_type_call)
     cls.handle_attribute = staticmethod(handle_attribute)
     cls.get_llvm_type = staticmethod(get_llvm_type)
     cls.get_name = staticmethod(get_name)
@@ -278,7 +278,7 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None):
         cls._compile_suffix = None
     
     # Delegate all protocol methods to unified type
-    cls.handle_call = unified_type.handle_call
+    cls.handle_type_call = unified_type.handle_type_call
     cls.handle_attribute = unified_type.handle_attribute
     cls.get_llvm_type = unified_type.get_llvm_type
     cls.get_name = unified_type.get_name

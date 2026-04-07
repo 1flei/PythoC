@@ -215,7 +215,7 @@ class ptr(BuiltinType):
         return cls.pointee_type
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
         """Handle ptr(value) or ptr[T](value) call
         
         Args:

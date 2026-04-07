@@ -445,7 +445,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         return cls_names == other_names
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node):
+    def handle_type_call(cls, visitor, func_ref, args, node):
         """Handle struct construction: Point() or struct[i32, i32]()
         
         Creates an uninitialized struct value (ir.Undefined).

@@ -26,24 +26,30 @@ class CallsMixin:
     """Mixin containing calls-related visitor methods"""
     
     def visit_Call(self, node: ast.Call):
-        """Handle function calls with unified duck typing approach
+        """Handle function calls with unified call protocol.
         
-        Design principle (unified protocol):
-        1. Get callable object and func_ref from node.func
+        Design principle:
+        1. Evaluate node.func to a callable ValueRef
         2. Pre-evaluate arguments (node.args)
-        3. Delegate to handle_call(visitor, func_ref, args, node)
+        3. Delegate to func_ref.type_hint.handle_call(visitor, func_ref, args, node)
         
-        All callables implement: handle_call(self, visitor, func_ref, args, node) -> ValueRef
-        where:
-        - func_ref: ValueRef of the callable (for func pointers, this is the pointer value)
-        - args: list of pre-evaluated ValueRef objects
+        Call protocol split:
+        - Value call: type_hint.handle_call handles callable values
+        - Type call: PythonType.handle_call forwards type objects to handle_type_call
         
         Linear type semantics:
         - For regular calls: linear ownership is transferred at call site
         - For defer calls: linear ownership is deferred until execution time
-          (checked via defer_linear_transfer flag on callable_obj)
+          (checked via defer_linear_transfer on the call protocol object)
         """
-        callable_obj, func_ref = self._get_callable(node.func)
+        func_ref = self.visit_expression(node.func)
+        if not isinstance(func_ref, ValueRef):
+            logger.error(f"Call target must evaluate to a ValueRef, got {func_ref}", node=node.func, exc_type=TypeError)
+
+        func_ref = self.read_rvalue(func_ref, name=getattr(node.func, 'id', None))
+        callable_protocol = getattr(func_ref, 'type_hint', None)
+        if callable_protocol is None or not hasattr(callable_protocol, 'handle_call'):
+            logger.error(f"Object does not support calling: {func_ref}", node=node.func, exc_type=TypeError)
         
         # Pre-evaluate arguments (unified behavior)
         # Handle struct unpacking (*struct_instance)
@@ -59,50 +65,14 @@ class CallsMixin:
         
         # Check if this callable defers linear transfer (e.g., defer intrinsic)
         # If so, skip linear transfer here - it will happen at execution time
-        defer_linear = getattr(callable_obj, 'defer_linear_transfer', False)
+        defer_linear = getattr(callable_protocol, 'defer_linear_transfer', False)
         
         if not defer_linear:
             for arg in args:
                 # Transfer linear ownership for function arguments
                 self._transfer_linear_ownership(arg, reason="function argument", node=node)
         
-        return callable_obj.handle_call(self, func_ref, args, node)
-    
-    def _get_callable(self, func_node):
-        """Get callable object and func_ref from function expression
-        
-        Extracts the object that implements handle_call protocol.
-        
-        Returns:
-            Tuple of (callable_obj, func_ref) where:
-            - callable_obj: Object with handle_call method
-            - func_ref: ValueRef of the callable (for func pointers, etc.)
-            
-        Protocol implementers:
-            - @compile/@inline/@extern functions: wrapper with handle_call
-            - Function pointers: func type with handle_call
-            - Builtin types: type class with handle_call (for casting)
-            - Python types: PythonType instance with handle_call
-        """
-        # Evaluate the callable expression
-        result = self.visit_expression(func_node)
-        if isinstance(result, ValueRef):
-            result = self.read_rvalue(result, name=getattr(func_node, 'id', None))
-        
-        # Check if result is a type class (not ValueRef) with handle_call
-        # This happens for type expressions like array[T, N], struct[...], etc.
-        if isinstance(result, type) and hasattr(result, 'handle_call'):
-            return result, result
-    
-        # Check value for handle_call (e.g., ExternFunctionWrapper, @compile wrapper)
-        if hasattr(result, 'value') and hasattr(result.value, 'handle_call'):
-            return result.value, result
-            
-        # Check type_hint for handle_call (e.g., BuiltinType, PythonType, func type)
-        if hasattr(result, 'type_hint') and result.type_hint and hasattr(result.type_hint, 'handle_call'):
-            return result.type_hint, result
-        
-        logger.error(f"Object does not support calling: {result}", node=func_node, exc_type=TypeError)
+        return callable_protocol.handle_call(self, func_ref, args, node)
     
     def _expand_starred_struct(self, struct_expr):
         """Expand *struct_instance to individual field values

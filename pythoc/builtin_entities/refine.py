@@ -32,7 +32,7 @@ class refine(BuiltinFunction):
         return 'refine'
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle refine(value, pred1, "tag1", ...) call
         
         This function is special - it's a yield function that should be
