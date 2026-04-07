@@ -150,23 +150,15 @@ def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list,
 
 
 def _get_callable_obj(func_arg: ValueRef):
-    """Extract callable object from function argument
+    """Extract the callable protocol object from a function argument.
     
-    Returns the object that implements handle_call protocol.
+    The call protocol now lives on ValueRef.type_hint:
+    - value call: func type, PythonType wrapper, etc.
+    - type call: PythonType.handle_call forwards to handle_type_call
     """
-    # Check if it's a Python value with handle_call
-    if func_arg.is_python_value():
-        py_val = func_arg.get_python_value()
-        if hasattr(py_val, 'handle_call'):
-            return py_val
-    
-    # Check value for handle_call (e.g., ExternFunctionWrapper, @compile wrapper)
-    if hasattr(func_arg, 'value') and hasattr(func_arg.value, 'handle_call'):
-        return func_arg.value
-    
-    # Check type_hint for handle_call (e.g., func type)
-    if hasattr(func_arg, 'type_hint') and func_arg.type_hint and hasattr(func_arg.type_hint, 'handle_call'):
-        return func_arg.type_hint
+    callable_protocol = getattr(func_arg, 'type_hint', None)
+    if callable_protocol is not None and hasattr(callable_protocol, 'handle_call'):
+        return callable_protocol
     
     return None
 
@@ -194,7 +186,7 @@ class defer(BuiltinFunction):
         return 'defer'
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle defer(f, *args) call
         
         This registers the deferred call but doesn't execute it.

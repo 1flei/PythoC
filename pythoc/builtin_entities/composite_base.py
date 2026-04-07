@@ -486,7 +486,7 @@ class CompositeType(BuiltinType):
             target_cls._compile_suffix = None
         
         # Delegate common protocol methods to unified type
-        target_cls.handle_call = unified_type.handle_call
+        target_cls.handle_type_call = unified_type.handle_type_call
         target_cls.handle_attribute = unified_type.handle_attribute
         target_cls.get_llvm_type = unified_type.get_llvm_type
         target_cls.get_name = unified_type.get_name

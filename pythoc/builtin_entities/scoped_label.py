@@ -44,7 +44,7 @@ class label(BuiltinFunction):
         return 'label'
 
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle label("name") call - returns context manager marker."""
         if len(args) != 1:
             logger.error("label() takes exactly 1 argument (label name)",
@@ -87,7 +87,7 @@ class goto(BuiltinFunction):
         return 'goto'
 
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle goto("name") call."""
         if len(args) != 1:
             logger.error("goto() takes exactly 1 argument (label name)",
@@ -136,7 +136,7 @@ class goto_end(BuiltinFunction):
         return 'goto_end'
 
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle goto_end("name") call."""
         if len(args) != 1:
             logger.error("goto_end() takes exactly 1 argument (label name)",

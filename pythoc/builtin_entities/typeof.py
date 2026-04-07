@@ -51,7 +51,7 @@ class typeof(BuiltinFunction):
             return pyconst[value_or_type]
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle typeof(x) call in @compile context
         
         Strategy:

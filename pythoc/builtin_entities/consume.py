@@ -16,7 +16,7 @@ class consume(BuiltinFunction):
         return 'consume'
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle consume(token) call
         
         consume() is a no-op at IR level. The actual consumption happens in visit_Call

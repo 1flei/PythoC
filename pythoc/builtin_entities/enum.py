@@ -245,7 +245,7 @@ class EnumType(CompositeType):
         cls._field_types_resolved = True
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node):
+    def handle_type_call(cls, visitor, func_ref, args, node):
         """Handle enum construction: E(E.Tag, payload) or E(E.Tag)
         
         Args:

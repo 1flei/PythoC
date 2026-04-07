@@ -152,7 +152,7 @@ class array(BuiltinType):
         return True  # array[T, N]() for zero-initialization
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Handle array[T, N]() for zero-initialization
         
         Args:

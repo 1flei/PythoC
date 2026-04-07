@@ -41,7 +41,7 @@ class linear(BuiltinType):
         return ir.LiteralStructType([])
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call):
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Create a new linear token: linear()
         
         Args:

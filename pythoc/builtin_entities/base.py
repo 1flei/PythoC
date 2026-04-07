@@ -478,7 +478,7 @@ class BuiltinType(BuiltinEntity):
         )
     
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
         """Handle type conversion: i32(x)
         
         Args:

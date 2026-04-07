@@ -462,7 +462,7 @@ class RefinedType(CompositeType):
         logger.error(f"Invalid refined type specification: {args_list}", node=node, exc_type=TypeError)
 
     @classmethod
-    def handle_call(cls, visitor, func_ref, args, node):
+    def handle_type_call(cls, visitor, func_ref, args, node):
         """Handle refined type constructor call: refined[...](value)
         
         Creates refined type instance without checking predicates.

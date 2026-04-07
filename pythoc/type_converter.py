@@ -359,14 +359,14 @@ class TypeConverter:
                     # Single element: (tag,) for void variants
                     tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
                     tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
-                    return target_type.handle_call(self._visitor, target_type, [tag_ref], None)
+                    return target_type.handle_type_call(self._visitor, target_type, [tag_ref], None)
                 elif len(python_val) == 2:
                     # Two elements: (tag, payload)
                     tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
                     tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
                     payload_py_type = PythonType.wrap(python_val[1], is_constant=True)
                     payload_ref = wrap_value(python_val[1], kind="python", type_hint=payload_py_type)
-                    return target_type.handle_call(self._visitor, target_type, [tag_ref, payload_ref], None)
+                    return target_type.handle_type_call(self._visitor, target_type, [tag_ref, payload_ref], None)
                 else:
                     raise TypeError(f"Enum initialization requires 1 or 2 elements, got {len(python_val)}")
             elif isinstance(python_val, int):
@@ -374,7 +374,7 @@ class TypeConverter:
                 from .builtin_entities.python_type import PythonType
                 tag_py_type = PythonType.wrap(python_val, is_constant=True)
                 tag_ref = wrap_value(python_val, kind="python", type_hint=tag_py_type)
-                return target_type.handle_call(self._visitor, target_type, [tag_ref], None)
+                return target_type.handle_type_call(self._visitor, target_type, [tag_ref], None)
         
         # Handle list/tuple to array conversion
         if isinstance(python_val, list):
@@ -1102,7 +1102,7 @@ class TypeConverter:
                     f"Variant {variant_names[variant_idx]} requires payload of type {variant_payload_type}, "
                     f"but struct has no payload field"
                 )
-            return target_enum_type.handle_call(self._visitor, target_enum_type, [tag_vref], None)
+            return target_enum_type.handle_type_call(self._visitor, target_enum_type, [tag_vref], None)
         else:
             # Has payload
             payload_vref = source_field_values[1]
@@ -1119,7 +1119,7 @@ class TypeConverter:
             if payload_type != variant_payload_type:
                 payload_vref = self.convert(payload_vref, variant_payload_type)
             
-            return target_enum_type.handle_call(self._visitor, target_enum_type, [tag_vref, payload_vref], None)
+            return target_enum_type.handle_type_call(self._visitor, target_enum_type, [tag_vref, payload_vref], None)
 
     def _build_conversion_registry(self):
         """Build dispatch table for conversions using LLVM types."""
