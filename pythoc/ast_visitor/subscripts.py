@@ -26,20 +26,11 @@ class SubscriptsMixin:
     """Mixin containing subscripts-related visitor methods"""
     
     def visit_Subscript(self, node: ast.Subscript):
-        """Handle subscript operations with unified duck typing protocol
-        
-        Design principle (unified protocol):
-        1. Get subscriptable object from node.value
-        2. ALWAYS visit index (no special case for type subscripts)
-        3. Delegate to type_hint.handle_subscript(visitor, base, index, node)
-        
-        Key insight: The dispatch is determined by base.type_hint:
-        - base.type_hint is PythonType -> type subscript (ptr[i32], struct[x: i32])
-        - base.type_hint is PC type instance -> value subscript (arr[0], p[i])
-        
-        Protocol implementers:
-            - PythonType.handle_subscript: always type subscript
-            - PCType.handle_subscript (array, ptr, struct): always value subscript
+        """Handle subscript operations with unified duck typing protocol.
+
+        The visitor stays at the AST layer: it evaluates the base and index,
+        while `ValueRefDispatcher.handle_subscript()` performs protocol
+        normalization and dispatch.
         """
         # Special case: union/enum varargs access (args[i])
         # Struct varargs are now handled as normal struct, no special case needed
@@ -50,69 +41,24 @@ class SubscriptsMixin:
                     # Only handle union/enum varargs specially (they use va_list)
                     if self.current_varargs_info['kind'] in ('union', 'enum'):
                         return self._handle_varargs_subscript(node)
-        
-        # Get the subscriptable object (evaluates node.value)
+
         result = self.visit_expression(node.value)
-        if isinstance(result, ValueRef):
-            result = self.prepare_protocol_base(result)
-        
-        # ALWAYS visit index - unified handling
         index = self.visit_rvalue_expression(node.slice)
-        
-        # Delegate to type_hint's handle_subscript
-        if result.type_hint and hasattr(result.type_hint, 'handle_subscript'):
-            return result.type_hint.handle_subscript(self, result, index, node)
-        
-        logger.error(f"Object does not support subscripting: valueref: {result}", node=node, exc_type=TypeError)
+        return self.value_dispatcher.handle_subscript(result, index, node)
     
     def visit_Attribute(self, node: ast.Attribute):
-        """Handle attribute access with unified duck typing protocol
-        
-        Design principle (unified protocol, similar to visit_Call and visit_Subscript):
-        1. Get the object from node.value
-        2. Pre-evaluate base (node.value) and extract attr_name (node.attr)
-        3. Delegate to handle_attribute(visitor, base, attr_name, node)
-        
-        All attribute-accessible types implement: handle_attribute(visitor, base, attr_name, node) -> ValueRef
-        where base is a pre-evaluated ValueRef and attr_name is a string.
-        
-        Protocol implementers:
-            - Builtin types (struct, union): type class with handle_attribute
-            - Python types: PythonType instance with handle_attribute
-            - Pointer types (ptr[struct]): ptr type with handle_attribute delegation
+        """Handle attribute access with unified duck typing protocol.
+
+        The visitor only evaluates the base expression. `ValueRefDispatcher`
+        handles protocol lookup, special enum cases, and the final dispatch to
+        `handle_attribute`.
         """
         # Struct varargs are now normal structs, no special handling needed
         
         # Evaluate the base expression
         result = self.visit_expression(node.value)
-        if isinstance(result, ValueRef):
-            result = self.prepare_protocol_base(result)
-        
-        # Special case: enum class attribute access (e.g., MyEnum.VARIANT)
-        # Delegate to handle_attribute for proper type handling
-        if (result.is_python_value() and 
-            isinstance(result.value, type) and 
-            getattr(result.value, '_is_enum', False)):
-            # Use handle_attribute if available
-            attr_name = node.attr
-            if hasattr(result.value, 'handle_attribute') and callable(result.value.handle_attribute):
-                return result.value.handle_attribute(self, result, attr_name, node)
-            logger.error(f"Enum '{result.value.__name__}' has no attribute '{attr_name}' or handle_attribute method",
-                        node=node, exc_type=AttributeError)
-        
-        # Extract the object that implements handle_attribute
-        attributable = None
-        if hasattr(result.value, 'handle_attribute'):
-            attributable = result.value
-        elif result.type_hint and hasattr(result.type_hint, 'handle_attribute'):
-            attributable = result.type_hint
-        else:
-            logger.error(f"Object does not support attribute access: valueref: {result}", node=node, exc_type=TypeError)
-        
-        # Extract attribute name
-        attr_name = node.attr
-        
-        return attributable.handle_attribute(self, result, attr_name, node)
+
+        return self.value_dispatcher.handle_attribute(result, node.attr, node)
     
     def _handle_varargs_subscript(self, node: ast.Subscript) -> ValueRef:
         """Handle args[i] for union/enum varargs (va_list based)
