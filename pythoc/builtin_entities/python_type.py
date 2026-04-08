@@ -245,14 +245,14 @@ class PythonType(_PythonTypeBase):
             if isinstance(self._python_object, type):
                 handle_type_call = getattr(self._python_object, 'handle_type_call', None)
                 if callable(handle_type_call):
-                    return handle_type_call(visitor, func_ref, args, node)
+                    return visitor.value_dispatcher.handle_type_call(func_ref, args, node)
 
             handle_call = getattr(self._python_object, 'handle_call', None)
             if callable(handle_call):
                 return handle_call(visitor, func_ref, args, node)
 
             if callable(self._python_object):
-                return self._eval_call(visitor, node, self._python_object)
+                return self._eval_call(visitor, args, node, self._python_object)
         
         logger.error(
             f"Cannot call Python object '{self._python_type.__name__}' in compiled code.\n"
@@ -303,49 +303,33 @@ class PythonType(_PythonTypeBase):
         
         return wrap_value(attr_value, kind="python", type_hint=attr_type)
     
-    def _eval_call(self, visitor, node: ast.Call, target_callable):
-        """Evaluate a Python callable with arguments (constant or runtime)."""
+    def _eval_call(self, visitor, args, node: ast.Call, target_callable):
+        """Evaluate a Python callable with pre-evaluated arguments."""
         from llvmlite import ir
-        
-        # Evaluate and extract arguments
+
         args_py = []
-        for arg_node in node.args:
-            # First, check if arg_node is a simple constant in AST
-            if isinstance(arg_node, ast.Constant):
-                # Use the Python constant value directly
-                args_py.append(arg_node.value)
+        for arg in args:
+            if hasattr(arg, 'is_python_value') and arg.is_python_value():
+                args_py.append(arg.value)
                 continue
-            
-            # Otherwise, evaluate the expression
-            valref = visitor.visit_rvalue_expression(arg_node)
-            
-            # Extract appropriate value based on ValueRef kind
-            if hasattr(valref, 'is_python_value') and valref.is_python_value():
-                # Python value: use .value directly (the Python object)
-                args_py.append(valref.value)
-            else:
-                # LLVM value: check if it's a constant we can extract
-                if isinstance(valref.value, ir.Constant):
-                    # Extract constant value if possible
-                    if isinstance(valref.value.type, ir.IntType):
-                        args_py.append(valref.value.constant)
-                    elif isinstance(valref.value.type, (ir.FloatType, ir.DoubleType)):
-                        args_py.append(valref.value.constant)
-                    else:
-                        # Cannot extract, pass ValueRef
-                        args_py.append(valref)
+
+            if isinstance(arg.value, ir.Constant):
+                if isinstance(arg.value.type, ir.IntType):
+                    args_py.append(arg.value.constant)
+                elif isinstance(arg.value.type, (ir.FloatType, ir.DoubleType)):
+                    args_py.append(arg.value.constant)
                 else:
-                    # Runtime LLVM value - pass the ValueRef
-                    args_py.append(valref)
-        
+                    args_py.append(arg)
+            else:
+                args_py.append(arg)
+
         try:
             result = target_callable(*args_py)
         except Exception as e:
             import traceback
             tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
             logger.error(f"Python call failed: {e}\nOriginal traceback:\n{tb_str}", node=node, exc_type=ValueError)
-        
-        # Wrap result back
+
         return self._wrap_constant_result(visitor, result)
     
     def handle_subscript(self, visitor, base, index, node: ast.Subscript):

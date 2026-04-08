@@ -751,39 +751,8 @@ class MatchStatementMixin:
         return condition
     
     def _compare_values(self, left, right, op):
-        """Helper to compare two values (used by match)
-
-        Returns:
-            ValueRef with bool type_hint
-        """
-        from ..valueref import wrap_value
-        from ..builtin_entities import bool as pc_bool
-
-        # Type unification - returns ValueRef objects
-        left_unified, right_unified, is_float = self.type_converter.unify_binop_types(
-            left, right
-        )
-
-        # Extract LLVM IR values
-        left_ir = ensure_ir(left_unified)
-        right_ir = ensure_ir(right_unified)
-
-        # Align pointer types if needed
-        if isinstance(left_ir.type, ir.PointerType) and isinstance(right_ir.type, ir.PointerType):
-            left_ir, right_ir = self._align_pointer_comparison(
-                left_unified, right_unified, left_ir, right_ir, None
-            )
-
-        # Generate comparison
-        if isinstance(op, ast.Eq):
-            if is_float:
-                cmp_ir = self.builder.fcmp_ordered('==', left_ir, right_ir)
-            else:
-                cmp_ir = self.builder.icmp_signed('==', left_ir, right_ir)
-            return wrap_value(cmp_ir, kind="value", type_hint=pc_bool)
-        else:
-            logger.error(f"Comparison operator {type(op).__name__}",
-                        node=None, exc_type=NotImplementedError)
+        """Helper to compare two values (used by match)."""
+        return self.value_dispatcher.handle_compare(op, left, right, None)
     
     def _bind_match_variable(self, var_name, var_value):
         """Bind a variable from match pattern

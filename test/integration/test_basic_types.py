@@ -98,6 +98,18 @@ def test_ptr_int_conversion() -> i32:
     
     return p2[0]
 
+
+@compile
+def test_nested_type_calls() -> i32:
+    """Test nested explicit type calls through the unified type dispatcher."""
+    base: i16 = 9
+    widened: i32 = i32(base)
+    as_float: f64 = f64(widened)
+    narrowed: i32 = i32(as_float)
+    if narrowed == 9:
+        return 1
+    return 0
+
 import unittest
 
 
@@ -131,6 +143,10 @@ class TestBasicTypes(unittest.TestCase):
     def test_ptr_int_conversion(self):
         """Test pointer to integer and back conversions"""
         self.assertEqual(test_ptr_int_conversion(), 42)
+
+    def test_nested_type_calls(self):
+        """Test nested explicit type calls"""
+        self.assertEqual(test_nested_type_calls(), 1)
 
 
 if __name__ == "__main__":

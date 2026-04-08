@@ -291,6 +291,23 @@ def test_compare_float_near_zero() -> i32:
     return result  # Should be 2
 
 
+@compile
+def test_compare_chain() -> i32:
+    """Test chained comparisons through the unified compare dispatcher."""
+    a: i32 = 1
+    b: i32 = 2
+    c: i32 = 3
+    d: i32 = 1
+    result: i32 = 0
+    if a < b < c:
+        result = result + 1
+    if not (c < b < a):
+        result = result + 1
+    if d <= a <= b:
+        result = result + 1
+    return result  # Should be 3
+
+
 # =============================================================================
 # Logical Operator Edge Cases
 # =============================================================================
@@ -358,6 +375,17 @@ def test_logical_with_comparison() -> i32:
         result = result + 1
     
     return result  # Should be 4
+
+
+@compile
+def test_truthiness_non_bool_values() -> i32:
+    """Test truthiness conversion for non-bool values."""
+    x: i32 = 3
+    y: i32 = 0
+    z: f64 = 0.0
+    if x and not y and not z:
+        return 1
+    return 0
 
 
 # =============================================================================
@@ -713,6 +741,7 @@ class TestLogical(unittest.TestCase):
     def test_complex_logical(self):
         self.assertEqual(test_logical_complex(), 5)
         self.assertEqual(test_logical_with_comparison(), 4)
+        self.assertEqual(test_truthiness_non_bool_values(), 1)
 
 
 class TestBitwise(unittest.TestCase):
