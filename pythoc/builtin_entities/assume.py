@@ -1,5 +1,5 @@
 from .base import BuiltinFunction
-from ..valueref import wrap_value
+from ..valueref import wrap_python_constant, wrap_value
 from ..logger import logger
 import ast
 
@@ -118,7 +118,12 @@ class assume(BuiltinFunction):
                 pred_callable = predicate_arg
             
             refined_type = refined[pred_callable]
-            return refined_type.handle_type_call(visitor, refined_type, value_args, node)
+            refined_type_ref = wrap_python_constant(refined_type)
+            return visitor.value_dispatcher.handle_type_call(
+                refined_type_ref,
+                value_args,
+                node,
+            )
         
         value_arg = args[0]
         
@@ -207,7 +212,12 @@ class assume(BuiltinFunction):
         else:
             refined_type = refined[tuple(refined_args)]
         
-        return refined_type.handle_type_call(visitor, refined_type, [value_arg], node)
+        refined_type_ref = wrap_python_constant(refined_type)
+        return visitor.value_dispatcher.handle_type_call(
+            refined_type_ref,
+            [value_arg],
+            node,
+        )
     
     @classmethod
     def _create_refined_type_from_predicate(cls, predicate, param_types, visitor):

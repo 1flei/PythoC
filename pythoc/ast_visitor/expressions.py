@@ -82,46 +82,9 @@ class ExpressionsMixin:
     
 
     def visit_UnaryOp(self, node: ast.UnaryOp):
-        """Handle unary operations with table-driven dispatch"""
+        """Handle unary operations through the unified value dispatcher."""
         operand = self.visit_rvalue_expression(node.operand)
-
-        # Before dispatching, check if operand is a PythonType value
-        from ..builtin_entities.python_type import PythonType
-        if isinstance(operand.type_hint, PythonType):
-            # Call Python's unary operator
-            python_val = operand.value
-            
-            # Map AST unary op to Python operator function
-            python_unary_ops = {
-                ast.UAdd: operator.pos,      # +x
-                ast.USub: operator.neg,      # -x
-                ast.Not: operator.not_,      # not x
-                ast.Invert: operator.invert, # ~x
-            }
-            
-            op_key = type(node.op)
-            
-            # Execute Python operation
-            result = python_unary_ops[op_key](python_val)
-            
-            # Wrap result as Python value
-            python_type_inst = PythonType.wrap(result, is_constant=True)
-            return wrap_value(result, kind="python", type_hint=python_type_inst)
-        
-        # Unary operation dispatch table
-        unary_op_dispatch = {
-            ast.UAdd: self._unary_plus,
-            ast.USub: self._unary_minus,
-            ast.Not: self._unary_not,
-            ast.Invert: self._unary_invert,
-        }
-        
-        op_key = type(node.op)
-        if op_key not in unary_op_dispatch:
-            logger.error(f"Unary operator {type(node.op).__name__} not supported", node=node,
-                        exc_type=NotImplementedError)
-        
-        return unary_op_dispatch[op_key](operand)
+        return self.value_dispatcher.handle_unary(operand, node)
     
     def _unary_plus(self, operand: ValueRef) -> ValueRef:
         """Unary plus: no-op"""
@@ -152,7 +115,7 @@ class ExpressionsMixin:
             result = self.builder.xor(ensure_ir(operand), ir.Constant(ir.IntType(1), 1))
         else:
             # Convert to boolean first, then negate
-            bool_val = self._to_boolean(operand)
+            bool_val = self.value_dispatcher.to_boolean(operand)
             result = self.builder.xor(ensure_ir(bool_val), ir.Constant(ir.IntType(1), 1))
         return wrap_value(result, kind="value", type_hint=bool_type)
 
@@ -170,152 +133,14 @@ class ExpressionsMixin:
     
 
     def visit_Compare(self, node: ast.Compare):
-        """Handle enhanced comparison operations with table-driven dispatch"""
+        """Handle chained comparisons through the unified value dispatcher."""
         left = self.visit_rvalue_expression(node.left)
-        
-        # Handle multiple comparisons (a < b < c)
-        result = None
-        current_left = left
-        
-        for op, comparator in zip(node.ops, node.comparators):
-            right = self.visit_rvalue_expression(comparator)
-            cmp_result = self._perform_comparison(op, current_left, right, comparator)
-            
-            # Chain comparisons with AND
-            if result is None:
-                result = cmp_result
-            else:
-                # Perform AND using _perform_comparison logic pathway
-                # If both are Python values, do Python-level AND
-                from ..builtin_entities.python_type import PythonType
-                if (isinstance(result, ValueRef) and result.is_python_value() and
-                    isinstance(cmp_result, ValueRef) and cmp_result.is_python_value()):
-                    # Python-level AND
-                    result_val = result.get_python_value() and cmp_result.get_python_value()
-                    python_type_inst = PythonType.wrap(result_val, is_constant=True)
-                    result = wrap_value(result_val, kind="python", type_hint=python_type_inst)
-                else:
-                    # IR-level AND
-                    result_ir = ensure_ir(result)
-                    cmp_result_ir = ensure_ir(cmp_result)
-                    from ..builtin_entities import bool as bool_type
-                    result = wrap_value(self.builder.and_(result_ir, cmp_result_ir), kind="value", type_hint=bool_type)
-            
-            current_left = right
-        
-        return result
-    
-
-    def _perform_comparison(self, op: ast.cmpop, left: ValueRef, right: ValueRef,
-                            node: ast.AST = None):
-        """Unified comparison handler with table-driven dispatch"""
-        # Handle Python value comparisons directly (constant folding)
-        if left.is_python_value() and right.is_python_value():
-            from ..builtin_entities.python_type import PythonType
-            left_py = left.get_python_value()
-            right_py = right.get_python_value()
-            
-            # Perform Python-level comparison
-            if isinstance(op, ast.Lt):
-                result = left_py < right_py
-            elif isinstance(op, ast.LtE):
-                result = left_py <= right_py
-            elif isinstance(op, ast.Gt):
-                result = left_py > right_py
-            elif isinstance(op, ast.GtE):
-                result = left_py >= right_py
-            elif isinstance(op, ast.Eq):
-                result = left_py == right_py
-            elif isinstance(op, ast.NotEq):
-                result = left_py != right_py
-            elif isinstance(op, ast.Is):
-                result = left_py is right_py
-            elif isinstance(op, ast.IsNot):
-                result = left_py is not right_py
-            else:
-                logger.error(f"Comparison operator {type(op).__name__} not supported for Python values",
-                            node=node, exc_type=NotImplementedError)
-            
-            # Return as Python value (for constant propagation)
-            python_type_inst = PythonType.wrap(result, is_constant=True)
-            return wrap_value(result, kind="python", type_hint=python_type_inst)
-        
-        # Unified type promotion for numeric comparisons
-        # (Python values are auto-promoted by TypeConverter)
-        left, right, is_float_cmp = self.type_converter.unify_binop_types(left, right)
-        
-        # Comparison dispatch table: maps (op_type, is_float) to comparison predicate
-        cmp_dispatch = {
-            (ast.Lt, False): '<',
-            (ast.Lt, True): '<',
-            (ast.LtE, False): '<=',
-            (ast.LtE, True): '<=',
-            (ast.Gt, False): '>',
-            (ast.Gt, True): '>',
-            (ast.GtE, False): '>=',
-            (ast.GtE, True): '>=',
-            (ast.Eq, False): '==',
-            (ast.Eq, True): '==',
-            (ast.NotEq, False): '!=',
-            (ast.NotEq, True): '!=',
-            (ast.Is, False): '==',
-            (ast.IsNot, False): '!=',
-        }
-        
-        op_key = (type(op), is_float_cmp)
-        if op_key not in cmp_dispatch:
-            if isinstance(op, ast.In):
-                logger.error("'in' operator not yet supported", node=node, exc_type=NotImplementedError)
-            elif isinstance(op, ast.NotIn):
-                logger.error("'not in' operator not yet supported", node=node, exc_type=NotImplementedError)
-            else:
-                logger.error(f"Comparison operator {type(op).__name__} not supported", node=node,
-                            exc_type=NotImplementedError)
-        
-        predicate = cmp_dispatch[op_key]
-        
-        # Execute comparison
-        from ..builtin_entities import bool as bool_type
-        if is_float_cmp:
-            result = self.builder.fcmp_ordered(predicate, ensure_ir(left), ensure_ir(right))
-            return wrap_value(result, kind="value", type_hint=bool_type)
-        else:
-            # Verify operands are comparable (must be integers or pointers)
-            left_ir = ensure_ir(left)
-            right_ir = ensure_ir(right)
-            if not isinstance(left_ir.type, (ir.IntType, ir.PointerType)):
-                left_hint = get_type_hint(left)
-                logger.error(
-                    f"Cannot compare type '{left_hint}' with icmp. "
-                    f"Only integers and pointers support == comparison. "
-                    f"For enum types, use match or extract tag with e[0].",
-                    node=node, exc_type=TypeError
-                )
-            if not isinstance(right_ir.type, (ir.IntType, ir.PointerType)):
-                right_hint = get_type_hint(right)
-                logger.error(
-                    f"Cannot compare type '{right_hint}' with icmp. "
-                    f"Only integers and pointers support == comparison. "
-                    f"For enum types, use match or extract tag with e[0].",
-                    node=node, exc_type=TypeError
-                )
-            # Choose signed or unsigned based on operand type hints
-            left_hint = get_type_hint(left)
-            right_hint = get_type_hint(right)
-
-            # Align pointer types if needed (null retargeting, void bridging)
-            if isinstance(left_ir.type, ir.PointerType) and isinstance(right_ir.type, ir.PointerType):
-                left_ir, right_ir = self._align_pointer_comparison(left, right, left_ir, right_ir, node)
-
-            use_unsigned = (is_unsigned_int(left_hint) or is_unsigned_int(right_hint))
-            # For pointer ordering comparisons, prefer unsigned predicates.
-            if isinstance(left_ir.type, ir.PointerType) and isinstance(right_ir.type, ir.PointerType):
-                if predicate in ('<', '<=', '>', '>='):
-                    use_unsigned = True
-            icmp = self.builder.icmp_unsigned if use_unsigned else self.builder.icmp_signed
-            result = icmp(predicate, left_ir, right_ir)
-            return wrap_value(result, kind="value", type_hint=bool_type)
-    
+        return self.value_dispatcher.handle_compare_chain(
+            left,
+            node.ops,
+            node.comparators,
+            node,
+        )
 
     def visit_BoolOp(self, node: ast.BoolOp):
         """Handle boolean operations (and, or) with table-driven dispatch"""
@@ -344,67 +169,53 @@ class ExpressionsMixin:
             short_circuit_value: The value to use when short-circuiting (0 or 1)
         """
         if len(values) == 1:
-            result = self._to_boolean(self.visit_expression(values[0]))
+            result = self.value_dispatcher.to_boolean(self.visit_expression(values[0]))
             return wrap_value(result, kind="value")
-        
-        # Create end block
+
         end_block = self.builder.create_block(f"{label_prefix}_end")
-        
-        # Track all blocks that jump to end_block and their values
         phi_incoming = []
-        
-        # Evaluate first value
-        val = self._to_boolean(self.visit_expression(values[0]))
+
+        val = self.value_dispatcher.to_boolean(self.visit_expression(values[0]))
         first_block = self.builder.block
-        
+
         if len(values) == 2:
-            # Simple case: just two values
             continue_block = self.builder.create_block(f"{label_prefix}_continue")
-            
-            # Branch: if short_circuit condition met, jump to end; otherwise continue
+
             if short_circuit_on_true:
                 self.builder.cbranch(val, end_block, continue_block)
             else:
                 self.builder.cbranch(val, continue_block, end_block)
-            
-            # Short-circuit path: use short_circuit_value
+
             phi_incoming.append((ir.Constant(ir.IntType(1), short_circuit_value), first_block))
-            
-            # Continue path: evaluate second value
+
             self.builder.position_at_end(continue_block)
-            val2 = self._to_boolean(self.visit_expression(values[1]))
+            val2 = self.value_dispatcher.to_boolean(self.visit_expression(values[1]))
             second_block = self.builder.block
             self.builder.branch(end_block)
-            
-            # Result is second value if we didn't short-circuit
             phi_incoming.append((ensure_ir(val2), second_block))
         else:
-            # Multiple values - chain them
             next_block = self.builder.create_block(f"{label_prefix}_next")
-            
-            # First value: check for short-circuit
+
             if short_circuit_on_true:
                 self.builder.cbranch(val, end_block, next_block)
             else:
                 self.builder.cbranch(val, next_block, end_block)
             phi_incoming.append((ir.Constant(ir.IntType(1), short_circuit_value), first_block))
-            
-            # Middle values
+
             for i in range(1, len(values) - 1):
                 self.builder.position_at_end(next_block)
-                val = self._to_boolean(self.visit_expression(values[i]))
+                val = self.value_dispatcher.to_boolean(self.visit_expression(values[i]))
                 current_block = self.builder.block
-                
+
                 next_block = self.builder.create_block(f"{label_prefix}_next")
                 if short_circuit_on_true:
                     self.builder.cbranch(val, end_block, next_block)
                 else:
                     self.builder.cbranch(val, next_block, end_block)
                 phi_incoming.append((ir.Constant(ir.IntType(1), short_circuit_value), current_block))
-            
-            # Last value
+
             self.builder.position_at_end(next_block)
-            val = self._to_boolean(self.visit_expression(values[-1]))
+            val = self.value_dispatcher.to_boolean(self.visit_expression(values[-1]))
             last_block = self.builder.block
             self.builder.branch(end_block)
             phi_incoming.append((ensure_ir(val), last_block))
@@ -422,7 +233,7 @@ class ExpressionsMixin:
 
     def visit_IfExp(self, node: ast.IfExp):
         """Handle ternary conditional expressions (a if condition else b)"""
-        condition = self._to_boolean(self.visit_expression(node.test))
+        condition = self.value_dispatcher.to_boolean(self.visit_expression(node.test))
         
         # Create basic blocks
         then_block = self.builder.create_block("ternary_then")
@@ -689,27 +500,6 @@ class ExpressionsMixin:
         """Promote integer value to floating point"""
         return self.type_converter.promote_to_float(value, target_type)
     
-
-    def _to_boolean(self, value, node: ast.AST = None):
-        """Convert value to boolean (i1)"""
-        if isinstance(value, ValueRef):
-            value = self.value_dispatcher.read_rvalue(value, name=getattr(value, "var_name", None))
-
-        # Handle Python values - convert to IR first
-        if isinstance(value, ValueRef) and value.is_python_value():
-            # Convert Python value to i1 (bool)
-            from ..builtin_entities import bool as bool_type
-            value = self.type_converter.convert(value, bool_type)
-        
-        vtype = get_type(value)
-        if isinstance(vtype, ir.IntType) and vtype.width == 1:
-            return ensure_ir(value)
-        elif isinstance(vtype, ir.IntType):
-            return self.builder.icmp_signed('!=', ensure_ir(value), ir.Constant(vtype, 0))
-        elif isinstance(vtype, (ir.FloatType, ir.DoubleType)):
-            return self.builder.fcmp_ordered('!=', ensure_ir(value), ir.Constant(vtype, 0.0))
-        else:
-            logger.error(f"Cannot convert {vtype} to boolean", node=node, exc_type=TypeError)
 
     
     def _align_pointer_comparison(self, left, right, left_ir, right_ir, node):

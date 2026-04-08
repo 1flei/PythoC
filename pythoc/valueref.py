@@ -535,6 +535,17 @@ def _infer_kind(value: Union[ir.Value, AnyType],
     return 'python'
 
 
+def wrap_python_constant(value: AnyType) -> ValueRef:
+    """Wrap a compile-time Python value as a pyconst ValueRef."""
+    from .builtin_entities.python_type import PythonType
+
+    return wrap_value(
+        value,
+        kind='python',
+        type_hint=PythonType.wrap(value, is_constant=True),
+    )
+
+
 def wrap_value(value: Union[ir.Value, AnyType],
                kind: Optional[str] = None, 
                type_hint: Optional['Any'] = None,

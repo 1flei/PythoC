@@ -277,24 +277,20 @@ class ptr(BuiltinType):
         return wrap_value(address_ptr, kind='value', type_hint=ptr_type)
     
     @classmethod
-    def handle_type_conversion(cls, visitor, node: ast.Call) -> ir.Value:
-        """Handle type conversion to pointer type using TypeConverter"""
-        if len(node.args) != 1:
-            logger.error(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)", node=node, exc_type=TypeError)
+    def handle_type_conversion(cls, visitor, value_or_node, node: ast.Call = None) -> ir.Value:
+        """Handle explicit pointer conversion through the unified value path."""
+        value_ref = value_or_node
+        if isinstance(value_or_node, ast.Call):
+            node = value_or_node
+            if len(node.args) != 1:
+                logger.error(
+                    f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
+                    node=node,
+                    exc_type=TypeError,
+                )
+            value_ref = visitor.visit_rvalue_expression(node.args[0])
 
-        arg = visitor.visit_rvalue_expression(node.args[0])
-        # Note: TypeConverter will extract LLVM type from pythoc type with module_context
-        # So we don't need to call get_llvm_type here
-        
-        # Use TypeConverter for the conversion (pass PC type directly)
-        try:
-            result = visitor.type_converter.convert(
-                arg,
-                cls
-            )
-            return result
-        except TypeError as e:
-            logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)
+        return visitor.value_dispatcher.explicit_cast(cls, value_ref, node)
     
     @classmethod
     def handle_add(cls, visitor, left, right, node: ast.BinOp):

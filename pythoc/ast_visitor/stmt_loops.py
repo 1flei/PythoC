@@ -136,7 +136,7 @@ class LoopsMixin:
         # -- Condition check (runtime only) --
         if not is_constant_true:
             cf.position_at_end(loop_top)
-            condition = self._to_boolean(self.visit_expression(node.test))
+            condition = self.value_dispatcher.to_boolean(self.visit_expression(node.test))
             false_target = else_block if has_else else loop_exit
             cf.cbranch(condition, loop_body, false_target)
 

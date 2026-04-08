@@ -38,25 +38,6 @@ class AssignmentsMixin:
         result = self.visit_expression(node)
         return result.as_lvalue()
 
-    def _apply_assign_decay(self, value_ref: ValueRef) -> ValueRef:
-        """Apply assignment decay to rvalue if its type supports it.
-        
-        This implements C-like array-to-pointer decay for untyped assignments.
-        Uses duck typing: if type_hint has handle_assign_decay method, call it.
-        
-        Args:
-            value_ref: The rvalue to potentially decay
-            
-        Returns:
-            Decayed ValueRef if applicable, otherwise original value_ref
-        """
-        type_hint = value_ref.get_pc_type()
-        # Duck typing: check if type has handle_assign_decay method
-        if hasattr(type_hint, 'handle_assign_decay'):
-            return type_hint.handle_assign_decay(self, value_ref)
-        
-        return value_ref
-
     def _check_linear_rvalue_copy(self, rvalue: ValueRef, node) -> None:
         """Check if rvalue is a linear token - forbid copy.
         
@@ -226,7 +207,7 @@ class AssignmentsMixin:
                     return
                 # Otherwise fall through to normal assignment (will likely fail)
         
-        decayed_rvalue = self._apply_assign_decay(rvalue)
+        decayed_rvalue = self.value_dispatcher.prepare_assignment_rvalue(rvalue, node)
         
         # Get or create lvalue
         lvalue = self.visit_lvalue_or_define(target, value_ref=decayed_rvalue, pc_type=pc_type, source="inference")
@@ -453,30 +434,22 @@ class AssignmentsMixin:
     
 
     def visit_AugAssign(self, node: ast.AugAssign):
-        """Handle augmented assignment statements (+=, -=, *=, etc.)"""
-        # Don't process if current block is already terminated
+        """Handle augmented assignment statements through the unified dispatcher."""
         if self.builder.is_terminated():
             return
-        
-        # Get the lvalue (address) of the target
+
         target_addr = self.visit_lvalue(node.target)
-        
-        # Load current value
-        current_value = self.builder.load(ensure_ir(target_addr))
-        current_val_ref = wrap_value(current_value, kind="value", type_hint=target_addr.type_hint)
-        
-        # Evaluate the right-hand side
-        rhs_value = self.visit_rvalue_expression(node.value)
-        
-        # Create a fake BinOp node to reuse binary operation logic
-        fake_binop = ast.BinOp(
-            left=ast.Name(id='_dummy_'),
-            op=node.op,
-            right=ast.Name(id='_dummy_')
+        current_val_ref = self.value_dispatcher.read_rvalue(
+            target_addr,
+            name=getattr(target_addr, "var_name", None),
         )
-        
-        # Perform the operation using unified binary operation logic
-        result = self._perform_binary_operation(fake_binop.op, current_val_ref, rhs_value, node)
-        
-        # Store the result back
-        self.builder.store(ensure_ir(result), ensure_ir(target_addr))
+        rhs_value = self.visit_rvalue_expression(node.value)
+        result = self.value_dispatcher.handle_binary_operation(
+            node.op,
+            current_val_ref,
+            rhs_value,
+            node,
+            left_node=node.target,
+            right_node=node.value,
+        )
+        self._store_to_lvalue(target_addr, result, node)

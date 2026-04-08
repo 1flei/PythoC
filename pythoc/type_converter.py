@@ -10,7 +10,7 @@ Reverse inference from LLVM to PC is intentionally not supported.
 from typing import Optional, Union, Any, Tuple, cast
 from llvmlite import ir
 
-from .valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
+from .valueref import ValueRef, ensure_ir, wrap_python_constant, wrap_value, get_type, get_type_hint
 from .type_check import is_struct_type, is_enum_type
 from .logger import logger
 from .builtin_entities.base import BuiltinType
@@ -351,22 +351,31 @@ class TypeConverter:
         
         # Handle enum initialization from tuple or int
         if hasattr(target_type, '_is_enum') and target_type._is_enum:
+            target_type_ref = wrap_python_constant(target_type)
             if isinstance(python_val, (tuple, list)):
                 # Tuple initialization: (tag, payload) or (tag,)
                 from .builtin_entities.python_type import PythonType
-                
+
                 if len(python_val) == 1:
                     # Single element: (tag,) for void variants
                     tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
                     tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
-                    return target_type.handle_type_call(self._visitor, target_type, [tag_ref], None)
+                    return self._visitor.value_dispatcher.handle_type_call(
+                        target_type_ref,
+                        [tag_ref],
+                        None,
+                    )
                 elif len(python_val) == 2:
                     # Two elements: (tag, payload)
                     tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
                     tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
                     payload_py_type = PythonType.wrap(python_val[1], is_constant=True)
                     payload_ref = wrap_value(python_val[1], kind="python", type_hint=payload_py_type)
-                    return target_type.handle_type_call(self._visitor, target_type, [tag_ref, payload_ref], None)
+                    return self._visitor.value_dispatcher.handle_type_call(
+                        target_type_ref,
+                        [tag_ref, payload_ref],
+                        None,
+                    )
                 else:
                     raise TypeError(f"Enum initialization requires 1 or 2 elements, got {len(python_val)}")
             elif isinstance(python_val, int):
@@ -374,7 +383,11 @@ class TypeConverter:
                 from .builtin_entities.python_type import PythonType
                 tag_py_type = PythonType.wrap(python_val, is_constant=True)
                 tag_ref = wrap_value(python_val, kind="python", type_hint=tag_py_type)
-                return target_type.handle_type_call(self._visitor, target_type, [tag_ref], None)
+                return self._visitor.value_dispatcher.handle_type_call(
+                    target_type_ref,
+                    [tag_ref],
+                    None,
+                )
         
         # Handle list/tuple to array conversion
         if isinstance(python_val, list):
@@ -1102,7 +1115,12 @@ class TypeConverter:
                     f"Variant {variant_names[variant_idx]} requires payload of type {variant_payload_type}, "
                     f"but struct has no payload field"
                 )
-            return target_enum_type.handle_type_call(self._visitor, target_enum_type, [tag_vref], None)
+            target_enum_ref = wrap_python_constant(target_enum_type)
+            return self._visitor.value_dispatcher.handle_type_call(
+                target_enum_ref,
+                [tag_vref],
+                None,
+            )
         else:
             # Has payload
             payload_vref = source_field_values[1]
@@ -1119,7 +1137,12 @@ class TypeConverter:
             if payload_type != variant_payload_type:
                 payload_vref = self.convert(payload_vref, variant_payload_type)
             
-            return target_enum_type.handle_type_call(self._visitor, target_enum_type, [tag_vref, payload_vref], None)
+            target_enum_ref = wrap_python_constant(target_enum_type)
+            return self._visitor.value_dispatcher.handle_type_call(
+                target_enum_ref,
+                [tag_vref, payload_vref],
+                None,
+            )
 
     def _build_conversion_registry(self):
         """Build dispatch table for conversions using LLVM types."""
@@ -1350,26 +1373,8 @@ class TypeConverter:
         return wrap_value(result, kind="value", type_hint=type_hint)
 
     def to_boolean(self, value: Union[ir.Value, ValueRef]) -> ir.Value:
-        """Convert any value to boolean (i1)."""
-        pc_type = None
-        if isinstance(value, ValueRef) and value.type_hint is not None:
-            pc_type = value.type_hint
-        llvm_type = get_type(value)
-        value_ir = ensure_ir(value)
-        # Prefer PC type dispatch
-        if pc_type is not None:
-            if hasattr(pc_type, '_is_integer') and pc_type._is_integer:
-                if llvm_type.width == 1:
-                    return value_ir
-                return self.builder.icmp_signed('!=', value_ir, ir.Constant(llvm_type, 0))
-            elif hasattr(pc_type, '_is_float') and pc_type._is_float:
-                return self.builder.fcmp_ordered('!=', value_ir, ir.Constant(llvm_type, 0.0))
-            elif hasattr(pc_type, 'pointee_type'):
-                null_ptr = ir.Constant(llvm_type, None)
-                return self.builder.icmp_signed('!=', value_ir, null_ptr)
-            else:
-                raise TypeError(f"Cannot convert pc_type {pc_type} to boolean")
-        raise TypeError(f"Cannot get pc_type from value")
+        """Convert any value to boolean (i1) via the unified value dispatcher."""
+        return self._visitor.value_dispatcher.to_boolean(value)
 
     def create_zero_constant(self, llvm_type: ir.Type) -> ir.Constant:
         """Create a zero constant for the given LLVM type."""
@@ -1389,6 +1394,32 @@ class TypeConverter:
             raise TypeError("Cannot create zero constant for void type")
         else:
             raise TypeError(f"Cannot create zero constant for {llvm_type}")
+
+    @staticmethod
+    def is_llvm_integer_type(llvm_type: ir.Type, width: Optional[int] = None) -> bool:
+        if not isinstance(llvm_type, ir.IntType):
+            return False
+        return width is None or llvm_type.width == width
+
+    @staticmethod
+    def is_llvm_float_type(llvm_type: ir.Type) -> bool:
+        return isinstance(llvm_type, (ir.FloatType, ir.DoubleType))
+
+    @staticmethod
+    def is_llvm_pointer_type(llvm_type: ir.Type) -> bool:
+        return isinstance(llvm_type, ir.PointerType)
+
+    @staticmethod
+    def create_int_constant(llvm_type: ir.Type, value: int) -> ir.Constant:
+        if not isinstance(llvm_type, ir.IntType):
+            raise TypeError(f"Expected integer LLVM type, got {llvm_type}")
+        return ir.Constant(llvm_type, value)
+
+    def create_bool_constant(self, value: bool) -> ir.Constant:
+        from .builtin_entities import bool as bool_type
+
+        bool_llvm_type = bool_type.get_llvm_type(self._visitor.module.context)
+        return self.create_int_constant(bool_llvm_type, int(bool(value)))
 
     def promote_to_float(self, value: Union[ir.Value, ValueRef], target_pc_type) -> ValueRef:
         """Promote integer value to float PC type (f32/f64)."""

@@ -479,39 +479,30 @@ class BuiltinType(BuiltinEntity):
     
     @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
-        """Handle type conversion: i32(x)
-        
-        Args:
-            visitor: AST visitor
-            func_ref: ValueRef of the callable (the type itself for type conversions)
-            args: Pre-evaluated arguments (list of ValueRef)
-            node: ast.Call node
-        """
-        return cls.handle_type_conversion(visitor, node)
+        """Handle explicit type calls like i32(x) using pre-evaluated arguments."""
+        if len(args) != 1:
+            logger.error(
+                f"{cls.get_name()}() takes exactly 1 argument ({len(args)} given)",
+                node=node,
+                exc_type=TypeError,
+            )
+        return cls.handle_type_conversion(visitor, args[0], node)
     
     @classmethod
-    def handle_type_conversion(cls, visitor, node: ast.Call) -> ir.Value:
-        """Convert value to this type using TypeConverter"""
-        if len(node.args) != 1:
-            logger.error(f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
-                        node=node, exc_type=TypeError)
-        
-        arg = visitor.visit_rvalue_expression(node.args[0])
-        # Note: TypeConverter will extract LLVM type from pythoc type with module_context
-        # So we don't need to call get_llvm_type here - just pass the PC type class
-        
-        # Determine if target is unsigned
-        target_is_unsigned = not cls.is_signed() if hasattr(cls, 'is_signed') else False
-        
-        # Use TypeConverter for the conversion (pass PC type directly)
-        try:
-            result = visitor.type_converter.convert(
-                arg, 
-                cls
-            )
-            return result
-        except TypeError as e:
-            logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)
+    def handle_type_conversion(cls, visitor, value_or_node, node: ast.Call = None) -> ir.Value:
+        """Convert a value to this type through the unified value path."""
+        value_ref = value_or_node
+        if isinstance(value_or_node, ast.Call):
+            node = value_or_node
+            if len(node.args) != 1:
+                logger.error(
+                    f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
+                    node=node,
+                    exc_type=TypeError,
+                )
+            value_ref = visitor.visit_rvalue_expression(node.args[0])
+
+        return visitor.value_dispatcher.explicit_cast(cls, value_ref, node)
     
     # Binary operation handlers for numeric types (unified call protocol)
     @classmethod

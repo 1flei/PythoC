@@ -37,7 +37,7 @@ class IfStatementMixin:
                     else_fn()
                 return (False, True)  # Only else branch executed
 
-        condition = self._to_boolean(condition)
+        condition = self.value_dispatcher.to_boolean(condition)
         
         # Use ControlFlowBuilder for block operations
         cf = self._get_cf_builder()

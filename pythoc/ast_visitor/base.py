@@ -81,8 +81,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # Implicit coercer for policy-checked implicit conversions
         self.implicit_coercer = ImplicitCoercer(self.type_converter)
 
-        # Unified ValueRef dispatcher for call/attribute/subscript/binop protocols
-        from .value_dispatcher import ValueRefDispatcher
+        # Unified ValueRef dispatcher for value calls and pyconst type calls.
+        from ..value_dispatcher import ValueRefDispatcher
         self.value_dispatcher = ValueRefDispatcher(self)
         
         # Unified scope manager for defer, linear types, and variable lifetime
