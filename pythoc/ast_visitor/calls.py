@@ -27,30 +27,13 @@ class CallsMixin:
     
     def visit_Call(self, node: ast.Call):
         """Handle function calls with unified call protocol.
-        
-        Design principle:
-        1. Evaluate node.func to a callable ValueRef
-        2. Pre-evaluate arguments (node.args)
-        3. Delegate to func_ref.type_hint.handle_call(visitor, func_ref, args, node)
-        
-        Call protocol split:
-        - Value call: type_hint.handle_call handles callable values
-        - Type call: PythonType.handle_call forwards type objects to handle_type_call
-        
-        Linear type semantics:
-        - For regular calls: linear ownership is transferred at call site
-        - For defer calls: linear ownership is deferred until execution time
-          (checked via defer_linear_transfer on the call protocol object)
+
+        The visitor evaluates the callee expression and arguments, then hands the
+        resulting `ValueRef` objects to `ValueRefDispatcher.handle_call()` for
+        protocol resolution, rvalue materialization, and linear-transfer policy.
         """
         func_ref = self.visit_expression(node.func)
-        if not isinstance(func_ref, ValueRef):
-            logger.error(f"Call target must evaluate to a ValueRef, got {func_ref}", node=node.func, exc_type=TypeError)
 
-        func_ref = self.read_rvalue(func_ref, name=getattr(node.func, 'id', None))
-        callable_protocol = getattr(func_ref, 'type_hint', None)
-        if callable_protocol is None or not hasattr(callable_protocol, 'handle_call'):
-            logger.error(f"Object does not support calling: {func_ref}", node=node.func, exc_type=TypeError)
-        
         # Pre-evaluate arguments (unified behavior)
         # Handle struct unpacking (*struct_instance)
         args = []
@@ -62,17 +45,13 @@ class CallsMixin:
             else:
                 arg_value = self.visit_rvalue_expression(arg)
                 args.append(arg_value)
-        
-        # Check if this callable defers linear transfer (e.g., defer intrinsic)
-        # If so, skip linear transfer here - it will happen at execution time
-        defer_linear = getattr(callable_protocol, 'defer_linear_transfer', False)
-        
-        if not defer_linear:
-            for arg in args:
-                # Transfer linear ownership for function arguments
-                self._transfer_linear_ownership(arg, reason="function argument", node=node)
-        
-        return callable_protocol.handle_call(self, func_ref, args, node)
+
+        return self.value_dispatcher.handle_call(
+            func_ref,
+            args,
+            node,
+            name=getattr(node.func, 'id', None),
+        )
     
     def _expand_starred_struct(self, struct_expr):
         """Expand *struct_instance to individual field values

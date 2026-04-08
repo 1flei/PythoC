@@ -80,6 +80,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
         # Implicit coercer for policy-checked implicit conversions
         self.implicit_coercer = ImplicitCoercer(self.type_converter)
+
+        # Unified ValueRef dispatcher for call/attribute/subscript/binop protocols
+        from .value_dispatcher import ValueRefDispatcher
+        self.value_dispatcher = ValueRefDispatcher(self)
         
         # Unified scope manager for defer, linear types, and variable lifetime
         self.scope_manager = self.ctx.scope_manager
@@ -273,71 +277,104 @@ class LLVMIRVisitor(ast.NodeVisitor):
         
         return var_info
 
+    def _wrap_python_name_binding(
+        self,
+        name: str,
+        python_obj: Any,
+        *,
+        source: str,
+    ) -> Optional[VariableInfo]:
+        """Convert a Python-visible symbol into a unified name binding."""
+        from ..builtin_entities import BuiltinEntity, BuiltinType, BuiltinFunction
+        from ..builtin_entities.python_type import PythonType
+
+        if isinstance(python_obj, type):
+            try:
+                if issubclass(python_obj, BuiltinEntity):
+                    if issubclass(python_obj, (BuiltinType, BuiltinFunction)):
+                        python_type = PythonType.wrap(python_obj, is_constant=True)
+                        return VariableInfo(
+                            name=name,
+                            value_ref=wrap_value(
+                                kind='python',
+                                value=python_obj,
+                                type_hint=python_type,
+                            ),
+                            alloca=None,
+                            source="builtin_entity",
+                            is_global=True,
+                            is_mutable=False,
+                        )
+            except TypeError:
+                pass
+
+        get_value = getattr(python_obj, 'get_value', None)
+        if isinstance(python_obj, ValueRef):
+            value_ref = python_obj
+        elif callable(get_value):
+            value_ref = get_value()
+        else:
+            python_type = PythonType.wrap(python_obj, is_constant=True)
+            value_ref = wrap_value(
+                kind='python',
+                value=python_obj,
+                type_hint=python_type,
+            )
+
+        return VariableInfo(
+            name=name,
+            value_ref=value_ref,
+            alloca=None,
+            source=source,
+            is_global=True,
+            is_mutable=False,
+        )
+
+    def _lookup_python_global_binding(self, name: str) -> Optional[VariableInfo]:
+        """Resolve symbols captured from the Python environment."""
+        if not self.ctx.user_globals:
+            return None
+
+        if name in self.ctx.user_globals:
+            return self._wrap_python_name_binding(
+                name,
+                self.ctx.user_globals[name],
+                source="python_global",
+            )
+
+        builtins_val = self.ctx.user_globals.get('__builtins__')
+        if builtins_val is None:
+            return None
+
+        if isinstance(builtins_val, dict):
+            if name in builtins_val:
+                return self._wrap_python_name_binding(
+                    name,
+                    builtins_val[name],
+                    source="python_builtin",
+                )
+            return None
+
+        if hasattr(builtins_val, name):
+            return self._wrap_python_name_binding(
+                name,
+                getattr(builtins_val, name),
+                source="python_builtin",
+            )
+
+        return None
+
     def lookup_variable(self, name: str) -> Optional[VariableInfo]:
         """Look up variable or function in context registry (unified)"""
         # 1. First check variable registry
         var_info = self.scope_manager.lookup_variable(name)
         if var_info:
             return var_info
-        
-        # 2. Check user globals
-        if self.ctx.user_globals and name in self.ctx.user_globals:
-            python_obj = self.ctx.user_globals[name]
-            from ..valueref import ValueRef, wrap_value
 
-            # 2a. BuiltinEntity types (i32, ptr, etc.)
-            from ..builtin_entities import BuiltinEntity, BuiltinType, BuiltinFunction
-            from ..builtin_entities.python_type import PythonType
-            if isinstance(python_obj, type):
-                try:
-                    if issubclass(python_obj, BuiltinEntity):
-                        if issubclass(python_obj, (BuiltinType, BuiltinFunction)):
-                            python_type = PythonType.wrap(python_obj, is_constant=True)
-                            return VariableInfo(
-                                name=name,
-                                value_ref=wrap_value(
-                                    kind='python',
-                                    value=python_obj,
-                                    type_hint=python_type,
-                                ),
-                                alloca=None,
-                                source="builtin_entity",
-                                is_global=True,
-                                is_mutable=False,
-                            )
-                except TypeError:
-                    pass
-                
-                # 2c. Struct class - return None to let type system handle it
-                if hasattr(python_obj, '_is_struct') and python_obj._is_struct:
-                    return None
-            
-            # 2b. Already a ValueRef (like nullptr)
-            if isinstance(python_obj, ValueRef):
-                return VariableInfo(
-                    name=name,
-                    value_ref=python_obj,
-                    alloca=None,
-                    source="python_global",
-                    is_global=True,
-                    is_mutable=False,
-                )
-            
-            # 2c. Generic Python object
-            from ..builtin_entities.python_type import PythonType
-            python_type = PythonType.wrap(python_obj, is_constant=True)
-            return VariableInfo(
-                name=name,
-                value_ref=wrap_value(
-                    kind='python',
-                    value=python_obj,
-                    type_hint=python_type,
-                ),
-                alloca=None,
-                source="python_global",
-                is_global=True,
-                is_mutable=False,
-            )
+        # 2. Resolve symbols captured from the Python environment
+        python_global = self._lookup_python_global_binding(name)
+        if python_global is not None:
+            return python_global
         
         # Note: Self/mutual recursion is now handled via group scope injection
         # in output_manager._compile_pending_for_group(). All functions in the
@@ -392,65 +429,19 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
     def read_rvalue(self, value_ref: ValueRef, *, name: Optional[str] = None) -> ValueRef:
         """Explicitly materialize a binding into its rvalue form when needed."""
-        if value_ref.is_python_value() or not value_ref.has_place():
-            return value_ref
-
-        place = value_ref.require_place()
-        if value_ref.value is not place:
-            return value_ref
-
-        from ..type_converter import get_base_type
-
-        base_type = get_base_type(value_ref.type_hint)
-        if (
-            base_type is not None
-            and isinstance(base_type, type)
-            and issubclass(base_type, BuiltinType)
-            and base_type.is_array()
-        ):
-            return value_ref
-
-        loaded_val = safe_load(
-            self.builder,
-            ensure_ir(place),
-            value_ref.type_hint,
-            name=name or getattr(value_ref, "var_name", "") or "",
-        )
-        return wrap_value(
-            loaded_val,
-            kind="address",
-            type_hint=value_ref.type_hint,
-            address=place,
-            source_node=value_ref.source_node,
-            var_name=value_ref.var_name,
-            linear_path=value_ref.linear_path,
-            vref_id=value_ref.vref_id,
-        )
+        return self.value_dispatcher.read_rvalue(value_ref, name=name)
 
     def visit_rvalue_expression(self, expr):
         """Visit an expression in value context."""
         result = self.visit_expression(expr)
         if isinstance(result, ValueRef):
             name = expr.id if isinstance(expr, ast.Name) else None
-            return self.read_rvalue(result, name=name)
+            return self.value_dispatcher.read_rvalue(result, name=name)
         return result
 
     def prepare_protocol_base(self, value_ref: ValueRef) -> ValueRef:
         """Prepare a base ValueRef for attribute/subscript protocol dispatch."""
-        if value_ref.is_python_value():
-            return value_ref
-
-        from ..type_converter import get_base_type
-
-        base_type = get_base_type(value_ref.type_hint)
-        if (
-            base_type is not None
-            and isinstance(base_type, type)
-            and issubclass(base_type, BuiltinType)
-            and base_type.is_pointer()
-        ):
-            return self.read_rvalue(value_ref, name=getattr(value_ref, "var_name", None))
-        return value_ref
+        return self.value_dispatcher.prepare_protocol_base(value_ref)
     
     # ========================================================================
     # Linear Token Tracking

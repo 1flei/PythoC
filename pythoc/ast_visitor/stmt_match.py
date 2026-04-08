@@ -520,14 +520,13 @@ class MatchStatementMixin:
         bindings = []
         
         for field_name, field_pattern in zip(pattern.kwd_attrs, pattern.kwd_patterns):
-            # Access struct field using type's handle_attribute
-            subject_type = subject.type_hint
-            if subject_type and hasattr(subject_type, 'handle_attribute'):
-                field_value = subject_type.handle_attribute(self, subject, field_name, None)
-            else:
-                logger.error(f"Struct type does not support attribute access: {subject_type}",
-                            node=None, exc_type=TypeError)
-            
+            attr_node = ast.Attribute(
+                value=ast.Name(id='_subject', ctx=ast.Load()),
+                attr=field_name,
+                ctx=ast.Load(),
+            )
+            field_value = self.value_dispatcher.handle_attribute(subject, field_name, attr_node)
+
             # Recursively match field pattern
             field_cond, field_bindings = self._generate_match_pattern(field_pattern, field_value)
             
@@ -729,23 +728,18 @@ class MatchStatementMixin:
             ctx=ast.Load()
         )
         
-        # Delegate to type's handle_subscript
+        # Delegate through dispatcher so match patterns share the same protocol
+        # lookup path as regular expression evaluation.
         subject_type = subject.type_hint
-        
-        # For arrays, need to decay to pointer first
+
+        # For arrays, keep the explicit decay step, then use the same dispatcher
+        # path as normal pointer subscripting.
         if hasattr(subject_type, 'get_decay_pointer_type'):
             ptr_type = subject_type.get_decay_pointer_type()
             ptr_subject = self.type_converter.convert(subject, ptr_type)
-            result = ptr_type.handle_subscript(self, ptr_subject, index_const, fake_node)
-            return result
-        
-        # For other types (struct, enum, tuple), use handle_subscript directly
-        if hasattr(subject_type, 'handle_subscript'):
-            result = subject_type.handle_subscript(self, subject, index_const, fake_node)
-            return result
-        
-        logger.error(f"Type {subject_type} does not support subscript access",
-                    node=None, exc_type=TypeError)
+            return self.value_dispatcher.handle_subscript(ptr_subject, index_const, fake_node)
+
+        return self.value_dispatcher.handle_subscript(subject, index_const, fake_node)
     
     def _get_array_element(self, array_value, index):
         """Legacy method - now uses _subscript_access"""

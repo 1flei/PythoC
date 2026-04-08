@@ -3,9 +3,8 @@ Expressions mixin for LLVMIRVisitor
 """
 
 import ast
-import builtins
 import operator
-from typing import Optional, Any
+from typing import Optional
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..builtin_entities import (
@@ -29,19 +28,6 @@ from ..type_converter import ImplicitCoercer, get_base_type
 class ExpressionsMixin:
     """Mixin containing expressions-related visitor methods"""
 
-    def _wrap_python_to_valueref(self, name: str, value: Any) -> ValueRef:
-        """Wrap a python value into valueref"""
-        # If the value is already a ValueRef (e.g., nullptr), return it directly
-        if isinstance(value, ValueRef):
-            return value
-
-        if hasattr(value, 'get_value'):
-            return value.get_value()
-        
-        from ..builtin_entities import PythonType
-        python_type = PythonType.wrap(value, is_constant=True)
-        return wrap_value(value, kind="python", type_hint=python_type)
-    
     def visit_Name(self, node: ast.Name):
         """Handle variable references, returning ValueRef"""
 
@@ -74,26 +60,6 @@ class ExpressionsMixin:
                 var_name=node.id,
                 linear_path=(),
             )
-        
-        # Check if it's in user's global namespace (constants, type aliases, etc.)
-        if node.id in self.ctx.user_globals:
-            value = self.ctx.user_globals[node.id]
-            # Convert Python constant to LLVM constant
-            return self._wrap_python_to_valueref(node.id, value)
-        
-        # Check if it's in builtins (print, len, etc.)
-        if '__builtins__' in self.ctx.user_globals:
-            builtins_val = self.ctx.user_globals['__builtins__']
-            # __builtins__ can be either a dict or a module
-            if isinstance(builtins_val, dict):
-                if node.id in builtins_val:
-                    value = builtins_val[node.id]
-                    return self._wrap_python_to_valueref(node.id, value)
-            elif hasattr(builtins_val, node.id):
-                value = getattr(builtins_val, node.id)
-                return self._wrap_python_to_valueref(node.id, value)
-        
-        # Otherwise raise error
         if self.is_constexpr():
             raise NameError(f"Variable '{node.id}' not defined")
         logger.error(f"Variable '{node.id}' not defined", node=node, exc_type=NameError)
@@ -109,76 +75,10 @@ class ExpressionsMixin:
         return wrap_value(node.value, kind="python", type_hint=python_type_inst)
 
     def visit_BinOp(self, node: ast.BinOp):
-        """Handle enhanced binary operations with unified protocol support"""
+        """Handle binary operations through the unified value dispatcher."""
         left = self.visit_rvalue_expression(node.left)
         right = self.visit_rvalue_expression(node.right)
-        
-        # Check if both operands are PythonType values
-        from ..builtin_entities.python_type import PythonType
-        if left.is_python_value() and right.is_python_value():
-            # Call Python's binary operator
-            left_val = left.value
-            right_val = right.value
-            
-            # C-style integer division (truncates toward zero)
-            def c_style_floordiv(a, b):
-                return int(a / b)  # truncate toward zero, like C
-            
-            # C-style modulo (sign follows dividend)
-            def c_style_mod(a, b):
-                return a - int(a / b) * b
-            
-            # Map AST binary op to Python operator function
-            python_binary_ops = {
-                ast.Add: operator.add,
-                ast.Sub: operator.sub,
-                ast.Mult: operator.mul,
-                ast.Div: operator.truediv,
-                ast.FloorDiv: c_style_floordiv,
-                ast.Mod: c_style_mod,
-                ast.Pow: operator.pow,
-                ast.LShift: operator.lshift,
-                ast.RShift: operator.rshift,
-                ast.BitOr: operator.or_,
-                ast.BitXor: operator.xor,
-                ast.BitAnd: operator.and_,
-            }
-            
-            op_key = type(node.op)
-
-            # Execute Python operation
-            result = python_binary_ops[op_key](left_val, right_val)
-            
-            # Wrap result as Python value
-            python_type_inst = PythonType.wrap(result, is_constant=True)
-            return wrap_value(result, kind="python", type_hint=python_type_inst)
-        
-        op_to_handler = {
-            ast.Add: ('handle_add', 'handle_radd'),
-            ast.Sub: ('handle_sub', 'handle_rsub'),
-            ast.Mult: ('handle_mul', 'handle_rmul'),
-            ast.Div: ('handle_div', 'handle_rdiv'),
-            ast.FloorDiv: ('handle_floordiv', 'handle_rfloordiv'),
-            ast.Mod: ('handle_mod', 'handle_rmod'),
-            ast.Pow: ('handle_pow', 'handle_rpow'),
-            ast.LShift: ('handle_lshift', 'handle_rlshift'),
-            ast.RShift: ('handle_rshift', 'handle_rrshift'),
-            ast.BitOr: ('handle_bitor', 'handle_rbitor'),
-            ast.BitXor: ('handle_bitxor', 'handle_rbitxor'),
-            ast.BitAnd: ('handle_bitand', 'handle_rbitand'),
-        }
-        
-        handler_name, handler_rname = op_to_handler.get(type(node.op))
-        
-        if handler_name and left.type_hint and hasattr(left.type_hint, handler_name):
-            handler = getattr(left.type_hint, handler_name)
-            return handler(self, left, right, node)
-        elif handler_rname and right.type_hint and hasattr(right.type_hint, handler_rname):
-            rhandler = getattr(right.type_hint, handler_rname)
-            return rhandler(self, left, right, node)
-        
-        # Fallback to default binary operation
-        return self._perform_binary_operation(node.op, left, right, node)
+        return self.value_dispatcher.handle_binop(left, right, node)
     
 
     def visit_UnaryOp(self, node: ast.UnaryOp):
@@ -793,7 +693,7 @@ class ExpressionsMixin:
     def _to_boolean(self, value, node: ast.AST = None):
         """Convert value to boolean (i1)"""
         if isinstance(value, ValueRef):
-            value = self.read_rvalue(value, name=getattr(value, "var_name", None))
+            value = self.value_dispatcher.read_rvalue(value, name=getattr(value, "var_name", None))
 
         # Handle Python values - convert to IR first
         if isinstance(value, ValueRef) and value.is_python_value():
