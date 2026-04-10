@@ -302,107 +302,49 @@ class TypeConverter:
         )
 
     def _promote_python_to_pc(self, python_val, target_type) -> ValueRef:
-        """Promote Python primitive value to a PC-typed ValueRef.
-        
-        Args:
-            python_val: Python value to promote
-            target_type: Optional target PC type (for context-aware promotion)
-        """
-        # Handle pc_list type - convert to array
-        # pc_list is a type (class) that stores ValueRef elements
-        from .builtin_entities.pc_list import PCListType
-        if isinstance(python_val, type) and issubclass(python_val, PCListType):
-            # Convert pc_list to target array type
+        """Promote Python primitive or literal carrier value to a PC-typed ValueRef."""
+        from .builtin_entities.python_type import PythonType
+        from .literal_protocol import get_sequence_elements, is_mapping_carrier, is_sequence_carrier
+
+        if is_sequence_carrier(python_val):
+            sequence_items = list(get_sequence_elements(python_val))
+
+            if hasattr(target_type, '_is_enum') and target_type._is_enum:
+                target_type_ref = wrap_python_constant(target_type)
+                arg_refs = []
+                for item in sequence_items:
+                    if isinstance(item, ValueRef):
+                        arg_refs.append(item)
+                    else:
+                        item_py_type = PythonType.wrap(item, is_constant=True)
+                        arg_refs.append(wrap_value(item, kind="python", type_hint=item_py_type))
+                if len(arg_refs) not in (1, 2):
+                    raise TypeError(f"Enum initialization requires 1 or 2 elements, got {len(arg_refs)}")
+                return self._visitor.value_dispatcher.handle_type_call(target_type_ref, arg_refs, None)
+
             if hasattr(target_type, "is_array") and target_type.is_array():
-                return self._convert_pc_list_to_array(python_val, target_type)
-            raise TypeError(
-                f"Cannot convert pc_list to {target_type}. "
-                f"pc_list can only be converted to array types."
-            )
-        
-        # Handle refined tuple types - extract the actual tuple values
-        # This happens when visit_Tuple returns refined[struct[...], "tuple"]
-        from .builtin_entities.refined import RefinedType
-        if isinstance(python_val, type) and issubclass(python_val, RefinedType):
-            tags = getattr(python_val, '_tags', [])
-            if "tuple" in tags:
-                # Extract tuple values from refined type
-                base_struct = python_val._base_type
-                if hasattr(base_struct, '_field_types'):
-                    tuple_values = []
-                    for field_type in base_struct._field_types:
-                        if hasattr(field_type, '_python_object'):
-                            tuple_values.append(field_type._python_object)
-                        elif hasattr(field_type, 'get_python_object'):
-                            tuple_values.append(field_type.get_python_object())
-                        else:
-                            tuple_values.append(field_type)
-                    python_val = tuple(tuple_values)
-        
-        # Validate python_val is a supported primitive type
-        # Allow: int, float, bool, str, None, list, tuple (for array/struct initialization)
-        # Reject: type objects, classes, functions, modules, etc.
-        if not isinstance(python_val, (int, float, bool, str, type(None), list, tuple)):
+                list_carrier = self._sequence_literal_to_pc_list(python_val)
+                return self._convert_pc_list_to_array(list_carrier, target_type)
+
+            if hasattr(target_type, '_field_types'):
+                return self._convert_tuple_to_struct(sequence_items, target_type)
+
+            raise TypeError(f"Cannot promote sequence literal {python_val} to PC type {target_type}")
+
+        if is_mapping_carrier(python_val):
+            raise TypeError(f"Cannot promote mapping literal to PC type {target_type}")
+
+        if not isinstance(python_val, (int, float, bool, str, type(None))):
             raise TypeError(
                 f"Cannot promote Python value of type {type(python_val).__name__} to PC type. "
-                f"Only primitive types (int, float, bool, str, None) and collections (list, tuple) are supported. "
-                f"Got: {repr(python_val)}"
+                f"Only primitive types and literal carriers are supported. Got: {repr(python_val)}"
             )
-        
-        # Handle enum initialization from tuple or int
-        if hasattr(target_type, '_is_enum') and target_type._is_enum:
-            target_type_ref = wrap_python_constant(target_type)
-            if isinstance(python_val, (tuple, list)):
-                # Tuple initialization: (tag, payload) or (tag,)
-                from .builtin_entities.python_type import PythonType
 
-                if len(python_val) == 1:
-                    # Single element: (tag,) for void variants
-                    tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
-                    tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
-                    return self._visitor.value_dispatcher.handle_type_call(
-                        target_type_ref,
-                        [tag_ref],
-                        None,
-                    )
-                elif len(python_val) == 2:
-                    # Two elements: (tag, payload)
-                    tag_py_type = PythonType.wrap(python_val[0], is_constant=True)
-                    tag_ref = wrap_value(python_val[0], kind="python", type_hint=tag_py_type)
-                    payload_py_type = PythonType.wrap(python_val[1], is_constant=True)
-                    payload_ref = wrap_value(python_val[1], kind="python", type_hint=payload_py_type)
-                    return self._visitor.value_dispatcher.handle_type_call(
-                        target_type_ref,
-                        [tag_ref, payload_ref],
-                        None,
-                    )
-                else:
-                    raise TypeError(f"Enum initialization requires 1 or 2 elements, got {len(python_val)}")
-            elif isinstance(python_val, int):
-                # Direct tag initialization for void variants
-                from .builtin_entities.python_type import PythonType
-                tag_py_type = PythonType.wrap(python_val, is_constant=True)
-                tag_ref = wrap_value(python_val, kind="python", type_hint=tag_py_type)
-                return self._visitor.value_dispatcher.handle_type_call(
-                    target_type_ref,
-                    [tag_ref],
-                    None,
-                )
-        
-        # Handle list/tuple to array conversion
-        if isinstance(python_val, list):
-            # Check if target_type is array
-            if hasattr(target_type, "is_array") and target_type.is_array():
-                return self._convert_list_to_array(python_val, target_type)
-            # Otherwise, cannot promote (no target type info)
-            raise TypeError(f"Cannot promote Python {python_val} to PC type {target_type}")
-        
-        # Handle tuple to struct conversion
-        if isinstance(python_val, tuple):
-            # Check if target_type is struct
-            if hasattr(target_type, '_field_types'):
-                return self._convert_tuple_to_struct(python_val, target_type)
-            raise TypeError(f"Cannot promote Python tuple to PC type {target_type}")
+        if hasattr(target_type, '_is_enum') and target_type._is_enum and isinstance(python_val, int):
+            target_type_ref = wrap_python_constant(target_type)
+            tag_py_type = PythonType.wrap(python_val, is_constant=True)
+            tag_ref = wrap_value(python_val, kind="python", type_hint=tag_py_type)
+            return self._visitor.value_dispatcher.handle_type_call(target_type_ref, [tag_ref], None)
         
         if isinstance(python_val, str):
             # Create global string constant
@@ -675,6 +617,32 @@ class TypeConverter:
             return self.builder.load(value_ir)
         return value_ir
 
+    def _sequence_literal_to_pc_list(self, sequence_value):
+        """Convert a generic sequence literal carrier to pc_list, preserving ValueRefs."""
+        from .builtin_entities.pc_list import pc_list
+        from .builtin_entities.python_type import PythonType
+        from .literal_protocol import get_sequence_elements, is_pc_list_type, is_sequence_carrier
+
+        if is_pc_list_type(sequence_value):
+            return sequence_value
+
+        if not is_sequence_carrier(sequence_value):
+            raise TypeError(f"Expected sequence literal carrier, got {type(sequence_value).__name__}")
+
+        elements = []
+        for item in get_sequence_elements(sequence_value):
+            if isinstance(item, ValueRef):
+                elements.append(item)
+                continue
+            if is_sequence_carrier(item):
+                nested_carrier = self._sequence_literal_to_pc_list(item)
+                nested_type = PythonType.wrap(nested_carrier, is_constant=True)
+                elements.append(wrap_value(nested_carrier, kind="python", type_hint=nested_type))
+                continue
+            elements.append(wrap_python_constant(item))
+
+        return pc_list.from_elements(elements)
+
     def _convert_list_to_array(self, python_list, target_array_type):
         """Convert Python list/tuple to array constant.
         
@@ -684,8 +652,7 @@ class TypeConverter:
         
         Returns:
             ValueRef with pointer to array
-        """        
-        return
+        """
         array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
         
         # Build the array constant recursively
@@ -752,15 +719,16 @@ class TypeConverter:
             
             # Convert each sub-list
             elem_constants = []
+            from .literal_protocol import extract_subscript_items, is_sequence_carrier
+
             for i, py_sublist in enumerate(python_list):
                 if i >= outer_size:
                     break
-                
-                if not isinstance(py_sublist, (list, tuple)):
-                    raise TypeError(f"Expected nested list for multi-dimensional array, got {type(py_sublist).__name__}")
-                
-                # Recursively build inner array constant (returns IR constant)
-                inner_const = self._build_array_constant_recursive(py_sublist, inner_array_type)
+
+                if not is_sequence_carrier(py_sublist):
+                    raise TypeError(f"Expected nested sequence literal for multi-dimensional array, got {type(py_sublist).__name__}")
+
+                inner_const = self._build_array_constant_recursive(tuple(extract_subscript_items(py_sublist)), inner_array_type)
                 elem_constants.append(inner_const)
             
             # Zero-fill remaining elements
@@ -851,51 +819,29 @@ class TypeConverter:
         
         # Handle multi-dimensional array
         else:
-            # For multi-dim array, each element should be a pc_list or nested list
             outer_size = dimensions[0]
             inner_dims = dimensions[1:]
             from .builtin_entities import array
+            from .literal_protocol import is_sequence_carrier
             inner_array_type = array[(pc_elem_type,) + tuple(inner_dims)]
-            
-            # Allocate outer array
+
             tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array_nd")
-            
+
             for i, elem in enumerate(elements):
                 if i >= outer_size:
                     break
-                
-                # Check if element is a pc_list (nested list with ValueRefs)
-                # elem.type_hint is the pc_list type class, elem.value is also the type class
-                elem_type = elem.type_hint if hasattr(elem, 'type_hint') else None
-                
-                # Check if elem_type is a pc_list type (class with is_pc_list method)
-                is_pc_list_elem = (
-                    elem_type is not None and 
-                    isinstance(elem_type, type) and 
-                    hasattr(elem_type, 'is_pc_list') and 
-                    elem_type.is_pc_list()
-                )
-                
-                if is_pc_list_elem:
-                    # Recursively convert nested pc_list
-                    inner_val = self._convert_pc_list_to_array(elem_type, inner_array_type)
-                elif elem.is_python_value():
+
+                if elem.is_python_value():
                     py_val = elem.get_python_value()
-                    # Check if py_val is a pc_list type (from nested list)
-                    if isinstance(py_val, type) and hasattr(py_val, 'is_pc_list') and py_val.is_pc_list():
-                        inner_val = self._convert_pc_list_to_array(py_val, inner_array_type)
-                    elif isinstance(py_val, list):
-                        # Python list - use existing conversion
-                        inner_val = self._convert_list_to_array(py_val, inner_array_type)
-                    else:
+                    if not is_sequence_carrier(py_val):
                         raise TypeError(
-                            f"Expected list or pc_list for multi-dimensional array element, "
-                            f"got {type(py_val)}"
+                            f"Expected sequence literal for multi-dimensional array element, got {type(py_val)}"
                         )
+                    inner_carrier = self._sequence_literal_to_pc_list(py_val)
+                    inner_val = self._convert_pc_list_to_array(inner_carrier, inner_array_type)
                 else:
                     raise TypeError(
-                        f"Expected pc_list or Python list for multi-dimensional array element, "
-                        f"got {elem_type}"
+                        f"Expected python-backed sequence literal for multi-dimensional array element, got {elem.type_hint}"
                     )
                 
                 # Store inner array to outer array element

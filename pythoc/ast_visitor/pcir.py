@@ -286,28 +286,28 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
         # change the actual return type from the LLVM function signature)
         return_type_hint = kwargs.get('return_type_hint')
         if return_type_hint is not None and hasattr(return_type_hint, 'get_llvm_type'):
+            fn = args[0] if args else None
+            module_context = None
+            if fn is not None and hasattr(fn, 'module') and fn.module:
+                module_context = fn.module.context
+
+            if module_context is not None:
+                try:
+                    ret = return_type_hint.get_llvm_type(module_context)
+                    if isinstance(ret, ir.VoidType):
+                        return None
+                    return ret
+                except (Exception, SystemExit):
+                    pass
+
             try:
-                # Try with None context first, fall back to inferring from fn
                 ret = return_type_hint.get_llvm_type(None)
                 if isinstance(ret, ir.VoidType):
                     return None
                 return ret
             except (Exception, SystemExit):
-                # IdentifiedStructType may need module_context
-                # Try to get it from the function argument
-                fn = args[0] if args else None
-                module_context = None
-                if fn is not None and hasattr(fn, 'module') and fn.module:
-                    module_context = fn.module.context
-                if module_context:
-                    try:
-                        ret = return_type_hint.get_llvm_type(module_context)
-                        if isinstance(ret, ir.VoidType):
-                            return None
-                        return ret
-                    except (Exception, SystemExit):
-                        pass
-                # Fall through to function type inference
+                pass
+            # Fall through to function type inference
 
         fn = args[0]
         fn_type = _get_vreg_type(fn)

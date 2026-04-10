@@ -98,6 +98,15 @@ class PCListType(StructType, metaclass=PCListTypeMeta):
             return []
         return [elem.type_hint for elem in cls._elements]
 
+    @classmethod
+    def handle_type_subscript(cls, items):
+        """Support compile-time indexing on literal carrier instances."""
+        if cls._elements is not None and len(items) == 1:
+            _, index = items[0]
+            if isinstance(index, int):
+                return cls.get_element(index)
+        return super().handle_type_subscript(items)
+
 
 def create_pc_list_type(elements: List['ValueRef']) -> type:
     """Create a pc_list type from a list of ValueRefs.

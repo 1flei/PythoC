@@ -93,7 +93,7 @@ class PythonType(_PythonTypeBase):
             return 0
         return 0  # Non-constant Python types also have no LLVM representation
     
-    def get_type_id(self) -> str:
+    def get_type_id(self, _visited=None) -> str:
         """Get type ID for pyconst[value]."""
         if self._is_constant:
             # Use value repr for type ID
@@ -350,11 +350,23 @@ class PythonType(_PythonTypeBase):
             index: Pre-evaluated index (ValueRef) - always provided now
             node: ast.Subscript node
         """
+        from ..literal_protocol import (
+            get_mapping_value,
+            get_sequence_element,
+            get_sequence_length,
+            is_mapping_carrier,
+            is_sequence_carrier,
+        )
         from ..valueref import wrap_value
         
         # Check if the Python object is a PC type class with handle_type_subscript
         # This handles PC type classes (ptr, struct, array, func, etc.)
-        if isinstance(self._python_object, type) and hasattr(self._python_object, 'handle_type_subscript'):
+        if (
+            isinstance(self._python_object, type)
+            and hasattr(self._python_object, 'handle_type_subscript')
+            and not is_sequence_carrier(self._python_object)
+            and not is_mapping_carrier(self._python_object)
+        ):
             # Extract value from index ValueRef and pass to normalize_subscript_items
             # normalize_subscript_items handles all formats: slice, tuple, refined[..., "slice/tuple"]
             if index.is_python_value():
@@ -383,19 +395,59 @@ class PythonType(_PythonTypeBase):
                 logger.error(f"List subscript requires constant index at compile time, got {type(node.slice)}",
                             node=node, exc_type=TypeError)
         
-        # Handle dict subscript
+        if is_mapping_carrier(self._python_object):
+            try:
+                result = get_mapping_value(self._python_object, index_val)
+            except KeyError:
+                available_keys = []
+                if isinstance(self._python_object, dict):
+                    available_keys = list(self._python_object.keys())
+                logger.error(f"Dict key not found: {index_val}, available keys={available_keys}", node=node, exc_type=KeyError)
+            return self._wrap_constant_result(visitor, result)
+
+        if is_sequence_carrier(self._python_object):
+            if not isinstance(index_val, int):
+                logger.error(f"Sequence subscript requires integer index, got {type(index_val).__name__}", node=node, exc_type=TypeError)
+            sequence_length = get_sequence_length(self._python_object)
+            if index_val < 0 or index_val >= sequence_length:
+                logger.error(
+                    f"List index out of range: {index_val} >= {sequence_length}, obj={self._python_object}",
+                    node=node,
+                    exc_type=IndexError,
+                )
+            result = get_sequence_element(self._python_object, index_val)
+            return self._wrap_constant_result(visitor, result)
+
         if isinstance(self._python_object, dict):
             if index_val not in self._python_object:
-                logger.error(f"Dict key not found: {index_val}, available keys={list(self._python_object.keys())}", node=node, exc_type=KeyError)
-            result = self._python_object[index_val]
-            return self._wrap_constant_result(visitor, result)
-        
-        # Handle list/tuple subscript - check bounds
-        if isinstance(index_val, int) and index_val >= len(self._python_object):
-            logger.error(f"List index out of range: {index_val} >= {len(self._python_object)}, obj={self._python_object}", node=node, exc_type=IndexError)
+                logger.error(
+                    f"Dict key not found: {index_val}, available keys={list(self._python_object.keys())}",
+                    node=node,
+                    exc_type=KeyError,
+                )
+            return self._wrap_constant_result(visitor, self._python_object[index_val])
 
-        result = self._python_object[index_val]
-        return self._wrap_constant_result(visitor, result)
+        if isinstance(self._python_object, (list, tuple, str, bytes)):
+            if not isinstance(index_val, int):
+                logger.error(
+                    f"Sequence subscript requires integer index, got {type(index_val).__name__}",
+                    node=node,
+                    exc_type=TypeError,
+                )
+            sequence_length = len(self._python_object)
+            if index_val < 0 or index_val >= sequence_length:
+                logger.error(
+                    f"List index out of range: {index_val} >= {sequence_length}, obj={self._python_object}",
+                    node=node,
+                    exc_type=IndexError,
+                )
+            return self._wrap_constant_result(visitor, self._python_object[index_val])
+
+        logger.error(
+            f"Object of type {type(self._python_object).__name__} is not subscriptable",
+            node=node,
+            exc_type=TypeError,
+        )
     
     def _extract_struct_type_items(self, struct_type):
         """Extract items from a struct type (from visit_Tuple without all-python special case).
@@ -410,33 +462,9 @@ class PythonType(_PythonTypeBase):
         Returns:
             Tuple of items suitable for normalize_subscript_items
         """
-        from .refined import RefinedType
-        
-        field_types = getattr(struct_type, '_field_types', [])
-        if not field_types:
-            logger.error(f"Struct type has no field types: {struct_type}", node=None, exc_type=TypeError)
-        
-        items = []
-        for field_type in field_types:
-            # Extract actual value from pyconst wrapper
-            actual_value = field_type
-            if hasattr(field_type, '_python_object'):
-                actual_value = field_type._python_object
-            elif hasattr(field_type, 'get_python_object'):
-                actual_value = field_type.get_python_object()
-            
-            # Check if it's a refined type with "slice" tag
-            if isinstance(actual_value, type) and issubclass(actual_value, RefinedType):
-                tags = getattr(actual_value, '_tags', [])
-                if "slice" in tags:
-                    # Use base class method to extract slice
-                    from .base import BuiltinType
-                    items.append(BuiltinType._extract_slice_from_refined(actual_value))
-                    continue
-            
-            items.append(actual_value)
-        
-        return tuple(items)
+        from ..literal_protocol import extract_runtime_tuple_items
+
+        return extract_runtime_tuple_items(struct_type)
     
     def _wrap_constant_result(self, visitor, result):
         """Wrap a compile-time evaluation result.
@@ -445,23 +473,9 @@ class PythonType(_PythonTypeBase):
         If result is a ValueRef, return it directly.
         Other Python values remain as pyconst.
         """
-        from ..valueref import wrap_value, ValueRef
-        
-        # If result is already a ValueRef, return it directly
-        if isinstance(result, ValueRef):
-            return result
-        
-        # Convert tuple to struct
-        if isinstance(result, tuple):
-            return self._convert_tuple_to_struct(visitor, result)
-        
-        # Convert list to pc_list
-        if isinstance(result, list):
-            return self._convert_list_to_pc_list(visitor, result)
-        
-        # Other Python values remain as pyconst
-        python_type = PythonType.wrap(result, is_constant=True)
-        return wrap_value(result, kind="python", type_hint=python_type)
+        from ..literal_protocol import wrap_literal_result
+
+        return wrap_literal_result(result)
     
     def _convert_tuple_to_struct(self, visitor, tup):
         """Convert Python tuple to struct type.

@@ -266,85 +266,42 @@ class ExpressionsMixin:
         if pc_type is None:
             pc_type = getattr(else_val, 'pc_type', None)
         
-        # If still None, try to infer from LLVM type
-        if pc_type is None:
-            llvm_type = get_type(phi)
-            pc_type = self._infer_pc_type_from_llvm(llvm_type)
-        
         return wrap_value(phi, kind="value", type_hint=pc_type)
-    
-    def _infer_pc_type_from_llvm(self, llvm_type):
-        """Infer PC type from LLVM type"""
-        from ..builtin_entities import i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, bool as bool_type
-        
-        if isinstance(llvm_type, ir.IntType):
-            width = llvm_type.width
-            if width == 1:
-                return bool_type
-            elif width == 8:
-                return i8
-            elif width == 16:
-                return i16
-            elif width == 32:
-                return i32
-            elif width == 64:
-                return i64
-        elif isinstance(llvm_type, (ir.FloatType, ir.DoubleType)):
-            if llvm_type == ir.FloatType():
-                return f32
-            elif llvm_type == ir.DoubleType():
-                return f64
-        
-        return None
 
     
     def visit_List(self, node: ast.List):
-        """Handle list expressions
-        
-        Returns:
-        - In constexpr mode: Python list (for type subscripts like func[[i32, i32], i32])
-        - All elements are PC type objects (not pc_list): Python list (for type annotations)
-        - Otherwise: pc_list type (for runtime array initialization)
-        
-        This distinction is important because:
-        - Type annotations need Python lists for func parameter types
-        - Runtime code needs pc_list to track ValueRefs for array conversion
-        """
-        from ..builtin_entities.pc_list import pc_list, PCListType
-        from ..builtin_entities.base import BuiltinEntity
-    
+        """Handle list expressions as pc_list literal carriers."""
+        from ..builtin_entities.pc_list import pc_list
+        from ..builtin_entities.python_type import PythonType
+
         elements = [self.visit_rvalue_expression(elt) for elt in node.elts]
-
-        # In constexpr mode, return Python list directly (for type subscripts)
-        if self.is_constexpr():
-            values = [elem.value if isinstance(elem, ValueRef) else elem for elem in elements]
-            return wrap_value(values, kind="python", type_hint=list)
-
-        # Check if all elements are PC type objects (for type annotations like func[[i32, i32], i32])
-        # Type objects are: BuiltinEntity subclasses (but NOT pc_list which is a value container)
-        def is_pc_type_object(elem):
-            if not elem.is_python_value():
-                return False
-            val = elem.get_python_value()
-            # Check if it's a type/class that is a BuiltinEntity but NOT pc_list
-            # pc_list is a value container, not a type annotation
-            if isinstance(val, type):
-                if issubclass(val, PCListType):
-                    return False  # pc_list is not a type annotation
-                if issubclass(val, BuiltinEntity):
-                    return True  # Other BuiltinEntity types are type annotations
-            return False
-        
-        if all(is_pc_type_object(elem) for elem in elements):
-            # Type list - return Python list for type annotations
-            values = [elem.get_python_value() for elem in elements]
-            from ..builtin_entities.python_type import PythonType
-            python_type_inst = PythonType.wrap(values, is_constant=True)
-            return wrap_value(values, kind="python", type_hint=python_type_inst)
-
-        # Value list (Python values, IR values, or nested pc_lists) - create pc_list
         list_type = pc_list.from_elements(elements)
-        return wrap_value(list_type, kind="python", type_hint=list_type)
+        return wrap_value(
+            list_type,
+            kind="python",
+            type_hint=PythonType.wrap(list_type, is_constant=True),
+        )
+
+    def visit_Dict(self, node: ast.Dict):
+        """Handle dict expressions as pc_dict literal carriers."""
+        from ..builtin_entities.pc_dict import pc_dict
+        from ..builtin_entities.python_type import PythonType
+
+        entries = []
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:
+                logger.error("dict unpacking is not supported", node=node, exc_type=NotImplementedError)
+            key_ref = self.visit_rvalue_expression(key_node)
+            value_ref = self.visit_rvalue_expression(value_node)
+            entries.append((key_ref, value_ref))
+
+        dict_type = pc_dict.from_entries(entries)
+        return wrap_value(
+            dict_type,
+            kind="python",
+            type_hint=PythonType.wrap(dict_type, is_constant=True),
+        )
+
 
     def visit_GeneratorExp(self, node: ast.GeneratorExp):
         """Handle generator expression as compile-time-only pyconst value.
@@ -434,61 +391,17 @@ class ExpressionsMixin:
         return wrap_value(refined_type, kind="python", type_hint=PythonType.wrap(refined_type))
 
     def visit_Tuple(self, node: ast.Tuple):
-        """Handle tuple expressions - returns struct type
-        
-        Creates an anonymous struct type from the tuple elements.
-        For Python values, uses pyconst[value] as the field type.
-        This allows tuples to be used as lightweight structs in PC code.
-        
-        If all fields are zero-sized (pyconst), no IR is generated and a python
-        value is returned. This enables using visit_expression for type resolution.
-        """
-        from ..builtin_entities.struct import struct
+        """Handle tuple expressions as pc_tuple literal carriers."""
+        from ..builtin_entities.pc_tuple import pc_tuple
         from ..builtin_entities.python_type import PythonType
-        
-        # Evaluate all elements
+
         elements = [self.visit_rvalue_expression(elt) for elt in node.elts]
-        
-        # In constexpr mode, return Python tuple directly
-        if self.is_constexpr():
-            values = [elem.value if isinstance(elem, ValueRef) else elem for elem in elements]
-            return wrap_value(tuple(values), kind="python", type_hint=tuple)
-        
-        # Build struct type from element types
-        # Format: ((None, type1), (None, type2), ...) for unnamed fields
-        # For Python values, use pyconst[value] as the type
-        field_specs = [(None, elem.get_pc_type()) for elem in elements]
-        # Create anonymous struct type: struct[type1, type2, ...]
-        struct_type = struct.handle_type_subscript(tuple(field_specs))
-        
-        # Get LLVM struct type to check if it has any runtime fields
-        llvm_struct_type = struct_type.get_llvm_type(self.module.context)
-        
-        # If struct has no runtime fields (all pyconst), return as python value
-        # This enables compile-time evaluation without IR generation
-        if len(llvm_struct_type.elements) == 0:
-            return wrap_value(struct_type, kind="python", type_hint=PythonType.wrap(struct_type))
-        
-        # Allocate struct and store elements
-        struct_alloca = self.builder.alloca(llvm_struct_type, name="tuple_struct")
-        
-        # Store each element into the struct
-        # Zero-sized fields (like pyconst) exist as {} in LLVM IR
-        for i, elem in enumerate(elements):
-            field_ptr = self.builder.gep(
-                struct_alloca,
-                [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
-                name=f"tuple_field_{i}"
-            )
-            self.builder.store(ensure_ir(elem), field_ptr)
-            
-            # Transfer ownership of linear elements (they're being moved into the tuple)
-            self._transfer_linear_ownership(elem, reason="tuple construction", node=node)
-        
-        # Load the struct value
-        struct_val = self.builder.load(struct_alloca, name="tuple_val")
-        
-        return wrap_value(struct_val, kind="address", type_hint=struct_type, address=struct_alloca)
+        tuple_type = pc_tuple.from_elements(elements)
+        return wrap_value(
+            tuple_type,
+            kind="python",
+            type_hint=PythonType.wrap(tuple_type, is_constant=True),
+        )
     
 
     def visit_JoinedStr(self, node: ast.JoinedStr):

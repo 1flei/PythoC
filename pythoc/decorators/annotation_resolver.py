@@ -63,7 +63,7 @@ def build_annotation_namespace(user_globals: dict, is_dynamic: bool = False,
 
 
 def resolve_string_annotation(annotation_str: str, eval_namespace: dict, 
-                              type_resolver=None) -> Any:
+                              type_resolver) -> Any:
     """
     Resolve a string type annotation to an actual type.
     
@@ -80,42 +80,18 @@ def resolve_string_annotation(annotation_str: str, eval_namespace: dict,
         The resolved type, or the original string if resolution fails
     """
     from ..builtin_entities import BuiltinEntity
-    
-    # Strategy 1: Try TypeResolver first (it handles nested types correctly)
-    # This ensures that ptr['ListNode'] gets properly resolved with ListNode looked up
-    if type_resolver:
-        try:
-            parsed = type_resolver.parse_annotation(annotation_str)
-            if parsed is not None:
-                return parsed
-        except:
-            pass
-    
-    # Strategy 2: Try direct eval as fallback
-    try:
-        evaled = eval(annotation_str, eval_namespace)
-        # Check if it's a valid PC type
-        if isinstance(evaled, type) and issubclass(evaled, BuiltinEntity):
-            if evaled.can_be_type():
-                return evaled
-        # Also accept non-BuiltinEntity types (might be struct classes)
-        return evaled
-    except:
-        pass
-    
-    # If all strategies fail, return the string (for lazy resolution)
-    return annotation_str
+    return type_resolver.parse_annotation(annotation_str)
 
 
-def resolve_annotations_dict(annotations: dict, eval_namespace: dict, 
-                             type_resolver=None) -> dict:
+def resolve_annotations_dict(annotations: dict, eval_namespace: dict,
+                             type_resolver) -> dict:
     """
     Resolve all annotations in a __annotations__ dictionary.
-    
+
     Args:
         annotations: The __annotations__ dictionary from a function or class
-        eval_namespace: The namespace to use for eval
-        type_resolver: Optional TypeResolver instance for fallback parsing
+        eval_namespace: The namespace prepared for TypeResolver callers
+        type_resolver: TypeResolver instance used for string annotation resolution
     
     Returns:
         Dictionary mapping annotation names to resolved types

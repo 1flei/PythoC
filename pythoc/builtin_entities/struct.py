@@ -403,7 +403,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     def get_type_id(cls, _visited=None) -> str:
         """Generate unique type ID for struct types"""
         struct_name = cls._canonical_name or getattr(cls, '__name__', 'S')
-        suffix = cls.get_type_id_suffix()
+        suffix = cls.get_type_id_suffix(_visited)
         return f"{len(struct_name)}{struct_name}_{suffix}"
     
     @classmethod
@@ -540,20 +540,17 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         # Load value and return with address for lvalue support
         loaded_value = visitor.builder.load(field_ptr)
         
-        # Propagate linear tracking info
-        base_var_name = getattr(base, 'var_name', None)
-        base_linear_path = getattr(base, 'linear_path', None)
-        
-        if base_var_name and base_linear_path is not None:
-            # Extend the path with this field index
-            result_var_name = base_var_name
-            result_linear_path = base_linear_path + (field_index,)
-        else:
-            result_var_name = None
-            result_linear_path = None
-        
-        return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr,
-                         var_name=result_var_name, linear_path=result_linear_path)
+        from ..literal_protocol import project_tracking_metadata
+
+        result_var_name, result_linear_path = project_tracking_metadata(base, field_index)
+        return wrap_value(
+            loaded_value,
+            kind="address",
+            type_hint=field_type,
+            address=field_ptr,
+            var_name=result_var_name,
+            linear_path=result_linear_path,
+        )
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
@@ -601,16 +598,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         # Priority: if base has address, use GEP for lvalue support.
         # Otherwise, if base is a struct value, use extract_value.
 
-        # Compute extended linear path for result
-        base_var_name = getattr(base, 'var_name', None)
-        base_linear_path = getattr(base, 'linear_path', None)
-        if base_var_name and base_linear_path is not None:
-            result_var_name = base_var_name
-            result_linear_path = base_linear_path + (index_val,)
-        else:
-            result_var_name = None
-            result_linear_path = None
-        
+        from ..literal_protocol import project_tracking_metadata
+
+        result_var_name, result_linear_path = project_tracking_metadata(base, index_val)
+
         if base.is_pointer_typed():
             struct_ptr = ensure_ir(base)
         elif base.has_place():
