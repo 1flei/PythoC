@@ -211,74 +211,24 @@ def unwrap_literal_item(item: Any) -> Any:
 
 
 def extract_subscript_items(items: Any) -> Tuple[Any, ...]:
-    from .builtin_entities.base import BuiltinType
-    from .builtin_entities.refined import RefinedType
-
-    if isinstance(items, type) and issubclass(items, RefinedType):
-        tags = getattr(items, '_tags', [])
-        if 'tuple' in tags:
-            return BuiltinType._extract_tuple_from_refined(items)
-
     if is_sequence_carrier(items):
         return tuple(unwrap_literal_item(item) for item in get_sequence_elements(items))
 
     return (items,)
 
 
-def extract_runtime_tuple_items(struct_type: Any) -> Tuple[Any, ...]:
-    from .builtin_entities.base import BuiltinType
-    from .builtin_entities.refined import RefinedType
-
-    field_types = getattr(struct_type, '_field_types', [])
-    if not field_types:
-        logger.error(f"Struct type has no field types: {struct_type}", node=None, exc_type=TypeError)
-
-    items = []
-    for field_type in field_types:
-        actual_value = unwrap_python_object(field_type)
-
-        if isinstance(actual_value, type) and issubclass(actual_value, RefinedType):
-            tags = getattr(actual_value, '_tags', [])
-            if 'slice' in tags:
-                items.append(BuiltinType._extract_slice_from_refined(actual_value))
-                continue
-            if 'tuple' in tags:
-                items.extend(BuiltinType._extract_tuple_from_refined(actual_value))
-                continue
-
-        items.append(actual_value)
-
-    return tuple(items)
-
-
-def _extract_tagged_tuple_type_items(type_hint: Any) -> Optional[Tuple[Any, ...]]:
-    from .builtin_entities.refined import RefinedType
-
-    resolved = unwrap_python_object(type_hint)
-    if not (isinstance(resolved, type) and issubclass(resolved, RefinedType)):
-        return None
-
-    if 'tuple' not in getattr(resolved, '_tags', []):
-        return None
-
-    base_type = getattr(resolved, '_base_type', None)
-    if base_type is None:
-        return None
-
-    return extract_runtime_tuple_items(base_type)
-
-
 def get_multidim_subscript_indices(visitor, index_ref: ValueRef, node) -> Optional[List[ValueRef]]:
-    """Normalize multi-dimensional index carriers into a list of ValueRefs."""
+    """Normalize multi-dimensional index carriers into a list of ValueRefs.
+
+    Supported inputs:
+    - python-backed literal sequence carriers like pc_tuple/pc_list
+    - runtime struct values whose fields are used as indices
+    """
     if index_ref.is_python_value():
         python_value = index_ref.get_python_value()
         if is_sequence_carrier(python_value):
             return [wrap_literal_result(item) for item in get_sequence_elements(python_value)]
         return None
-
-    tagged_tuple_items = _extract_tagged_tuple_type_items(getattr(index_ref, 'type_hint', None))
-    if tagged_tuple_items is not None:
-        return [wrap_literal_result(item) for item in tagged_tuple_items]
 
     if index_ref.is_struct_value():
         pc_type = index_ref.get_pc_type()

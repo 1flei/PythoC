@@ -23,6 +23,7 @@ from ..builtin_entities import bool as pc_bool
 from ..registry import get_unified_registry, infer_struct_from_access
 from ..logger import logger
 from ..type_converter import ImplicitCoercer, get_base_type
+from ..literal_protocol import wrap_literal_result
 
 
 class ExpressionsMixin:
@@ -332,7 +333,7 @@ class ExpressionsMixin:
     
 
     def visit_Slice(self, node: ast.Slice):
-        """Handle slice syntax (x: Type) as refined[struct[...], "slice"].
+        """Handle slice syntax (x: Type) as a named-item pc_tuple carrier.
         
         ast.Slice structure:
         - lower: field name (ast.Name 'x' -> string "x")
@@ -340,15 +341,11 @@ class ExpressionsMixin:
         - step: None (not used)
         
         Equivalence:
-            x: i32      <=>  refined[struct[pyconst["x"], pyconst[i32]], "slice"]
-            "name": f64 <=>  refined[struct[pyconst["name"], pyconst[f64]], "slice"]
+            x: i32       <=> pc_tuple["x", i32]
+            "name": f64 <=> pc_tuple["name", f64]
         
-        Returns: ValueRef representing refined[struct[...], "slice"]
+        Returns: ValueRef representing a 2-item literal carrier.
         """
-        from ..builtin_entities.python_type import PythonType, pyconst
-        from ..builtin_entities.struct import struct
-        from ..builtin_entities.refined import refined
-        
         # Extract field name as STRING (not variable lookup!)
         if node.lower is None:
             logger.error("Slice must have lower bound (field name)", node=node, exc_type=TypeError)
@@ -369,26 +366,13 @@ class ExpressionsMixin:
         
         field_type_ref = self.visit_expression(node.upper)
         
-        # Extract the actual type from field_type_ref
-        # field_type_ref is pyconst[i32], we need to get i32
+        # Extract the actual type from field_type_ref.
         if field_type_ref.is_python_value():
             field_type = field_type_ref.value
         else:
             field_type = field_type_ref.type_hint
-        
-        # Create 2-element struct: struct[pyconst["x"], pyconst[field_type]]
-        # Field 0: the name (as pyconst[str])
-        # Field 1: the type (as pyconst[type])
-        inner_struct_type = struct.handle_type_subscript((
-            (None, pyconst[field_name]),
-            (None, pyconst[field_type]),
-        ))
-        
-        # Wrap as refined[struct[...], "slice"]
-        refined_type = refined[inner_struct_type, "slice"]
-        
-        # Return as python value (this is a type, not a runtime value)
-        return wrap_value(refined_type, kind="python", type_hint=PythonType.wrap(refined_type))
+
+        return wrap_literal_result((field_name, field_type))
 
     def visit_Tuple(self, node: ast.Tuple):
         """Handle tuple expressions as pc_tuple literal carriers."""
