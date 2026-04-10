@@ -200,20 +200,9 @@ class BuiltinType(BuiltinEntity):
             (i32, slice("y", f64)) -> ((None, i32), ("y", f64))
             (("x", i32), i32) -> (("x", i32), (None, i32))
         """
-        import builtins
-        from .refined import RefinedType
-        
-        # First, unwrap refined[..., "tuple"] if present (from visit_Tuple in AST parsing)
-        # This handles the case where AST parsing produces a single refined type
-        # containing multiple elements
-        if not isinstance(items, builtins.tuple):
-            if isinstance(items, type) and issubclass(items, RefinedType):
-                tags = getattr(items, '_tags', [])
-                if "tuple" in tags:
-                    # Recursively extract items from refined tuple
-                    items = cls._extract_tuple_from_refined(items)
-            if not isinstance(items, builtins.tuple):
-                items = (items,)
+        from ..literal_protocol import extract_subscript_items
+
+        items = extract_subscript_items(items)
         
         normalized = []
         for item in items:
@@ -426,7 +415,7 @@ class BuiltinType(BuiltinEntity):
         return False
     
     @classmethod
-    def get_type_id(cls) -> str:
+    def get_type_id(cls, _visited=None) -> str:
         """
         Generate unique type ID for this type.
         Default implementation for primitive types based on their structural properties.

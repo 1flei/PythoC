@@ -160,9 +160,13 @@ __all__ = [
     'is_python_type',
     'pyconst',
     
-    # PC list type
+    # PC literal carriers
     'pc_list',
     'PCListType',
+    'pc_tuple',
+    'PCTupleType',
+    'pc_dict',
+    'PCDictType',
     
     # Registry and query functions
     'get_builtin_entity',

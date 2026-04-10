@@ -214,14 +214,14 @@ class func(BuiltinType):
         1) Use base normalization to get pairs: ((None, [p1,p2]) , (None, ret))
         2) If first item is an unnamed list/tuple, expand into ((None, p1), (None, p2), ..., (None, ret))
         """
-        import builtins
+        from ..literal_protocol import is_sequence_carrier, extract_subscript_items
+
         base_normalized = super().normalize_subscript_items(items)
-        if (isinstance(base_normalized, builtins.tuple) and len(base_normalized) >= 2 and
-            base_normalized[0][0] is None and isinstance(base_normalized[0][1], (builtins.list, builtins.tuple))):
+        if len(base_normalized) >= 2 and base_normalized[0][0] is None:
             legacy_params = base_normalized[0][1]
-            expanded_params = tuple((None, p) for p in legacy_params)
-            # keep the rest items (including return type) after expansion
-            return expanded_params + base_normalized[1:]
+            if is_sequence_carrier(legacy_params):
+                expanded_params = tuple((None, p) for p in extract_subscript_items(legacy_params))
+                return expanded_params + base_normalized[1:]
         return base_normalized
 
     @classmethod

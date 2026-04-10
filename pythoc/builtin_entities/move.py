@@ -6,8 +6,35 @@ and returning the value for use elsewhere.
 """
 import ast
 from .base import BuiltinFunction
-from ..valueref import wrap_value
+from ..valueref import ValueRef
 from ..logger import logger
+
+
+def _fresh_move_value(value):
+    from ..literal_protocol import (
+        get_mapping_entries,
+        get_sequence_elements,
+        is_mapping_carrier,
+        is_sequence_carrier,
+        rebuild_mapping_carrier,
+        rebuild_sequence_carrier,
+    )
+
+    if isinstance(value, ValueRef):
+        return value.clone(var_name=None, linear_path=None)
+
+    if is_sequence_carrier(value):
+        fresh_elements = [_fresh_move_value(elem) for elem in get_sequence_elements(value)]
+        return rebuild_sequence_carrier(value, fresh_elements)
+
+    if is_mapping_carrier(value):
+        fresh_entries = [
+            (_fresh_move_value(key), _fresh_move_value(mapped_value))
+            for key, mapped_value in get_mapping_entries(value)
+        ]
+        return rebuild_mapping_carrier(value, fresh_entries)
+
+    return value
 
 
 class move(BuiltinFunction):
@@ -64,5 +91,5 @@ class move(BuiltinFunction):
         # This ensures the assignment treats it as a fresh value, not a variable reference
         # The ownership has already been transferred from the source by visit_Call
         
-        # Preserve ValueRef storage semantics but drop tracking metadata.
-        return arg_value.clone(var_name=None, linear_path=None)
+        fresh_value = _fresh_move_value(arg_value.value)
+        return arg_value.clone(value=fresh_value, var_name=None, linear_path=None)

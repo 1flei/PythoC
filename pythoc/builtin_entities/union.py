@@ -16,9 +16,9 @@ class UnionType(CompositeType):
         return 'union'
     
     @classmethod
-    def get_type_id(cls) -> str:
+    def get_type_id(cls, _visited=None) -> str:
         """Generate unique type ID for union types"""
-        suffix = cls.get_type_id_suffix()
+        suffix = cls.get_type_id_suffix(_visited)
         return f'U{suffix}'
     
     @classmethod

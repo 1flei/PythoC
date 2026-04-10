@@ -48,12 +48,11 @@ class array(BuiltinType):
         return 'array'
     
     @classmethod
-    def get_type_id(cls) -> str:
+    def get_type_id(cls, _visited=None) -> str:
         """Generate unique type ID for array types."""
         if cls.element_type and cls.dimensions:
-            # Import here to avoid circular dependency
             from ..type_id import get_type_id
-            elem_id = get_type_id(cls.element_type)
+            elem_id = get_type_id(cls.element_type, _visited)
             dims_str = '_'.join(str(d) for d in cls.dimensions)
             return f'A{elem_id}_{dims_str}'
         return 'Ax'  # unknown array

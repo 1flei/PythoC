@@ -132,7 +132,7 @@ class ptr(BuiltinType):
         return 'ptr[void]'
     
     @classmethod
-    def get_type_id(cls) -> str:
+    def get_type_id(cls, _visited=None) -> str:
         """Generate unique type ID for pointer types."""
         if cls.pointee_type is not None:
             pointee = cls.pointee_type
@@ -146,9 +146,8 @@ class ptr(BuiltinType):
                 pointee = resolved
                 pointee = resolved
             
-            # Import here to avoid circular dependency
             from ..type_id import get_type_id
-            pointee_id = get_type_id(pointee)
+            pointee_id = get_type_id(pointee, _visited)
             return f'P{pointee_id}'
         return 'Pv'  # void pointer
     
@@ -428,44 +427,12 @@ class ptr(BuiltinType):
         Returns:
             ValueRef with dereferenced value
         """
-        from ..valueref import wrap_value, ensure_ir
-        from .refined import RefinedType
-        
-        # Value subscript: p[index] or p[i, j, k] - pointer arithmetic
-        # Check if index is a struct (multi-dimensional access from tuple expression)
-        # Also check for refined[struct[...], "tuple"] which is the new tuple representation
-        is_multidim = index.is_struct_value()
-        if not is_multidim and index.type_hint:
-            # Check if it's a refined type with "tuple" tag (from visit_Tuple)
-            type_hint = index.type_hint
-            # For python values, type_hint might be PythonType wrapping a refined type
-            if hasattr(type_hint, '_python_object'):
-                type_hint = type_hint._python_object
-            if isinstance(type_hint, type) and issubclass(type_hint, RefinedType):
-                tags = getattr(type_hint, '_tags', [])
-                if "tuple" in tags:
-                    # Extract indices from the refined tuple type
-                    base_struct = type_hint._base_type
-                    if hasattr(base_struct, '_field_types'):
-                        # Extract values from the struct fields (pyconst values)
-                        indices = []
-                        for field_type in base_struct._field_types:
-                            if hasattr(field_type, '_python_object'):
-                                indices.append(wrap_value(field_type._python_object, kind="python", 
-                                             type_hint=field_type))
-                            elif hasattr(field_type, 'get_python_object'):
-                                indices.append(wrap_value(field_type.get_python_object(), kind="python",
-                                             type_hint=field_type))
-                            else:
-                                indices.append(wrap_value(field_type, kind="python", type_hint=field_type))
-                        return cls._handle_multidim_subscript(visitor, base, indices, node)
-        
-        if is_multidim:
-            # Multi-dimensional pointer access: p[i, j, k] where (i, j, k) is a struct
-            indices = index.get_pc_type().get_all_fields(visitor, index, node)
+        from ..literal_protocol import get_multidim_subscript_indices
+
+        indices = get_multidim_subscript_indices(visitor, index, node)
+        if indices is not None:
             return cls._handle_multidim_subscript(visitor, base, indices, node)
         
-        # Single index: p[i] - convert to *(ptr + index)
         base = cls.handle_add(visitor, base, index, node)
         return cls.handle_deref(visitor, base, node)
     

@@ -448,80 +448,16 @@ class LLVMIRVisitor(ast.NodeVisitor):
     # ========================================================================
     
     def _is_linear_type(self, type_hint) -> bool:
-        """Check if a type is linear
-        
-        A type is linear if:
-        1. It's the linear token type itself
-        2. It has _is_linear attribute set to True
-        3. It's a RefinedType wrapping a linear type
-        4. It's a struct containing linear fields (recursively)
-        """
-        from ..builtin_entities import linear
-        from ..builtin_entities.refined import RefinedType
-        
-        if type_hint is linear:
-            return True
-        # Check if it's a class with _is_linear attribute
-        if isinstance(type_hint, type) and hasattr(type_hint, '_is_linear'):
-            return type_hint._is_linear
-        
-        # Check if it's a RefinedType - delegate to base type
-        if isinstance(type_hint, type) and issubclass(type_hint, RefinedType):
-            base_type = getattr(type_hint, '_base_type', None)
-            if base_type is not None:
-                return self._is_linear_type(base_type)
-        
-        # Check if it's a struct with linear fields
-        if isinstance(type_hint, type) and hasattr(type_hint, '_field_types'):
-            field_types = type_hint._field_types
-            if field_types:
-                for field_type in field_types:
-                    # Recursively check if any field is linear
-                    if self._is_linear_type(field_type):
-                        return True
-        
-        return False
+        """Check linearity through the shared composite schema helper."""
+        from ..literal_protocol import is_linear_schema_type
+
+        return is_linear_schema_type(type_hint)
     
     def _get_linear_paths(self, type_hint, prefix: Tuple[int, ...] = ()) -> List[Tuple[int, ...]]:
-        """Get all linear token paths in a type
-        
-        Returns list of index paths where linear tokens exist.
-        
-        Examples:
-            linear -> [()]
-            refined[linear, "tag"] -> [()] (refined wrapping linear is linear itself)
-            struct[ptr, linear] -> [(1,)]
-            struct[struct[ptr, linear], linear] -> [(0, 1), (1,)]
-        """
-        from ..builtin_entities import linear
-        from ..builtin_entities.refined import RefinedType
-        
-        if type_hint is linear:
-            return [prefix]
-        
-        if isinstance(type_hint, type) and hasattr(type_hint, '_is_linear') and type_hint._is_linear:
-            return [prefix]
-        
-        # Check if it's a RefinedType - delegate to base type
-        # A refined[linear, "tag"] is linear at the current path, not nested
-        if isinstance(type_hint, type) and issubclass(type_hint, RefinedType):
-            base_type = getattr(type_hint, '_base_type', None)
-            if base_type is not None:
-                # Delegate to base type at the same prefix (not nested)
-                return self._get_linear_paths(base_type, prefix)
-        
-        # Check if it's a struct with linear fields
-        if isinstance(type_hint, type) and hasattr(type_hint, '_field_types'):
-            field_types = type_hint._field_types
-            if field_types:
-                paths = []
-                for i, field_type in enumerate(field_types):
-                    # Recursively get paths from each field
-                    field_paths = self._get_linear_paths(field_type, prefix + (i,))
-                    paths.extend(field_paths)
-                return paths
-        
-        return []
+        """Get all linear token paths through the shared composite schema helper."""
+        from ..literal_protocol import get_linear_schema_paths
+
+        return get_linear_schema_paths(type_hint, prefix)
     
     def _init_linear_states(self, var_info, type_hint, initial_state: str = 'consumed'):
         """Initialize linear states for all linear paths in a type
@@ -643,18 +579,16 @@ class LLVMIRVisitor(ast.NodeVisitor):
             reason: Description of why ownership is being transferred
             node: AST node for error reporting
         """
+        from ..literal_protocol import iter_literal_value_refs
+
         logger.debug(f"_transfer_linear_ownership: value_ref={value_ref}, reason={reason}")
-        
-        # Handle Python tuple containing ValueRefs (e.g., return statements)
-        # Check this BEFORE checking if it's a linear type, because the tuple itself
-        # is not linear but may contain linear elements
+
         if value_ref.is_python_value():
-            py_val = value_ref.get_python_value()
-            if isinstance(py_val, tuple):
-                # Transfer ownership for each element in the tuple
-                for elem in py_val:
-                    if isinstance(elem, ValueRef):
-                        self._transfer_linear_ownership(elem, reason, node)
+            transferred_nested = False
+            for nested_ref in iter_literal_value_refs(value_ref.get_python_value()):
+                self._transfer_linear_ownership(nested_ref, reason, node)
+                transferred_nested = True
+            if transferred_nested:
                 return
         
         # Skip if not a linear type

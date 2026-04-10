@@ -39,37 +39,37 @@ class AssignmentsMixin:
         return result.as_lvalue()
 
     def _check_linear_rvalue_copy(self, rvalue: ValueRef, node) -> None:
-        """Check if rvalue is a linear token - forbid copy.
-        
-        Linear tokens cannot be copied; they must be moved explicitly.
-        Raises error via logger if attempting to copy a linear token.
-        
-        This is a syntactic check - any direct assignment of a linear variable
-        (without move()) is an error, regardless of the current state.
-        
-        Args:
-            rvalue: The rvalue being assigned
-            node: AST node for error reporting (lineno)
-        """
-        logger.debug(f"_check_linear_rvalue_copy: rvalue={rvalue}, var_name={getattr(rvalue, 'var_name', None)}, linear_path={getattr(rvalue, 'linear_path', None)}")
-        if not (hasattr(rvalue, 'var_name') and rvalue.var_name and 
-                hasattr(rvalue, 'linear_path') and rvalue.linear_path is not None):
-            return
-        
-        # Check if the rvalue's type is linear
-        if not self._is_linear_type(rvalue.type_hint):
-            return
-        
-        # Format path for error message
-        if rvalue.linear_path:
-            path_str = f"{rvalue.var_name}[{']['.join(map(str, rvalue.linear_path))}]"
-        else:
-            path_str = rvalue.var_name
-        logger.error(
-            f"Cannot assign linear token '{path_str}' "
-            f"(use move() to transfer ownership)",
-            node
+        """Check if rvalue is a linear token or embeds one in a carrier."""
+        from ..literal_protocol import iter_value_ref_leaves
+
+        logger.debug(
+            f"_check_linear_rvalue_copy: rvalue={rvalue}, "
+            f"var_name={getattr(rvalue, 'var_name', None)}, "
+            f"linear_path={getattr(rvalue, 'linear_path', None)}"
         )
+
+        for candidate in iter_value_ref_leaves(rvalue):
+            candidate_var_name = getattr(candidate, 'var_name', None)
+            candidate_linear_path = getattr(candidate, 'linear_path', None)
+            if not candidate_var_name or candidate_linear_path is None:
+                continue
+
+            if not self._is_linear_type(candidate.type_hint):
+                continue
+
+            if candidate_linear_path:
+                path_str = (
+                    f"{candidate_var_name}"
+                    f"[{']['.join(map(str, candidate_linear_path))}]"
+                )
+            else:
+                path_str = candidate_var_name
+
+            logger.error(
+                f"Cannot assign linear token '{path_str}' "
+                f"(use move() to transfer ownership)",
+                node,
+            )
 
     def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef, pc_type=None, source="inference") -> ValueRef:
         """Visit lvalue or define new variable if it doesn't exist
@@ -307,70 +307,19 @@ class AssignmentsMixin:
                 self._assign_to_target(target, rvalue, node)
     
     def _handle_tuple_unpacking(self, target: ast.Tuple, value_node: ast.AST, rvalue: ValueRef, node: ast.AST):
-        """Handle tuple unpacking assignment
-        
-        Supports:
-        - Python tuple/list unpacking: a, b = (1, 2)
-        - Struct type with _elements (compile-time): a, b = struct_from_tuple
-        - Runtime struct unpacking: a, b = func() where func returns struct
-        """
-        from ..valueref import wrap_value, ValueRef
-        from ..builtin_entities.python_type import PythonType
-        
-        # Case 1: Python value (compile-time)
-        if rvalue.is_python_value():
-            py_val = rvalue.get_python_value()
-            
-            # Get elements from either _elements attribute or tuple/list directly
-            if hasattr(py_val, '_elements') and py_val._elements is not None:
-                elements = py_val._elements
-            elif isinstance(py_val, (tuple, list)):
-                elements = py_val
-            else:
-                logger.error(f"Cannot unpack Python value of type {type(py_val)}", node=value_node, exc_type=TypeError)
-            
-            if len(elements) != len(target.elts):
-                logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(elements)} values",
-                            node=target, exc_type=TypeError)
-            
-            for elem, elt in zip(elements, target.elts):
-                if isinstance(elem, ValueRef):
-                    self._assign_to_target(elt, elem, target)
-                else:
-                    val_ref = wrap_value(elem, kind='python',
-                                       type_hint=PythonType.wrap(elem, is_constant=True))
-                    self._assign_to_target(elt, val_ref, target)
-            return
-        
-        # Case 2: Runtime struct unpacking
-        if hasattr(rvalue, 'type_hint') and hasattr(rvalue.type_hint, '_field_types'):
-            struct_type = rvalue.type_hint
-            field_types = struct_type._field_types
-            
-            if len(target.elts) != len(field_types):
-                logger.error(f"Unpacking mismatch: {len(target.elts)} variables, {len(field_types)} fields",
-                            node=target, exc_type=TypeError)
-            
-            for i, elt in enumerate(target.elts):
-                field_pc_type = field_types[i]
-                
-                # Special handling for pyconst fields (zero-sized, value is in type)
-                if isinstance(field_pc_type, PythonType) and field_pc_type.is_constant():
-                    const_value = field_pc_type.get_constant_value()
-                    field_val_ref = wrap_value(const_value, kind='python', type_hint=field_pc_type)
-                else:
-                    # Regular field: extract from LLVM struct
-                    module_context = self.module.context if self.module else None
-                    llvm_index = struct_type._get_llvm_field_index(i, module_context)
-                    if llvm_index == -1:
-                        logger.error(f"Zero-sized field [{i}] has no LLVM representation", node=node, exc_type=RuntimeError)
-                    field_value = self.builder.extract_value(ensure_ir(rvalue), llvm_index)
-                    field_val_ref = wrap_value(field_value, type_hint=field_pc_type, node=node)
-                
-                self._assign_to_target(elt, field_val_ref, target, pc_type=field_pc_type)
-            return
-        
-        logger.error(f"Unsupported unpacking type: {rvalue.type_hint}.", node=value_node, exc_type=TypeError)
+        """Handle tuple unpacking assignment through the literal protocol."""
+        from ..literal_protocol import get_unpack_values
+
+        unpack_values = get_unpack_values(self, rvalue, value_node)
+        if len(unpack_values) != len(target.elts):
+            logger.error(
+                f"Unpacking mismatch: {len(target.elts)} variables, {len(unpack_values)} values",
+                node=target,
+                exc_type=TypeError,
+            )
+
+        for unpack_value, elt in zip(unpack_values, target.elts):
+            self._assign_to_target(elt, unpack_value, target, pc_type=unpack_value.get_pc_type())
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         """Handle annotated assignment statements (variable declarations with types)

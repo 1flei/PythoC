@@ -306,7 +306,7 @@ class CompositeType(BuiltinType):
         return cls._field_types[index]
     
     @classmethod
-    def get_type_id_suffix(cls) -> str:
+    def get_type_id_suffix(cls, _visited=None) -> str:
         """Generate type ID suffix based on field structure
 
         This creates a hash-based suffix that uniquely identifies the composite type
@@ -324,12 +324,15 @@ class CompositeType(BuiltinType):
         if not cls._field_types:
             return "empty"
 
+        if _visited is None:
+            _visited = set()
+
         # Build field structure string for hashing
         field_ids = []
         field_names = cls._field_names or [None] * len(cls._field_types)
 
         for fname, ftype in zip(field_names, cls._field_types):
-            ftype_id = get_type_id(ftype) if ftype is not None else "void"
+            ftype_id = get_type_id(ftype, _visited) if ftype is not None else "void"
             if fname:
                 field_ids.append(f"{fname}:{ftype_id}")
             else:

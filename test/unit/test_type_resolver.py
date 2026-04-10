@@ -8,6 +8,7 @@ from llvmlite import ir
 
 from pythoc.type_resolver import TypeResolver
 from pythoc.builtin_entities import i32, i64, f32, f64, u8, u16, ptr, array
+from pythoc.builtin_entities.python_type import PythonType
 
 
 class TestTypeResolver(unittest.TestCase):
@@ -46,6 +47,14 @@ class TestTypeResolver(unittest.TestCase):
         """Test parsing type class directly"""
         result = self.resolver.parse_annotation(i32)
         self.assertEqual(result, i32)
+
+    def test_wrap_direct_type_class_as_pyconst(self):
+        """Test direct non-AST type input uses canonical pyconst wrapping"""
+        value_ref = self.resolver._wrap_as_python_value(i32)
+        self.assertTrue(value_ref.is_python_value())
+        self.assertEqual(value_ref.value, i32)
+        self.assertIsInstance(value_ref.type_hint, PythonType)
+        self.assertIs(value_ref.type_hint.get_python_object(), i32)
     
     def test_parse_unsigned_types(self):
         """Test parsing unsigned integer types"""

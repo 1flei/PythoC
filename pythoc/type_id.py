@@ -8,10 +8,22 @@ Two types are considered identical if and only if they produce the same type ID.
 Design: Each type implements its own get_type_id() classmethod.
 """
 
-from typing import Any
+from typing import Any, Optional, Set
 
 
-def get_type_id(pc_type: Any) -> str:
+def _recursive_type_token(pc_type: Any) -> str:
+    type_name = getattr(pc_type, '_canonical_name', None) or getattr(pc_type, '__name__', None)
+    if not type_name and hasattr(pc_type, 'get_name'):
+        try:
+            type_name = pc_type.get_name()
+        except Exception:
+            type_name = None
+    if not type_name:
+        type_name = type(pc_type).__name__
+    return f'R{len(type_name)}{type_name}'
+
+
+def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
     """
     Get the unique type ID for a PC type.
     
@@ -20,22 +32,30 @@ def get_type_id(pc_type: Any) -> str:
     
     Returns a compact string that uniquely identifies the type.
     """
+    if _visited is None:
+        _visited = set()
+
     if pc_type is None:
         return 'v'
+
+    type_key = id(pc_type)
+    if type_key in _visited:
+        return _recursive_type_token(pc_type)
     
-    # Delegate to type's own get_type_id() method
     if hasattr(pc_type, 'get_type_id'):
-        return pc_type.get_type_id()
+        _visited.add(type_key)
+        try:
+            return pc_type.get_type_id(_visited)
+        finally:
+            _visited.remove(type_key)
     
-    # Handle LLVM IR types by looking up Python class in registry
     from llvmlite import ir
     if isinstance(pc_type, ir.IdentifiedStructType):
         from .registry import get_unified_registry
         registry = get_unified_registry()
         struct_info = registry.get_struct(pc_type.name)
         if struct_info and struct_info.python_class:
-            return struct_info.python_class.get_type_id()
-        # No Python class found, use LLVM type name
+            return get_type_id(struct_info.python_class, _visited)
         return f'{len(pc_type.name)}{pc_type.name}'
     
     raise TypeError(f"Type {pc_type} (type={type(pc_type)}) does not have a get_type_id() method")

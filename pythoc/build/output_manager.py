@@ -236,6 +236,54 @@ class OutputManager:
             )
             return False
 
+        if not self._cached_dependency_outputs_exist(group):
+            return False
+
+        return True
+
+    def _cached_dependency_outputs_exist(self, group):
+        """Check whether persisted dependent groups still have materialized outputs."""
+        obj_file = group.get('obj_file')
+        if not obj_file:
+            return True
+
+        from .deps import get_dependency_tracker
+        from ..utils.link_utils import get_shared_lib_extension
+
+        dep_tracker = get_dependency_tracker()
+        deps = dep_tracker.load_deps(obj_file)
+        if not deps:
+            return True
+
+        lib_ext = get_shared_lib_extension()
+        cwd = os.getcwd()
+
+        for group_dep in deps.group_dependencies:
+            target_group = getattr(group_dep, 'target_group', None)
+            if target_group is None or not target_group.file:
+                continue
+
+            source_file = target_group.file
+            if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
+                rel_path = os.path.relpath(source_file, cwd)
+            else:
+                base_name = os.path.splitext(os.path.basename(source_file))[0]
+                rel_path = f"external/{base_name}.py"
+
+            build_dir = os.path.join('build', os.path.dirname(rel_path))
+            base_name = os.path.splitext(os.path.basename(source_file))[0]
+            file_suffix = target_group.get_file_suffix()
+            file_base = f"{base_name}.{file_suffix}" if file_suffix else base_name
+
+            dep_obj_file = os.path.join(build_dir, f"{file_base}.o")
+            dep_so_file = os.path.join(build_dir, f"{file_base}{lib_ext}")
+            if not os.path.exists(dep_obj_file) or not os.path.exists(dep_so_file):
+                from ..logger import logger
+                logger.debug(
+                    f"Cache miss for {group.get('source_file')}: dependent group output missing {dep_obj_file} / {dep_so_file}"
+                )
+                return False
+
         return True
     
     def _forward_declare_function(self, compiler, func_info):

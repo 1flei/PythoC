@@ -285,6 +285,32 @@ def run_extract_file():
     lfclose(file[0], file[1])
 
 
+@compile
+def consume_two_linear(a: linear, b: linear) -> void:
+    consume(a)
+    consume(b)
+
+
+@compile
+def run_unpack_moved_dual():
+    dt = make_dual_token()
+    first, second = move(dt)
+    consume(first)
+    consume(second)
+
+
+@compile
+def run_star_unpack_moved_dual():
+    dt = make_dual_token()
+    consume_two_linear(*move(dt))
+
+
+@compile
+def run_consume_dict_literal():
+    t = linear()
+    consume({"token": t})
+
+
 # ============================================================================
 # Test functions (successful cases)
 # ============================================================================
@@ -372,6 +398,24 @@ def test_extract_file():
     """Test extracting another composite from nested struct"""
     run_extract_file()
     print("OK test_extract_file passed")
+
+
+def test_unpack_moved_dual():
+    """Test runtime unpacking through shared carrier helper"""
+    run_unpack_moved_dual()
+    print("OK test_unpack_moved_dual passed")
+
+
+def test_star_unpack_moved_dual():
+    """Test starred unpack through shared carrier helper"""
+    run_star_unpack_moved_dual()
+    print("OK test_star_unpack_moved_dual passed")
+
+
+def test_consume_dict_literal():
+    """Test mapping carrier ownership transfer through consume()"""
+    run_consume_dict_literal()
+    print("OK test_consume_dict_literal passed")
 
 
 # ============================================================================
@@ -502,6 +546,29 @@ def test_error_loop_external_composite():
         clear_failed_group(group_key)
 
 
+def test_error_dict_literal_copy():
+    """Test nested mapping carrier copy check for linear tokens"""
+    source_file = os.path.abspath(__file__)
+    group_key = (source_file, 'module', 'bad_dict_literal_copy_v2')
+    try:
+        @compile(suffix="bad_dict_literal_copy_v2")
+        def bad_dict_literal_copy():
+            t = linear()
+            payload = {"token": t}
+            consume(payload["token"])
+
+        flush_all_pending_outputs()
+        print("FAIL test_error_dict_literal_copy failed - should have raised RuntimeError")
+    except RuntimeError as e:
+        err_str = str(e).lower()
+        if "cannot assign linear token" in err_str or "use move()" in err_str:
+            print(f"OK test_error_dict_literal_copy passed: {e}")
+        else:
+            print(f"FAIL test_error_dict_literal_copy failed - wrong error: {e}")
+    finally:
+        clear_failed_group(group_key)
+
+
 # ============================================================================
 # Main test runner
 # ============================================================================
@@ -520,6 +587,7 @@ if __name__ == "__main__":
         test_error_double_consume_in_dual()
         test_error_inconsistent_if_composite()
         test_error_loop_external_composite()
+        test_error_dict_literal_copy()
         print()
         
         print("=== Basic patterns ===")
@@ -546,6 +614,9 @@ if __name__ == "__main__":
         test_token_swap()
         test_extract_mem()
         test_extract_file()
+        test_unpack_moved_dual()
+        test_star_unpack_moved_dual()
+        test_consume_dict_literal()
         print()
         
         print("All composite linear type tests completed!")

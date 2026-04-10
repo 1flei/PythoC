@@ -54,60 +54,11 @@ class CallsMixin:
         )
     
     def _expand_starred_struct(self, struct_expr):
-        """Expand *struct_instance to individual field values
-        
-        Transforms:
-            f(*my_struct)
-        Into:
-            f(my_struct.field0, my_struct.field1, ...)
-        
-        Args:
-            struct_expr: AST node for the struct expression
-        
-        Returns:
-            List of ValueRef objects for each field
-        """
-        # Evaluate the struct instance
+        """Expand a starred carrier through the shared unpack protocol."""
+        from ..literal_protocol import get_unpack_values
+
         struct_val = self.visit_rvalue_expression(struct_expr)
-        
-        # Get struct type information
-        struct_type_hint = struct_val.type_hint
-        if struct_type_hint is None:
-            logger.error(f"Cannot unpack value without type information", node=struct_expr, exc_type=TypeError)
-        
-        # Check if it's a struct type by checking for _field_types attribute
-        if not hasattr(struct_type_hint, '_field_types'):
-            logger.error(f"Cannot unpack non-struct type: {struct_type_hint}", node=struct_expr, exc_type=TypeError)
-        
-        # Get field information from the struct type directly
-        field_types = struct_type_hint._field_types
-        field_names = getattr(struct_type_hint, '_field_names', None)
-        
-        # Empty struct unpacks to no arguments
-        if not field_types:
-            return []
-        
-        # Extract each field value
-        expanded_args = []
-        struct_ir = ensure_ir(struct_val)
-        
-        for field_index, field_type in enumerate(field_types):
-            # Use extractvalue to get the field directly from struct value
-            field_val = self.builder.extract_value(struct_ir, field_index, name=f"field_{field_index}")
-            
-            # Create ValueRef with field type and tracking info
-            field_ref = wrap_value(field_val, kind="value", type_hint=field_type)
-            
-            # If the original struct has tracking info, propagate it to the field
-            if hasattr(struct_val, 'var_name') and struct_val.var_name:
-                field_ref.var_name = struct_val.var_name
-                # Build the linear path for this field
-                base_path = getattr(struct_val, 'linear_path', ())
-                field_ref.linear_path = base_path + (field_index,)
-            
-            expanded_args.append(field_ref)
-        
-        return expanded_args
+        return get_unpack_values(self, struct_val, struct_expr)
     
 
     def _perform_call(self, node: ast.Call, func_callable, param_types, return_type_hint=None, evaluated_args=None, param_pc_types=None):

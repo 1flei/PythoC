@@ -36,7 +36,7 @@ from .builtin_entities import (
     union as UnionType,
 )
 from .registry import get_unified_registry
-from .valueref import ValueRef, wrap_value
+from .valueref import ValueRef, wrap_python_constant
 from .type_check import is_python_value
 
 
@@ -154,10 +154,10 @@ class TypeResolver:
         return visitor.visit_expression(node)
 
     def _wrap_as_python_value(self, value):
-        """Wrap Python value as ValueRef(kind='python')."""
+        """Wrap Python value as a canonical compile-time Python constant."""
         if isinstance(value, ValueRef):
             return value
-        return wrap_value(value, kind="python", type_hint=type(value))
+        return wrap_python_constant(value)
 
     def _extract_type_from_valueref(self, value_ref):
         """Extract type from ValueRef(kind='python') or raw value."""
