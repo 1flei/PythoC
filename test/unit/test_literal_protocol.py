@@ -9,6 +9,7 @@ from pythoc.builtin_entities import i32, linear
 from pythoc.builtin_entities.consume import consume
 from pythoc.builtin_entities.struct import struct
 from pythoc.literal_protocol import (
+    extract_subscript_items,
     get_linear_schema_paths,
     get_mapping_entries,
     get_multidim_subscript_indices,
@@ -70,6 +71,24 @@ class TestLiteralProtocol(unittest.TestCase):
         indices = get_multidim_subscript_indices(None, index, None)
 
         self.assertEqual([item.get_python_value() for item in indices], [1, 2, 3])
+
+    def test_extract_subscript_items_uses_sequence_carrier_path(self):
+        tuple_items = wrap_literal_result((i32, linear)).get_python_value()
+
+        self.assertEqual(extract_subscript_items(tuple_items), (i32, linear))
+
+    def test_struct_normalize_subscript_items_accepts_slice_pair_carrier(self):
+        named_item = wrap_literal_result(("field", i32)).get_python_value()
+
+        self.assertEqual(struct.normalize_subscript_items(named_item), (("field", i32),))
+
+    def test_struct_normalize_subscript_items_accepts_tuple_of_slice_pair_carriers(self):
+        named_items = wrap_literal_result((("field", i32), ("flag", linear))).get_python_value()
+
+        self.assertEqual(
+            struct.normalize_subscript_items(named_items),
+            (("field", i32), ("flag", linear)),
+        )
 
     def test_linear_schema_helpers_recurse_nested_composites(self):
         inner = struct[linear, i32]

@@ -185,8 +185,8 @@ class BuiltinType(BuiltinEntity):
                 - Tuple with slices: (slice("x", i32), slice("y", f64))
                 - Tuple with named tuples: (("x", i32), ("y", f64))
                 - Mixed: (i32, slice("y", f64), ("z", i32))
-                - refined[struct[...], "slice"]: from visit_Slice (AST parsing)
-                - refined[struct[...], "tuple"]: from visit_Tuple (AST parsing)
+                - python-backed literal sequence carriers: pc_tuple/pc_list/tuple/list
+                - named-item carriers from visit_Slice: pc_tuple["name", type]
         
         Returns:
             Tuple[Tuple[Optional[str], type], ...] where:
@@ -202,7 +202,10 @@ class BuiltinType(BuiltinEntity):
         """
         from ..literal_protocol import extract_subscript_items
 
-        items = extract_subscript_items(items)
+        if cls._is_named_item_carrier(items):
+            items = (items,)
+        else:
+            items = extract_subscript_items(items)
         
         normalized = []
         for item in items:
@@ -217,12 +220,10 @@ class BuiltinType(BuiltinEntity):
         Handles:
         - slice("name", type, None): Python runtime named field
         - ("name", type): already normalized tuple
-        - refined[struct[...], "slice"]: from visit_Slice (AST parsing)
-        - refined[struct[...], "tuple"]: recursively extract items
+        - named-item literal carriers from visit_Slice: pc_tuple["name", type]
         - other: unnamed field -> (None, item)
         """
         import builtins
-        from .refined import RefinedType
         
         # Case 1: Python runtime slice object
         if isinstance(item, builtins.slice):
@@ -236,105 +237,45 @@ class BuiltinType(BuiltinEntity):
         # Case 2: Already normalized ("name", type) tuple
         if isinstance(item, builtins.tuple) and len(item) == 2 and isinstance(item[0], str):
             return item
-        
-        # Case 3: refined[struct[...], "slice"] from visit_Slice
-        if isinstance(item, type) and issubclass(item, RefinedType):
-            tags = getattr(item, '_tags', [])
-            
-            if "slice" in tags:
-                # Extract ("name", type) from refined[struct[pyconst["name"], pyconst[type]], "slice"]
-                return cls._extract_slice_from_refined(item)
-            
-            # "tuple" tag should be handled at normalize_subscript_items level, not here
-            # If we get here with "tuple" tag, something is wrong
-            if "tuple" in tags:
-                logger.error("refined[..., 'tuple'] should be unwrapped at normalize_subscript_items level",
-                            node=None, exc_type=TypeError)
-        
+
+        # Case 3: Named-item literal carrier from visit_Slice
+        if cls._is_named_item_carrier(item):
+            return cls._extract_named_item_carrier(item)
+
         # Case 4: Unnamed item
         return (None, item)
-    
+
     @classmethod
-    def _extract_slice_from_refined(cls, refined_type):
-        """Extract (name, type) from refined[struct[pyconst["name"], pyconst[type]], "slice"]
-        
-        This handles the output of visit_Slice when parsing AST type annotations.
-        """
-        base_type = getattr(refined_type, '_base_type', None)
-        if base_type is None:
-            logger.error(f"Invalid slice type: {refined_type}", node=None, exc_type=TypeError)
-        
-        # base_type is struct[pyconst["name"], pyconst[type]]
-        field_types = getattr(base_type, '_field_types', [])
-        if len(field_types) != 2:
-            logger.error(f"Slice must have exactly 2 fields (name, type), got {len(field_types)}",
-                        node=None, exc_type=TypeError)
-        
-        # Extract name from pyconst["name"]
-        name_type = field_types[0]
-        if hasattr(name_type, '_python_object'):
-            name = name_type._python_object
-        elif hasattr(name_type, 'get_python_object'):
-            name = name_type.get_python_object()
-        else:
-            logger.error(f"Cannot extract name from {name_type}", node=None, exc_type=TypeError)
-        
-        # Extract type from pyconst[type]
-        type_type = field_types[1]
-        if hasattr(type_type, '_python_object'):
-            field_type = type_type._python_object
-        elif hasattr(type_type, 'get_python_object'):
-            field_type = type_type.get_python_object()
-        else:
-            logger.error(f"Cannot extract type from {type_type}", node=None, exc_type=TypeError)
-        
-        return (name, field_type)
-    
+    def _is_named_item_carrier(cls, item):
+        from ..literal_protocol import get_sequence_elements, is_sequence_carrier, unwrap_literal_item
+
+        if not is_sequence_carrier(item):
+            return False
+
+        elements = get_sequence_elements(item)
+        if len(elements) != 2:
+            return False
+
+        return isinstance(unwrap_literal_item(elements[0]), str)
+
     @classmethod
-    def _extract_tuple_from_refined(cls, refined_type):
-        """Extract items from refined[struct[...], "tuple"]
-        
-        This handles the output of visit_Tuple when parsing AST type annotations.
-        The refined type wraps a struct where each field is a pyconst containing
-        either a type or another refined type (for slices).
-        
-        Returns:
-            Tuple of items (types or (name, type) tuples)
-        """
-        from .refined import RefinedType
-        
-        base_type = getattr(refined_type, '_base_type', None)
-        if base_type is None:
-            logger.error(f"Invalid tuple type: {refined_type}", node=None, exc_type=TypeError)
-        
-        field_types = getattr(base_type, '_field_types', [])
-        items = []
-        
-        for field_type in field_types:
-            # Extract actual value from pyconst wrapper
-            if hasattr(field_type, '_python_object'):
-                actual_value = field_type._python_object
-            elif hasattr(field_type, 'get_python_object'):
-                actual_value = field_type.get_python_object()
-            else:
-                actual_value = field_type
-            
-            # Check if it's a nested refined type (slice or tuple)
-            if isinstance(actual_value, type) and issubclass(actual_value, RefinedType):
-                tags = getattr(actual_value, '_tags', [])
-                if "slice" in tags:
-                    items.append(cls._extract_slice_from_refined(actual_value))
-                    continue
-                if "tuple" in tags:
-                    # Nested tuple - recursively extract and flatten
-                    nested = cls._extract_tuple_from_refined(actual_value)
-                    items.extend(nested)
-                    continue
-            
-            # Plain value
-            items.append(actual_value)
-        
-        return tuple(items)
+    def _extract_named_item_carrier(cls, item):
+        from ..literal_protocol import get_sequence_elements, unwrap_literal_item
+
+        elements = get_sequence_elements(item)
+        if len(elements) != 2:
+            logger.error(
+                f"Named-item carrier must have exactly 2 elements, got {len(elements)}",
+                node=None,
+                exc_type=TypeError,
+            )
+
+        field_name = unwrap_literal_item(elements[0])
+        if not isinstance(field_name, str):
+            logger.error(f"Field name must be a string, got {type(field_name)}", node=None, exc_type=TypeError)
+
+        field_type = unwrap_literal_item(elements[1])
+        return (field_name, field_type)
     
     @classmethod
     def handle_type_subscript(cls, items):

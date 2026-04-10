@@ -333,21 +333,19 @@ class PythonType(_PythonTypeBase):
         return self._wrap_constant_result(visitor, result)
     
     def handle_subscript(self, visitor, base, index, node: ast.Subscript):
-        """Handle subscripting a Python object (always type subscript for PC types).
+        """Handle subscripting a Python object.
         
         Design principle:
-        - If _python_object is a PC type class (ptr, struct, etc.): type subscript
-        - If _python_object is a Python sequence (list, dict): compile-time indexing
+        - PC type classes (ptr, struct, array, func, ...) use type subscript
+        - Python sequences and mappings use compile-time value indexing
         
-        For type subscripts:
-        - ptr[i32]: index is pyconst[i32]
-        - struct[x: i32]: index is refined[struct[...], "slice"]
-        - struct[x: i32, y: f64]: index is refined[struct[...], "tuple"] of slices
+        Type subscripts now require a Python-backed index carrier. Old
+        runtime-struct/refined-tuple compatibility paths have been removed.
         
         Args:
             visitor: AST visitor
             base: Pre-evaluated base object (ValueRef)
-            index: Pre-evaluated index (ValueRef) - always provided now
+            index: Pre-evaluated index (ValueRef)
             node: ast.Subscript node
         """
         from ..literal_protocol import (
@@ -367,18 +365,14 @@ class PythonType(_PythonTypeBase):
             and not is_sequence_carrier(self._python_object)
             and not is_mapping_carrier(self._python_object)
         ):
-            # Extract value from index ValueRef and pass to normalize_subscript_items
-            # normalize_subscript_items handles all formats: slice, tuple, refined[..., "slice/tuple"]
-            if index.is_python_value():
-                items = index.value
-            elif index.type_hint is not None and hasattr(index.type_hint, '_field_types'):
-                # Non-python value with struct type_hint (from visit_Tuple without all-python special case)
-                # Extract items from the struct's _field_types
-                items = self._extract_struct_type_items(index.type_hint)
-            else:
-                logger.error(f"Type subscript index must be a python value, got {index}", node=node, exc_type=TypeError)
-            
-            normalized = self._python_object.normalize_subscript_items(items)
+            if not index.is_python_value():
+                logger.error(
+                    f"Type subscript index must be a python value, got {index}",
+                    node=node,
+                    exc_type=TypeError,
+                )
+
+            normalized = self._python_object.normalize_subscript_items(index.value)
             result_type = self._python_object.handle_type_subscript(normalized)
             return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
 
@@ -449,29 +443,11 @@ class PythonType(_PythonTypeBase):
             exc_type=TypeError,
         )
     
-    def _extract_struct_type_items(self, struct_type):
-        """Extract items from a struct type (from visit_Tuple without all-python special case).
-        
-        This handles the case where visit_Tuple creates a runtime struct instead of
-        a refined[struct[...], "tuple"]. The struct's _field_types contain pyconst
-        or refined types that we need to extract.
-        
-        Args:
-            struct_type: A struct type with _field_types attribute
-        
-        Returns:
-            Tuple of items suitable for normalize_subscript_items
-        """
-        from ..literal_protocol import extract_runtime_tuple_items
-
-        return extract_runtime_tuple_items(struct_type)
-    
     def _wrap_constant_result(self, visitor, result):
         """Wrap a compile-time evaluation result.
         
-        Converts Python tuple/list to struct/pc_list for unified representation.
-        If result is a ValueRef, return it directly.
-        Other Python values remain as pyconst.
+        Literal containers are converted through the shared literal carrier protocol.
+        ValueRef inputs pass through unchanged and scalar Python values remain pyconst.
         """
         from ..literal_protocol import wrap_literal_result
 

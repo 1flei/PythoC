@@ -8,6 +8,7 @@ This script runs:
 3. Example tests (test/example/)
 
 Tests are run sequentially to avoid CPU / filesystem contention on CI.
+Unit tests are run in quiet mode to keep the full-suite output readable.
 Each suite's output is printed directly as if run individually.
 """
 
@@ -75,7 +76,7 @@ def main():
 
     python_exe = sys.executable
     test_suites = [
-        ("Unit Tests", [python_exe, "test/run_unit_tests.py"]),
+        ("Unit Tests", [python_exe, "test/run_unit_tests.py", "--quiet"]),
         ("Integration Tests", [python_exe, "test/run_integration_tests.py"]),
         ("Example Tests", [python_exe, "test/run_examples.py"]),
     ]
