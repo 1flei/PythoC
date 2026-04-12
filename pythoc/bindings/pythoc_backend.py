@@ -264,10 +264,10 @@ def emit_ctype(buf: ptr[StringBuffer], ty: ptr[CType]) -> void:
             else:
                 strbuf_push_cstr(buf, "ptr[void]")
         
-        # Function type: func[[param_types], ret_type]
+        # Function type: func[param_types..., ret_type]
         case (CType.Func, ft):
             if ft != nullptr:
-                strbuf_push_cstr(buf, "func[[")
+                strbuf_push_cstr(buf, "func[")
                 i: i32 = 0
                 while i < ft.param_count:
                     if i > 0:
@@ -275,11 +275,12 @@ def emit_ctype(buf: ptr[StringBuffer], ty: ptr[CType]) -> void:
                     param: ptr[ParamInfo] = ptr(ft.params[i])
                     emit_qualtype(buf, param.type)
                     i = i + 1
-                strbuf_push_cstr(buf, "], ")
+                if ft.param_count > 0:
+                    strbuf_push_cstr(buf, ", ")
                 emit_qualtype(buf, ft.ret)
                 strbuf_push_char(buf, 93)  # ']'
             else:
-                strbuf_push_cstr(buf, "func[[], void]")
+                strbuf_push_cstr(buf, "func[void]")
         
         # Struct type
         case (CType.Struct, st):

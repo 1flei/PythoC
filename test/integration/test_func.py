@@ -38,7 +38,7 @@ def divide(x: i32, y: i32) -> i32:
 
 
 @compile
-def apply_binary_op(op: func[[i32, i32], i32], x: i32, y: i32) -> i32:
+def apply_binary_op(op: func[i32, i32, i32], x: i32, y: i32) -> i32:
     """Apply a binary operation to two numbers"""
     return op(x, y)
 
@@ -54,13 +54,13 @@ def double(x: i32) -> i32:
 
 
 @compile
-def apply_unary_op(op: func[[i32], i32], x: i32) -> i32:
+def apply_unary_op(op: func[i32, i32], x: i32) -> i32:
     """Apply a unary operation to a number"""
     return op(x)
 
 
 @compile
-def select_operation(op_code: i32) -> func[[i32, i32], i32]:
+def select_operation(op_code: i32) -> func[i32, i32, i32]:
     """Select an operation based on code (function table)"""
     if op_code == 0:
         return add
@@ -75,7 +75,7 @@ def select_operation(op_code: i32) -> func[[i32, i32], i32]:
 @compile
 def calculator(op_code: i32, x: i32, y: i32) -> i32:
     """Simple calculator using function pointers"""
-    operation: func[[i32, i32], i32] = select_operation(op_code)
+    operation: func[i32, i32, i32] = select_operation(op_code)
     return operation(x, y)
 
 

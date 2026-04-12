@@ -10,6 +10,8 @@ import ast
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Any
 
+from ..schema_protocol import get_schema_field_types, is_schema_type
+
 
 @dataclass
 class ResolvedVarArgs:
@@ -68,15 +70,8 @@ def resolve_varargs(func_node: ast.FunctionDef, type_resolver) -> ResolvedVarArg
 
     element_types: List[Any] = []
     if kind == "struct":
-        if hasattr(parsed_type, "_struct_fields"):
-            for _, field_type in parsed_type._struct_fields:
-                if isinstance(field_type, str):
-                    resolved_field_type = type_resolver.parse_annotation(field_type)
-                    element_types.append(resolved_field_type or field_type)
-                else:
-                    element_types.append(field_type)
-        elif hasattr(parsed_type, "_field_types") and parsed_type._field_types is not None:
-            for field_type in parsed_type._field_types:
+        if is_schema_type(parsed_type):
+            for field_type in get_schema_field_types(parsed_type):
                 if isinstance(field_type, str):
                     resolved_field_type = type_resolver.parse_annotation(field_type)
                     element_types.append(resolved_field_type or field_type)
@@ -163,7 +158,7 @@ def detect_varargs(func_node: ast.FunctionDef, type_resolver) -> Tuple[str, Opti
             element_types = list(slice_node.elts)
         else:
             element_types = [slice_node]
-    elif kind == 'struct' and (hasattr(parsed_type, '_struct_fields') or hasattr(parsed_type, '_field_types')):
+    elif kind == 'struct' and is_schema_type(parsed_type):
         element_types = []
     else:
         element_types = [annotation]

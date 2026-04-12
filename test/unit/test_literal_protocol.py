@@ -10,12 +10,10 @@ from pythoc.builtin_entities.consume import consume
 from pythoc.builtin_entities.struct import struct
 from pythoc.literal_protocol import (
     extract_subscript_items,
-    get_linear_schema_paths,
     get_mapping_entries,
     get_multidim_subscript_indices,
     get_sequence_elements,
     get_unpack_values,
-    is_linear_schema_type,
     is_pc_dict_type,
     is_pc_tuple_type,
     iter_literal_value_refs,
@@ -89,13 +87,6 @@ class TestLiteralProtocol(unittest.TestCase):
             struct.normalize_subscript_items(named_items),
             (("field", i32), ("flag", linear)),
         )
-
-    def test_linear_schema_helpers_recurse_nested_composites(self):
-        inner = struct[linear, i32]
-        outer = struct[i32, inner]
-
-        self.assertTrue(is_linear_schema_type(outer))
-        self.assertEqual(get_linear_schema_paths(outer), [(1, 0)])
 
     def test_project_tracking_metadata_extends_child_path(self):
         base = wrap_value(

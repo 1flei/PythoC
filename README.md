@@ -127,7 +127,7 @@ PythoC provides complete C runtime capabilities:
 - Structs: `@compile class`, `@struct class`, `struct[x: i32, y: i32]` (named) or `struct[i32, i32]` (unnamed)
 - Unions: `@union class` or `union[T1, T2, ...]`
 - Enums: `@enum class`
-- Function pointers: `func[[arg_types], return_type]`
+- Function pointers: `func[arg_types..., return_type]`
 
 **Control flow**:
 - `if`/`else`, `while`, `for` loops

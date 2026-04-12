@@ -397,7 +397,7 @@ def div_op(a: i32, b: i32) -> i32:
 
 
 @compile
-def apply_op(op: func[[i32, i32], i32], a: i32, b: i32) -> i32:
+def apply_op(op: func[i32, i32, i32], a: i32, b: i32) -> i32:
     """Apply operation via function pointer"""
     return op(a, b)
 
@@ -413,7 +413,7 @@ def test_func_ptr_apply() -> i32:
 
 
 @compile
-def select_op(code: i32) -> func[[i32, i32], i32]:
+def select_op(code: i32) -> func[i32, i32, i32]:
     """Select operation by code"""
     if code == 0:
         return add_op
@@ -428,7 +428,7 @@ def select_op(code: i32) -> func[[i32, i32], i32]:
 @compile
 def test_func_ptr_select() -> i32:
     """Test function pointer selection"""
-    op: func[[i32, i32], i32] = select_op(2)
+    op: func[i32, i32, i32] = select_op(2)
     return op(6, 7)  # 42
 
 
@@ -445,7 +445,7 @@ def unary_double(x: i32) -> i32:
 
 
 @compile
-def apply_unary(f: func[[i32], i32], x: i32) -> i32:
+def apply_unary(f: func[i32, i32], x: i32) -> i32:
     """Apply unary function"""
     return f(x)
 

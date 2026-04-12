@@ -460,12 +460,12 @@ def multiply(x: i32, y: i32) -> i32:
 
 # Pass function as argument
 @compile
-def apply_op(op: func[[i32, i32], i32], x: i32, y: i32) -> i32:
+def apply_op(op: func[i32, i32, i32], x: i32, y: i32) -> i32:
     return op(x, y)
 
 # Return function pointer
 @compile
-def select_op(code: i32) -> func[[i32, i32], i32]:
+def select_op(code: i32) -> func[i32, i32, i32]:
     if code == 0:
         return add
     elif code == 1:
@@ -475,7 +475,7 @@ def select_op(code: i32) -> func[[i32, i32], i32]:
 
 @compile
 def calculator(op_code: i32, x: i32, y: i32) -> i32:
-    operation: func[[i32, i32], i32] = select_op(op_code)
+    operation: func[i32, i32, i32] = select_op(op_code)
     return operation(x, y)
 
 @compile

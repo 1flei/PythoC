@@ -37,16 +37,11 @@ array_1d_rt = array[i32, 10]
 array_2d_rt = array[i32, 3, 4]
 array_3d_rt = array[i32, 2, 3, 4]
 
-# Function types (new syntax: func[params..., return_type])
+# Function types
 func_binary_rt = func[i32, i32, i32]  # (i32, i32) -> i32
 func_unary_rt = func[i32, i32]  # (i32) -> i32
 func_nullary_rt = func[i32]  # () -> i32
 func_named_rt = func["a": i32, "b": i32, i32]  # (a: i32, b: i32) -> i32
-
-# Function types (old syntax: func[[params], return_type])
-func_binary_old_rt = func[[i32, i32], i32]  # (i32, i32) -> i32
-func_unary_old_rt = func[[i32], i32]  # (i32) -> i32
-func_nullary_old_rt = func[[], i32]  # () -> i32
 
 
 # ============================================================================
@@ -58,16 +53,16 @@ def test_struct_compile_time() -> i32:
     """Test struct type subscript in compile-time context"""
     # Named struct with identifier syntax (only works in compile-time)
     s1: struct[a: i32, b: f64, c: i32] = (10, 1.0, 20)
-    
+
     # Named struct with string syntax
     s2: struct["x": i32, "y": f64, "z": i32] = (30, 2.0, 40)
-    
+
     # Unnamed struct
     s3: struct[i32, f64, i32] = (50, 3.0, 60)
-    
+
     # Mixed struct
     s4: struct[i32, "b": f64, "c": i32] = (70, 4.0, 80)
-    
+
     # Access fields
     result = s1.a + s1.c + s2.x + s2.z + s3[0] + s3[2] + s4[0] + s4.c
     return result  # 10 + 20 + 30 + 40 + 50 + 60 + 70 + 80 = 360
@@ -78,11 +73,10 @@ def test_union_compile_time() -> i32:
     """Test union type subscript in compile-time context"""
     # Just verify union types with type subscript compile correctly
     # (union initialization has separate issues, tested in test_union.py)
-    
     u1: union[a: i32, b: f64]
     u2: union["x": i32, "y": f64]
     u3: union[i32, f64]
-    
+
     return 350
 
 
@@ -91,11 +85,10 @@ def test_ptr_compile_time() -> i32:
     """Test ptr type subscript in compile-time context"""
     # Just declare pointer types to verify they compile
     # (actual pointer operations require getptr which has issues currently)
-    
     p1: ptr[i32]
     p2: ptr[struct[a: i32, b: i32]]
     p3: ptr[array[i32, 10]]
-    
+
     # Return a constant
     return 72
 
@@ -105,11 +98,10 @@ def test_array_compile_time() -> i32:
     """Test array type subscript in compile-time context"""
     # Just declare array types to verify they compile
     # (array literal initialization has some limitations currently)
-    
     arr1: array[i32, 5]
     arr2: array[i32, 2, 3]
     arr3: array[f64, 10]
-    
+
     # Return a constant
     return 76
 
@@ -118,28 +110,23 @@ def test_array_compile_time() -> i32:
 def test_func_compile_time() -> i32:
     """Test func type subscript in compile-time context"""
     # Function pointer types can be used in type annotations
-    
-    # New syntax: func[params..., ret]
+
+    # Flat syntax: func[param_types..., ret]
     # Binary function: (i32, i32) -> i32
     binary_op: func[i32, i32, i32]
-    
+
     # Unary function: (i32) -> i32
     unary_op: func[i32, i32]
-    
+
     # Nullary function: () -> i32
     nullary_op: func[i32]
-    
+
     # Named parameters: (a: i32, b: i32) -> i32
     named_op: func[a: i32, b: i32, i32]
-    
+
     # Mixed: (i32, b: i32) -> i32
     mixed_op: func[i32, b: i32, i32]
-    
-    # Old syntax: func[[params], ret]
-    binary_old: func[[i32, i32], i32]
-    unary_old: func[[i32], i32]
-    nullary_old: func[[], i32]
-    
+
     # Just return a constant to verify types compile correctly
     return 123
 
@@ -154,7 +141,7 @@ def test_struct_runtime_types() -> i32:
     s1: named_struct_rt = (1, 1.0, 2)
     s2: unnamed_struct_rt = (3, 2.0, 4)
     s3: mixed_struct_rt = (5, 3.0, 6)
-    
+
     return s1.a + s1.c + s2[0] + s2[2] + s3[0] + s3.c  # 1+2+3+4+5+6 = 21
 
 
@@ -164,7 +151,7 @@ def test_union_runtime_types() -> i32:
     # Just verify runtime-created union types work in compile context
     u1: named_union_rt
     u2: unnamed_union_rt
-    
+
     return 150
 
 
@@ -175,7 +162,7 @@ def test_ptr_runtime_types() -> i32:
     p1: ptr_i32_rt
     p2: ptr_struct_rt
     p3: ptr_array_rt
-    
+
     # Return a constant
     return 72
 
@@ -187,7 +174,7 @@ def test_array_runtime_types() -> i32:
     arr1: array_1d_rt
     arr2: array_2d_rt
     arr3: array_3d_rt
-    
+
     # Return a constant
     return 24
 
@@ -196,18 +183,11 @@ def test_array_runtime_types() -> i32:
 def test_func_runtime_types() -> i32:
     """Test using func types created in global scope"""
     # Just declare variables with runtime-created func types
-    
-    # New syntax types
     binary: func_binary_rt
     unary: func_unary_rt
     nullary: func_nullary_rt
     named: func_named_rt
-    
-    # Old syntax types
-    binary_old: func_binary_old_rt
-    unary_old: func_unary_old_rt
-    nullary_old: func_nullary_old_rt
-    
+
     # Return a constant (actual function pointer usage is limited)
     return 456
 
@@ -261,6 +241,20 @@ class TestTypeSubscriptUnified(unittest.TestCase):
     def test_func_runtime_types(self):
         """Test using func types created in global scope"""
         self.assertEqual(test_func_runtime_types(), 456)
+
+    def test_func_type_name_uses_flat_syntax(self):
+        """Function type names should use flat syntax"""
+        self.assertEqual(func_binary_rt.get_name(), "func[i32, i32, i32]")
+        self.assertEqual(func_nullary_rt.get_name(), "func[i32]")
+        self.assertEqual(func_named_rt.get_name(), "func[a: i32, b: i32, i32]")
+        self.assertEqual(func_named_rt.get_type_id(), "func[a: i32, b: i32, i32]")
+
+    def test_func_legacy_runtime_syntax_rejected(self):
+        """Legacy func syntax should be rejected"""
+        with self.assertRaises(SystemExit):
+            func[[i32, i32], i32]
+        with self.assertRaises(SystemExit):
+            func[[], i32]
 
 
 if __name__ == "__main__":
