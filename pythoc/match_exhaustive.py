@@ -17,6 +17,7 @@ from enum import Enum as PyEnum
 import ast
 
 from .logger import logger
+from .schema_protocol import get_field_layout_types, get_schema_field_names, get_schema_field_types, is_schema_type
 
 
 class PatternKind(PyEnum):
@@ -176,8 +177,8 @@ class TypeInfo:
             return True
 
         # Struct types are finite if ALL fields have finite types
-        if hasattr(pc_type, '_is_struct') and pc_type._is_struct:
-            field_types = getattr(pc_type, '_field_types', [])
+        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
+            field_types = get_schema_field_types(pc_type)
             if not field_types:
                 # Empty struct is finite (one constructor, no fields)
                 return True
@@ -225,8 +226,8 @@ class TypeInfo:
             return result
 
         # Struct constructors: single constructor with field types as sub-types
-        if hasattr(pc_type, '_is_struct') and pc_type._is_struct:
-            field_types = getattr(pc_type, '_field_types', [])
+        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
+            field_types = get_schema_field_types(pc_type)
             struct_name = getattr(pc_type, '__name__', 'struct')
             # Struct has exactly one constructor (tag=0) with all fields as sub-patterns
             return [(0, struct_name, list(field_types))]
@@ -258,8 +259,8 @@ class TypeInfo:
             return 0
 
         # Struct: arity is the number of fields
-        if hasattr(pc_type, '_is_struct') and pc_type._is_struct:
-            field_types = getattr(pc_type, '_field_types', [])
+        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
+            field_types = get_schema_field_types(pc_type)
             return len(field_types)
 
         # Array: arity is the number of elements
@@ -268,8 +269,8 @@ class TypeInfo:
             length = getattr(pc_type, 'length', None)
             if length is not None:
                 return length
-            # Fallback: check _field_types
-            field_types = getattr(pc_type, '_field_types', [])
+            # Fallback: use field-layout helper for fixed aggregate layouts
+            field_types = get_field_layout_types(pc_type)
             return len(field_types)
 
         return 0
@@ -299,8 +300,8 @@ class TypeInfo:
             return []
 
         # Struct: sub-types are the field types
-        if hasattr(pc_type, '_is_struct') and pc_type._is_struct:
-            field_types = getattr(pc_type, '_field_types', [])
+        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
+            field_types = get_schema_field_types(pc_type)
             return list(field_types)
 
         # Array: sub-types are element type repeated for each position
@@ -309,8 +310,8 @@ class TypeInfo:
             length = getattr(pc_type, 'length', None)
             if element_type and length:
                 return [element_type] * length
-            # Fallback: check _field_types
-            field_types = getattr(pc_type, '_field_types', [])
+            # Fallback: use field-layout helper for fixed aggregate layouts
+            field_types = get_field_layout_types(pc_type)
             return list(field_types)
 
         return []
@@ -619,9 +620,8 @@ class PatternNormalizer:
     def _normalize_class(self, pattern: ast.MatchClass,
                         subject_type: Any) -> NormalizedPattern:
         """Normalize class (struct) pattern."""
-        # Get field types from subject type
-        field_names = getattr(subject_type, '_field_names', [])
-        field_types = getattr(subject_type, '_field_types', [])
+        field_names = get_schema_field_names(subject_type)
+        field_types = get_schema_field_types(subject_type)
 
         # Build sub-patterns in field order
         sub_patterns = []
@@ -696,9 +696,7 @@ class PatternNormalizer:
 
     def _get_field_types(self, subject_type: Any) -> List[Any]:
         """Get field types for struct/tuple type."""
-        if hasattr(subject_type, '_field_types'):
-            return subject_type._field_types
-        return []
+        return get_schema_field_types(subject_type)
 
 
 def check_match_exhaustiveness(node: ast.Match, subject_types: List[Any],

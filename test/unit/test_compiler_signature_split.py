@@ -91,6 +91,23 @@ class TestCompilerDeclarationResolution(unittest.TestCase):
         self.assertIs(resolved.param_type_hints["args_elem0"], i32)
         self.assertIs(resolved.param_type_hints["args_elem1"], f64)
 
+    def test_resolve_function_declaration_preserves_empty_struct_varargs(self):
+        Empty = struct[tuple([])]
+        fn_ast = ast.parse(
+            "def acquire(*args: Empty) -> i32:\n"
+            "    return 0\n"
+        ).body[0]
+
+        resolved = self.compiler._resolve_function_declaration(
+            fn_ast,
+            user_globals={"i32": i32, "Empty": Empty},
+        )
+
+        self.assertEqual(resolved.varargs.kind, "struct")
+        self.assertFalse(resolved.has_llvm_varargs)
+        self.assertEqual(resolved.varargs.element_types, [])
+        self.assertEqual(resolved.param_names, [])
+
 
 if __name__ == "__main__":
     unittest.main()

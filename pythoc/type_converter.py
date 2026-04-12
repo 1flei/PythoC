@@ -14,6 +14,7 @@ from .valueref import ValueRef, ensure_ir, wrap_python_constant, wrap_value, get
 from .type_check import is_struct_type, is_enum_type
 from .logger import logger
 from .builtin_entities.base import BuiltinType
+from .schema_protocol import get_schema_field_types, is_schema_type
 import ast
 
 
@@ -326,7 +327,7 @@ class TypeConverter:
                 list_carrier = self._sequence_literal_to_pc_list(python_val)
                 return self._convert_pc_list_to_array(list_carrier, target_type)
 
-            if hasattr(target_type, '_field_types'):
+            if is_schema_type(target_type):
                 return self._convert_tuple_to_struct(sequence_items, target_type)
 
             raise TypeError(f"Cannot promote sequence literal {python_val} to PC type {target_type}")
@@ -870,10 +871,8 @@ class TypeConverter:
         Returns:
             ValueRef with struct value
         """
-        # Get field types from struct
-        if hasattr(target_struct_type, '_field_types') and target_struct_type._field_types:
-            field_types = target_struct_type._field_types
-        else:
+        field_types = get_schema_field_types(target_struct_type)
+        if not field_types:
             raise TypeError(f"Cannot get field types from {target_struct_type}")
         
         # Check length
@@ -897,7 +896,7 @@ class TypeConverter:
             # Case 2: elem is a Python tuple/list - recursively convert
             elif isinstance(elem, (tuple, list)):
                 # Check if field_type is struct/array/union
-                if hasattr(field_type, '_field_types'):
+                if is_schema_type(field_type):
                     # Nested struct
                     field_val = self._convert_tuple_to_struct(elem, field_type)
                     field_values.append(ensure_ir(field_val))
@@ -951,9 +950,8 @@ class TypeConverter:
         Returns:
             ValueRef with converted struct value
         """
-        # Get field types
-        source_fields = source_struct_type._field_types if source_struct_type._field_types else []
-        target_fields = target_struct_type._field_types if target_struct_type._field_types else []
+        source_fields = get_schema_field_types(source_struct_type)
+        target_fields = get_schema_field_types(target_struct_type)
         
         # Check field count matches
         if len(source_fields) != len(target_fields):
@@ -999,8 +997,7 @@ class TypeConverter:
         """
         from .builtin_entities.python_type import PythonType
         
-        # Get source struct fields
-        source_fields = source_struct_type._field_types if source_struct_type._field_types else []
+        source_fields = get_schema_field_types(source_struct_type)
         
         # Need at least 1 field (tag), optionally 2 (tag + payload)
         if len(source_fields) < 1 or len(source_fields) > 2:

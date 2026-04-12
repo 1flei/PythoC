@@ -448,14 +448,14 @@ class LLVMIRVisitor(ast.NodeVisitor):
     # ========================================================================
     
     def _is_linear_type(self, type_hint) -> bool:
-        """Check linearity through the shared composite schema helper."""
-        from ..literal_protocol import is_linear_schema_type
+        """Check linearity through the shared schema protocol."""
+        from ..schema_protocol import is_linear_schema_type
 
         return is_linear_schema_type(type_hint)
     
     def _get_linear_paths(self, type_hint, prefix: Tuple[int, ...] = ()) -> List[Tuple[int, ...]]:
-        """Get all linear token paths through the shared composite schema helper."""
-        from ..literal_protocol import get_linear_schema_paths
+        """Get all linear token paths through the shared schema protocol."""
+        from ..schema_protocol import get_linear_schema_paths
 
         return get_linear_schema_paths(type_hint, prefix)
     
@@ -495,19 +495,16 @@ class LLVMIRVisitor(ast.NodeVisitor):
         parts = [var_name]
         current_type = type_hint
         
+        from ..schema_protocol import get_schema_field_name, get_schema_field_type
+
         for idx in path:
-            # Try to get field name from current type
             field_name = None
-            if hasattr(current_type, '_struct_fields') and current_type._struct_fields:
-                # Named struct with _struct_fields
-                if idx < len(current_type._struct_fields):
-                    field_name, field_type = current_type._struct_fields[idx]
-                    current_type = field_type
-            elif hasattr(current_type, '_field_types') and current_type._field_types:
-                # Anonymous struct with _field_types only
-                if idx < len(current_type._field_types):
-                    current_type = current_type._field_types[idx]
-            
+            try:
+                field_name = get_schema_field_name(current_type, idx)
+                current_type = get_schema_field_type(current_type, idx)
+            except Exception:
+                field_name = None
+
             if field_name:
                 parts.append(f".{field_name}")
             else:

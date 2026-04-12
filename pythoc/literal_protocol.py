@@ -1,7 +1,7 @@
-"""Literal carrier and composite schema protocols.
+"""Literal carrier protocols.
 
-This module centralizes carrier shape handling and composite traversal so
-callers do not need to inspect tuple/list/dict/struct details directly.
+This module centralizes tuple/list/dict carrier handling so callers do not
+need to inspect literal wrapper details directly.
 """
 
 from __future__ import annotations
@@ -78,76 +78,6 @@ def get_mapping_value(value: Any, key: Any) -> Any:
     if is_pc_dict_type(value):
         return value.get_value(key)
     logger.error(f"Object is not a mapping carrier: {value}", node=None, exc_type=TypeError)
-
-
-def unwrap_python_object(value: Any) -> Any:
-    if hasattr(value, '_python_object'):
-        return value._python_object
-
-    get_python_object = getattr(value, 'get_python_object', None)
-    if callable(get_python_object):
-        return get_python_object()
-
-    return value
-
-
-def _resolve_linear_schema_type(type_hint: Any) -> Any:
-    from .builtin_entities.refined import RefinedType
-
-    resolved = unwrap_python_object(type_hint)
-    if isinstance(resolved, type) and issubclass(resolved, RefinedType):
-        base_type = getattr(resolved, '_base_type', None)
-        if base_type is not None:
-            return _resolve_linear_schema_type(base_type)
-    return resolved
-
-
-def get_composite_field_types(type_hint: Any) -> List[Any]:
-    schema_type = _resolve_linear_schema_type(type_hint)
-    field_types = getattr(schema_type, '_field_types', None)
-    if not field_types:
-        return []
-    return list(field_types)
-
-
-def is_linear_schema_type(type_hint: Any) -> bool:
-    from .builtin_entities import linear
-
-    schema_type = _resolve_linear_schema_type(type_hint)
-
-    if schema_type is linear:
-        return True
-
-    if isinstance(schema_type, type) and hasattr(schema_type, '_is_linear'):
-        if schema_type._is_linear:
-            return True
-
-    for field_type in get_composite_field_types(schema_type):
-        if is_linear_schema_type(field_type):
-            return True
-
-    return False
-
-
-def get_linear_schema_paths(
-    type_hint: Any,
-    prefix: Tuple[int, ...] = (),
-) -> List[Tuple[int, ...]]:
-    from .builtin_entities import linear
-
-    schema_type = _resolve_linear_schema_type(type_hint)
-
-    if schema_type is linear:
-        return [prefix]
-
-    if isinstance(schema_type, type) and hasattr(schema_type, '_is_linear'):
-        if schema_type._is_linear:
-            return [prefix]
-
-    paths = []
-    for index, field_type in enumerate(get_composite_field_types(schema_type)):
-        paths.extend(get_linear_schema_paths(field_type, prefix + (index,)))
-    return paths
 
 
 def project_tracking_metadata(

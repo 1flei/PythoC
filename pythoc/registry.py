@@ -131,10 +131,8 @@ class FunctionInfo:
         """Expose the public callable PC type for this function."""
         from .builtin_entities.func import func as func_type_cls
 
-        param_types = [self.param_type_hints[name] for name in self.param_names]
-        if param_types:
-            return func_type_cls[param_types, self.return_type_hint]
-        return func_type_cls[[], self.return_type_hint]
+        param_types = tuple(self.param_type_hints[name] for name in self.param_names)
+        return func_type_cls[param_types + (self.return_type_hint,)]
 
 
 @dataclass
