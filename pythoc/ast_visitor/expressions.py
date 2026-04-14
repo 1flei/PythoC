@@ -87,52 +87,6 @@ class ExpressionsMixin:
         operand = self.visit_rvalue_expression(node.operand)
         return self.value_dispatcher.handle_unary(operand, node)
     
-    def _unary_plus(self, operand: ValueRef) -> ValueRef:
-        """Unary plus: no-op"""
-        return operand
-
-    def _unary_minus(self, operand: ValueRef) -> ValueRef:
-        """Unary minus: negate value
-
-        Result type forgets refinement since -x does not preserve predicates.
-        """
-        from ..type_converter import forget_refinement
-
-        operand_type = get_type(operand)
-        if isinstance(operand_type, (ir.FloatType, ir.DoubleType)):
-            result = self.builder.fsub(ir.Constant(operand_type, 0.0), ensure_ir(operand))
-        else:
-            result = self.builder.sub(ir.Constant(operand_type, 0), ensure_ir(operand))
-        # Forget refinement for operation result
-        result_type = forget_refinement(operand.type_hint)
-        return wrap_value(result, kind="value", type_hint=result_type)
-
-    def _unary_not(self, operand: ValueRef) -> ValueRef:
-        """Logical not: boolean negation"""
-        from ..builtin_entities import bool as bool_type
-        operand_type = get_type(operand)
-        if isinstance(operand_type, ir.IntType) and operand_type.width == 1:
-            # Already boolean, just XOR with 1
-            result = self.builder.xor(ensure_ir(operand), ir.Constant(ir.IntType(1), 1))
-        else:
-            # Convert to boolean first, then negate
-            bool_val = self.value_dispatcher.to_boolean(operand)
-            result = self.builder.xor(ensure_ir(bool_val), ir.Constant(ir.IntType(1), 1))
-        return wrap_value(result, kind="value", type_hint=bool_type)
-
-    def _unary_invert(self, operand: ValueRef) -> ValueRef:
-        """Bitwise not: invert all bits
-
-        Result type forgets refinement since ~x does not preserve predicates.
-        """
-        from ..type_converter import forget_refinement
-
-        result = self.builder.xor(ensure_ir(operand), ir.Constant(get_type(operand), -1))
-        # Forget refinement for operation result
-        result_type = forget_refinement(operand.type_hint)
-        return wrap_value(result, kind="value", type_hint=result_type)
-    
-
     def visit_Compare(self, node: ast.Compare):
         """Handle chained comparisons through the unified value dispatcher."""
         left = self.visit_rvalue_expression(node.left)
@@ -262,12 +216,12 @@ class ExpressionsMixin:
         phi.add_incoming(ensure_ir(then_val), then_block)
         phi.add_incoming(ensure_ir(else_val), else_block)
         
-        # Extract type from then_val (prefer then_val's type)
-        pc_type = getattr(then_val, 'pc_type', None)
-        if pc_type is None:
-            pc_type = getattr(else_val, 'pc_type', None)
+        # Use type_hint from then branch (prefer then_val's type)
+        result_type = then_val.type_hint if isinstance(then_val, ValueRef) else None
+        if result_type is None and isinstance(else_val, ValueRef):
+            result_type = else_val.type_hint
         
-        return wrap_value(phi, kind="value", type_hint=pc_type)
+        return wrap_value(phi, kind="value", type_hint=result_type)
 
     
     def visit_List(self, node: ast.List):

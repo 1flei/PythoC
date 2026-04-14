@@ -123,11 +123,9 @@ def forget_refinement(pc_type):
     if hasattr(pc_type, 'qualified_type') and pc_type.qualified_type is not None:
         inner = forget_refinement(pc_type.qualified_type)
         if inner != pc_type.qualified_type:
-            # The inner type changed, need to reconstruct the qualifier
-            # This is complex because qualifiers are typically classes
-            # For now, just return the inner type without qualifier
-            # A more complete implementation would reconstruct the qualifier wrapper
-            return inner
+            # Reconstruct qualifier wrapper around the stripped inner type
+            from .ir_helpers import propagate_qualifiers
+            return propagate_qualifiers(pc_type, inner)
 
     return pc_type
 

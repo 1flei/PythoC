@@ -600,7 +600,6 @@ def wrap_value(value: Union[ir.Value, AnyType],
         raise ValueError("Address kind requires address")
 
     if kind == "value" and address is not None:
-        kind = "address"
         raise ValueError("Value kind cannot have address")
     
     return ValueRef(

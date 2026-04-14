@@ -94,9 +94,24 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.binding_state = None  # FunctionBindingState, set by compiler.py
         self._current_function = None
         self.label_counter = 0
-        self.struct_types = self.ctx.struct_types
-        self.source_globals = self.ctx.source_globals
         self.compiler = compiler
+        self._python_global_cache: dict = {}  # Cache for _lookup_python_global_binding
+    
+    @property
+    def struct_types(self):
+        return self.ctx.struct_types
+
+    @struct_types.setter
+    def struct_types(self, value):
+        self.ctx.struct_types = value
+
+    @property
+    def source_globals(self):
+        return self.ctx.source_globals
+
+    @source_globals.setter
+    def source_globals(self, value):
+        self.ctx.source_globals = value
     
     @property
     def current_function(self):
@@ -331,7 +346,22 @@ class LLVMIRVisitor(ast.NodeVisitor):
         )
 
     def _lookup_python_global_binding(self, name: str) -> Optional[VariableInfo]:
-        """Resolve symbols captured from the Python environment."""
+        """Resolve symbols captured from the Python environment.
+
+        Results are cached so repeated lookups of the same global do not
+        re-create VariableInfo / ValueRef wrappers.
+        """
+        cached = self._python_global_cache.get(name)
+        if cached is not None:
+            return cached
+
+        result = self._resolve_python_global_binding(name)
+        if result is not None:
+            self._python_global_cache[name] = result
+        return result
+
+    def _resolve_python_global_binding(self, name: str) -> Optional[VariableInfo]:
+        """Internal resolver for python globals (uncached)."""
         if not self.ctx.user_globals:
             return None
 
@@ -394,26 +424,23 @@ class LLVMIRVisitor(ast.NodeVisitor):
         return self.scope_manager.lookup_variable(name) is not None
     
     def visit_expression(self, expr):
-        """Visit an expression and return a ValueRef preserving type hints"""
+        """Visit an expression and return a ValueRef preserving type hints.
+
+        The contract is: this method always returns a ValueRef. Non-ValueRef
+        results from visit() are automatically wrapped as python constants.
+        """
+        from ..valueref import wrap_python_constant
+
         result = self.visit(expr)
         if result is None:
             logger.error(f"Expression {ast.dump(expr)} returned None", node=expr, exc_type=ValueError)
         
-        # Return the result directly without tracking
-        # Linear expressions will be checked at the statement level (visit_Expr)
         if isinstance(result, ValueRef):
             return result
         
-        # Handle list results (from Tuple expressions)
-        if isinstance(result, list):
-            return result
-        
-        # Handle type objects (from type expressions like array[i32, 5])
-        # Type objects don't have .type attribute, they ARE types
-        if isinstance(result, type):
-            return result
-
-        return result
+        # Wrap non-ValueRef results (type objects, raw Python values)
+        # as compile-time python constants so callers see a uniform type.
+        return wrap_python_constant(result)
 
     def _bind_name_reference(self, value_ref: ValueRef, name: str) -> ValueRef:
         """Attach top-level variable tracking metadata to a binding reference."""

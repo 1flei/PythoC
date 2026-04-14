@@ -759,8 +759,14 @@ class _ScopeContext:
         if self._cf is not None:
             self._manager.exit_scope(self._cf, node=self._node)
         else:
-            # No CF provided, just pop scope without defer execution
+            # No CF provided - pop scope without defer execution.
+            # This path is only valid when the scope has no defers.
             if self._manager._scopes:
-                self._manager._scopes.pop()
+                scope = self._manager._scopes.pop()
+                if scope.defers:
+                    logger.debug(
+                        f"Scope exited without ControlFlowBuilder but has "
+                        f"{len(scope.defers)} defers that will not be emitted"
+                    )
                 self._manager._var_registry.exit_scope()
         return False
