@@ -102,52 +102,125 @@ def get_current_compilation_context() -> Optional[Dict[str, Any]]:
     return None
 
 
-def _create_effect_wrapped_function(original_func, suffix: str):
+def resolve_effect_wrapper(wrapper, caller_group_key=None,
+                           suffix=None, effect_overrides=None):
+    """Unified effect specialization entry point.
+
+    This is the single authority for "should this wrapper be effect-specialized?"
+    Used in two phases:
+
+    Phase 1 (import time): EffectImportHook passes explicit suffix + overrides
+        for each @compile function in the fromlist.  These are root-set entries.
+    Phase 2 (compile time): callable_lowering calls with no explicit args;
+        suffix and overrides are read from the current compilation_context.
+        These are transitive (propagation along the call graph).
+
+    The decision logic is shared:
+    - Already specialized for the target suffix -> return as-is
+    - Marked as effect implementation (_pc_effect_impl) -> return as-is
+    - Group-level effects_used has no overlap with overrides (and deps info
+      is available) -> return as-is
+
+    Args:
+        wrapper: The @compile wrapper to potentially specialize.
+        caller_group_key: Caller's group key for dependency recording.
+        suffix: Explicit effect suffix (phase 1). If None, read from
+                compilation_context (phase 2).
+        effect_overrides: Explicit effect overrides dict (phase 1). If None,
+                read from compilation_context (phase 2).
+
+    Returns:
+        The (possibly specialized) wrapper.  Returns the original wrapper
+        unchanged when specialization is not needed or not possible.
     """
-    Create a new @compile function with the current effect context.
+    # --- Determine suffix and overrides ---
+    if suffix is None or effect_overrides is None:
+        compilation_ctx = get_current_compilation_context()
+        if compilation_ctx:
+            if suffix is None:
+                suffix = compilation_ctx.get('effect_suffix')
+            if effect_overrides is None:
+                effect_overrides = compilation_ctx.get('effect_overrides', {})
 
-    Prefers `get_effect_specialized()` on the wrapper (which correctly reuses
-    the original captured symbols, including annotation-time locals that are
-    not in the closure). Falls back to re-applying @compile for wrappers
-    that do not support `get_effect_specialized`.
+    if not suffix or not effect_overrides:
+        return wrapper
 
-    The new version uses 4-tuple group_key: (source_file, scope, None, effect_suffix)
-    where source_file is the original function's definition file (NOT caller's file).
-    
-    Design principle: Same effect_suffix = same implementation = reused across callers.
-    If bindings differ but suffix is same, that is a user error.
-    """
-    # Prefer get_effect_specialized — it correctly passes _captured_symbols
-    # so that metaprogrammed functions (e.g. linearize wrappers) whose
-    # annotations reference locals work correctly.
-    if hasattr(original_func, 'get_effect_specialized'):
-        try:
-            effect_overrides = capture_effect_context()
-            new_wrapper = original_func.get_effect_specialized(suffix, effect_overrides)
-            if new_wrapper is not None and new_wrapper is not original_func:
-                return new_wrapper
-        except Exception:
-            import traceback
-            traceback.print_exc()
+    # --- Resolve canonical wrapper ---
+    func_info = getattr(wrapper, '_func_info', None)
+    original_wrapper = func_info.wrapper if func_info else wrapper
+    original_binding = getattr(
+        original_wrapper, '_binding',
+        getattr(original_wrapper, '_state', None)
+    )
+    if original_binding is None:
+        return wrapper
 
-    # Fallback: re-apply @compile decorator
-    original_python_func = getattr(original_func, '__wrapped__', None)
-    if original_python_func is None:
-        return None
+    # Already effect-specialized for target suffix.
+    if original_binding.effect_suffix is not None:
+        return wrapper
 
-    from .decorators.compile import compile as compile_decorator
+    # Effect implementations are never transitively specialized.
+    if getattr(original_wrapper, '_pc_effect_impl', False):
+        return wrapper
 
-    try:
-        new_wrapper = compile_decorator(
-            original_python_func, 
-            _effect_suffix=suffix
+    # --- Check group-level effects_used (skip if no overlap) ---
+    should_specialize = True
+    callee_group_key = original_binding.group_key
+    if callee_group_key:
+        from .build.deps import get_dependency_tracker
+        dep_tracker = get_dependency_tracker()
+        callee_deps = dep_tracker.get_deps(callee_group_key)
+        if callee_deps is not None:
+            should_specialize = bool(
+                set(callee_deps.effects_used) & set(effect_overrides.keys())
+            )
+
+    if not should_specialize:
+        return wrapper
+
+    # --- Produce specialized wrapper ---
+    specialized_wrapper = _do_effect_specialize(
+        original_wrapper, suffix, effect_overrides
+    )
+    if specialized_wrapper is None or specialized_wrapper is original_wrapper:
+        return wrapper
+
+    from .logger import logger as _logger
+    _logger.debug(
+        f"Effect specialization: {original_binding.original_name} -> "
+        f"{getattr(specialized_wrapper, '_func_info', None) and specialized_wrapper._func_info.mangled_name}"
+    )
+
+    # Record dependency: caller_group -> specialized_wrapper_group
+    spec_binding = getattr(
+        specialized_wrapper, '_binding',
+        getattr(specialized_wrapper, '_state', None)
+    )
+    spec_group_key = spec_binding.group_key if spec_binding else None
+    if (caller_group_key and spec_group_key
+            and caller_group_key != spec_group_key):
+        from .build.deps import get_dependency_tracker
+        get_dependency_tracker().record_group_dependency(
+            caller_group_key, spec_group_key, "effect_specialized_call"
         )
-        return new_wrapper
-    except Exception:
-        # If compilation fails, return original
-        import traceback
-        traceback.print_exc()
-        return None
+
+    return specialized_wrapper
+
+
+def _do_effect_specialize(original_wrapper, suffix, effect_overrides):
+    """Produce an effect-specialized wrapper.
+
+    Prefers get_effect_specialized() (reuses captured symbols correctly).
+    Falls back to re-applying @compile for wrappers that don't support it.
+
+    Returns None on failure.
+    """
+    if hasattr(original_wrapper, 'get_effect_specialized'):
+        result = original_wrapper.get_effect_specialized(suffix, effect_overrides)
+        if result is not None and result is not original_wrapper:
+            return result
+    from .logger import logger
+    logger.error(f"Failed to specialize effect for {original_wrapper}")
 
 
 class EffectImportHook:
@@ -184,6 +257,7 @@ class EffectImportHook:
 
         # For `from module import name1, name2, ...`
         # We need to wrap @compile functions in the returned module
+        effect_overrides = capture_effect_context()
         for attr_name in fromlist:
             if attr_name == '*':
                 continue
@@ -212,8 +286,13 @@ class EffectImportHook:
             if cache_key in self._wrapped_attrs:
                 wrapped = self._wrapped_attrs[cache_key]
             else:
-                # Create a new version with the current effect context
-                wrapped = _create_effect_wrapped_function(attr, suffix)
+                # Use the unified specialization entry point (phase 1: explicit args)
+                wrapped = resolve_effect_wrapper(
+                    attr, suffix=suffix, effect_overrides=effect_overrides,
+                )
+                # resolve_effect_wrapper returns the original when not needed
+                if wrapped is attr:
+                    wrapped = None
                 if wrapped is not None:
                     self._wrapped_attrs[cache_key] = wrapped
 
@@ -359,6 +438,7 @@ class EffectContext:
         self._saved_direct: Dict[str, bool] = {}
         self._import_hook: Optional[EffectImportHook] = None
         self._saved_modules: Dict[str, Dict[str, Any]] = {}  # module_name -> {attr_name -> original_func}
+        self._saved_import = None  # The __import__ that was active when we entered
 
     def __enter__(self) -> 'EffectContext':
         # Save current state and apply overrides
@@ -380,36 +460,35 @@ class EffectContext:
 
             # Mark effect-implementation callables so the compiler can avoid
             # effect-specializing the implementation itself.
-            try:
-                def _mark_impl(obj):
-                    if obj is None:
-                        return
-                    if callable(obj) and getattr(obj, '_is_compiled', False):
-                        setattr(obj, '_pc_effect_impl', True)
-                    d = getattr(obj, '__dict__', None)
-                    if isinstance(d, dict):
-                        for v in d.values():
-                            if callable(v) and getattr(v, '_is_compiled', False):
-                                setattr(v, '_pc_effect_impl', True)
+            def _mark_impl(obj):
+                if obj is None:
+                    return
+                if callable(obj) and getattr(obj, '_is_compiled', False):
+                    setattr(obj, '_pc_effect_impl', True)
+                d = getattr(obj, '__dict__', None)
+                if isinstance(d, dict):
+                    for v in d.values():
+                        if callable(v) and getattr(v, '_is_compiled', False):
+                            setattr(v, '_pc_effect_impl', True)
 
-                _mark_impl(impl)
-            except Exception:
-                pass
+            _mark_impl(impl)
 
         # Push suffix to stack
         if self._suffix is not None:
             self._effect._suffix_stack.append(self._suffix)
 
         # Install builtins.__import__ hook to intercept all imports
+        # Save whatever __import__ is currently active (may be an outer hook)
+        self._saved_import = builtins.__import__
         self._import_hook = EffectImportHook(self)
         builtins.__import__ = self._import_hook
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # Restore original __import__ first
+        # Restore __import__ to what it was before __enter__
         if self._import_hook is not None:
-            builtins.__import__ = _original_import
+            builtins.__import__ = self._saved_import
 
             # Restore modified module attributes
             for module_name, attrs in self._saved_modules.items():

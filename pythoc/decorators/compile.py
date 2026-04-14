@@ -573,15 +573,7 @@ def _compile_impl(func_or_class,
         from ..valueref import wrap_value
         from ..builtin_entities import func as func_type_cls
         from ..builtin_entities.python_type import PythonType
-        from ..build.deps import get_dependency_tracker
-        
-        # Record dependency: caller -> callee (at call time, not from LLVM IR)
-        caller_group_key = getattr(visitor, 'current_group_key', None)
-        callee_group_key = wrapper._binding.group_key
-        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
-            dep_tracker = get_dependency_tracker()
-            dep_tracker.record_group_dependency(caller_group_key, callee_group_key, "function_call")
-        
+
         wrapper_ref = wrap_value(wrapper, kind="python", type_hint=PythonType.wrap(wrapper))
         converted_func_ref = visitor.type_converter.convert(wrapper_ref, func_type_cls, node)
         func_type = converted_func_ref.type_hint

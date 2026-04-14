@@ -141,7 +141,7 @@ class ParseError(Exception):
 class _Parser:
     """Recursive-descent regex parser.
 
-    Grammar (simplified precedence, low→high):
+    Grammar (simplified precedence, low->high):
         regex     = alternate
         alternate = concat ('|' concat)*
         concat    = repeat+

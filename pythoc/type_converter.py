@@ -228,13 +228,20 @@ class TypeConverter:
                 type_hint=target_type
             )
         
-        # Step 1: Handle @compile wrapper -> func conversion
-        # When source is a Python value that is a @compile wrapper, convert to func pointer
+        # Step 1: Handle @compile wrapper -> func pointer
+        # When source is a Python value that is a @compile wrapper, lower it
+        # to a func pointer.  This path handles wrappers used as *values*
+        # (e.g. `return add`, `op = add`, function pointer arguments).
+        # The *call* path goes through handle_call -> callable_lowering directly.
         if isinstance(value, ValueRef) and value.is_python_value():
             python_val = value.get_python_value()
             if hasattr(python_val, '_is_compiled') and python_val._is_compiled:
-                # This is a @compile wrapper - convert to func pointer
-                return self._convert_compile_wrapper_to_func(python_val, target_type)
+                from .callable_lowering import lower_compile_wrapper
+                caller_group_key = getattr(self._visitor, 'current_group_key', None)
+                return lower_compile_wrapper(
+                    python_val, self._visitor.module, caller_group_key,
+                    node=node,
+                )
             # Otherwise, auto-promote Python values to PC values
             value = self._promote_python_to_pc(python_val, stripped_target)
             return value
@@ -396,179 +403,6 @@ class TypeConverter:
         else:
             raise TypeError(f"Cannot infer PC type from Python type {type(python_val).__name__}")
     
-    def _convert_compile_wrapper_to_func(self, wrapper, target_type) -> ValueRef:
-        """Convert @compile wrapper to func pointer type.
-        
-        This handles the conversion of a @compile decorated function to a function
-        pointer. The wrapper contains all the metadata needed to declare/get the
-        IR function and build the appropriate func type.
-        
-        Transitive effect propagation:
-        - If the current compilation has effect_suffix and this callee uses
-          any of the overridden effects, we generate a new version with the
-          same effect_suffix.
-        - The callee's group_key is (callee_file, callee_scope, callee_compile_suffix, effect_suffix)
-          NOT the caller's group_key - this preserves proper group boundaries.
-        
-        Args:
-            wrapper: The @compile wrapper function object
-            target_type: Target func type (may be None for auto-inference)
-        
-        Returns:
-            ValueRef with func pointer type_hint
-        """
-        from .effect import get_current_compilation_context
-        from llvmlite import ir
-        
-        binding_state = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
-        if binding_state is None:
-            raise NameError(
-                "Function '{}' missing binding metadata".format(
-                    getattr(wrapper, '__name__', wrapper)
-                )
-            )
-        func_name = binding_state.original_name
-        
-        # Get func_info directly from wrapper (not from registry lookup)
-        func_info = getattr(wrapper, '_func_info', None)
-        if not func_info:
-            raise NameError(f"Function '{func_name}' missing _func_info attribute")
-        
-        # Determine actual function name
-        lookup_mangled = binding_state.mangled_name
-        actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
-        
-        # Handle transitive effect propagation
-        #
-        # Policy (group/file-level): only propagate the caller's effect suffix to a
-        # callee when the *callee group* uses at least one of the overridden effects.
-        #
-        # Rationale: this avoids the worst-case explosion of specialized variants
-        # (and Windows DLL-local `static` duplication) without persisting per-function
-        # effect dependency maps to disk.
-
-        compilation_ctx = get_current_compilation_context()
-
-        callee_effect_suffix = binding_state.effect_suffix
-
-        # Only propagate when the callee itself is not already effect-specialized.
-        if compilation_ctx and callee_effect_suffix is None:
-            ctx_effect_suffix = compilation_ctx.get('effect_suffix')
-            ctx_effects = compilation_ctx.get('effect_overrides', {})
-
-            if ctx_effect_suffix and ctx_effects:
-                original_wrapper = func_info.wrapper if func_info else None
-
-                # Do NOT propagate effect suffix into effect-implementation callables.
-                # Effect implementations are marked by the effect system.
-                if original_wrapper and getattr(original_wrapper, '_pc_effect_impl', False):
-                    pass
-                else:
-                    # Decide based on callee *group-level* `effects_used`.
-                    #
-                    # - If we have deps info for the callee group, specialize only when
-                    #   there is an intersection.
-                    # - If we don't know yet (callee not compiled / deps not loaded), be
-                    #   conservative and specialize.
-                    should_specialize = True
-                    callee_group_key = getattr(original_wrapper, '_binding', getattr(original_wrapper, '_state', None))
-                    callee_group_key = callee_group_key.group_key if callee_group_key else (binding_state.group_key if binding_state else None)
-                    if callee_group_key:
-                        try:
-                            from .build.deps import get_dependency_tracker
-                            dep_tracker = get_dependency_tracker()
-                            callee_deps = dep_tracker.get_deps(callee_group_key)
-                            if callee_deps is not None:
-                                should_specialize = bool(set(callee_deps.effects_used) & set(ctx_effects.keys()))
-                        except Exception:
-                            should_specialize = True
-
-                    if should_specialize and original_wrapper and hasattr(original_wrapper, 'get_effect_specialized'):
-
-                        specialized_wrapper = original_wrapper.get_effect_specialized(
-                            ctx_effect_suffix, ctx_effects
-                        )
-                        func_info = specialized_wrapper._func_info
-                        actual_func_name = func_info.mangled_name if func_info.mangled_name else func_name
-                        logger.debug(f"Using transitive effect version: {actual_func_name}")
-
-                        # Record dependency: caller_group -> specialized_wrapper_group
-                        caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                        specialized_binding = getattr(specialized_wrapper, '_binding', getattr(specialized_wrapper, '_state', None))
-                        callee_group_key = specialized_binding.group_key if specialized_binding else None
-                        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
-                            from .build.deps import get_dependency_tracker
-                            dep_tracker = get_dependency_tracker()
-                            dep_tracker.record_group_dependency(
-                                caller_group_key, callee_group_key, "effect_specialized_call"
-                            )
-
-
-        # If the callee is still a template (not yet materialized), materialize
-        # the default specialization so the symbol exists at link time.
-        callee_w = func_info.wrapper if func_info else None
-        callee_binding = getattr(callee_w, '_binding', getattr(callee_w, '_state', None))
-        if callee_binding and callee_binding.is_template:
-            from .decorators.compile import materialize_specialization, DEFAULT_EFFECT_KEY
-            materialize_specialization(callee_w, DEFAULT_EFFECT_KEY, {})
-
-        # Always record a dependency for the referenced wrapper.
-        #
-        # This is important on Windows where we must link dependency groups at
-        # DLL link-time (via import libraries). Even when we intentionally skip
-        # effect-specializing an effect-implementation callable (marked with
-        # `_pc_effect_impl`), we still need the group-level dependency recorded
-        # so the linker sees the correct provider.
-        caller_group_key = getattr(self._visitor, 'current_group_key', None)
-        callee_wrapper = getattr(func_info, 'wrapper', None) if func_info else None
-        callee_wrapper_binding = getattr(callee_wrapper, '_binding', getattr(callee_wrapper, '_state', None)) if callee_wrapper else None
-        callee_group_key = (
-            callee_wrapper_binding.group_key if callee_wrapper_binding else None
-        ) or (binding_state.group_key if binding_state else None)
-        if caller_group_key and callee_group_key and caller_group_key != callee_group_key:
-            from .build.deps import get_dependency_tracker
-            get_dependency_tracker().record_group_dependency(
-                caller_group_key, callee_group_key, "function_ref"
-            )
-        
-        # Get or declare the function in the module
-        module = self._visitor.module
-        module_context = module.context
-        
-        try:
-            ir_func = module.get_global(actual_func_name)
-        except KeyError:
-            # Declare the function with proper ABI handling via builder
-            param_llvm_types = []
-            for param_name in func_info.param_names:
-                param_type = func_info.param_type_hints.get(param_name)
-                if param_type and hasattr(param_type, 'get_llvm_type'):
-                    param_llvm_types.append(param_type.get_llvm_type(module_context))
-                else:
-                    param_llvm_types.append(ir.IntType(32))
-            
-            if func_info.return_type_hint and hasattr(func_info.return_type_hint, 'get_llvm_type'):
-                return_llvm_type = func_info.return_type_hint.get_llvm_type(module_context)
-            else:
-                return_llvm_type = ir.VoidType()
-            
-            # Use LLVMBuilder to declare function with C ABI
-            from .builder import LLVMBuilder
-            temp_builder = LLVMBuilder()
-            func_wrapper = temp_builder.declare_function(
-                module, actual_func_name,
-                param_llvm_types, return_llvm_type
-            )
-            ir_func = func_wrapper.ir_function
-            
-            # Apply function-level attributes to the declare so LLVM can
-            # optimize cross-module calls (e.g. readnone enables CSE)
-            if func_info.fn_attrs:
-                for attr in func_info.fn_attrs:
-                    ir_func.attributes.add(attr)
-        
-        return wrap_value(ir_func, kind='pointer', type_hint=func_info.callable_pc_type)
-
     def promote_to_pc_default(self, python_val) -> ValueRef:
         """Promote Python value to default PC type
         
