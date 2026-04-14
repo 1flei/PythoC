@@ -7,7 +7,7 @@ defer(f, a, b, c) registers f(a, b, c) to be called when the current block exits
 Defer semantics follow Zig/Go:
 - Return value is evaluated BEFORE defers execute
 - Defer cannot modify the return value directly
-- Deferred calls are executed in FIFO order (first registered, first executed)
+- Deferred calls are executed in LIFO order (last registered, first executed)
 - Defer is useful for cleanup operations (closing files, freeing memory, etc.)
 """
 
@@ -50,20 +50,20 @@ def test_defer_simple() -> i32:
     return result  # Returns 0 (Zig/Go semantics: defer executes after return value is captured)
 
 
-@compile(suffix="defer_fifo_order")
-def test_defer_fifo_order() -> i32:
-    """Multiple defers execute in FIFO order
-    
-    """
+@compile(suffix="defer_lifo_order")
+def test_defer_lifo_order() -> i32:
+    """Multiple defers in the same scope execute in LIFO order."""
     result: i32 = 0
-    
-    def inc(p: ptr[i32]) -> void:
-        p[0] = p[0] + 1
-    
-    defer(inc, ptr(result))
-    defer(inc, ptr(result))
-    defer(inc, ptr(result))
-    return result  # Returns 0 (defers execute after, result becomes 3 but not returned)
+
+    def push_digit(p: ptr[i32], digit: i32) -> void:
+        p[0] = p[0] * 10 + digit
+
+    if result == 0:
+        defer(push_digit, ptr(result), 1)
+        defer(push_digit, ptr(result), 2)
+        defer(push_digit, ptr(result), 3)
+
+    return result  # IF scope exits before return, so the observed order is 321
 
 
 @compile(suffix="defer_with_work")
@@ -388,6 +388,29 @@ def test_defer_goto_forward() -> i32:
     return result  # Defer before goto: result=1, +10=11, returns 11
 
 
+@compile(suffix="defer_forward_goto_lifo_order")
+def test_defer_forward_goto_lifo_order() -> i32:
+    """Forward goto preserves LIFO defer order for the exited scope."""
+    result: i32 = 0
+
+    def push_digit(p: ptr[i32], digit: i32) -> void:
+        p[0] = p[0] * 10 + digit
+
+    with label("main"):
+        with label("before"):
+            defer(push_digit, ptr(result), 1)
+            defer(push_digit, ptr(result), 2)
+            defer(push_digit, ptr(result), 3)
+            goto_begin("after")
+
+        result = result + 1000  # Skipped by goto
+
+        with label("after"):
+            result = result
+
+    return result  # Forward goto exits `before`, so the observed order is 321
+
+
 @compile(suffix="defer_goto_backward")
 def test_defer_goto_backward() -> i32:
     """Defer with backward goto (loop via goto)"""
@@ -648,10 +671,10 @@ class TestDefer(DeferredTestCase):
         result = test_defer_simple()
         self.assertEqual(result, 0)  # Zig/Go semantics: return value is 0
     
-    def test_defer_fifo_order(self):
-        """FIFO execution order - return value captured before defers execute"""
-        result = test_defer_fifo_order()
-        self.assertEqual(result, 0)  # Zig/Go semantics: return value is 0
+    def test_defer_lifo_order(self):
+        """LIFO execution order within the same scope."""
+        result = test_defer_lifo_order()
+        self.assertEqual(result, 321)
     
     def test_defer_with_work(self):
         """Defer with work between - return value captured before defer executes"""
@@ -760,6 +783,11 @@ class TestDefer(DeferredTestCase):
         """Defer with forward goto"""
         result = test_defer_goto_forward()
         self.assertEqual(result, 11)  # Defer at label exit: 1, +10 = 11
+
+    def test_defer_forward_goto_lifo_order(self):
+        """Forward goto path also preserves LIFO order."""
+        result = test_defer_forward_goto_lifo_order()
+        self.assertEqual(result, 321)
     
     def test_defer_goto_backward(self):
         """Defer with backward goto (loop)"""

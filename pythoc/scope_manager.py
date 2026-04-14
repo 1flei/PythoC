@@ -245,30 +245,33 @@ class ScopeManager:
             self._emit_defers_for_scope(scope)
     
     def _emit_defers_for_scope(self, scope: Scope):
-        """Emit deferred calls for a single scope
-        
+        """Emit deferred calls for a single scope.
+
+        Defers execute in LIFO order within a scope.
+
         The defers list is NOT cleared - multiple code paths may need to emit
         the same defers (e.g., goto path and normal exit path are mutually
         exclusive at runtime but both need IR generated at compile time).
         """
         if not self._visitor:
             return
-        
+
         from pythoc.builtin_entities.defer import _execute_single_defer
-        
+
         cf = self._visitor._get_cf_builder()
-        
-        # Do NOT clear defers - they may be needed by other code paths
-        defers_to_emit = scope.defers[:]
-        
+
+        # Do NOT clear defers - they may be needed by other code paths.
+        # Within a scope, defer unwinds in LIFO order.
+        defers_to_emit = list(reversed(scope.defers))
+
         executed_count = 0
         for defer_info in defers_to_emit:
             if cf.is_terminated():
                 logger.debug(f"  cf is terminated, stopping defer emit")
                 break
-            
+
             logger.debug(f"  emitting defer: {defer_info.callable_obj}")
-            
+
             # Use the unified defer execution function
             _execute_single_defer(
                 self._visitor,
@@ -278,7 +281,7 @@ class ScopeManager:
                 defer_info.node
             )
             executed_count += 1
-        
+
         logger.debug(f"Emitted {executed_count}/{len(defers_to_emit)} defers for scope depth {scope.depth}")
     
     def register_defer(self, callable_obj: Any, func_ref: ValueRef, 
@@ -492,13 +495,14 @@ class ScopeManager:
         """Capture current defer state for forward goto resolution.
 
         Returns a list of (depth, callable_obj, func_ref, args, node) tuples
-        representing all defers currently registered across all scopes.
+        in unwind order: inner scopes first, and within a scope the most recent
+        defer comes first.
         """
         snapshot = []
         current_depth = self.current_depth
-        for scope in self._scopes:
+        for scope in reversed(self._scopes):
             if scope.depth <= current_depth:
-                for defer_info in scope.defers:
+                for defer_info in reversed(scope.defers):
                     snapshot.append((
                         scope.depth,
                         defer_info.callable_obj,

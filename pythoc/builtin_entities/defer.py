@@ -3,7 +3,7 @@ defer intrinsic for deferred execution
 
 defer(f, a, b, c) - Register f(a, b, c) to be called when the current block exits
 
-Deferred calls are executed in FIFO order (first registered, first executed)
+Deferred calls are executed in LIFO order (last registered, first executed)
 when the block exits via:
 - Normal flow (end of block/scope)
 - return (executes all defers from current scope up)
@@ -20,7 +20,7 @@ Usage:
 Note:
 - defer captures the arguments at registration time, not at execution time
 - Deferred calls are scope-bound: they execute when their scope exits
-- Multiple defers in same scope execute in FIFO order (first defer runs first)
+- Multiple defers in same scope execute in LIFO order (last defer runs first)
 - All defer management is done through ScopeManager (no legacy _defer_stack)
 """
 import ast
@@ -35,48 +35,49 @@ from ..logger import logger
 # ============================================================================
 
 def _get_defers_for_scope_via_manager(visitor, scope_depth: int):
-    """Get defers for a specific scope depth from ScopeManager
-    
-    Returns list of (callable_obj, func_ref, args, node) tuples
+    """Get defers for a specific scope depth from ScopeManager.
+
+    Returns tuples in execution order.
     """
     if not hasattr(visitor, 'scope_manager'):
         return []
-    
+
     for scope in visitor.scope_manager._scopes:
         if scope.depth == scope_depth:
             return [
                 (d.callable_obj, d.func_ref, d.args, d.node)
-                for d in scope.defers
+                for d in reversed(scope.defers)
             ]
     return []
 
 
 def _get_all_defers_via_manager(visitor):
-    """Get all defers from all scopes via ScopeManager
-    
-    Returns list of (depth, callable_obj, func_ref, args, node) tuples
+    """Get all defers from all scopes via ScopeManager.
+
+    Returns tuples in unwind order: inner scopes first, and within a scope the
+    most recently registered defer executes first.
     """
     if not hasattr(visitor, 'scope_manager'):
         return []
-    
+
     result = []
-    for scope in visitor.scope_manager._scopes:
-        for d in scope.defers:
+    for scope in reversed(visitor.scope_manager._scopes):
+        for d in reversed(scope.defers):
             result.append((scope.depth, d.callable_obj, d.func_ref, d.args, d.node))
     return result
 
 
 def emit_deferred_calls(visitor, scope_depth: int = None, all_scopes: bool = False):
-    """Emit IR for deferred calls via ScopeManager
-    
+    """Emit IR for deferred calls via ScopeManager.
+
     This generates the IR to execute defers at the current position.
-    
+
     Args:
         visitor: AST visitor
         scope_depth: Specific scope depth to emit defers for
         all_scopes: If True, emit all defers from all scopes
-    
-    Deferred calls are emitted in FIFO order (first registered, first executed)
+
+    Deferred calls are emitted in LIFO order within each scope.
     """
     if not hasattr(visitor, 'scope_manager'):
         logger.error("emit_deferred_calls: visitor has no scope_manager", node=None)
@@ -164,13 +165,13 @@ def _get_callable_obj(func_arg: ValueRef):
 
 
 class defer(BuiltinFunction):
-    """defer(f, *args) - Register a deferred call
-    
+    """defer(f, *args) - Register a deferred call.
+
     The call f(*args) will be executed when the current block exits.
     Arguments are evaluated at defer() time, not at execution time.
-    
-    Multiple defers in the same scope execute in FIFO order.
-    
+
+    Multiple defers in the same scope execute in LIFO order.
+
     Linear type semantics:
     - Linear arguments are NOT consumed at defer registration time
     - Linear arguments are consumed when the defer actually executes
