@@ -5,20 +5,18 @@ from .logger import logger
 
 
 def strip_qualifiers(pc_type: Any) -> Any:
-    """Strip all qualifiers from a type, returning the base type
-    
+    """Strip qualifier wrappers (const, volatile, static) from a type.
+
+    Delegates to the canonical implementation in type_converter which
+    correctly preserves refined types.
+
     Example:
         const[volatile[i32]] -> i32
         static[const[array[i32, 5]]] -> array[i32, 5]
+        refined[i32, pred] -> refined[i32, pred]  (NOT stripped)
     """
-    if pc_type is None:
-        return None
-    
-    # Keep stripping qualifiers until we reach the base type
-    while hasattr(pc_type, 'qualified_type') and pc_type.qualified_type is not None:
-        pc_type = pc_type.qualified_type
-    
-    return pc_type
+    from .type_converter import strip_qualifiers as _canonical_strip
+    return _canonical_strip(pc_type)
 
 
 def propagate_qualifiers(from_type: Any, to_type: Any) -> Any:

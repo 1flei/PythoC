@@ -415,27 +415,6 @@ class ValueRefDispatcher:
                 self._zero_constant_for(value),
             )
 
-        if self.visitor.type_converter.is_llvm_integer_type(llvm_type, width=1):
-            return value_ir
-        if self.visitor.type_converter.is_llvm_integer_type(llvm_type):
-            return self.visitor.builder.icmp_signed(
-                "!=",
-                value_ir,
-                self._zero_constant_for(value),
-            )
-        if self.visitor.type_converter.is_llvm_float_type(llvm_type):
-            return self.visitor.builder.fcmp_ordered(
-                "!=",
-                value_ir,
-                self._zero_constant_for(value),
-            )
-        if self.visitor.type_converter.is_llvm_pointer_type(llvm_type):
-            return self.visitor.builder.icmp_unsigned(
-                "!=",
-                value_ir,
-                self._zero_constant_for(value),
-            )
-
         logger.error(f"Cannot convert {llvm_type} to boolean", node=node, exc_type=TypeError)
 
     def _combine_boolean_and(

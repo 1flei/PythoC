@@ -439,42 +439,46 @@ class BuiltinType(BuiltinEntity):
     def handle_add(cls, visitor, left, right, node: ast.BinOp):
         """Handle addition for numeric types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
         if is_float:
             result = visitor.builder.fadd(ensure_ir(left), ensure_ir(right))
         else:
             result = visitor.builder.add(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_sub(cls, visitor, left, right, node: ast.BinOp):
         """Handle subtraction for numeric types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
         if is_float:
             result = visitor.builder.fsub(ensure_ir(left), ensure_ir(right))
         else:
             result = visitor.builder.sub(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_mul(cls, visitor, left, right, node: ast.BinOp):
         """Handle multiplication for numeric types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
         if is_float:
             result = visitor.builder.fmul(ensure_ir(left), ensure_ir(right))
         else:
             result = visitor.builder.mul(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_div(cls, visitor, left, right, node: ast.BinOp):
         """Handle division for numeric types (always returns float)"""
         from ..valueref import wrap_value, ensure_ir, get_type
+        from ..type_converter import forget_refinement
         from llvmlite import ir
         from ..builtin_entities import f64
         
@@ -485,12 +489,13 @@ class BuiltinType(BuiltinEntity):
             right = visitor._promote_to_float(right, f64)
         
         result = visitor.builder.fdiv(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_floordiv(cls, visitor, left, right, node: ast.BinOp):
         """Handle floor division for numeric types"""
         from ..valueref import wrap_value, ensure_ir, get_type
+        from ..type_converter import forget_refinement
         from llvmlite import ir
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
@@ -500,24 +505,26 @@ class BuiltinType(BuiltinEntity):
             result = visitor.builder.call(visitor._get_floor_intrinsic(ir.DoubleType()), [result])
         else:
             result = visitor.builder.sdiv(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_mod(cls, visitor, left, right, node: ast.BinOp):
         """Handle modulo for numeric types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
         if is_float:
             result = visitor.builder.frem(ensure_ir(left), ensure_ir(right))
         else:
             result = visitor.builder.srem(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_pow(cls, visitor, left, right, node: ast.BinOp):
         """Handle power for numeric types"""
         from ..valueref import wrap_value, ensure_ir, get_type
+        from ..type_converter import forget_refinement
         left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
         
         # Choose pow intrinsic by PC hint: floats use f64 pow, integers promoted already
@@ -526,16 +533,17 @@ class BuiltinType(BuiltinEntity):
             visitor._get_pow_intrinsic(float_llvm),
             [ensure_ir(left), ensure_ir(right)]
         )
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_lshift(cls, visitor, left, right, node: ast.BinOp):
         """Handle left shift for integer types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, _ = visitor.type_converter.unify_binop_types(left, right)
         
         result = visitor.builder.shl(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_rshift(cls, visitor, left, right, node: ast.BinOp):
@@ -545,6 +553,7 @@ class BuiltinType(BuiltinEntity):
         and logical shift (lshr) for unsigned types (fills with zeros).
         """
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, _ = visitor.type_converter.unify_binop_types(left, right)
         
         # Check if the type is signed or unsigned
@@ -557,34 +566,37 @@ class BuiltinType(BuiltinEntity):
             result = visitor.builder.ashr(ensure_ir(left), ensure_ir(right))
         else:
             result = visitor.builder.lshr(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_bitor(cls, visitor, left, right, node: ast.BinOp):
         """Handle bitwise or for integer types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, _ = visitor.type_converter.unify_binop_types(left, right)
         
         result = visitor.builder.or_(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_bitxor(cls, visitor, left, right, node: ast.BinOp):
         """Handle bitwise xor for integer types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, _ = visitor.type_converter.unify_binop_types(left, right)
         
         result = visitor.builder.xor(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
     def handle_bitand(cls, visitor, left, right, node: ast.BinOp):
         """Handle bitwise and for integer types"""
         from ..valueref import wrap_value, ensure_ir
+        from ..type_converter import forget_refinement
         left, right, _ = visitor.type_converter.unify_binop_types(left, right)
         
         result = visitor.builder.and_(ensure_ir(left), ensure_ir(right))
-        return wrap_value(result, kind="value", type_hint=left.type_hint)
+        return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
 
 
 class BuiltinFunction(BuiltinEntity):

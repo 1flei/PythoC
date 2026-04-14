@@ -401,27 +401,15 @@ class LLVMCompiler:
             if param_name in resolved_decl.param_type_hints:
                 type_hint = resolved_decl.param_type_hints[param_name]
             
-            # Create ValueRef with proper wrapper for function pointers
             from .context import VariableInfo
             from .valueref import wrap_value
-            from .builtin_entities.func import func
             
-            # Check if this is a function pointer parameter
-            if type_hint and isinstance(type_hint, type) and issubclass(type_hint, func):
-                # Store alloca directly, func.handle_call will load it when needed
-                value_ref = wrap_value(
-                    alloca,
-                    kind='address',
-                    type_hint=type_hint,
-                    address=alloca
-                )
-            else:
-                value_ref = wrap_value(
-                    alloca,
-                    kind='address',
-                    type_hint=type_hint,
-                    address=alloca
-                )
+            value_ref = wrap_value(
+                alloca,
+                kind='address',
+                type_hint=type_hint,
+                address=alloca
+            )
             
             var_info = VariableInfo(
                 name=param_name,
