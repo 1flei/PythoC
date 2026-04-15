@@ -280,6 +280,14 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
               'bitcast', 'inttoptr', 'ptrtoint'):
         return args[1]  # The target type
 
+    # C ABI varargs
+    if op == 'va_start':
+        return ir.PointerType(ir.IntType(8))  # returns i8*
+    if op == 'va_arg':
+        return args[1]  # target_type
+    if op == 'va_end':
+        return None
+
     # Call
     if op == 'call':
         # If return_type_hint is provided, use its LLVM type (ABI coercion may

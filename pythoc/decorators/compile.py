@@ -338,17 +338,15 @@ def _compile_impl(func_or_class,
     param_names = [arg.arg for arg in func_ast.args.args]
     from ..ast_visitor.varargs import resolve_varargs
     resolved_varargs = resolve_varargs(func_ast, type_resolver)
-    varargs_kind = resolved_varargs.kind
     varargs_name = resolved_varargs.param_name
-    if varargs_kind == 'struct' and varargs_name in param_type_hints:
+    if resolved_varargs.is_typed and varargs_name in param_type_hints:
         del param_type_hints[varargs_name]
 
-    for i, elem_pc_type in enumerate(resolved_varargs.element_types):
-        if varargs_kind != 'struct':
-            break
-        expanded_param_name = f'{varargs_name}_elem{i}'
-        param_names.append(expanded_param_name)
-        param_type_hints[expanded_param_name] = elem_pc_type
+    if resolved_varargs.is_typed:
+        for i, elem_pc_type in enumerate(resolved_varargs.element_types):
+            expanded_param_name = f'{varargs_name}_elem{i}'
+            param_names.append(expanded_param_name)
+            param_type_hints[expanded_param_name] = elem_pc_type
 
     # Build mangled name: name_{compile_suffix}_{effect_suffix}
     # compile_suffix comes first, then effect_suffix

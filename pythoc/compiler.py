@@ -228,7 +228,7 @@ class LLVMCompiler:
             resolved_return_type = void
 
         varargs = resolve_varargs(ast_node, type_resolver)
-        if varargs.kind == 'struct' and varargs.param_name is not None:
+        if varargs.is_typed and varargs.param_name is not None:
             resolved_param_type_hints.pop(varargs.param_name, None)
             for index, elem_pc_type in enumerate(varargs.element_types):
                 expanded_name = f"{varargs.param_name}_elem{index}"
@@ -333,7 +333,7 @@ class LLVMCompiler:
                 normal_param_hints[arg.arg] = resolved_decl.param_type_hints[arg.arg]
 
         varargs_info = None
-        if varargs_kind != 'none':
+        if varargs_name is not None:
             varargs_info = {
                 'kind': varargs_kind,
                 'name': varargs_name,
@@ -425,8 +425,10 @@ class LLVMCompiler:
             if type_hint and visitor._is_linear_type(type_hint):
                 visitor._init_linear_states(var_info, type_hint, initial_state='active')
         
-        # For struct varargs, create a synthetic struct from the expanded parameters
-        if varargs_kind == 'struct':
+        # For typed varargs (*args: T), create a synthetic composite from
+        # the expanded parameters so the function body can access them as
+        # args[i] or args.field.
+        if resolved_decl.varargs.is_typed:
             # Get all expanded parameter values using func_wrapper
             # Use get_user_arg_unpacked() to handle ABI coercion transparently
             expanded_values = []
@@ -475,34 +477,6 @@ class LLVMCompiler:
                 name=varargs_name,
                 value_ref=varargs_value_ref,
                 alloca=varargs_alloca,
-                source="parameter",
-                is_parameter=True,
-                is_mutable=False  # varargs is read-only
-            )
-            
-            visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
-        
-        # For union/enum varargs, register a placeholder variable
-        # The actual va_list will be initialized on first access in subscripts.py
-        if varargs_kind in ('union', 'enum'):
-            from .context import VariableInfo
-            from .valueref import wrap_value
-            
-            # Parse the varargs type annotation to get the enum/union type
-            varargs_type_hint = resolved_decl.varargs.parsed_type
-            
-            # Create a placeholder ValueRef - the actual va_list is initialized lazily
-            # We use kind='varargs' to indicate this is a special varargs placeholder
-            varargs_placeholder = wrap_value(
-                None,  # Will be initialized on first access
-                kind='varargs',  # Special kind to indicate varargs placeholder
-                type_hint=varargs_type_hint,  # The enum/union type
-            )
-            
-            varargs_var_info = VariableInfo(
-                name=varargs_name,
-                value_ref=varargs_placeholder,
-                alloca=None,  # No alloca yet - will be created on first access
                 source="parameter",
                 is_parameter=True,
                 is_mutable=False  # varargs is read-only

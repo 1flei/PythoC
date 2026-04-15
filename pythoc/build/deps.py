@@ -300,6 +300,19 @@ class DependencyTracker:
         # Loaded deps from files: group_key -> GroupDeps
         self._loaded_deps: Dict[Tuple, GroupDeps] = {}
     
+    def _get_transitive_cache(self) -> Dict[Tuple, Optional[bool]]:
+        """Lazily initialize the transitive effects cache."""
+        cache = getattr(self, '_transitive_effects_cache', None)
+        if cache is None:
+            cache = {}
+            self._transitive_effects_cache = cache
+        return cache
+
+    def _clear_transitive_cache(self):
+        cache = getattr(self, '_transitive_effects_cache', None)
+        if cache:
+            cache.clear()
+
     def get_or_create_group_deps(self, group_key: Tuple) -> GroupDeps:
         """Get or create GroupDeps for a group key."""
         if group_key not in self._group_deps:
@@ -337,6 +350,7 @@ class DependencyTracker:
         """Record that a group uses an effect."""
         group_deps = self.get_or_create_group_deps(group_key)
         group_deps.add_effect(effect_name)
+        self._clear_transitive_cache()
     
     def get_deps_file_path(self, obj_file: str) -> str:
         """Get .deps file path corresponding to an .o file."""
@@ -418,6 +432,122 @@ class DependencyTracker:
             return self.load_deps(obj_file)
         
         return None
+
+    def derive_obj_file_from_group_key(self, group_key: Tuple) -> Optional[str]:
+        """Derive the object file path for a group key."""
+        if isinstance(group_key, GroupKey):
+            gk = group_key
+        else:
+            gk = GroupKey.from_tuple(group_key)
+
+        source_file = gk.file
+        if not source_file:
+            return None
+
+        cwd = os.getcwd()
+        if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
+            rel_path = os.path.relpath(source_file, cwd)
+        else:
+            base_name = os.path.splitext(os.path.basename(source_file))[0]
+            rel_path = f"external/{base_name}.py"
+
+        build_dir = os.path.join('build', os.path.dirname(rel_path))
+        base_name = os.path.splitext(os.path.basename(source_file))[0]
+        file_suffix = gk.get_file_suffix()
+        file_base = f"{base_name}.{file_suffix}" if file_suffix else base_name
+        return os.path.join(build_dir, f"{file_base}.o")
+
+    def get_deps_for_group(self, group_key: Tuple) -> Optional[GroupDeps]:
+        """Get dependencies for a group key, loading persisted deps if needed."""
+        if isinstance(group_key, GroupKey):
+            group_key = group_key.to_tuple()
+
+        obj_file = self.derive_obj_file_from_group_key(group_key)
+        return self.get_deps(group_key, obj_file=obj_file)
+
+    def group_uses_effects_transitively(
+        self,
+        group_key: Tuple,
+        effect_names: Set[str],
+    ) -> Optional[bool]:
+        """Check whether a group or its dependent groups use any target effect.
+
+        Returns True or False when dependency information is available.
+        Returns None when the dependency information is unavailable, so callers
+        can fall back to conservative specialization.
+
+        Results are memoized per (group_key, frozenset(effect_names)) so that
+        repeated queries during compilation stay O(1) after the first walk.
+        """
+        if not effect_names:
+            return False
+
+        if isinstance(group_key, GroupKey):
+            group_key = group_key.to_tuple()
+
+        frozen_effects = frozenset(effect_names)
+        return self._walk_transitive_effects(group_key, frozen_effects, set())
+
+    def _walk_transitive_effects(
+        self,
+        group_key: Tuple,
+        frozen_effects: frozenset,
+        visiting: Set[Tuple],
+    ) -> Optional[bool]:
+        """DFS helper with per-node memoization."""
+        cache = self._get_transitive_cache()
+        cache_key = (group_key, frozen_effects)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        if group_key in visiting:
+            return False
+        visiting.add(group_key)
+
+        result = self._compute_transitive_effects(
+            group_key, frozen_effects, visiting
+        )
+
+        visiting.discard(group_key)
+
+        # Only cache definitive results; None means deps unavailable and
+        # may appear later, so we do not cache it.
+        if result is not None:
+            cache[cache_key] = result
+
+        return result
+
+    def _compute_transitive_effects(
+        self,
+        group_key: Tuple,
+        frozen_effects: frozenset,
+        visiting: Set[Tuple],
+    ) -> Optional[bool]:
+        deps = self.get_deps_for_group(group_key)
+        if deps is None:
+            return None
+
+        if deps.effects_used & frozen_effects:
+            return True
+
+        saw_unknown = False
+        for group_dep in deps.group_dependencies:
+            target_group = getattr(group_dep, 'target_group', None)
+            if target_group is None:
+                continue
+
+            target_result = self._walk_transitive_effects(
+                target_group.to_tuple(), frozen_effects, visiting
+            )
+            if target_result is True:
+                return True
+            if target_result is None:
+                saw_unknown = True
+
+        if saw_unknown:
+            return None
+        return False
     
     def get_link_libraries(self, group_key: Tuple, obj_file: str = None) -> List[str]:
         """Get all link libraries for a group."""
@@ -453,11 +583,13 @@ class DependencyTracker:
             del self._group_deps[group_key]
         if group_key in self._loaded_deps:
             del self._loaded_deps[group_key]
+        self._clear_transitive_cache()
     
     def clear_all(self):
         """Clear all in-memory state."""
         self._group_deps.clear()
         self._loaded_deps.clear()
+        self._clear_transitive_cache()
 
 
 

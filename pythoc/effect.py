@@ -163,17 +163,18 @@ def resolve_effect_wrapper(wrapper, caller_group_key=None,
     if getattr(original_wrapper, '_pc_effect_impl', False):
         return wrapper
 
-    # --- Check group-level effects_used (skip if no overlap) ---
+    # --- Check group-level effects_used (including transitive group deps) ---
     should_specialize = True
     callee_group_key = original_binding.group_key
     if callee_group_key:
         from .build.deps import get_dependency_tracker
         dep_tracker = get_dependency_tracker()
-        callee_deps = dep_tracker.get_deps(callee_group_key)
-        if callee_deps is not None:
-            should_specialize = bool(
-                set(callee_deps.effects_used) & set(effect_overrides.keys())
-            )
+        callee_uses_effects = dep_tracker.group_uses_effects_transitively(
+            callee_group_key,
+            set(effect_overrides.keys()),
+        )
+        if callee_uses_effects is not None:
+            should_specialize = callee_uses_effects
 
     if not should_specialize:
         return wrapper

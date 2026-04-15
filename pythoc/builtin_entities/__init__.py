@@ -53,6 +53,7 @@ from .qualifiers import const, static, volatile
 
 # Built-in functions
 from .intrinsics import sizeof, nullptr, seq, consume, assume, refine, typeof, char, defer
+from .intrinsics import va_start, va_arg, va_end
 # Scoped goto/label (user-facing API)
 from .intrinsics import label, goto, goto_begin, goto_end
 
