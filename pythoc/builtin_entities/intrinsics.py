@@ -11,6 +11,7 @@ from .assume import assume
 from .refine import refine
 from .defer import defer
 from .scoped_label import label, goto, goto_begin, goto_end
+from .va_builtins import va_start, va_arg, va_end
 
 nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="value", type_hint=ptr[void])
 
@@ -29,4 +30,8 @@ __all__ = [
     'goto',
     'goto_begin',  # Backward compatibility alias
     'goto_end',
+    # C ABI varargs
+    'va_start',
+    'va_arg',
+    'va_end',
 ]

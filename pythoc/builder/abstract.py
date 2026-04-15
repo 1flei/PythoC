@@ -331,3 +331,33 @@ class AbstractBuilder(ABC):
     def not_(self, value: Any, name: str = "") -> Any:
         """Bitwise NOT."""
         pass
+
+    # ========== C ABI Varargs ==========
+
+    @abstractmethod
+    def va_start(self, name: str = "va_list") -> Any:
+        """Initialize a va_list for the current varargs function.
+
+        Returns:
+            An i8* pointer to the va_list.
+        """
+        pass
+
+    @abstractmethod
+    def va_arg(self, va_list_ptr: Any, target_type: Any, name: str = "") -> Any:
+        """Read the next argument from a va_list.
+
+        Args:
+            va_list_ptr: i8* pointer returned by va_start.
+            target_type: LLVM type to read.
+            name: Optional SSA name.
+
+        Returns:
+            The extracted value.
+        """
+        pass
+
+    @abstractmethod
+    def va_end(self, va_list_ptr: Any) -> None:
+        """Clean up a va_list."""
+        pass

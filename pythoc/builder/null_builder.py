@@ -244,3 +244,12 @@ class NullBuilder(AbstractBuilder):
     
     def not_(self, value: Any, name: str = "") -> Any:
         self._raise_error("not")
+
+    def va_start(self, name: str = "va_list") -> Any:
+        self._raise_error("va_start")
+
+    def va_arg(self, va_list_ptr: Any, target_type: Any, name: str = "") -> Any:
+        self._raise_error("va_arg")
+
+    def va_end(self, va_list_ptr: Any) -> None:
+        self._raise_error("va_end")

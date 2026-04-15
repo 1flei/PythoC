@@ -170,7 +170,7 @@ class func(BuiltinType):
                     exc_type=TypeError,
                 )
 
-        # Type conversion for arguments if needed
+        # Type conversion for fixed arguments
         converted_args = []
         for idx, (arg, expected_type) in enumerate(zip(args, param_llvm_types)):
             target_pc_type = cls.param_types[idx]
@@ -185,6 +185,25 @@ class func(BuiltinType):
                 converted_args.append(ensure_ir(converted))
             else:
                 converted_args.append(ensure_ir(arg))
+
+        # For varargs functions, pass remaining arguments beyond the fixed
+        # params. Apply C default argument promotions (i8/i16 -> i32, f32 -> f64).
+        fn_type = getattr(func_ptr, 'function_type', None)
+        is_varargs = fn_type and getattr(fn_type, 'var_arg', False)
+        if is_varargs and len(args) > len(param_llvm_types):
+            from . import i8 as pc_i8, i16 as pc_i16, i32 as pc_i32
+            from . import f32 as pc_f32, f64 as pc_f64
+            for extra_arg in args[len(param_llvm_types):]:
+                hint = getattr(extra_arg, 'type_hint', None)
+                # C default argument promotions for varargs
+                if hint in (pc_i8, pc_i16):
+                    promoted = visitor.type_converter.convert(extra_arg, pc_i32, node)
+                    converted_args.append(ensure_ir(promoted))
+                elif hint == pc_f32:
+                    promoted = visitor.type_converter.convert(extra_arg, pc_f64, node)
+                    converted_args.append(ensure_ir(promoted))
+                else:
+                    converted_args.append(ensure_ir(extra_arg))
 
         # Call the function pointer - pass return_type_hint and arg_type_hints for ABI coercion
         logger.debug(

@@ -84,7 +84,7 @@ class TestCompilerDeclarationResolution(unittest.TestCase):
             user_globals={"i32": i32, "f64": f64, "Pair": Pair},
         )
 
-        self.assertEqual(resolved.varargs.kind, "struct")
+        self.assertEqual(resolved.varargs.kind, "typed")
         self.assertFalse(resolved.has_llvm_varargs)
         self.assertEqual(resolved.param_names, ["x", "args_elem0", "args_elem1"])
         self.assertEqual(resolved.varargs.element_types, [i32, f64])
@@ -103,7 +103,7 @@ class TestCompilerDeclarationResolution(unittest.TestCase):
             user_globals={"i32": i32, "Empty": Empty},
         )
 
-        self.assertEqual(resolved.varargs.kind, "struct")
+        self.assertEqual(resolved.varargs.kind, "typed")
         self.assertFalse(resolved.has_llvm_varargs)
         self.assertEqual(resolved.varargs.element_types, [])
         self.assertEqual(resolved.param_names, [])
