@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775837598314,
+  "lastUpdate": 1776259804547,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1320,6 +1320,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.044,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "6bb33ac1a33d925ce96d81ef9c6fe07f63c37b2e",
+          "message": "Unifiy the extern wrapper with func",
+          "timestamp": "2026-04-15T21:25:41+08:00",
+          "tree_id": "59b70265b59c94d6064c75b4bab20578f76356e8",
+          "url": "https://github.com/1flei/PythoC/commit/6bb33ac1a33d925ce96d81ef9c6fe07f63c37b2e"
+        },
+        "date": 1776259803632,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.72,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.821,
             "unit": "seconds/test"
           }
         ]
