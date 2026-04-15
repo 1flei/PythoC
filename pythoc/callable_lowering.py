@@ -169,3 +169,109 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
             ir_func.attributes.add(attr)
 
     return ir_func
+
+
+# ---------------------------------------------------------------------------
+# Extern wrapper lowering
+# ---------------------------------------------------------------------------
+
+def lower_extern_wrapper(
+    extern_wrapper,
+    module: ir.Module,
+    caller_group_key: Optional[tuple] = None,
+    node=None,
+) -> ValueRef:
+    """Lower an @extern wrapper to an LLVM function pointer ValueRef.
+
+    This is the extern counterpart of lower_compile_wrapper.  It declares the
+    extern symbol in the current LLVM module (with var_arg flag if applicable)
+    and returns a ValueRef typed as func[fixed_params..., return_type].
+
+    After this, the value can be called through func.handle_call just like
+    any @compile function pointer.
+
+    Args:
+        extern_wrapper: The ExternFunctionWrapper object.
+        module: Target LLVM module.
+        caller_group_key: Caller's group key for dependency recording.
+        node: AST node for error reporting.
+
+    Returns:
+        ValueRef(kind='pointer', type_hint=func[param_types..., return_type])
+    """
+    func_name = extern_wrapper.func_name
+
+    # --- Try to reuse existing declaration ---
+    try:
+        existing = module.get_global(func_name)
+        if existing.is_declaration:
+            ir_func = existing
+        else:
+            logger.error(
+                f"Cannot call extern function '{func_name}': "
+                f"a local function with the same name is already defined.",
+                node=node, exc_type=NameError,
+            )
+            return None  # unreachable
+    except KeyError:
+        # --- Declare the extern function ---
+        module_context = module.context
+
+        param_llvm_types = []
+        for param_name, param_type in extern_wrapper.param_types:
+            if param_name == 'args':
+                continue
+            if param_type is None:
+                logger.error(
+                    f"Extern function '{func_name}': parameter '{param_name}' "
+                    f"has no type annotation",
+                    node=node, exc_type=TypeError,
+                )
+            param_llvm_types.append(param_type.get_llvm_type(module_context))
+
+        if extern_wrapper.return_type is None:
+            return_llvm_type = ir.VoidType()
+        else:
+            return_llvm_type = extern_wrapper.return_type.get_llvm_type(module_context)
+
+        has_varargs = any(
+            name == 'args' for name, _ in extern_wrapper.param_types
+        )
+
+        from .builder import LLVMBuilder
+        func_wrapper = LLVMBuilder().declare_function(
+            module, func_name,
+            param_llvm_types, return_llvm_type,
+            var_arg=has_varargs,
+        )
+        ir_func = func_wrapper.ir_function
+
+        if extern_wrapper.calling_convention == 'stdcall':
+            ir_func.calling_convention = 'x86_stdcallcc'
+        else:
+            ir_func.calling_convention = 'ccc'
+
+    # --- Record link library dependency ---
+    lib = extern_wrapper.lib
+    if lib:
+        # Global registry — used by the linker to determine -l flags
+        from .registry import get_unified_registry
+        get_unified_registry().add_link_library(lib)
+        # Group-level deps — for precise dependency tracking
+        if caller_group_key:
+            from .build.deps import get_dependency_tracker
+            get_dependency_tracker().record_extern_dependency(
+                caller_group_key, [lib],
+            )
+
+    # --- Build PC func type ---
+    from .builtin_entities.func import func as func_type_cls
+    from .builtin_entities.types import void
+
+    fixed_pc_types = tuple(
+        pt for name, pt in extern_wrapper.param_types if name != 'args'
+    )
+    ret_type = extern_wrapper.return_type if extern_wrapper.return_type is not None else void
+    callable_pc_type = func_type_cls[fixed_pc_types + (ret_type,)]
+
+    return wrap_value(ir_func, kind='pointer', type_hint=callable_pc_type)

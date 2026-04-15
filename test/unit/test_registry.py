@@ -187,7 +187,7 @@ class TestUnifiedRegistry(unittest.TestCase):
         """Test extern function registration - deprecated, extern info now stored on wrapper"""
         # This test is kept for documentation purposes
         # In the new design, extern function info is stored on the wrapper object
-        # (wrapper._extern_config) and passed directly to compiler._declare_extern_function
+        # (wrapper._extern_config) and lowered via callable_lowering.lower_extern_wrapper
         pass
 
     def test_global_registry_singleton(self):

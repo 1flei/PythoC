@@ -47,7 +47,6 @@ class LLVMCompiler:
         self.module = None
         self.compiled_functions = []
 
-        self.extern_functions = {}  # Registry for extern function declarations
         self.user_globals = user_globals or {}  # User code's global namespace
         self.create_module()
 
@@ -68,16 +67,8 @@ class LLVMCompiler:
         target = binding.Target.from_triple(self.module.triple)
         target_machine = target.create_target_machine()
         self.module.data_layout = target_machine.target_data
-        self.extern_functions = {}  # Reset extern functions for new module
-        self._declare_extern_functions()
         return self.module
     
-    
-    def _declare_extern_functions(self):
-        """Declare only the extern functions that are actually used in the code"""
-        # This method is now called after compilation to only declare used functions
-        # The actual declaration happens in _declare_extern_function when needed
-        pass
     
     def _recreate_type_in_context(self, pc_type):
         """Recreate a PC type's LLVM representation in current module's context"""
@@ -110,82 +101,6 @@ class LLVMCompiler:
 
         raise TypeError(f"Cannot recreate LLVM type for {pc_type}")
     
-    def _declare_extern_function(self, func_name, extern_info=None):
-        """Declare a specific extern function when it's actually called
-
-        Args:
-            func_name: Name of the extern function
-            extern_info: Dict with extern function info (lib, param_types, return_type, etc.)
-                         If not provided, will be looked up from registry (deprecated path)
-        """
-        if func_name in self.extern_functions:
-            return self.extern_functions[func_name]
-
-        # Check if a global with this name already exists in the module
-        # If it's a local definition (not a declaration), we have a name conflict
-        try:
-            existing = self.module.get_global(func_name)
-            if existing.is_declaration:
-                # It's already an extern declaration, reuse it
-                self.extern_functions[func_name] = existing
-                return existing
-            else:
-                # It's a local definition - name conflict!
-                raise NameError(
-                    f"Cannot call extern function '{func_name}': "
-                    f"a local function with the same name is already defined. "
-                    f"Please rename your local function to avoid conflict with the extern symbol."
-                )
-        except KeyError:
-            # No existing global, proceed to create declaration
-            pass
-
-        # extern_info must be provided
-        if extern_info is None:
-            raise NameError(f"Extern function '{func_name}' info not provided")
-
-        from .builder import LLVMBuilder
-
-        # Convert PC types to LLVM types
-        param_types = []
-        for param_name, param_type in extern_info['param_types']:
-            if param_name == 'args':  # Handle *args (varargs)
-                continue  # Skip varargs in type list
-            if param_type is None:
-                raise TypeError(f"Extern function '{func_name}': parameter '{param_name}' has no type annotation")
-            llvm_type = param_type.get_llvm_type(self.module.context)
-            param_types.append(llvm_type)
-
-        # Convert return type from pythoc type to LLVM type
-        if extern_info['return_type'] is None:
-            return_type = ir.VoidType()
-        else:
-            return_type = extern_info['return_type'].get_llvm_type(self.module.context)
-
-        # Handle varargs (printf-style functions)
-        has_varargs = any(param_name == 'args' for param_name, _ in extern_info['param_types'])
-
-        # Use builder to declare function with ABI handling
-        temp_builder = LLVMBuilder()
-        func_wrapper = temp_builder.declare_function(
-            self.module, func_name, param_types, return_type, var_arg=has_varargs
-        )
-        extern_func = func_wrapper.ir_function
-
-        # Set calling convention if specified
-        if extern_info.get('calling_convention') == 'stdcall':
-            extern_func.calling_convention = 'x86_stdcallcc'
-        else:
-            extern_func.calling_convention = 'ccc'  # Default C calling convention
-
-        # Add library to link libraries
-        lib = extern_info.get('lib')
-        if lib:
-            get_unified_registry().add_link_library(lib)
-
-        self.extern_functions[func_name] = extern_func
-        return extern_func
-
     def _resolve_function_declaration(
         self,
         ast_node: ast.FunctionDef,
