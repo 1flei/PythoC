@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
 import sys
-from typing import Any, List
-from ..valueref import ValueRef
 
 
 class ExternFunctionWrapper:
@@ -16,108 +14,21 @@ class ExternFunctionWrapper:
         self._ctypes_func = None
 
     def handle_call(self, visitor, func_ref, args, node):
-        from ..valueref import ensure_ir, wrap_value, get_type
-        from llvmlite import ir
+        """Handle @extern function call by lowering to func type.
 
-        # Get or declare the extern function
-        # We must always go through _declare_extern_function to handle name conflicts
-        # (e.g., when user defines a local @compile function with same name)
-        if hasattr(visitor, 'compiler') and visitor.compiler:
-            # Pass extern info directly to avoid registry lookup
-            extern_info = {
-                'lib': self.lib,
-                'calling_convention': self.calling_convention,
-                'return_type': self.return_type,
-                'param_types': self.param_types,
-            }
-            func = visitor.compiler._declare_extern_function(self.func_name, extern_info)
-        else:
-            raise RuntimeError(f"Visitor does not have a compiler")
-        # args are already pre-evaluated by visit_Call
-        has_varargs = any(param_name == 'args' for param_name, _ in self.param_types)
-        converted_args = []
-        
-        if has_varargs:
-            fixed_param_count = len([p for p in self.param_types if p[0] != 'args'])
-            # Convert fixed params strictly by PC type hints
-            for i in range(min(fixed_param_count, len(args))):
-                arg = args[i]
-                target_pc_type = self.param_types[i][1] if i < len(self.param_types) else None
-                if target_pc_type is None:
-                    raise TypeError(f"Extern call '{self.func_name}': missing PC type hint for fixed parameter {i}")
-                converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
-                converted_args.append(ensure_ir(converted))
-            # Handle varargs: apply C default promotions
-            for i in range(fixed_param_count, len(args)):
-                arg = args[i]
-                arg_hint = getattr(arg, 'type_hint', None)
-                
-                # Check if arg is a PythonType that needs promotion
-                from ..builtin_entities.python_type import PythonType
-                if arg_hint is not None and isinstance(arg_hint, PythonType):
-                    # Promote to default PC type (int->i32, float->f64)
-                    promoted = arg_hint.promote_to_default_pc_type()
-                    converted_args.append(ensure_ir(promoted))
-                    continue
-                
-                # If arg is a Python value without PythonType hint (shouldn't happen)
-                if isinstance(arg, ValueRef) and arg.is_python_value():
-                    python_val = arg.value
-                    if isinstance(python_val, bool) or isinstance(python_val, int):
-                        from ..builtin_entities import i32 as pc_i32
-                        promoted = visitor.type_converter.convert(arg, pc_i32)
-                        converted_args.append(ensure_ir(promoted))
-                        continue
-                    if isinstance(python_val, float):
-                        from ..builtin_entities import f64 as pc_f64
-                        promoted = visitor.type_converter.convert(arg, pc_f64)
-                        converted_args.append(ensure_ir(promoted))
-                        continue
-                
-                # Apply C default argument promotions for varargs
-                # - Integer types smaller than int are promoted to int (i32)
-                # - float is promoted to double (f64)
-                if arg_hint is not None:
-                    from ..builtin_entities import i8, i16, i32, f32, f64
-                    # Check if it's a small integer type that needs promotion
-                    if arg_hint in (i8, i16):
-                        # Promote to i32
-                        promoted = visitor.type_converter.convert(arg, i32)
-                        converted_args.append(ensure_ir(promoted))
-                        continue
-                    elif arg_hint == f32:
-                        # Promote to f64
-                        promoted = visitor.type_converter.convert(arg, f64)
-                        converted_args.append(ensure_ir(promoted))
-                        continue
-                    else:
-                        # Already promoted type or other type, pass through
-                        converted_args.append(ensure_ir(arg))
-                else:
-                    # No hint, pass as-is
-                    converted_args.append(ensure_ir(arg))
-        else:
-            # Non-varargs: convert all args by PC type hints only
-            for i, arg in enumerate(args):
-                target_pc_type = self.param_types[i][1] if i < len(self.param_types) else None
-                if target_pc_type is None:
-                    raise TypeError(f"Extern call '{self.func_name}': missing PC type hint for parameter {i}")
-                converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
-                converted_args.append(ensure_ir(converted))
-        
-        # Build arg_type_hints for ABI coercion
-        arg_type_hints = [pt[1] for pt in self.param_types if pt[0] != 'args']
-        
-        call_result = visitor.builder.call(
-            func, converted_args,
-            return_type_hint=self.return_type,
-            arg_type_hints=arg_type_hints
+        This follows the same pattern as @compile wrappers: lower the
+        wrapper to a func[...] ValueRef, then delegate to func.handle_call.
+        This ensures varargs promotion, ABI coercion, and all other call
+        mechanics are handled in one place.
+        """
+        from ..callable_lowering import lower_extern_wrapper
+
+        caller_group_key = getattr(visitor, 'current_group_key', None)
+        lowered = lower_extern_wrapper(
+            self, visitor.module, caller_group_key, node=node,
         )
-        if self.return_type is None:
-            from ..builtin_entities.types import void
-            return wrap_value(call_result, kind="value", type_hint=void)
-        else:
-            return wrap_value(call_result, kind="value", type_hint=self.return_type)
+        func_type = lowered.type_hint
+        return func_type.handle_call(visitor, lowered, args, node)
 
     def __call__(self, *args, **kwargs):
         if self._ctypes_func is None:

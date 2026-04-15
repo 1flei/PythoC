@@ -228,8 +228,8 @@ class TypeConverter:
                 type_hint=target_type
             )
         
-        # Step 1: Handle @compile wrapper -> func pointer
-        # When source is a Python value that is a @compile wrapper, lower it
+        # Step 1: Handle @compile / @extern wrapper -> func pointer
+        # When source is a Python value that is a callable wrapper, lower it
         # to a func pointer.  This path handles wrappers used as *values*
         # (e.g. `return add`, `op = add`, function pointer arguments).
         # The *call* path goes through handle_call -> callable_lowering directly.
@@ -239,6 +239,13 @@ class TypeConverter:
                 from .callable_lowering import lower_compile_wrapper
                 caller_group_key = getattr(self._visitor, 'current_group_key', None)
                 return lower_compile_wrapper(
+                    python_val, self._visitor.module, caller_group_key,
+                    node=node,
+                )
+            if getattr(python_val, '_is_extern', False):
+                from .callable_lowering import lower_extern_wrapper
+                caller_group_key = getattr(self._visitor, 'current_group_key', None)
+                return lower_extern_wrapper(
                     python_val, self._visitor.module, caller_group_key,
                     node=node,
                 )
