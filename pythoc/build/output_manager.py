@@ -601,10 +601,8 @@ class OutputManager:
             compiled_symbols: Optional complete symbol set for the current .o
         """
         from .deps import get_dependency_tracker
-        from ..registry import get_unified_registry
 
         dep_tracker = get_dependency_tracker()
-        registry = get_unified_registry()
         
         # Get or create deps for this group
         group_deps = dep_tracker.get_or_create_group_deps(group_key)
@@ -617,16 +615,11 @@ class OutputManager:
             if os.path.exists(source_file):
                 group_deps.source_mtime = os.path.getmtime(source_file)
         
-        # Add link libraries from registry
-
-        for lib in registry.get_link_libraries():
-            if lib not in group_deps.link_libraries:
-                group_deps.link_libraries.append(lib)
-        
-        # Add link objects from registry
-        for obj in registry.get_link_objects():
-            if obj not in group_deps.link_objects:
-                group_deps.link_objects.append(obj)
+        # Link libraries and objects are recorded incrementally during
+        # compilation (via callable_lowering.record_extern_dependency and
+        # cimport).  We do NOT dump the global registry here — that would
+        # pollute every group's .deps with unrelated libraries from other
+        # groups compiled in the same process.
         
         if compiled_symbols is not None:
             group_deps.compiled_symbols = sorted(compiled_symbols)
