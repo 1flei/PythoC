@@ -242,48 +242,20 @@ class LLVMBuilder(AbstractBuilder):
 
     # ========== C ABI Varargs ==========
 
+    def _get_va_lowering(self):
+        """Lazily create the platform-specific va_arg lowering."""
+        if not hasattr(self, '_va_lowering'):
+            from .abi.varargs import get_va_arg_lowering
+            triple = getattr(self._builder.module, 'triple', None)
+            self._va_lowering = get_va_arg_lowering(triple)
+        return self._va_lowering
+
     def va_start(self, name: str = "va_list") -> Any:
-        # va_list on x86_64 System V is { i32, i32, i8*, i8* } = 24 bytes.
-        # On Windows x64 / aarch64, it may be smaller (just i8*).
-        # Allocate the full x86_64 SysV struct type to be safe — LLVM will
-        # only write what the target needs.
-        va_list_struct = ir.LiteralStructType([
-            ir.IntType(32),                   # gp_offset
-            ir.IntType(32),                   # fp_offset
-            ir.PointerType(ir.IntType(8)),    # overflow_arg_area
-            ir.PointerType(ir.IntType(8)),    # reg_save_area
-        ])
-        va_list_array = ir.ArrayType(va_list_struct, 1)
-        alloca = self._builder.alloca(va_list_array, name=name)
-
-        i8_ptr_ty = ir.PointerType(ir.IntType(8))
-        ap = self._builder.bitcast(alloca, i8_ptr_ty)
-
-        intrinsic_name = "llvm.va_start"
-        module = self._builder.module
-        try:
-            intrinsic = module.get_global(intrinsic_name)
-        except KeyError:
-            fn_ty = ir.FunctionType(ir.VoidType(), [i8_ptr_ty])
-            intrinsic = ir.Function(module, fn_ty, intrinsic_name)
-
-        self._builder.call(intrinsic, [ap])
-        return ap
+        return self._get_va_lowering().emit_va_start(self._builder)
 
     def va_arg(self, va_list_ptr: Any, target_type: Any, name: str = "") -> Any:
-        # Emit LLVM va_arg instruction (patched into llvmlite by llvm_extensions).
-        # LLVM backend lowers this to correct platform-specific ABI code.
-        return self._builder.va_arg(va_list_ptr, target_type, name=name)
+        return self._get_va_lowering().emit_va_arg(
+            self._builder, va_list_ptr, target_type, name=name)
 
     def va_end(self, va_list_ptr: Any) -> None:
-        va_list_ty = ir.PointerType(ir.IntType(8))
-
-        intrinsic_name = "llvm.va_end"
-        module = self._builder.module
-        try:
-            intrinsic = module.get_global(intrinsic_name)
-        except KeyError:
-            fn_ty = ir.FunctionType(ir.VoidType(), [va_list_ty])
-            intrinsic = ir.Function(module, fn_ty, intrinsic_name)
-
-        self._builder.call(intrinsic, [va_list_ptr])
+        self._get_va_lowering().emit_va_end(self._builder, va_list_ptr)

@@ -3,11 +3,10 @@ LLVM IR extensions for llvmlite
 
 This module provides monkey-patching to add missing capabilities to llvmlite:
 - BFloatType / FP128Type (missing float types)
-- va_arg instruction (missing varargs primitive)
 """
 
 from llvmlite import ir
-from llvmlite.ir import types, instructions
+from llvmlite.ir import types
 import struct
 
 
@@ -118,7 +117,7 @@ class FP128Type(types.Type):
 
 
 def patch_llvmlite():
-    """Monkey patch llvmlite to add BFloatType, FP128Type, and va_arg."""
+    """Monkey patch llvmlite to add BFloatType and FP128Type."""
     # Add to ir module
     ir.BFloatType = BFloatType
     ir.FP128Type = FP128Type
@@ -136,48 +135,6 @@ def patch_llvmlite():
     
     BFloatType.__new__ = staticmethod(_bfloat_new)
     FP128Type.__new__ = staticmethod(_fp128_new)
-
-    # --- va_arg instruction ---
-
-    class VaArgInstr(instructions.Instruction):
-        """LLVM va_arg instruction.
-
-        Emits:  %result = va_arg ptr %ap, <target_type>
-
-        LLVM's backend lowers this to the correct ABI-specific code for
-        each target (x86_64 System V, Windows x64, aarch64, ...).
-        """
-
-        def __init__(self, parent, va_list_ptr, target_type, name=''):
-            super().__init__(
-                parent, target_type, "va_arg", [va_list_ptr], name=name,
-            )
-
-        def descr(self, buf):
-            [ap] = self.operands
-            buf.append("va_arg {0} {1}, {2}{3}\n".format(
-                ap.type,
-                ap.get_reference(),
-                self.type,
-                self._stringify_metadata(leading_comma=True),
-            ))
-
-    def _builder_va_arg(self, va_list_ptr, target_type, name=''):
-        """Emit a va_arg instruction (platform-independent).
-
-        Args:
-            va_list_ptr: Pointer to the va_list (i8* or target-specific type).
-            target_type: The LLVM type to read from the va_list.
-            name: Optional SSA name for the result.
-
-        Returns:
-            The loaded value with the requested type.
-        """
-        instr = VaArgInstr(self.block, va_list_ptr, target_type, name=name)
-        self._insert(instr)
-        return instr
-
-    ir.IRBuilder.va_arg = _builder_va_arg
 
 
 # Auto-patch on import
