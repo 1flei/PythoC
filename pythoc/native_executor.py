@@ -136,16 +136,10 @@ class MultiSOExecutor:
         if so_file not in visited:
             all_libs_to_load.append(so_file)
         
-        # For circular dependencies, we need to load all libraries even if they have undefined symbols.
-        #
-        # On Windows, the loader requires dependent DLLs to be discoverable at load time, so we must
-        # load dependencies first (topological order) to populate the DLL search path.
-        if sys.platform == 'win32':
-            load_order = list(all_libs_to_load)
-        else:
-            # Strategy: Try loading in reverse order, if a library fails due to undefined symbols,
-            # skip it and try loading other libraries first, then retry failed ones
-            load_order = list(reversed(all_libs_to_load))
+        # Load in topological order (dependencies first) on all platforms.
+        # The retry loop handles circular dependencies where some libraries
+        # may fail on first pass but succeed after their peers are loaded.
+        load_order = list(all_libs_to_load)
         # First pass: try to load all libraries
         failed_libs = []
         for lib_file in load_order:
@@ -636,41 +630,25 @@ class MultiSOExecutor:
         # Collect dependencies from persisted deps graph (source of truth)
         dependencies = self._get_dependencies(wrapper._state.compiler, source_file, so_file)
 
-        # On Windows, linking dependent groups' raw `.o` files into every DLL can
-        # duplicate global/static state across DLLs (e.g., function-local `static`),
-        # which breaks tests like `test_cimport_effect`. Prefer linking against
-        # dependency import libraries instead.
+        # Ensure all dependencies are compiled first (all platforms).
+        self._compile_dependencies_recursive(dependencies, set())
+
+        # On Windows (PE/COFF), the linker requires all imported symbols to be
+        # resolvable at link time via import libraries.  Collect dependency
+        # DLLs and persisted @extern(lib=...) libraries as explicit link inputs.
         extra_link_libraries: Optional[List[str]] = None
         if sys.platform == 'win32':
-            # Ensure dependencies are built first so their import libs exist.
-            self._compile_dependencies_recursive(dependencies, set())
-            # Merge dependency DLLs with this group's persisted link libraries
-            # (e.g., libraries from @extern(lib=...) registered via cimport).
             dep_libs = [dep_so for _, dep_so in dependencies if dep_so != so_file]
             persisted_libs = self._get_persisted_link_libraries(obj_file)
             extra_link_libraries = dep_libs + [l for l in persisted_libs if l not in dep_libs]
 
-        # Use BuildCache to check if .so needs re-linking.
-        #
-        # IMPORTANT (Windows): even though we *link* against dependency import libraries
-        # (not by embedding dependent `.o` files), the correct import table depends on
-        # which dependency groups are being referenced. Those dependency `.o` files are
-        # the upstream inputs that produce their `.dll`/import-libs, so include them in
-        # the relink input set to avoid stale linkage.
+        # Check if .so/.dll needs re-linking.
+        # Only check direct inputs: the group's own .o and .deps file.
+        # Transitive dependency changes are handled by their own relink cycle.
         relink_inputs = [obj_file]
         deps_file = obj_file.replace('.o', '.deps')
         if os.path.exists(deps_file):
             relink_inputs.append(deps_file)
-
-        if sys.platform == 'win32':
-            dep_obj_files = self._collect_dependent_obj_files_transitive(source_file, so_file)
-            relink_inputs += dep_obj_files
-            # Also include dependency `.deps` so changes in the dependency graph
-            # (which affect the import table) trigger a relink.
-            for dep_obj in dep_obj_files:
-                dep_deps = dep_obj.replace('.o', '.deps')
-                if os.path.exists(dep_deps):
-                    relink_inputs.append(dep_deps)
 
         need_compile = BuildCache.check_so_needs_relink(so_file, relink_inputs)
 
@@ -688,10 +666,6 @@ class MultiSOExecutor:
                     delattr(wrapper, '_native_func')
             self.compile_source_to_so(obj_file, so_file, extra_link_libraries=extra_link_libraries)
 
-        # Compile dependencies recursively if needed (non-Windows)
-        if sys.platform != 'win32':
-            self._compile_dependencies_recursive(dependencies, set())
-        
         # Load library with dependencies
         self.load_library_with_dependencies(source_file, so_file, dependencies)
         
@@ -795,15 +769,12 @@ class MultiSOExecutor:
 
 
 
-        # Windows: pre-generate stub import libraries for all dependencies that
-        # have an .o file but no .lib yet. This breaks circular dependency
-        # deadlocks where DLL A needs B.lib to link and B needs A.lib.
-        # Stub .libs are generated from .o symbol tables via dlltool, allowing
-        # the linker to proceed even before the actual .dll is built.
+        # Windows (PE/COFF): pre-generate stub import libraries so that all
+        # link jobs can run even when there are circular dependencies.
         if sys.platform == 'win32':
             self._ensure_stub_implibs(dependencies, set())
 
-        # Collect all link jobs first (DFS), then execute in parallel on Windows.
+        # Collect all link jobs via DFS, then execute (parallel when >1 job).
         link_jobs: List[Tuple[str, str, Optional[List[str]]]] = []  # (obj, so, libs)
 
         def _collect_jobs(deps):
@@ -819,8 +790,11 @@ class MultiSOExecutor:
                 if dep_deps:
                     _collect_jobs(dep_deps)
 
-                # Check if this dependency needs linking
+                # Check if this dependency needs linking.
+                # Only check direct inputs (own .o + .deps); transitive
+                # dependency changes are handled by their own relink cycle.
                 if os.path.exists(dep_obj_file):
+                    # Windows PE: must pass dependency DLLs as link libraries
                     dep_link_libraries: Optional[List[str]] = None
                     if sys.platform == 'win32':
                         dep_link_libraries = [d_so for _, d_so in dep_deps if d_so != dep_so_file]
@@ -829,14 +803,6 @@ class MultiSOExecutor:
                     dep_deps_file = dep_obj_file.replace('.o', '.deps')
                     if os.path.exists(dep_deps_file):
                         relink_inputs.append(dep_deps_file)
-
-                    if sys.platform == 'win32':
-                        dep_obj_files = self._collect_dependent_obj_files_transitive(dep_source_file, dep_so_file)
-                        relink_inputs += dep_obj_files
-                        for trans_obj in dep_obj_files:
-                            trans_deps = trans_obj.replace('.o', '.deps')
-                            if os.path.exists(trans_deps):
-                                relink_inputs.append(trans_deps)
 
                     if BuildCache.check_so_needs_relink(dep_so_file, relink_inputs):
                         link_jobs.append((dep_obj_file, dep_so_file, dep_link_libraries))
@@ -850,8 +816,9 @@ class MultiSOExecutor:
             self._verified_deps.update(visited)
             return
 
-        # On Windows, run link jobs in parallel to amortise zig startup overhead.
-        if sys.platform == 'win32' and len(link_jobs) > 1:
+        # Run link jobs — parallel when there are multiple jobs to amortise
+        # subprocess startup overhead (especially zig on Windows).
+        if len(link_jobs) > 1:
             import concurrent.futures
             max_workers = min(len(link_jobs), os.cpu_count() or 4)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
