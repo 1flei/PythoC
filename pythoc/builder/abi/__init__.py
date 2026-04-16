@@ -12,8 +12,12 @@ return values, otherwise the generated code will be ABI-incompatible with C.
 
 from .x86_64 import X86_64ABI
 from .base import ABIInfo, CoercedType
+from .varargs import VAArgLowering, get_va_arg_lowering
 
-__all__ = ['ABIInfo', 'CoercedType', 'X86_64ABI', 'get_target_abi']
+__all__ = [
+    'ABIInfo', 'CoercedType', 'X86_64ABI',
+    'get_target_abi', 'VAArgLowering', 'get_va_arg_lowering',
+]
 
 
 def get_target_abi(triple: str = None) -> ABIInfo:
@@ -44,7 +48,6 @@ def get_target_abi(triple: str = None) -> ABIInfo:
         max_reg_size = 8 if is_windows else 16
         return X86_64ABI(max_register_size=max_reg_size)
     elif arch in ('aarch64', 'arm64'):
-        # TODO: Implement AArch64 ABI
         from .aarch64 import AArch64ABI
         return AArch64ABI()
     else:
