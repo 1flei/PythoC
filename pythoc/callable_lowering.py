@@ -137,7 +137,7 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
     param_llvm_types = []
     for param_name in func_info.param_names:
         param_type = func_info.param_type_hints.get(param_name)
-        if not param_type or not hasattr(param_type, 'get_llvm_type'):
+        if param_type is None or not hasattr(param_type, 'get_llvm_type'):
             logger.error(
                 f"Parameter '{param_name}' of function '{actual_func_name}' "
                 f"has no valid PC type (got {param_type!r})",
@@ -146,7 +146,7 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
         param_llvm_types.append(param_type.get_llvm_type(module_context))
 
     return_type = func_info.return_type_hint
-    if not return_type or not hasattr(return_type, 'get_llvm_type'):
+    if return_type is None or not hasattr(return_type, 'get_llvm_type'):
         logger.error(
             f"Return type of function '{actual_func_name}' "
             f"has no valid PC type (got {return_type!r})",

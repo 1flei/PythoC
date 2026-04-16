@@ -12,6 +12,8 @@ class func(BuiltinType):
     _is_pointer = True
     param_types = None   # Tuple of parameter types (T1, T2, ...)
     return_type = None   # Return type
+    has_varargs = False  # Whether the function was declared with *args: T
+    has_kwargs = False   # Whether the function was declared with **kwargs: T
 
     @classmethod
     def get_name(cls) -> str:
@@ -169,6 +171,31 @@ class func(BuiltinType):
                     node=node,
                     exc_type=TypeError,
                 )
+
+        # Pack positional args for *args: T functions.
+        # The func type has a single varargs parameter of type T, but callers
+        # may pass N individual args that should be packed into a pc_tuple
+        # carrier and converted to T via the type conversion system.
+        # This fires when args count doesn't match param count (excess, deficit,
+        # or when the varargs slot isn't already a single carrier).
+        if cls.has_varargs and len(args) != len(cls.param_types):
+            from ..builtin_entities.pc_tuple import create_pc_tuple_type
+            from ..builtin_entities.python_type import PythonType
+
+            # Find varargs param index: last param before kwargs (if present)
+            kwargs_count = 1 if cls.has_kwargs else 0
+            varargs_idx = len(cls.param_types) - 1 - kwargs_count
+            normal_count = varargs_idx
+
+            normal_args = list(args[:normal_count])
+            # Everything between normal args and kwargs (if any) is varargs material
+            kwargs_args = list(args[len(args) - kwargs_count:]) if kwargs_count else []
+            excess_args = list(args[normal_count:len(args) - kwargs_count if kwargs_count else len(args)])
+
+            tuple_type = create_pc_tuple_type(excess_args)
+            tuple_hint = PythonType.wrap(tuple_type, is_constant=True)
+            tuple_ref = wrap_value(tuple_type, kind='python', type_hint=tuple_hint)
+            args = normal_args + [tuple_ref] + kwargs_args
 
         # Type conversion for fixed arguments
         converted_args = []

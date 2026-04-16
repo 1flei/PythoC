@@ -1,7 +1,7 @@
 """
-Varargs resolution for PC functions.
+Varargs and kwargs resolution for PC functions.
 
-Two modes:
+Varargs (*args):
 - *args: T  (annotated) -- compile-time expansion. The caller passes
   individual arguments that are packed into a T value inside the function.
   Works for any T whose field layout is known at compile time (struct,
@@ -9,6 +9,13 @@ Two modes:
 - *args     (bare)      -- LLVM C ABI varargs. The caller uses the
   platform va_list mechanism. Access via explicit va_start/va_arg/va_end
   builtins.
+
+Kwargs (**kwargs):
+- **kwargs: T (annotated) -- compile-time packing.  The caller passes
+  keyword arguments whose names match T's fields.  Inside the callee
+  ``kwargs`` is a regular parameter of type ``T``.
+  Equivalent to ``kwargs: T = T(k1=v1, k2=v2, ...)``.
+- **kwargs    (bare)      -- NOT allowed.  C has no keyword varargs ABI.
 """
 
 import ast
@@ -21,6 +28,7 @@ from ..schema_protocol import (
     has_field_layout,
     is_schema_type,
 )
+from ..logger import logger
 
 
 @dataclass
@@ -142,3 +150,53 @@ def detect_varargs(
     if not resolved.is_typed:
         return ("none", None, resolved.param_name)
     return (resolved.kind, resolved.element_types, resolved.param_name)
+
+
+# =========================================================================
+# **kwargs resolution
+# =========================================================================
+
+@dataclass
+class ResolvedKwArgs:
+    """Resolved **kwargs metadata.
+
+    When ``parsed_type`` is set, the callee receives ``kwargs`` as a
+    regular parameter of that type.  The call site is responsible for
+    packing keyword arguments into an instance of ``parsed_type``.
+    """
+    param_name: Optional[str]
+    parsed_type: Optional[Any] = None
+
+    @property
+    def is_typed(self) -> bool:
+        return self.parsed_type is not None
+
+
+def resolve_kwargs(func_node: ast.FunctionDef, type_resolver) -> ResolvedKwArgs:
+    """Resolve **kwargs into a typed parameter (or reject bare **kwargs).
+
+    - ``**kwargs: T`` -> ResolvedKwArgs(param_name='kwargs', parsed_type=T)
+    - ``**kwargs``    -> compile error (C has no keyword varargs ABI)
+    - no **kwargs     -> ResolvedKwArgs(param_name=None)
+    """
+    kwarg = func_node.args.kwarg
+    if kwarg is None:
+        return ResolvedKwArgs(param_name=None)
+
+    if not kwarg.annotation:
+        logger.error(
+            "bare **{} without type annotation is not supported; "
+            "use **{}: T where T is a struct or other named type".format(
+                kwarg.arg, kwarg.arg,
+            ),
+            node=func_node, exc_type=TypeError,
+        )
+
+    parsed_type = type_resolver.parse_annotation(kwarg.annotation)
+    if parsed_type is None:
+        logger.error(
+            f"cannot resolve type annotation for **{kwarg.arg}",
+            node=func_node, exc_type=TypeError,
+        )
+
+    return ResolvedKwArgs(param_name=kwarg.arg, parsed_type=parsed_type)

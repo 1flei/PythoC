@@ -624,13 +624,13 @@ def try_link_with_linkers(
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=180,
                 stdin=subprocess.DEVNULL,
             )
             return output_file
 
         except subprocess.TimeoutExpired:
-            errors.append(f"{linker}: timed out after 120s")
+            errors.append(f"{linker}: timed out after 180s")
         except subprocess.CalledProcessError as e:
             msg = (e.stdout or '') + ("\n" if e.stdout else '') + (e.stderr or '')
             # Include the command for debugging; this is especially helpful on Windows

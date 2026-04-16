@@ -1,3 +1,4 @@
+# varargs ABI v2
 # -*- coding: utf-8 -*-
 """
 Simple test to verify effect propagation works correctly.

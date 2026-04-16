@@ -1,5 +1,7 @@
-""" 
+# varargs ABI v2
+"""
 Linearize resource management functions.
+# *args: T refactored to single-param ABI
 
 Provides metaprogramming utilities to transform a pair of acquire/release
 functions into linear-token enforced APIs for resource safety.

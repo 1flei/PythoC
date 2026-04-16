@@ -192,6 +192,57 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                         fn_attrs=fn_attrs)
 
 
+def _pack_varargs_kwargs_for_native(wrapper, args, kwargs):
+    """Pack *args and **kwargs for native function calls from Python.
+
+    When calling a @compile function from Python (not from another @compile
+    function), the wrapper receives individual arguments. But the native
+    function expects a single struct parameter for *args: T and **kwargs: T.
+    This function packs the excess args into the appropriate ctypes struct.
+    """
+    func_info = getattr(wrapper, '_func_info', None)
+    if func_info is None:
+        return args
+
+    has_varargs = getattr(func_info, 'has_varargs', False)
+    has_kwargs = getattr(func_info, 'has_kwargs', False)
+
+    if not has_varargs and not has_kwargs:
+        return args
+
+    # Determine normal param count (excluding varargs/kwargs params)
+    ast_node = func_info.ast_node
+    if ast_node is not None:
+        normal_count = len(ast_node.args.args)
+    else:
+        # Fallback: count params that are not varargs/kwargs
+        total = len(func_info.param_names)
+        normal_count = total - (1 if has_varargs else 0) - (1 if has_kwargs else 0)
+
+    result = list(args[:normal_count])
+
+    if has_varargs:
+        varargs_type = func_info.param_type_hints.get(
+            func_info.param_names[normal_count]
+        )
+        if varargs_type and hasattr(varargs_type, 'get_ctypes_type'):
+            ctype = varargs_type.get_ctypes_type()
+            excess = args[normal_count:]
+            result.append(ctype(*excess))
+
+    if has_kwargs and kwargs:
+        kwargs_param_name = func_info.param_names[-1]
+        kwargs_type = func_info.param_type_hints.get(kwargs_param_name)
+        if kwargs_type and hasattr(kwargs_type, 'get_ctypes_type'):
+            from ..schema_protocol import get_schema_field_names
+            field_names = get_schema_field_names(kwargs_type)
+            ctype = kwargs_type.get_ctypes_type()
+            ordered_vals = [kwargs[fn] for fn in field_names if fn in kwargs]
+            result.append(ctype(*ordered_vals))
+
+    return tuple(result)
+
+
 def _compile_impl(func_or_class, 
                   compile_suffix: Optional[str] = None, 
                   effect_suffix: Optional[str] = None,
@@ -229,6 +280,7 @@ def _compile_impl(func_or_class,
         if not hasattr(wrapper, '_native_func'):
             wrapper._native_func = executor.execute_function(wrapper)
 
+        args = _pack_varargs_kwargs_for_native(wrapper, args, kwargs)
         return wrapper._native_func(*args)
     
     source_file, source_code = get_function_file_and_source(func)
@@ -336,17 +388,22 @@ def _compile_impl(func_or_class,
                     param_type_hints[arg.arg] = param_type
 
     param_names = [arg.arg for arg in func_ast.args.args]
-    from ..ast_visitor.varargs import resolve_varargs
+    from ..ast_visitor.varargs import resolve_varargs, resolve_kwargs
     resolved_varargs = resolve_varargs(func_ast, type_resolver)
     varargs_name = resolved_varargs.param_name
     if resolved_varargs.is_typed and varargs_name in param_type_hints:
         del param_type_hints[varargs_name]
 
     if resolved_varargs.is_typed:
-        for i, elem_pc_type in enumerate(resolved_varargs.element_types):
-            expanded_param_name = f'{varargs_name}_elem{i}'
-            param_names.append(expanded_param_name)
-            param_type_hints[expanded_param_name] = elem_pc_type
+        # *args: T -> single parameter of type T (symmetric with **kwargs: T)
+        param_names.append(varargs_name)
+        param_type_hints[varargs_name] = resolved_varargs.parsed_type
+
+    # **kwargs: T -> add a single parameter of type T
+    resolved_kwargs = resolve_kwargs(func_ast, type_resolver)
+    if resolved_kwargs.is_typed:
+        param_names.append(resolved_kwargs.param_name)
+        param_type_hints[resolved_kwargs.param_name] = resolved_kwargs.parsed_type
 
     # Build mangled name: name_{compile_suffix}_{effect_suffix}
     # compile_suffix comes first, then effect_suffix
@@ -438,6 +495,8 @@ def _compile_impl(func_or_class,
         overload_enabled=False,
         fn_attrs=fn_attrs or set(),
         has_llvm_varargs=resolved_varargs.has_llvm_varargs,
+        has_varargs=resolved_varargs.is_typed,
+        has_kwargs=resolved_kwargs.is_typed,
     )
 
     group_compiler = compiler

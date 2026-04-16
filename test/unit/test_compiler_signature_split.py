@@ -86,10 +86,9 @@ class TestCompilerDeclarationResolution(unittest.TestCase):
 
         self.assertEqual(resolved.varargs.kind, "typed")
         self.assertFalse(resolved.has_llvm_varargs)
-        self.assertEqual(resolved.param_names, ["x", "args_elem0", "args_elem1"])
-        self.assertEqual(resolved.varargs.element_types, [i32, f64])
-        self.assertIs(resolved.param_type_hints["args_elem0"], i32)
-        self.assertIs(resolved.param_type_hints["args_elem1"], f64)
+        # *args: T is now a single parameter of type T
+        self.assertEqual(resolved.param_names, ["x", "args"])
+        self.assertIs(resolved.param_type_hints["args"], Pair)
 
     def test_resolve_function_declaration_preserves_empty_struct_varargs(self):
         Empty = struct[tuple([])]
@@ -105,8 +104,9 @@ class TestCompilerDeclarationResolution(unittest.TestCase):
 
         self.assertEqual(resolved.varargs.kind, "typed")
         self.assertFalse(resolved.has_llvm_varargs)
-        self.assertEqual(resolved.varargs.element_types, [])
-        self.assertEqual(resolved.param_names, [])
+        # *args: Empty is now a single parameter of type Empty
+        self.assertEqual(resolved.param_names, ["args"])
+        self.assertIs(resolved.param_type_hints["args"], Empty)
 
 
 if __name__ == "__main__":

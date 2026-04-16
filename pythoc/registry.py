@@ -105,6 +105,10 @@ class FunctionInfo:
     # Whether this function uses LLVM-level varargs (union/enum/none varargs).
     # Struct varargs are expanded at compile time and do not set this flag.
     has_llvm_varargs: bool = False
+    # Whether this function was declared with *args: T (typed varargs).
+    has_varargs: bool = False
+    # Whether this function was declared with **kwargs: T.
+    has_kwargs: bool = False
     # LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
     # Applied to cross-module `declare` so the optimizer can treat calls as pure, etc.
     fn_attrs: Set[str] = field(default_factory=set)
@@ -132,7 +136,18 @@ class FunctionInfo:
         from .builtin_entities.func import func as func_type_cls
 
         param_types = tuple(self.param_type_hints[name] for name in self.param_names)
-        return func_type_cls[param_types + (self.return_type_hint,)]
+        # Build named items so that func type preserves param_names
+        # (needed for keyword argument support at call sites).
+        items = tuple(
+            (name, self.param_type_hints[name]) for name in self.param_names
+        ) + ((None, self.return_type_hint),)
+        result = func_type_cls.handle_type_subscript(items)
+        # Propagate *args/**kwargs flags so call sites can detect them
+        if self.has_varargs:
+            result.has_varargs = True
+        if self.has_kwargs:
+            result.has_kwargs = True
+        return result
 
 
 @dataclass
