@@ -345,6 +345,8 @@ class TypeConverter:
             raise TypeError(f"Cannot promote sequence literal {python_val} to PC type {target_type}")
 
         if is_mapping_carrier(python_val):
+            if is_schema_type(target_type):
+                return self._convert_dict_to_struct(python_val, target_type)
             raise TypeError(f"Cannot promote mapping literal to PC type {target_type}")
 
         if not isinstance(python_val, (int, float, bool, str, type(None))):
@@ -711,7 +713,7 @@ class TypeConverter:
             ValueRef with struct value
         """
         field_types = get_schema_field_types(target_struct_type)
-        if not field_types:
+        if field_types is None:
             raise TypeError(f"Cannot get field types from {target_struct_type}")
         
         # Check length
@@ -770,6 +772,94 @@ class TypeConverter:
         struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
         for i, field_val in enumerate(field_values):
             struct_value = self._visitor.builder.insert_value(struct_value, field_val, i)
+        return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
+
+    def _convert_dict_to_struct(self, mapping_val, target_struct_type):
+        """Convert a mapping carrier (pc_dict) to a struct value.
+
+        Only accepts keys that are a subset of the struct's field names.
+        Missing fields cause an error. Extra keys cause an error.
+
+        This is the symmetric counterpart of ``_convert_tuple_to_struct``
+        for ``**kwargs: T`` where ``T`` is a struct type.
+        """
+        from .literal_protocol import get_mapping_entries
+        from .schema_protocol import get_schema_field_names, get_schema_field_types
+
+        field_names = get_schema_field_names(target_struct_type)
+        field_types = get_schema_field_types(target_struct_type)
+
+        if field_types is None:
+            raise TypeError(f"Cannot get field types from {target_struct_type}")
+        if not field_names or any(n is None for n in field_names):
+            raise TypeError(
+                f"pc_dict -> struct requires all fields to be named, "
+                f"but {target_struct_type} has field_names={field_names}"
+            )
+
+        entries = get_mapping_entries(mapping_val)
+
+        # Build key -> value map, extracting string keys from ValueRef wrappers
+        key_value_map = {}
+        for key_ref, val_ref in entries:
+            if isinstance(key_ref, ValueRef) and key_ref.is_python_value():
+                key_str = key_ref.get_python_value()
+            elif isinstance(key_ref, str):
+                key_str = key_ref
+            else:
+                raise TypeError(
+                    f"pc_dict key must be a string, got {type(key_ref)}"
+                )
+            if key_str in key_value_map:
+                raise TypeError(f"duplicate key in pc_dict: '{key_str}'")
+            key_value_map[key_str] = val_ref
+
+        # Validate: all dict keys must be valid field names
+        valid_names = set(field_names)
+        for key_str in key_value_map:
+            if key_str not in valid_names:
+                logger.error(
+                    f"pc_dict key '{key_str}' is not a field of "
+                    f"{target_struct_type} (valid: {', '.join(field_names)})",
+                    node=None,
+                    exc_type=TypeError,
+                )
+
+        # Validate: all struct fields must be present in the dict
+        missing = [n for n in field_names if n not in key_value_map]
+        if missing:
+            logger.error(
+                f"pc_dict is missing fields for {target_struct_type}: "
+                f"{', '.join(missing)}",
+                node=None,
+                exc_type=TypeError,
+            )
+
+        # Build field values in struct field order
+        field_values = []
+        for fname, ftype in zip(field_names, field_types):
+            elem = key_value_map[fname]
+            if isinstance(elem, ValueRef):
+                if elem.type_hint != ftype:
+                    field_val = self.convert(elem, ftype)
+                else:
+                    field_val = elem
+                field_values.append(ensure_ir(field_val))
+            else:
+                from .builtin_entities import PythonType
+                py_valueref = PythonType.wrap(elem, is_constant=True)
+                py_valueref = wrap_value(elem, kind="python", type_hint=py_valueref)
+                field_val = self.convert(py_valueref, ftype)
+                field_values.append(ensure_ir(field_val))
+
+        struct_llvm_type = target_struct_type.get_llvm_type(
+            self._visitor.module.context
+        )
+        struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
+        for i, field_val in enumerate(field_values):
+            struct_value = self._visitor.builder.insert_value(
+                struct_value, field_val, i
+            )
         return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
 
     def _convert_struct_to_struct(self, value, source_struct_type, target_struct_type, original_target_type):

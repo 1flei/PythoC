@@ -35,6 +35,7 @@ class _ResolvedFunctionDeclaration:
     param_llvm_types: List[ir.Type]
     return_llvm_type: ir.Type
     varargs: Any
+    kwargs: Any = None
 
     @property
     def has_llvm_varargs(self) -> bool:
@@ -145,10 +146,16 @@ class LLVMCompiler:
         varargs = resolve_varargs(ast_node, type_resolver)
         if varargs.is_typed and varargs.param_name is not None:
             resolved_param_type_hints.pop(varargs.param_name, None)
-            for index, elem_pc_type in enumerate(varargs.element_types):
-                expanded_name = f"{varargs.param_name}_elem{index}"
-                param_names.append(expanded_name)
-                resolved_param_type_hints[expanded_name] = elem_pc_type
+            # *args: T -> single parameter of type T (symmetric with **kwargs: T)
+            param_names.append(varargs.param_name)
+            resolved_param_type_hints[varargs.param_name] = varargs.parsed_type
+
+        # **kwargs: T -> add a single parameter of type T
+        from .ast_visitor.varargs import resolve_kwargs
+        resolved_kwargs = resolve_kwargs(ast_node, type_resolver)
+        if resolved_kwargs.is_typed:
+            param_names.append(resolved_kwargs.param_name)
+            resolved_param_type_hints[resolved_kwargs.param_name] = resolved_kwargs.parsed_type
 
         param_llvm_types = [
             self._recreate_type_in_context(resolved_param_type_hints[name])
@@ -163,6 +170,7 @@ class LLVMCompiler:
             param_llvm_types=param_llvm_types,
             return_llvm_type=return_llvm_type,
             varargs=varargs,
+            kwargs=resolved_kwargs,
         )
 
     def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None, func_state = None) -> ir.Function:
@@ -252,7 +260,7 @@ class LLVMCompiler:
             varargs_info = {
                 'kind': varargs_kind,
                 'name': varargs_name,
-                'element_types': list(resolved_decl.varargs.element_types),
+                'parsed_type': resolved_decl.varargs.parsed_type,
                 'num_normal_params': len(ast_node.args.args),
                 'va_list': None,
             }
@@ -296,6 +304,8 @@ class LLVMCompiler:
         # Initialize parameters - they will be registered in variable registry
         # For struct varargs, we also initialize the expanded parameters AND create a struct
         normal_param_count = len(ast_node.args.args)
+        from .context import VariableInfo
+        from .valueref import wrap_value
         
         # First, register all normal parameters
         # Use func_wrapper.get_user_arg_unpacked() to handle ABI coercion transparently
@@ -315,9 +325,6 @@ class LLVMCompiler:
             # Use pre-parsed type hints if available (for meta-programming)
             if param_name in resolved_decl.param_type_hints:
                 type_hint = resolved_decl.param_type_hints[param_name]
-            
-            from .context import VariableInfo
-            from .valueref import wrap_value
             
             value_ref = wrap_value(
                 alloca,
@@ -340,65 +347,67 @@ class LLVMCompiler:
             if type_hint and visitor._is_linear_type(type_hint):
                 visitor._init_linear_states(var_info, type_hint, initial_state='active')
         
-        # For typed varargs (*args: T), create a synthetic composite from
-        # the expanded parameters so the function body can access them as
-        # args[i] or args.field.
+        # For typed varargs (*args: T), register the args parameter.
+        # It is a single LLVM parameter of type T (after normal params).
         if resolved_decl.varargs.is_typed:
-            # Get all expanded parameter values using func_wrapper
-            # Use get_user_arg_unpacked() to handle ABI coercion transparently
-            expanded_values = []
-            expanded_types_llvm = []
-            for elem_idx in range(len(resolved_decl.varargs.element_types)):
-                param_idx = normal_param_count + elem_idx
-                param_val, param_type = func_wrapper.get_user_arg_unpacked(
-                    param_idx, visitor.builder
-                )
-                expanded_values.append(param_val)
-                expanded_types_llvm.append(param_type)
-            
-            # Create an anonymous struct type
-            struct_type_llvm = ir.LiteralStructType(expanded_types_llvm)
-            
-            # Allocate space for the struct
-            varargs_alloca = visitor._create_alloca_in_entry(struct_type_llvm, f"{varargs_name}_struct")
-            
-            # Store each expanded parameter into the struct
-            for elem_idx, param_val in enumerate(expanded_values):
-                # GEP to get pointer to field
-                field_ptr = visitor.builder.gep(
-                    varargs_alloca,
-                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), elem_idx)],
-                    inbounds=True
-                )
-                visitor.builder.store(param_val, field_ptr)
-            
-            # Determine the PC type hint for the varargs struct
-            # If it's a named struct class, use that type
-            # Otherwise, create an anonymous struct type hint
             varargs_type_hint = resolved_decl.varargs.parsed_type
-            
-            # Register the varargs struct as a variable
-            from .context import VariableInfo
-            from .valueref import wrap_value
-            
+            varargs_param_idx = normal_param_count
+            varargs_val, varargs_llvm_type = func_wrapper.get_user_arg_unpacked(
+                varargs_param_idx, visitor.builder
+            )
+            varargs_alloca = visitor._create_alloca_in_entry(
+                varargs_llvm_type, f"{varargs_name}_addr"
+            )
+            visitor.builder.store(varargs_val, varargs_alloca)
+
             varargs_value_ref = wrap_value(
                 varargs_alloca,
                 kind='address',
                 type_hint=varargs_type_hint,
-                address=varargs_alloca
+                address=varargs_alloca,
             )
-            
             varargs_var_info = VariableInfo(
                 name=varargs_name,
                 value_ref=varargs_value_ref,
                 alloca=varargs_alloca,
                 source="parameter",
                 is_parameter=True,
-                is_mutable=False  # varargs is read-only
+                is_mutable=False,
             )
-            
             visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
         
+        # For typed **kwargs (**kwargs: T), register the kwargs parameter.
+        # It is the last LLVM parameter (after normal params and varargs).
+        if resolved_decl.kwargs and resolved_decl.kwargs.is_typed:
+            kwargs_name = resolved_decl.kwargs.param_name
+            kwargs_type_hint = resolved_decl.kwargs.parsed_type
+            # Parameter index: normal params + 1 (varargs param) if present
+            vararg_count = 1 if resolved_decl.varargs.is_typed else 0
+            kwargs_param_idx = normal_param_count + vararg_count
+            kwargs_val, kwargs_llvm_type = func_wrapper.get_user_arg_unpacked(
+                kwargs_param_idx, visitor.builder
+            )
+            kwargs_alloca = visitor._create_alloca_in_entry(
+                kwargs_llvm_type, f"{kwargs_name}_addr"
+            )
+            visitor.builder.store(kwargs_val, kwargs_alloca)
+
+            kwargs_value_ref = wrap_value(
+                kwargs_alloca,
+                kind='address',
+                type_hint=kwargs_type_hint,
+                address=kwargs_alloca,
+            )
+            kwargs_var_info = VariableInfo(
+                name=kwargs_name,
+                value_ref=kwargs_value_ref,
+                alloca=kwargs_alloca,
+                source="parameter",
+                is_parameter=True,
+                is_mutable=False,
+            )
+            visitor.scope_manager.declare_variable(kwargs_var_info, allow_shadow=True)
+
         # Initialize list to accumulate all inlined statements (via func_state)
         visitor._all_inlined_stmts = compile_frame.all_inlined_stmts
 

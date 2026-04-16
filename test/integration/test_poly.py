@@ -1,3 +1,4 @@
+# varargs ABI v2
 from __future__ import annotations
 
 from pythoc import *

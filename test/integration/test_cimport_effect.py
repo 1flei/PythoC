@@ -1,3 +1,4 @@
+# varargs ABI v2
 # -*- coding: utf-8 -*-
 """
 Test that bindings module uses effect.mem for memory allocation.
