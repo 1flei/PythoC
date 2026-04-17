@@ -142,9 +142,11 @@ class FunctionInfo:
             (name, self.param_type_hints[name]) for name in self.param_names
         ) + ((None, self.return_type_hint),)
         result = func_type_cls.handle_type_subscript(items)
-        # Propagate *args/**kwargs flags so call sites can detect them
+        # Propagate collector flags so call sites can detect them
         if self.has_varargs:
             result.has_varargs = True
+        if self.has_llvm_varargs:
+            result.has_llvm_varargs = True
         if self.has_kwargs:
             result.has_kwargs = True
         return result

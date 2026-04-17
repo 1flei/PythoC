@@ -101,6 +101,16 @@ def single_arg(*args: struct[i32]) -> i32:
 def sum_many(*args: struct[i32, i32, i32, i32, i32, i32, i32, i32]) -> i32:
     return args[0] + args[1] + args[2] + args[3] + args[4] + args[5] + args[6] + args[7]
 
+EmptyArgs = struct[tuple([])]
+
+@compile
+def accept_empty_varargs(*args: EmptyArgs) -> i32:
+    return i32(9)
+
+@compile
+def call_empty_varargs() -> i32:
+    return accept_empty_varargs()
+
 # Phase 4: Union varargs
 @compile
 def print_by_tag(tag: i32, *args: union[i32, f64, ptr[i8]]):
@@ -212,6 +222,22 @@ def test_struct_varargs_mixed_types():
     # not a compiled-to-compiled issue.
     print("  WARNING  Skipped: ptr[i8] in struct requires ctypes wrapping from Python")
     return True
+
+
+def test_empty_struct_varargs():
+    """Test empty typed *args normalization."""
+    print("\n[Test 3b] Empty typed varargs")
+
+    try:
+        result = call_empty_varargs()
+        assert result == 9, f"Expected 9, got {result}"
+        direct = accept_empty_varargs()
+        assert direct == 9, f"Expected 9, got {direct}"
+        print("  OK empty typed varargs works for compiled and Python callers")
+        return True
+    except Exception as e:
+        print(f"   Failed: {e}")
+        return False
 
 
 # =============================================================================
@@ -458,11 +484,11 @@ def test_multiple_unpacking():
 # Test 6: Edge cases
 # =============================================================================
 
-def test_empty_struct_varargs():
-    """Test struct varargs with no arguments - SKIPPED (syntax limitation)"""
-    print("\n[Test 14] Empty struct varargs - SKIPPED")
-    print("  WARNING  Python doesn't support struct[] syntax, skipping")
-    return True  # Skip
+def test_empty_struct_varargs_syntax_placeholder():
+    """Legacy placeholder for the old empty varargs syntax discussion."""
+    print("\n[Test 14] Empty struct varargs syntax placeholder")
+    print("  OK empty typed varargs now covered by a real regression test")
+    return True
 
 
 def test_single_element_struct_varargs():
@@ -509,6 +535,7 @@ def run_all_tests():
             ("Basic struct varargs", test_struct_varargs_basic),
             ("len(args)", test_struct_varargs_len),
             ("Mixed types", test_struct_varargs_mixed_types),
+            ("Empty typed varargs", test_empty_struct_varargs),
         ]),
         
         # Phase 2: Struct unpacking
@@ -551,7 +578,7 @@ def run_all_tests():
         
         # Edge cases
         ("Edge Cases", [
-            ("Empty varargs", test_empty_struct_varargs),
+            ("Empty varargs placeholder", test_empty_struct_varargs_syntax_placeholder),
             ("Single element", test_single_element_struct_varargs),
             ("Large varargs (8)", test_large_struct_varargs),
         ]),

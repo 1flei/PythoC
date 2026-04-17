@@ -310,13 +310,13 @@ class OutputManager:
         param_llvm_types = []
         for param_name in func_info.param_names:
             pc_type = func_info.param_type_hints.get(param_name)
-            if pc_type and hasattr(pc_type, 'get_llvm_type'):
+            if pc_type is not None and hasattr(pc_type, 'get_llvm_type'):
                 param_llvm_types.append(pc_type.get_llvm_type(module_context))
             else:
                 # Fallback to i32 if type unknown
                 param_llvm_types.append(ir.IntType(32))
         
-        if func_info.return_type_hint and hasattr(func_info.return_type_hint, 'get_llvm_type'):
+        if func_info.return_type_hint is not None and hasattr(func_info.return_type_hint, 'get_llvm_type'):
             return_type = func_info.return_type_hint.get_llvm_type(module_context)
         else:
             return_type = ir.VoidType()
