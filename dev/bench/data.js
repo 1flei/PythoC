@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776310363047,
+  "lastUpdate": 1776419990829,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1398,6 +1398,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.047,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "c99e1b09669dbc689c5e2ccb4ad19c43b70f44ed",
+          "message": "Unify call normalization",
+          "timestamp": "2026-04-17T14:16:21+08:00",
+          "tree_id": "5604007ac0c8933b0df3a64076d45a5e62b11b04",
+          "url": "https://github.com/1flei/PythoC/commit/c99e1b09669dbc689c5e2ccb4ad19c43b70f44ed"
+        },
+        "date": 1776419990062,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.8,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.015,
             "unit": "seconds/test"
           }
         ]
