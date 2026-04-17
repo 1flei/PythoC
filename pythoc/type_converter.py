@@ -791,7 +791,7 @@ class TypeConverter:
 
         if field_types is None:
             raise TypeError(f"Cannot get field types from {target_struct_type}")
-        if not field_names or any(n is None for n in field_names):
+        if any(n is None for n in field_names):
             raise TypeError(
                 f"pc_dict -> struct requires all fields to be named, "
                 f"but {target_struct_type} has field_names={field_names}"

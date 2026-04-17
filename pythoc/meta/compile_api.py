@@ -309,18 +309,8 @@ def compile_ast(
 
     # Set up handle_call for cross-module calls
     def handle_call(visitor, func_ref, args, node):
-        from ..valueref import wrap_value
-        from ..builtin_entities import func as func_type_cls
-        from ..builtin_entities.python_type import PythonType
-
-        wrapper_ref = wrap_value(
-            wrapper, kind="python", type_hint=PythonType.wrap(wrapper)
-        )
-        converted_func_ref = visitor.type_converter.convert(
-            wrapper_ref, func_type_cls, node
-        )
-        func_type = converted_func_ref.type_hint
-        return func_type.handle_call(visitor, converted_func_ref, args, node)
+        from ..call_normalization import lower_compile_handle_call
+        return lower_compile_handle_call(wrapper, visitor, func_ref, args, node)
 
     wrapper.handle_call = handle_call
     wrapper._is_compiled = True

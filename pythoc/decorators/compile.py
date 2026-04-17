@@ -16,6 +16,8 @@ import ast
 import sys
 from typing import Any, List, Optional
 
+from ..call_normalization import pack_native_call_args
+
 # Sentinel value to distinguish "not provided" from "provided as None"
 _SCOPE_NOT_PROVIDED = object()
 
@@ -192,57 +194,6 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                         fn_attrs=fn_attrs)
 
 
-def _pack_varargs_kwargs_for_native(wrapper, args, kwargs):
-    """Pack *args and **kwargs for native function calls from Python.
-
-    When calling a @compile function from Python (not from another @compile
-    function), the wrapper receives individual arguments. But the native
-    function expects a single struct parameter for *args: T and **kwargs: T.
-    This function packs the excess args into the appropriate ctypes struct.
-    """
-    func_info = getattr(wrapper, '_func_info', None)
-    if func_info is None:
-        return args
-
-    has_varargs = getattr(func_info, 'has_varargs', False)
-    has_kwargs = getattr(func_info, 'has_kwargs', False)
-
-    if not has_varargs and not has_kwargs:
-        return args
-
-    # Determine normal param count (excluding varargs/kwargs params)
-    ast_node = func_info.ast_node
-    if ast_node is not None:
-        normal_count = len(ast_node.args.args)
-    else:
-        # Fallback: count params that are not varargs/kwargs
-        total = len(func_info.param_names)
-        normal_count = total - (1 if has_varargs else 0) - (1 if has_kwargs else 0)
-
-    result = list(args[:normal_count])
-
-    if has_varargs:
-        varargs_type = func_info.param_type_hints.get(
-            func_info.param_names[normal_count]
-        )
-        if varargs_type and hasattr(varargs_type, 'get_ctypes_type'):
-            ctype = varargs_type.get_ctypes_type()
-            excess = args[normal_count:]
-            result.append(ctype(*excess))
-
-    if has_kwargs and kwargs:
-        kwargs_param_name = func_info.param_names[-1]
-        kwargs_type = func_info.param_type_hints.get(kwargs_param_name)
-        if kwargs_type and hasattr(kwargs_type, 'get_ctypes_type'):
-            from ..schema_protocol import get_schema_field_names
-            field_names = get_schema_field_names(kwargs_type)
-            ctype = kwargs_type.get_ctypes_type()
-            ordered_vals = [kwargs[fn] for fn in field_names if fn in kwargs]
-            result.append(ctype(*ordered_vals))
-
-    return tuple(result)
-
-
 def _compile_impl(func_or_class, 
                   compile_suffix: Optional[str] = None, 
                   effect_suffix: Optional[str] = None,
@@ -280,7 +231,7 @@ def _compile_impl(func_or_class,
         if not hasattr(wrapper, '_native_func'):
             wrapper._native_func = executor.execute_function(wrapper)
 
-        args = _pack_varargs_kwargs_for_native(wrapper, args, kwargs)
+        args = pack_native_call_args(wrapper, args, kwargs)
         return wrapper._native_func(*args)
     
     source_file, source_code = get_function_file_and_source(func)
@@ -627,14 +578,8 @@ def _compile_impl(func_or_class,
 
     def handle_call(visitor, func_ref, args, node):
         """Handle calling a @compile function."""
-        from ..valueref import wrap_value
-        from ..builtin_entities import func as func_type_cls
-        from ..builtin_entities.python_type import PythonType
-
-        wrapper_ref = wrap_value(wrapper, kind="python", type_hint=PythonType.wrap(wrapper))
-        converted_func_ref = visitor.type_converter.convert(wrapper_ref, func_type_cls, node)
-        func_type = converted_func_ref.type_hint
-        return func_type.handle_call(visitor, converted_func_ref, args, node)
+        from ..call_normalization import lower_compile_handle_call
+        return lower_compile_handle_call(wrapper, visitor, func_ref, args, node)
 
     wrapper.handle_call = handle_call
     wrapper._is_compiled = True

@@ -31,6 +31,7 @@ Rect = struct["width": i32, "height": i32]
 Point3D = struct["x": i32, "y": i32, "z": i32]
 WeightedPair = struct["a": i32, "b": i32, "weight": f64]
 Vec2 = struct["x": f64, "y": f64]
+Empty = struct[tuple([])]
 
 
 # ============================================================================
@@ -110,6 +111,21 @@ def test_kwargs_point3d() -> i32:
 @compile
 def test_kwargs_with_positional() -> i32:
     return offset_rect(i32(5), width=i32(6), height=i32(7))
+
+
+@compile
+def test_kwargs_mixed_fixed_keyword() -> i32:
+    return offset_rect(dx=i32(5), width=i32(6), height=i32(7))
+
+
+@compile
+def accept_empty_kwargs(**kwargs: Empty) -> i32:
+    return i32(7)
+
+
+@compile
+def test_empty_kwargs() -> i32:
+    return accept_empty_kwargs()
 
 
 # ============================================================================
@@ -249,6 +265,19 @@ class TestKwargsStruct(unittest.TestCase):
 
     def test_with_positional(self):
         self.assertEqual(test_kwargs_with_positional(), 77)
+
+    def test_mixed_fixed_keyword(self):
+        self.assertEqual(test_kwargs_mixed_fixed_keyword(), 77)
+
+    def test_python_wrapper_fixed_and_kwargs(self):
+        self.assertEqual(offset_rect(dx=5, width=6, height=7), 77)
+
+    def test_python_wrapper_normal_keywords(self):
+        self.assertEqual(add_two(a=10, b=20), 30)
+
+    def test_empty_kwargs(self):
+        self.assertEqual(test_empty_kwargs(), 7)
+        self.assertEqual(accept_empty_kwargs(), 7)
 
     def test_weighted_pair(self):
         # (3+7)*2.0 = 20

@@ -551,9 +551,17 @@ class MultiSOExecutor:
         """Convert pythoc type to ctypes type.
         
         All pythoc types should implement get_ctypes_type() method.
+        Zero-size types return None so the Python/native wrapper can omit them.
         """
         if pc_type is None:
             return None
+
+        if hasattr(pc_type, 'get_size_bytes'):
+            try:
+                if pc_type.get_size_bytes() == 0:
+                    return None
+            except TypeError:
+                pass
         
         if hasattr(pc_type, 'get_ctypes_type'):
             return pc_type.get_ctypes_type()

@@ -13,6 +13,7 @@ a high-level Python wrapper is lowered to a concrete IR declaration.
 This module has no knowledge of effect internals.
 """
 
+import inspect
 from typing import Optional, TYPE_CHECKING
 from llvmlite import ir
 
@@ -200,6 +201,30 @@ def lower_extern_wrapper(
         ValueRef(kind='pointer', type_hint=func[param_types..., return_type])
     """
     func_name = extern_wrapper.func_name
+    signature = extern_wrapper._extern_config.get('signature')
+    param_type_map = dict(extern_wrapper.param_types)
+    fixed_params = []
+    varargs_name = None
+
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            varargs_name = param.name
+            continue
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            logger.error(
+                f"Extern function '{func_name}' does not support **kwargs",
+                node=node, exc_type=TypeError,
+            )
+        param_type = param_type_map.get(param.name)
+        if param_type is None:
+            logger.error(
+                f"Extern function '{func_name}': parameter '{param.name}' "
+                f"has no type annotation",
+                node=node, exc_type=TypeError,
+            )
+        fixed_params.append((param.name, param_type))
+
+    has_varargs = varargs_name is not None
 
     # --- Try to reuse existing declaration ---
     try:
@@ -216,27 +241,14 @@ def lower_extern_wrapper(
     except KeyError:
         # --- Declare the extern function ---
         module_context = module.context
-
-        param_llvm_types = []
-        for param_name, param_type in extern_wrapper.param_types:
-            if param_name == 'args':
-                continue
-            if param_type is None:
-                logger.error(
-                    f"Extern function '{func_name}': parameter '{param_name}' "
-                    f"has no type annotation",
-                    node=node, exc_type=TypeError,
-                )
-            param_llvm_types.append(param_type.get_llvm_type(module_context))
+        param_llvm_types = [
+            param_type.get_llvm_type(module_context) for _, param_type in fixed_params
+        ]
 
         if extern_wrapper.return_type is None:
             return_llvm_type = ir.VoidType()
         else:
             return_llvm_type = extern_wrapper.return_type.get_llvm_type(module_context)
-
-        has_varargs = any(
-            name == 'args' for name, _ in extern_wrapper.param_types
-        )
 
         from .builder import LLVMBuilder
         func_wrapper = LLVMBuilder().declare_function(
@@ -268,10 +280,11 @@ def lower_extern_wrapper(
     from .builtin_entities.func import func as func_type_cls
     from .builtin_entities.types import void
 
-    fixed_pc_types = tuple(
-        pt for name, pt in extern_wrapper.param_types if name != 'args'
-    )
     ret_type = extern_wrapper.return_type if extern_wrapper.return_type is not None else void
-    callable_pc_type = func_type_cls[fixed_pc_types + (ret_type,)]
+    callable_items = tuple(fixed_params) + ((None, ret_type),)
+    callable_pc_type = func_type_cls.handle_type_subscript(callable_items)
+    if has_varargs:
+        callable_pc_type.has_llvm_varargs = True
+        callable_pc_type.param_names = [name for name, _ in fixed_params] + [varargs_name]
 
     return wrap_value(ir_func, kind='pointer', type_hint=callable_pc_type)
