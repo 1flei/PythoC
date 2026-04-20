@@ -111,12 +111,6 @@ def unregister_defers_for_scope(visitor, scope_depth: int):
             break
 
 
-# Legacy API - now just delegates to ScopeManager
-def execute_deferred_calls(visitor, scope_depth: int = None, all_scopes: bool = False):
-    """Emit deferred calls (legacy API, delegates to emit_deferred_calls)"""
-    emit_deferred_calls(visitor, scope_depth=scope_depth, all_scopes=all_scopes)
-
-
 def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list, node: ast.AST):
     """Execute a single deferred call
     

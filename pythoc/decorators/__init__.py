@@ -10,8 +10,7 @@ import os
 import ast
 from typing import Any, List
 
-from ..compiler import LLVMCompiler
-from ..registry import register_struct_from_class, _unified_registry
+from ..registry import _unified_registry
 
 from .structs import (
     add_struct_handle_call as _add_struct_handle_call,

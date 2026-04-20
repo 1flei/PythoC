@@ -20,7 +20,7 @@ Kwargs (**kwargs):
 
 import ast
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Any
+from typing import List, Optional, Any
 
 from ..schema_protocol import (
     get_field_layout_types,
@@ -138,18 +138,6 @@ def resolve_varargs(func_node: ast.FunctionDef, type_resolver) -> ResolvedVarArg
         parsed_type=parsed_type,
         element_types=element_types,
     )
-
-
-# ---- Legacy API kept for callers that have not been updated yet ----------
-
-def detect_varargs(
-    func_node: ast.FunctionDef, type_resolver,
-) -> Tuple[str, Optional[List[Any]], Optional[str]]:
-    """Legacy wrapper. Prefer ``resolve_varargs`` in new code."""
-    resolved = resolve_varargs(func_node, type_resolver)
-    if not resolved.is_typed:
-        return ("none", None, resolved.param_name)
-    return (resolved.kind, resolved.element_types, resolved.param_name)
 
 
 # =========================================================================

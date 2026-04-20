@@ -1,242 +1,32 @@
 """
-Closure Adapter - Bridges closure calls with meta expansion pipeline
+Closure adapter compatibility shim.
 
-Pure AST adapter - generates AST only, no IR/builder operations.
-Handles captured variables from outer scopes.
+The actual logic lives in ``InlineAdapter`` (see ``inline_adapter.py``),
+which now handles both ``@inline`` expansion and closure inlining via a
+``kind`` parameter. ``ClosureAdapter`` stays as a thin wrapper so call
+sites that already reach for it keep working; new code should
+instantiate ``InlineAdapter(..., kind='closure')`` directly.
 """
 
-import ast
-from typing import Dict, Optional, Any, TYPE_CHECKING
-from .exit_rules import ReturnExitRule
-from .scope_analyzer import ScopeContext
-from ..valueref import ValueRef, wrap_value
-from ..context import VariableInfo
-from ..logger import logger
-from ..utils import get_next_id
+from typing import Any, Dict, TYPE_CHECKING
+
+from .inline_adapter import InlineAdapter
 
 if TYPE_CHECKING:
     from ..ast_visitor.visitor_impl import LLVMIRVisitor
 
 
-class ClosureAdapter:
-    """
-    Adapter for closure inlining using meta expansion pipeline
-
-    Strategy (same as InlineAdapter):
-    1. Create temporary variables for arguments
-    2. Use meta.expand_inline() to transform closure AST (detects captures automatically)
-    3. Return pure AST for visitor to process
-
-    ScopeAnalyzer automatically detects captured variables.
+class ClosureAdapter(InlineAdapter):
+    """Adapter for closure inlining. Equivalent to ``InlineAdapter`` with
+    ``kind='closure'``.
     """
 
-    def __init__(self, parent_visitor: 'LLVMIRVisitor', param_bindings: Dict[str, Any],
+    def __init__(self, parent_visitor: 'LLVMIRVisitor',
+                 param_bindings: Dict[str, Any],
                  func_globals: Dict[str, Any] = None):
-        """
-        Initialize closure adapter
-
-        Args:
-            parent_visitor: The visitor that's calling the closure
-            param_bindings: Dict mapping parameter names to ValueRefs or Python objects
-            func_globals: The closure's __globals__ (for name resolution)
-        """
-        self.visitor = parent_visitor
-        self.param_bindings = param_bindings
-        self.func_globals = func_globals
-    
-    
-    def execute_closure(self, func_ast: ast.FunctionDef) -> Optional[ValueRef]:
-        """
-        Execute closure inline using universal kernel via meta pipeline
-
-        Args:
-            func_ast: The closure function AST to execute inline
-
-        Returns:
-            ValueRef of the return value, or None if no return
-        """
-        logger.debug(f"ClosureAdapter: executing closure inline for {func_ast.name}")
-
-        # Determine result variable name using global ID
-        unique_id = get_next_id()
-        result_var = f"_closure_result_{unique_id}"
-
-        # Create exit rule (using goto-based approach, no flag_var needed)
-        exit_rule = ReturnExitRule(result_var=result_var)
-
-        # Create temporary variables for arguments and register them
-        arg_temps = self._create_arg_temps()
-
-        # Create AST argument expressions (Name nodes referencing temp vars)
-        arg_exprs = [ast.Name(id=temp_name, ctx=ast.Load()) for temp_name in arg_temps.values()]
-
-        # Build caller context from current scope (for capture detection)
-        caller_context = self._build_caller_context()
-
-        # Create dummy call site
-        call_site = ast.Call(
-            func=ast.Name(id=func_ast.name, ctx=ast.Load()),
-            args=arg_exprs,
-            keywords=[]
+        super().__init__(
+            parent_visitor,
+            param_bindings,
+            func_globals=func_globals,
+            kind="closure",
         )
-
-        # Build MetaInlineRequest and delegate to expand_inline
-        from .kernel import (
-            MetaInlineRequest, expand_inline,
-            merge_inline_globals, restore_globals,
-        )
-        request = MetaInlineRequest(
-            callee_ast=func_ast,
-            callee_globals=self.func_globals or {},
-            call_args=arg_exprs,
-            call_site=call_site,
-            caller_context=caller_context,
-            exit_rule=exit_rule,
-        )
-
-        try:
-            inline_result = expand_inline(request)
-        except Exception as e:
-            logger.error(f"ClosureAdapter: meta inline expansion failed: {e}")
-            raise
-
-        # Merge globals, visit statements, restore globals
-        old_user_globals = merge_inline_globals(self.visitor, inline_result)
-
-        for stmt in inline_result.stmts:
-            ast.fix_missing_locations(stmt)
-        for stmt in inline_result.stmts:
-            self.visitor.visit(stmt)
-
-        restore_globals(self.visitor, old_user_globals)
-        
-        # Return result if function has return value
-        has_return = self._has_return_value(func_ast)
-        if has_return:
-            return self._lookup_result_var(result_var)
-        
-        # For void functions, return a void ValueRef
-        from ..builtin_entities import void
-        return wrap_value(None, kind='python', type_hint=void)
-    
-    def _create_arg_temps(self) -> Dict[str, str]:
-        """
-        Create temporary variables for arguments and register in visitor scope
-        
-        Returns:
-            Mapping of parameter names to temporary variable names
-            
-        IMPORTANT: These temps have NO alloca - they are pure value references.
-        
-        CRITICAL for linear types: We clear var_name from the ValueRef so that
-        the temporary variable is not tracked for consumption. The ownership
-        was already transferred when the caller evaluated the arguments.
-        """
-        arg_temps = {}
-        closure_id = get_next_id()
-        
-        for i, (param_name, param_value) in enumerate(self.param_bindings.items()):
-            # Create unique temp variable name
-            temp_name = f"_arg_closure_{closure_id}_{i}"
-            arg_temps[param_name] = temp_name
-            
-            # Wrap non-ValueRef as python ValueRef
-            if not isinstance(param_value, ValueRef):
-                from ..builtin_entities.python_type import PythonType
-                param_value = wrap_value(param_value, kind="python",
-                                     type_hint=PythonType.wrap(param_value, is_constant=True))
-            else:
-                # Create a fresh ValueRef without var_name tracking
-                # This is critical for linear types: the ownership was already
-                # transferred when the caller evaluated the arguments
-                param_value = param_value.clone(var_name=None, linear_path=None)
-            
-            # Register temp variable WITHOUT alloca
-            temp_info = VariableInfo(
-                name=temp_name,
-                value_ref=param_value,
-                alloca=None,  # CRITICAL: No alloca!
-                source="closure_arg_temp",
-                is_parameter=False
-            )
-            self.visitor.scope_manager.declare_variable(temp_info, allow_shadow=True)
-        
-        return arg_temps
-    
-    def _build_caller_context(self) -> ScopeContext:
-        """
-        Build caller scope context for kernel
-        
-        This tells the kernel what variables are available in outer scope,
-        so it can correctly identify captured variables.
-        
-        CRITICAL: Must use get_all_visible() to include variables from ALL
-        enclosing scopes, not just the current scope. This is essential for
-        by-ref capture to work correctly when closure is defined in nested
-        scopes (e.g., inside a while loop).
-        """
-        available_vars = set()
-        
-        # Get all visible variables from ALL scopes (not just current)
-        if hasattr(self.visitor, 'scope_manager'):
-            registry = self.visitor.scope_manager
-            for var_name in registry.get_all_visible().keys():
-                available_vars.add(var_name)
-        
-        return ScopeContext(available_vars=available_vars)
-    
-    def _has_return_value(self, func_ast: ast.FunctionDef) -> bool:
-        """Check if function has non-void return value"""
-        # Check return type annotation
-        if func_ast.returns:
-            if isinstance(func_ast.returns, ast.Name) and func_ast.returns.id == 'void':
-                return False
-            return True
-        # Check for return statements with values
-        for node in ast.walk(func_ast):
-            if isinstance(node, ast.Return) and node.value is not None:
-                return True
-        return False
-    
-    def _lookup_result_var(self, var_name: str) -> Optional[ValueRef]:
-        """Look up result variable and load its value
-        
-        CRITICAL for linear types: 
-        1. The closure result variable is a temporary that holds the return value
-        2. When we read it, we transfer ownership OUT of the temporary
-        3. We must mark the temporary as consumed here
-        4. The returned ValueRef should NOT have var_name (like move() returns)
-           so that the caller treats it as a fresh value, not a variable reference
-        """
-        var_info = self.visitor.scope_manager.lookup_variable(var_name)
-        if not var_info:
-            logger.warning(f"Result variable {var_name} not found")
-            return None
-        
-        # Load the value from the alloca
-        alloca = var_info.alloca
-        loaded_value = self.visitor.builder.load(alloca)
-        
-        # CRITICAL: Transfer ownership OUT of the closure result variable
-        # This marks the temporary as consumed, similar to what move() does
-        if self.visitor._is_linear_type(var_info.type_hint):
-            # Create a temporary ValueRef with tracking info for ownership transfer
-            temp_ref = wrap_value(
-                loaded_value,
-                kind='value',
-                type_hint=var_info.type_hint,
-                var_name=var_name,
-                linear_path=()
-            )
-            # Transfer ownership - marks _closure_result_N as consumed
-            # node=None is acceptable, it's only used for error reporting
-            self.visitor._transfer_linear_ownership(temp_ref, reason="closure return", node=None)
-        
-        # Return a NEW ValueRef WITHOUT var_name tracking (like move() does)
-        # This ensures the caller treats it as a fresh value, not a variable reference
-        return wrap_value(
-            loaded_value, 
-            kind='value', 
-            type_hint=var_info.type_hint
-        )
-

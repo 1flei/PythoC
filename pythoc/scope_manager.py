@@ -119,9 +119,9 @@ class ScopeManager:
     """
     
     def __init__(self):
-        """Initialize scope manager with its own VariableRegistry"""
-        from .registry import VariableRegistry
-        self._var_registry = VariableRegistry()
+        """Initialize scope manager with its own internal variable registry."""
+        from .registry import _InternalVariableRegistry
+        self._var_registry = _InternalVariableRegistry()
         self._scopes: List[Scope] = []
         self._visitor: Optional[Any] = None  # Set by visitor
 

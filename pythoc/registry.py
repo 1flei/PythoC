@@ -1,13 +1,23 @@
 """
-Unified Registry System for PC Compiler
+Unified Registry System for PC Compiler.
 
-This module provides a centralized registry for all compilation artifacts:
-- Variables (scope-aware)
-- Functions (compiled, extern, runtime-generated)
-- Types (builtin, structs)
-- Compilers and modules
+Centralizes compilation artifacts that are genuinely process-global:
 
-This replaces the scattered global dictionaries across multiple files.
+- Function metadata (``FunctionInfo``) and per-variable info
+  (``VariableInfo``) used across the AST visitor and CFG.
+- Struct metadata registry (``StructInfo``) for user-defined structs.
+- Source file / compiler / shared-library registry used by the
+  multi-so executor.
+- Builtin-entity registry populated from the ``BuiltinEntity``
+  metaclass.
+- Link libraries / object files collected from extern declarations and
+  cimport.
+
+Scope management for *local* variables lives in
+``scope_manager.ScopeManager``. This module still defines
+``VariableRegistry`` because ``ScopeManager`` uses one internally for
+name lookup, but no other call site should create a ``VariableRegistry``
+directly.
 """
 
 from __future__ import annotations
@@ -239,33 +249,30 @@ class StructInfo:
         return False
 
 
-class VariableRegistry:
-    """Scope-aware variable registry
+class _InternalVariableRegistry:
+    """Scope-aware variable registry used *only* by ``ScopeManager``.
 
-    Manages variables with proper scope handling, supporting nested scopes,
-    variable shadowing, and type inference integration.
+    This is an internal lookup structure. External code must go through
+    ``ScopeManager`` rather than instantiate this directly.
+
+    Responsibilities:
+
+    - Nested-scope variable storage with shadowing.
+    - Module-level ``global_vars`` slot.
+    - Integration hook with an optional type-inference context.
     """
 
     def __init__(self):
-        # Scope stack: each scope is a dict of variable name -> VariableInfo
         self.scopes: List[Dict[str, VariableInfo]] = [{}]
-
-        # Global variables (module-level)
         self.global_vars: Dict[str, VariableInfo] = {}
-
-        # Type inference context (optional integration)
         self.type_inference_ctx: Optional[Any] = None
-
-        # Current scope level
         self._scope_level = 0
 
     def enter_scope(self):
-        """Enter a new scope (function, block, etc.)"""
         self.scopes.append({})
         self._scope_level += 1
 
     def exit_scope(self) -> Dict[str, VariableInfo]:
-        """Exit current scope and return variables in that scope"""
         if len(self.scopes) > 1:
             scope_vars = self.scopes.pop()
             self._scope_level -= 1
@@ -273,82 +280,54 @@ class VariableRegistry:
         return {}
 
     def declare(self, var_info: VariableInfo, allow_shadow: bool = False):
-        """Declare a variable in the current scope
+        """Declare a variable in the current scope.
 
-        Args:
-            var_info: Variable information
-            allow_shadow: If True, allow shadowing variables from outer scopes
-
-        Raises:
-            NameError: If variable already exists in current scope
+        Raises ``NameError`` if the variable already exists in the current
+        scope and ``allow_shadow`` is False.
         """
         current_scope = self.scopes[-1]
-
-        # Check if already declared in current scope
         if var_info.name in current_scope and not allow_shadow:
             existing = current_scope[var_info.name]
             raise NameError(
                 f"Variable '{var_info.name}' already declared in this scope "
                 f"(line {existing.line_number})"
             )
-
-        # Set scope level
         var_info.scope_level = self._scope_level
-
-        # Add to current scope
         current_scope[var_info.name] = var_info
-
-        # Sync with type inference context if available
         if self.type_inference_ctx and var_info.type_hint:
             self.type_inference_ctx.set_var_type(var_info.name, var_info.type_hint)
 
     def lookup(self, name: str) -> Optional[VariableInfo]:
-        """Look up a variable in the scope chain
-
-        Searches from innermost to outermost scope.
-        Returns None if variable is not found (caller will try other namespaces).
-        """
-        # Search scopes from inner to outer
         for scope in reversed(self.scopes):
             if name in scope:
                 return scope[name]
-
-        # Check global variables
         if name in self.global_vars:
             return self.global_vars[name]
-
-        # Variable not found - return None (caller will check other namespaces)
         return None
 
     def is_declared_in_current_scope(self, name: str) -> bool:
-        """Check if variable is declared in the current scope"""
         return name in self.scopes[-1]
 
     def get_all_in_current_scope(self) -> List[VariableInfo]:
-        """Get all variables in the current scope"""
         return list(self.scopes[-1].values())
 
     def get_all_visible(self) -> Dict[str, VariableInfo]:
-        """Get all currently visible variables (from all scopes)"""
-        visible = {}
-
-        # Add globals first
+        visible: Dict[str, VariableInfo] = {}
         visible.update(self.global_vars)
-
-        # Add from outer to inner scopes (inner shadows outer)
         for scope in self.scopes:
             visible.update(scope)
-
         return visible
 
     def clear(self):
-        """Clear all scopes (useful for testing)"""
         self.scopes = [{}]
         self.global_vars.clear()
         self._scope_level = 0
 
     def __repr__(self) -> str:
-        return f"VariableRegistry(scopes={len(self.scopes)}, level={self._scope_level})"
+        return (
+            f"_InternalVariableRegistry(scopes={len(self.scopes)}, "
+            f"level={self._scope_level})"
+        )
 
 
 class UnifiedCompilationRegistry:
@@ -540,43 +519,7 @@ class UnifiedCompilationRegistry:
                     return struct_info
         
         return None
-    
-    def infer_struct_from_access(self, llvm_type: ir.Type, field_name: str) -> Optional[StructInfo]:
-        """Infer struct type from field access pattern
-        
-        Args:
-            llvm_type: LLVM type being accessed
-            field_name: Name of the field being accessed
-        
-        Returns:
-            StructInfo if a match is found, None otherwise
-        """
-        # If we have an IdentifiedStructType, try to match by name
-        if isinstance(llvm_type, ir.IdentifiedStructType):
-            struct_name = llvm_type.name.strip('"')
-            
-            # Try exact match first
-            if struct_name in self._structs:
-                struct_info = self._structs[struct_name]
-                if struct_info.has_field(field_name):
-                    return struct_info
-            
-            # Try matching without suffix (e.g., "TestStruct.3" -> "TestStruct")
-            if '.' in struct_name:
-                base_name = struct_name.split('.')[0]
-                if base_name in self._structs:
-                    struct_info = self._structs[base_name]
-                    if struct_info.has_field(field_name):
-                        return struct_info
-        
-        # Try to find a struct that has this field
-        for struct_info in self._structs.values():
-            if struct_info.has_field(field_name):
-                # Could add more sophisticated matching here
-                return struct_info
-        
-        return None
-    
+
     def clear_structs(self):
         """Clear all registered structs"""
         self._structs.clear()
@@ -728,33 +671,3 @@ def register_struct_from_class(cls) -> Optional[StructInfo]:
     fields = cls._struct_fields
     
     return _unified_registry.register_struct_from_fields(struct_name, fields, python_class=cls)
-
-
-def get_field_index(struct_name: str, field_name: str) -> Optional[int]:
-    """Get field index for a struct field
-    
-    Backward compatibility wrapper for struct_metadata.get_field_index()
-    """
-    struct_info = _unified_registry.get_struct(struct_name)
-    if struct_info:
-        return struct_info.get_field_index(field_name)
-    return None
-
-
-def get_struct_field_count(struct_name: str) -> int:
-    """Get the number of fields in a struct
-    
-    Backward compatibility wrapper for struct_metadata.get_struct_field_count()
-    """
-    struct_info = _unified_registry.get_struct(struct_name)
-    if struct_info:
-        return struct_info.get_field_count()
-    return 0
-
-
-def infer_struct_from_access(llvm_type: ir.Type, field_name: str) -> Optional[StructInfo]:
-    """Infer struct type from field access pattern
-    
-    Backward compatibility wrapper for struct_metadata.infer_struct_from_access()
-    """
-    return _unified_registry.infer_struct_from_access(llvm_type, field_name)

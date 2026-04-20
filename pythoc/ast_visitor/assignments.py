@@ -20,7 +20,6 @@ from ..builtin_entities import (
     TYPE_MAP,
 )
 from ..builtin_entities import bool as pc_bool
-from ..registry import get_unified_registry, infer_struct_from_access
 
 
 class AssignmentsMixin:
