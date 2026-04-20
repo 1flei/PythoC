@@ -153,7 +153,7 @@ __all__ = [
     # Scoped goto/label (user-facing API)
     'label',
     'goto',
-    'goto_begin',  # Backward compatibility alias
+    'goto_begin',  # Public alias of ``goto`` for readability next to goto_end
     'goto_end',
     
     # Python type wrapper

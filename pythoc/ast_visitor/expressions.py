@@ -20,7 +20,6 @@ from ..builtin_entities import (
     is_signed_int,
 )
 from ..builtin_entities import bool as pc_bool
-from ..registry import get_unified_registry, infer_struct_from_access
 from ..logger import logger
 from ..type_converter import ImplicitCoercer, get_base_type
 from ..literal_protocol import wrap_literal_result

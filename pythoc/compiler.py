@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 from llvmlite import ir, binding
 from .ast_visitor import LLVMIRVisitor
-from .registry import get_unified_registry, register_struct_from_class
+from .registry import get_unified_registry
 from .type_resolver import TypeResolver
 from .logger import logger
 
@@ -47,6 +47,8 @@ class LLVMCompiler:
     def __init__(self, user_globals=None):
         self.module = None
         self.compiled_functions = []
+        # Optimized IR text cache, invalidated whenever a new body is added.
+        self._optimized_ir = None
 
         self.user_globals = user_globals or {}  # User code's global namespace
         self.create_module()
@@ -506,11 +508,13 @@ class LLVMCompiler:
         return type_resolver.annotation_to_llvm_type(annotation)
     
     def get_ir(self) -> str:
-        """Get the LLVM IR as a string"""
+        """Return LLVM IR as text, preferring the optimized version if present."""
+        if self._optimized_ir:
+            return self._optimized_ir
         if self.module is None:
             return ""
         return str(self.module)
-    
+
     def save_ir_to_file(self, filename: str):
         """Save the LLVM IR to a file (optimized version if available)"""
         if self.module is None:
@@ -734,15 +738,6 @@ class LLVMCompiler:
 
         pm.run(llvm_module, pb)
         return str(llvm_module)
-    
-    def get_ir(self) -> str:
-        """Get the LLVM IR as a string, returning optimized version if available"""
-        if hasattr(self, '_optimized_ir') and self._optimized_ir:
-            return self._optimized_ir
-        elif self.module is None:
-            return ""
-        else:
-            return str(self.module)
     
     def compile_to_object(self, filename: str):
         """Compile the LLVM IR to an object file"""

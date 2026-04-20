@@ -120,7 +120,8 @@ class goto(BuiltinFunction):
         return wrap_value(None, kind='python', type_hint=void)
 
 
-# Backward compatibility alias
+# Public alias: "goto" jumps to label start; "goto_begin" reads better
+# next to "goto_end" at call sites.
 goto_begin = goto
 
 

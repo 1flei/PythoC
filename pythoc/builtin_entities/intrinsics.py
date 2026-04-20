@@ -28,7 +28,7 @@ __all__ = [
     # Scoped goto/label
     'label',
     'goto',
-    'goto_begin',  # Backward compatibility alias
+    'goto_begin',  # Public alias of ``goto`` for readability next to goto_end
     'goto_end',
     # C ABI varargs
     'va_start',

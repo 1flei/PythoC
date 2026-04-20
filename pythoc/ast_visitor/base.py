@@ -33,7 +33,6 @@ from ..builtin_entities import (
 )
 from ..builtin_entities.base import BuiltinType
 from ..builtin_entities import bool as pc_bool
-from ..registry import get_unified_registry, infer_struct_from_access
 from ..type_resolver import TypeResolver
 from ..logger import logger
 from ..scope_manager import ScopeManager, ScopeType
@@ -89,7 +88,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.scope_manager = self.ctx.scope_manager
         self.scope_manager.set_visitor(self)
 
-        # Backward compatibility aliases
+        # Per-compilation state; populated by compiler.py just before
+        # the visitor starts walking the function body.
         self.func_state = None  # ActiveCompileFrame, set by compiler.py
         self.binding_state = None  # FunctionBindingState, set by compiler.py
         self._current_function = None

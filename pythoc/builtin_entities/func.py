@@ -322,7 +322,7 @@ class func(BuiltinType):
         _ret_name_opt, return_type = ret_item
         if is_sequence_carrier(return_type):
             logger.error(
-                "Legacy func syntax is removed; use func[param_types..., return_type]",
+                "func return type must be a type, not a sequence literal",
                 node=None,
                 exc_type=TypeError,
             )
@@ -334,7 +334,7 @@ class func(BuiltinType):
         for name_opt, ptype in param_items:
             if is_sequence_carrier(ptype):
                 logger.error(
-                    "Legacy func syntax is removed; use func[param_types..., return_type]",
+                    "func parameter type must be a type, not a sequence literal",
                     node=None,
                     exc_type=TypeError,
                 )

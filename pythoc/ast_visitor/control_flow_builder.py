@@ -527,8 +527,9 @@ class ControlFlowBuilder:
                               visible_parent_depths=None):
         """Register a forward goto from current block. Marks block terminated.
 
-        Can be called with a PendingGoto object (legacy) or keyword args to
-        construct one internally.
+        Callers should pass keyword arguments; the ``pending`` positional
+        slot exists so that a pre-built ``PendingGoto`` can be inserted
+        directly without re-constructing it.
         """
         if pending is None:
             pending = PendingGoto(

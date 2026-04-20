@@ -59,80 +59,105 @@ class X86_64ABI(ABIInfo):
     
     def classify_return_type(self, llvm_type: ir.Type) -> CoercedType:
         """Classify return type for x86-64 ABI.
-        
+
         Args:
             llvm_type: The LLVM type being returned
-            
+
         Returns:
             CoercedType with coercion info
+        """
+        return self._classify(llvm_type, is_return=True)
+
+    def classify_argument_type(self, llvm_type: ir.Type) -> CoercedType:
+        """Classify argument type for x86-64 ABI.
+
+        Shares the eightbyte classification logic with
+        ``classify_return_type`` but differs in two places:
+
+        - Empty aggregates: a zero-sized return is coerced to ``void``,
+          but a zero-sized argument keeps its original type as DIRECT
+          (the call site can drop the argument if needed; at the ABI
+          level we do not inject a void type into the signature).
+        - ``is_return`` is False, which drives downstream decisions
+          such as whether to emit ``sret`` vs ``byval`` attributes.
+        """
+        return self._classify(llvm_type, is_return=False)
+
+    def _classify(self, llvm_type: ir.Type, *, is_return: bool) -> CoercedType:
+        """Shared classification logic for both return and argument types.
+
+        The x86-64 SysV ABI assigns the same eightbyte classification to
+        arguments and returns; the differences live only at the edges
+        (empty aggregates, INDIRECT flavour).
         """
         # Non-aggregate types don't need coercion
         if not self.is_aggregate_type(llvm_type):
             return CoercedType(
                 kind=PassingKind.DIRECT,
                 original_type=llvm_type,
-                is_return=True
+                is_return=is_return,
             )
-        
+
         size = self.get_type_size(llvm_type)
-        
-        # Empty struct returns void
+
+        # Empty aggregates
         if size == 0:
+            if is_return:
+                # Returning an empty aggregate -> the callee returns void
+                return CoercedType(
+                    kind=PassingKind.DIRECT,
+                    coerced_type=ir.VoidType(),
+                    original_type=llvm_type,
+                    is_return=True,
+                )
+            # For arguments keep the original type; do NOT rewrite to
+            # void, because a void parameter is illegal in LLVM IR.
             return CoercedType(
                 kind=PassingKind.DIRECT,
-                coerced_type=ir.VoidType(),
                 original_type=llvm_type,
-                is_return=True
+                is_return=False,
             )
-        
-        # Use sret (indirect) for structs larger than max_register_size
-        # System V: > 16 bytes, Windows x64: > 8 bytes
+
+        # Use indirect passing for structs larger than max_register_size.
+        # For returns: sret (caller supplies pointer).
+        # For arguments: byval on SysV (caller copies), plain pointer
+        # on ABIs that don't use byval (controlled by
+        # uses_byval_for_indirect_args()).
         if size > self.max_register_size:
             return CoercedType(
                 kind=PassingKind.INDIRECT,
                 original_type=llvm_type,
-                is_return=True
+                is_return=is_return,
             )
-        
+
         # Classify the struct's eightbytes
         lo_class, hi_class = self._classify_struct(llvm_type)
-        
-        # If either class is MEMORY, use sret
+
+        # If either class is MEMORY, use indirect passing
         if lo_class == FieldClass.MEMORY or hi_class == FieldClass.MEMORY:
             return CoercedType(
                 kind=PassingKind.INDIRECT,
                 original_type=llvm_type,
-                is_return=True
+                is_return=is_return,
             )
-        
+
         # Build coerced type based on classification
         coerced = self._build_coerced_type(llvm_type, size, lo_class, hi_class)
-        
+
         if coerced is None:
-            # Fallback: use sret
+            # Fallback: use indirect passing
             return CoercedType(
                 kind=PassingKind.INDIRECT,
                 original_type=llvm_type,
-                is_return=True
+                is_return=is_return,
             )
-        
+
         return CoercedType(
             kind=PassingKind.COERCE,
             coerced_type=coerced,
             original_type=llvm_type,
-            is_return=True
+            is_return=is_return,
         )
-    
-    def classify_argument_type(self, llvm_type: ir.Type) -> CoercedType:
-        """Classify argument type for x86-64 ABI.
-        
-        Similar to return type but arguments have slightly different rules.
-        """
-        # For now, use same logic as return type
-        # TODO: Implement argument-specific rules if needed
-        result = self.classify_return_type(llvm_type)
-        result.is_return = False
-        return result
     
     def _classify_aggregate(self, llvm_type: ir.Type) -> Tuple[int, int]:
         """Classify aggregate type (struct or array) into two eightbyte classes.

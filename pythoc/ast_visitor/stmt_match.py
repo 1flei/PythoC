@@ -741,15 +741,6 @@ class MatchStatementMixin:
 
         return self.value_dispatcher.handle_subscript(subject, index_const, fake_node)
     
-    def _get_array_element(self, array_value, index):
-        """Legacy method - now uses _subscript_access"""
-        return self._subscript_access(array_value, index)
-    
-    def _generate_match_condition(self, pattern, subject):
-        """Legacy method - now uses _generate_match_pattern"""
-        condition, _ = self._generate_match_pattern(pattern, subject)
-        return condition
-    
     def _compare_values(self, left, right, op):
         """Helper to compare two values (used by match)."""
         return self.value_dispatcher.handle_compare(op, left, right, None)

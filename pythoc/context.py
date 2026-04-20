@@ -75,10 +75,6 @@ class ActiveCompileFrame:
     all_inlined_stmts: list = field(default_factory=list)
 
 
-# Backward compatibility alias for older imports.
-FunctionCompileState = FunctionBindingState
-
-
 class CompilationContext:
     """Global compilation context
     
