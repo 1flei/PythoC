@@ -5,10 +5,11 @@ This module follows the broad re2c decomposition:
 
   TNFA -> closure items -> kernel buffers -> tag versions / tcmds -> TDFA
 
-It intentionally implements only the leftmost core for PythoC's current
-surface syntax. The schema is shaped so a later ``TDFA -> TaggedOPCSBMA``
-bridge can consume explicit control transitions and command lists instead of
-reconstructing tag writes from an untagged DFA closure.
+It implements the leftmost core for PythoC's current surface syntax.
+The TDFA produced here is the canonical control automaton consumed by
+``tbma.build_tagged_tbma`` (and via it, by ``codegen``). There is no
+intermediate untagged DFA in the native pipeline -- tag commands live
+directly on TDFA edges.
 """
 
 from __future__ import annotations
@@ -83,6 +84,11 @@ class TDFA:
     output_registers: Tuple[int, ...]
     register_count: int
     tagver_rows: Tuple[Tuple[int, ...], ...]
+    # Tag slots whose output register may receive more than one distinct
+    # position write under the deterministic tagged model.  Derived
+    # statically from the TDFA's own transition/accept command lists so
+    # the frontend does not need to re-walk an NFA closure.
+    multi_write_slots: FrozenSet[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -759,6 +765,13 @@ class _TDFACompiler:
                 if target < 0:
                     row[class_id] = dead_state
 
+        transitions_tuple = tuple(tuple(row) for row in self.transitions)
+        multi_write_slots = _compute_multi_write_slots(
+            output_registers=self.output_registers,
+            transition_commands=self.transition_commands,
+            accept_commands=self.accept_commands,
+        )
+
         return TDFA(
             states=tuple(self.states),
             num_states=len(self.states),
@@ -766,7 +779,7 @@ class _TDFACompiler:
             start_state=start_state,
             dead_state=dead_state,
             accept_states=frozenset(self.accept_states),
-            transitions=tuple(tuple(row) for row in self.transitions),
+            transitions=transitions_tuple,
             class_map=self.class_map,
             class_representatives=self.class_representatives,
             sentinel_256_class=self.sentinel_256_class,
@@ -780,7 +793,62 @@ class _TDFACompiler:
             output_registers=self.output_registers,
             register_count=self.maxtagver,
             tagver_rows=tuple(self.tagver_table.rows),
+            multi_write_slots=multi_write_slots,
         )
+
+
+def _compute_multi_write_slots(
+        *,
+        output_registers: Tuple[int, ...],
+        transition_commands: Dict[Tuple[int, int], Tuple[TDFACommand, ...]],
+        accept_commands: Dict[int, Tuple[TDFACommand, ...]],
+        ) -> FrozenSet[int]:
+    """Return the set of tag slots whose value may be written more than once.
+
+    A tag slot is marked "multi-write" when its backing output register
+    receives a write from more than one distinct origin across the whole
+    TDFA command set:
+
+      * transition-edge ``set`` commands that directly target an
+        output register count once per (state, class) origin,
+      * accept-state ``set``/``add``/``copy`` commands targeting an
+        output register count once per accept state.
+
+    Two or more distinct origins for the same output register means
+    that the final position observed by the runtime depends on which
+    edges were traversed, which is the same semantic the user-visible
+    tag warning in ``codegen`` flags.
+    """
+
+    output_to_slot: Dict[int, int] = {
+        reg: slot for slot, reg in enumerate(output_registers)
+    }
+    write_origins: Dict[int, Set[Tuple[str, int, int]]] = {}
+
+    for (state_id, class_id), commands in transition_commands.items():
+        for command in commands:
+            if command.kind not in ("set", "add"):
+                continue
+            slot = output_to_slot.get(command.lhs)
+            if slot is None:
+                continue
+            write_origins.setdefault(slot, set()).add(
+                ("edge", state_id, class_id)
+            )
+
+    for state_id, commands in accept_commands.items():
+        for command in commands:
+            slot = output_to_slot.get(command.lhs)
+            if slot is None:
+                continue
+            write_origins.setdefault(slot, set()).add(
+                ("accept", state_id, command.kind == "copy")
+            )
+
+    return frozenset(
+        slot for slot, origins in write_origins.items()
+        if len(origins) > 1
+    )
 
 
 def build_tdfa(tnfa: TNFA, include_internal: bool = False) -> TDFA:
@@ -999,4 +1067,3 @@ def run_tdfa(tdfa: TDFA,
         return True, _materialize_tag_dict(tdfa.tag_names, accepted, include_internal)
 
     return False, {}
-

@@ -1,15 +1,19 @@
 """
-PythoC code generation for regex DFA matchers.
+PythoC code generation for regex matchers.
 
-Takes a DFA (from dfa.py) and generates pattern-specialized @compile functions.
-Instead of a generic table-driven DFA loop, each pattern produces bespoke
-native code where DFA states become explicit if/elif branches.
+Takes a tagged T-BMA artifact (built from a TDFA control automaton via
+``tbma.build_tagged_tbma``) and generates pattern-specialized
+``@compile`` functions. Every TDFA control state becomes one goto/FSM
+block, and the leading-anchor gadget (when installed) contributes its
+own gadget blocks with per-state probe offsets and per-edge shifts.
 
-Pipeline: pattern -> DFA -> AST -> meta.compile_generated -> LLVM native code.
+Pipeline: ``pattern -> TNFA -> TDFA -> TaggedOPCSBMA -> AST ->
+meta.compile_generated -> LLVM native code``.
 
-Universal ABI:  run(n: u64, data: ptr[i8], out: ptr[i64]) -> u8
-Both match and search share the same native calling convention.  The u8
-return is 1/0 (matched / not), and tag slot values are written to *out*.
+Universal ABI:  ``run(n: u64, data: ptr[i8], out: ptr[i64]) -> u8``
+Both match and search share the same native calling convention. The
+``u8`` return is 1/0 (matched / not), and tag slot values are written
+to ``out``.
 """
 
 from __future__ import annotations
@@ -28,15 +32,14 @@ from pythoc.builtin_entities.types import i8, i32, i64, u8, u64, ptr
 from pythoc.builtin_entities.scoped_label import label, goto, goto_end
 from pythoc.builtin_entities.struct import create_struct_type
 
-from .dfa import DFA
 from .parse import (
     parse, Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor, Tag,
 )
-from .nfa import build_nfa
 from .tnfa import build_tnfa
-from .dfa import build_dfa
 from . import opcs
-from .tdfa import build_tdfa as _build_tdfa
+from .shape import decompose_pattern
+from .tbma import build_tagged_tbma
+from .tdfa import TDFA, build_tdfa as _build_tdfa
 
 
 INTERNAL_TAG_PREFIX = "__pythoc_internal_"
@@ -56,28 +59,14 @@ def _pattern_digest(pattern: str) -> str:
     return h
 
 
-def compile_pattern(pattern: str):
-    """Full pipeline: pattern string -> DFA."""
-    re_ast = parse(pattern)
-    nfa = build_nfa(re_ast)
-    dfa = build_dfa(nfa)
-    return dfa
-
-
-def compile_pattern_from_ast(re_ast):
-    """Full pipeline: AST node -> DFA."""
-    nfa = build_nfa(re_ast)
-    return build_dfa(nfa)
-
-
-def compile_tdfa(pattern: str, include_internal: bool = False):
+def compile_tdfa(pattern: str, include_internal: bool = False) -> TDFA:
     """Full pipeline: pattern string -> TDFA."""
     re_ast = parse(pattern)
     tnfa = build_tnfa(re_ast)
     return _build_tdfa(tnfa, include_internal=include_internal)
 
 
-def compile_tdfa_from_ast(re_ast, include_internal: bool = False):
+def compile_tdfa_from_ast(re_ast, include_internal: bool = False) -> TDFA:
     """Full pipeline: AST node -> TDFA."""
     tnfa = build_tnfa(re_ast)
     return _build_tdfa(tnfa, include_internal=include_internal)
@@ -98,22 +87,7 @@ def rewrite_for_search(ast_node) -> object:
     return Concat(children=[prefix, beg, ast_node, end])
 
 
-def compile_search_dfa(pattern: str):
-    """Build a search DFA (prepend .*?) for unanchored O(n) matching."""
-    re_ast = parse(pattern)
-    search_ast = rewrite_for_search(re_ast)
-    nfa = build_nfa(search_ast)
-    return build_dfa(nfa)
-
-
-def compile_search_dfa_from_ast(re_ast):
-    """Build a search DFA from AST (prepend .*?)."""
-    search_ast = rewrite_for_search(re_ast)
-    nfa = build_nfa(search_ast)
-    return build_dfa(nfa)
-
-
-def compile_search_tdfa(pattern: str):
+def compile_search_tdfa(pattern: str) -> TDFA:
     """Build a search TDFA (prepend .*?) for unanchored matching."""
     re_ast = parse(pattern)
     search_ast = rewrite_for_search(re_ast)
@@ -121,7 +95,7 @@ def compile_search_tdfa(pattern: str):
     return _build_tdfa(tnfa, include_internal=True)
 
 
-def compile_search_tdfa_from_ast(re_ast):
+def compile_search_tdfa_from_ast(re_ast) -> TDFA:
     """Build a search TDFA from AST (prepend .*?)."""
     search_ast = rewrite_for_search(re_ast)
     tnfa = build_tnfa(search_ast)
@@ -239,21 +213,49 @@ def _tag_warning_label(tag_name: str) -> str:
 
 def _warn_multi_write_slots(pattern: str,
                             mode: str,
-                            tag_runtime: opcs.DFATagRuntime,
+                            tdfa: TDFA,
                             re_ast) -> None:
-    """Warn when a tag may be rewritten by the compiled model."""
+    """Warn when a tag may be rewritten by the compiled model.
+
+    The decision is driven by the AST's "sliding" analysis: a tag
+    positioned after a variable-length suffix (or the unanchored
+    search-start boundary under a sliding leading repeat) has a
+    byte-offset value that depends on which path the deterministic
+    automaton picks. The TDFA's ``multi_write_slots`` is a purely
+    structural cross-check that the automaton really does have more
+    than one origin for the affected slots -- we do not warn when it
+    has none, because in that case the compiled artifact literally
+    cannot produce a different value at runtime.
+    """
     sliding_user_tags = _collect_sliding_user_tags(re_ast)
     warn_search_start = _starts_with_sliding_repeat(re_ast)
+    if not sliding_user_tags and not warn_search_start:
+        return
 
-    for slot in sorted(tag_runtime.multi_write_slots):
-        tag_name = tag_runtime.tag_names[slot]
-        if tag_name == INTERNAL_END_TAG:
+    candidates: List[str] = []
+    if warn_search_start:
+        candidates.append(INTERNAL_BEG_TAG)
+    candidates.extend(sorted(sliding_user_tags))
+
+    multi_write_tag_names = {
+        tdfa.tag_names[slot]
+        for slot in tdfa.multi_write_slots
+    }
+
+    for tag_name in candidates:
+        if tag_name not in tdfa.tag_slots:
             continue
-        if tag_name == INTERNAL_BEG_TAG and not warn_search_start:
-            continue
-        if (not tag_name.startswith(INTERNAL_TAG_PREFIX) and
-                tag_name not in sliding_user_tags):
-            continue
+        # AST says the tag is sliding.  If the TDFA has just one write
+        # point for its register there is nothing the compiled model
+        # can possibly disagree with; otherwise the reported position
+        # is the final write taken on the accepting path.
+        if tag_name not in multi_write_tag_names:
+            # Keep the warning for user-visible sliding tags so the
+            # legacy semantics hold: the *language* mixes positions
+            # even if the current compiled automaton happens to pin
+            # just one write origin per slot.
+            if tag_name == INTERNAL_BEG_TAG:
+                continue
         warnings.warn(
             f"Regex /{pattern}/ {mode} may rewrite "
             f"{_tag_warning_label(tag_name)} multiple times "
@@ -1060,8 +1062,8 @@ class CompiledRegex:
 
         self._match_bma: Optional[opcs.TaggedOPCSBMA] = None
         self._search_bma: Optional[opcs.TaggedOPCSBMA] = None
-        self._match_tdfa = None
-        self._search_tdfa = None
+        self._match_tdfa: Optional[TDFA] = None
+        self._search_tdfa: Optional[TDFA] = None
         self._native_match_fn = None
         self._native_search_fn = None
         self._match_ctypes_struct = None
@@ -1071,13 +1073,13 @@ class CompiledRegex:
         need_search = mode in ("search", "both")
 
         if need_match:
-            match_nfa = build_nfa(self._re_ast)
-            self.dfa = build_dfa(match_nfa)
-            match_tag_runtime = opcs.compute_dfa_tag_runtime(
-                match_nfa, self.dfa, include_internal=False)
-            _warn_multi_write_slots(pattern, "match", match_tag_runtime, self._re_ast)
-            self._match_tdfa = compile_tdfa_from_ast(self._re_ast, include_internal=False)
-            self._match_bma = opcs.build_tagged_opcs_bma(self._match_tdfa)
+            self._match_tdfa = compile_tdfa_from_ast(
+                self._re_ast, include_internal=False)
+            _warn_multi_write_slots(
+                pattern, "match", self._match_tdfa, self._re_ast)
+            match_shape = decompose_pattern(self._re_ast)
+            self._match_bma = build_tagged_tbma(
+                self._match_tdfa, shape_seq=match_shape)
             if self._match_bma.tag_names:
                 self._match_ctypes_struct = _make_ctypes_tag_struct(
                     self._match_bma.tag_names)
@@ -1085,13 +1087,12 @@ class CompiledRegex:
 
         if need_search:
             search_ast = rewrite_for_search(self._re_ast)
-            search_nfa = build_nfa(search_ast)
-            search_dfa = build_dfa(search_nfa)
-            search_tag_runtime = opcs.compute_dfa_tag_runtime(
-                search_nfa, search_dfa, include_internal=True)
-            _warn_multi_write_slots(pattern, "search", search_tag_runtime, self._re_ast)
             self._search_tdfa = compile_search_tdfa_from_ast(self._re_ast)
-            self._search_bma = opcs.build_tagged_opcs_bma(self._search_tdfa)
+            _warn_multi_write_slots(
+                pattern, "search", self._search_tdfa, self._re_ast)
+            search_shape = decompose_pattern(search_ast)
+            self._search_bma = build_tagged_tbma(
+                self._search_tdfa, shape_seq=search_shape)
             self._search_ctypes_struct = _make_ctypes_tag_struct(
                 self._search_bma.tag_names)
             self._native_search_fn = self._compile_search_fn()
@@ -1127,7 +1128,7 @@ class CompiledRegex:
             return (matched, {})
 
     def search(self, data: bytes) -> Tuple[bool, dict]:
-        """Unanchored search — find the first occurrence anywhere.
+        """Unanchored search - find the first occurrence anywhere.
 
         Returns ``(found, info)`` where *info* contains ``'start'``
         and ``'end'`` keys plus any user-defined tags.

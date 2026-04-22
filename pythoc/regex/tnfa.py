@@ -1,10 +1,11 @@
 """
 Explicit TNFA for the tagged regex frontend.
 
-This module mirrors the core shape of re2c's TNFA much more closely than the
-legacy Thompson NFA in ``nfa.py``. The tagged compilation path should use this
-module, while the old ``nfa.py`` remains as legacy scaffolding for the current
-untagged/OPCS native pipeline.
+This module is the single entry point from parse-time AST to automata
+land. It builds a tagged NFA whose structure is close to re2c's TNFA,
+which the leftmost TDFA frontend in ``tdfa.py`` then determinizes. The
+result is the canonical control automaton consumed by the T-BMA builder
+and codegen.
 """
 
 from __future__ import annotations

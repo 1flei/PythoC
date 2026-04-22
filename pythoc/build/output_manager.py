@@ -462,15 +462,15 @@ class OutputManager:
         while self._pending_groups:
             group_key = next(iter(self._pending_groups))
             group = self._pending_groups.pop(group_key)
-            
+
             # Skip if already flushed
             if group_key in self._flushed_groups:
                 continue
-            
+
             # Skip if marked as failed
             if group.get('compilation_failed', False):
                 continue
-            
+
             obj_file = group['obj_file']
             source_file = group.get('source_file')
 
@@ -492,10 +492,9 @@ class OutputManager:
                             self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
                         group['wrappers'] = []
 
-                        logger.debug(f"Cache hit for {group_key}, skipping compilation")
                         continue
 
-                # Cache miss — this process is the first to compile this .o.
+                # Cache miss -- this process is the first to compile this .o.
                 try:
                     compiled_count, compiled_symbols = self._compile_pending_for_group(group_key, group)
                 except Exception:
@@ -540,7 +539,7 @@ class OutputManager:
             # Mark this group as flushed
             self._flushed_groups.add(group_key)
             group['wrappers'] = []
-        
+
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
     
     def _restore_deps_from_cache(self, group_key, group):

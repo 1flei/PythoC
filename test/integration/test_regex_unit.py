@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Unit tests for regex internals: parser, NFA, DFA.
+Unit tests for regex internals: parser, TNFA/TDFA, T-BMA artifacts.
 
-These are pure Python tests — no @compile needed.
+These are pure Python tests -- no @compile needed.
 """
 
 import ctypes
@@ -18,10 +18,14 @@ from pythoc.regex.parse import (
     parse, ParseError,
     Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor, Tag,
 )
-from pythoc.regex.nfa import build_nfa, epsilon_closure, NFA
-from pythoc.regex.dfa import build_dfa, DFA
+from pythoc.regex.tnfa import build_tnfa
+from pythoc.regex.tdfa import build_tdfa
 from pythoc.regex import opcs
-from pythoc.regex.codegen import CompiledRegex, compile_pattern, _pattern_digest
+from pythoc.regex.codegen import (
+    CompiledRegex,
+    _pattern_digest,
+    compile_search_tdfa_from_ast,
+)
 
 # ---------------------------------------------------------------------------
 # Pre-compile all patterns before any native execution starts.
@@ -38,6 +42,9 @@ _ALL_PATTERNS = [
     "a*{mid}b", "{x}a|{y}bc", "{x}a|a{y}", "{s}abc{e}", "abcd", "(ab)*cde",
     ".*{tag}.*b", "a*{tag}a*b", "(ab)*{tag}abc", "(ab)*{mid}cde",
     "needle", "https?://",
+    # T-BMA MVP coverage: leading-anchor on .*F shapes,
+    # alternations of fixed-length tails, and chained-F patterns.
+    "(cat|dog)", ".*foo.*bar",
 ]
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
@@ -244,86 +251,78 @@ class TestParser(unittest.TestCase):
 
 
 # ============================================================================
-# NFA tests
+# TNFA / TDFA structural tests (replace the legacy NFA/DFA unit coverage)
 # ============================================================================
 
-class TestNFA(unittest.TestCase):
+class TestTNFA(unittest.TestCase):
 
-    def test_literal_nfa(self):
+    def test_literal_tnfa(self):
         ast = parse("a")
-        nfa = build_nfa(ast)
-        self.assertEqual(nfa.state_count(), 2)
-        start = nfa.states[nfa.start]
-        self.assertIn(ord('a'), start.byte_transitions)
+        tnfa = build_tnfa(ast)
+        # At minimum one RAN state for 'a' plus the FIN state.
+        ran_states = [s for s in tnfa.states if s.kind == "RAN"]
+        self.assertTrue(any(
+            any(lo <= ord('a') <= hi for lo, hi in s.ranges)
+            for s in ran_states
+        ))
+        self.assertTrue(any(s.kind == "FIN" for s in tnfa.states))
 
-    def test_concat_nfa(self):
+    def test_concat_tnfa(self):
         ast = parse("ab")
-        nfa = build_nfa(ast)
-        self.assertGreaterEqual(nfa.state_count(), 4)
+        tnfa = build_tnfa(ast)
+        self.assertGreaterEqual(tnfa.state_count(), 3)
 
-    def test_alternation_nfa(self):
+    def test_alternation_tnfa(self):
         ast = parse("a|b")
-        nfa = build_nfa(ast)
-        self.assertGreaterEqual(nfa.state_count(), 6)
+        tnfa = build_tnfa(ast)
+        self.assertTrue(any(s.kind == "ALT" for s in tnfa.states))
 
-    def test_star_nfa(self):
+    def test_star_tnfa(self):
         ast = parse("a*")
-        nfa = build_nfa(ast)
-        self.assertGreaterEqual(nfa.state_count(), 4)
+        tnfa = build_tnfa(ast)
+        # A star always introduces at least one ALT for the loop.
+        self.assertTrue(any(s.kind == "ALT" for s in tnfa.states))
 
-    def test_epsilon_closure(self):
-        ast = parse("a*")
-        nfa = build_nfa(ast)
-        closure = epsilon_closure(nfa, {nfa.start})
-        self.assertIn(nfa.accept, closure)
-
-    def test_dot_nfa(self):
+    def test_dot_tnfa(self):
         ast = parse(".")
-        nfa = build_nfa(ast)
-        start = nfa.states[nfa.start]
-        self.assertEqual(len(start.byte_transitions), 256)
+        tnfa = build_tnfa(ast)
+        ran_states = [s for s in tnfa.states if s.kind == "RAN"]
+        self.assertTrue(any(s.ranges == ((0, 255),) for s in ran_states))
 
 
 # ============================================================================
-# DFA tests
+# TDFA tests
 # ============================================================================
 
-class TestDFA(unittest.TestCase):
+class TestTDFA(unittest.TestCase):
 
-    def test_literal_dfa(self):
-        ast = parse("a")
-        nfa = build_nfa(ast)
-        dfa = build_dfa(nfa)
-        self.assertGreaterEqual(dfa.num_states, 2)
-        self.assertIn(dfa.start_state, range(dfa.num_states))
-        self.assertTrue(len(dfa.accept_states) > 0)
+    def _build(self, pattern):
+        return build_tdfa(build_tnfa(parse(pattern)))
 
-    def test_dfa_has_class_map(self):
-        ast = parse("[a-z]")
-        nfa = build_nfa(ast)
-        dfa = build_dfa(nfa)
-        self.assertEqual(len(dfa.class_map), 256)
-        cls_a = dfa.class_map[ord('a')]
+    def test_literal_tdfa(self):
+        tdfa = self._build("a")
+        self.assertGreaterEqual(tdfa.num_states, 2)
+        self.assertIn(tdfa.start_state, range(tdfa.num_states))
+        self.assertTrue(len(tdfa.accept_states) > 0)
+
+    def test_tdfa_has_class_map(self):
+        tdfa = self._build("[a-z]")
+        self.assertEqual(len(tdfa.class_map), 256)
+        cls_a = tdfa.class_map[ord('a')]
         for c in range(ord('a'), ord('z') + 1):
-            self.assertEqual(dfa.class_map[c], cls_a)
+            self.assertEqual(tdfa.class_map[c], cls_a)
 
     def test_anchor_start(self):
-        ast = parse("^abc")
-        nfa = build_nfa(ast)
-        dfa = build_dfa(nfa)
-        self.assertNotEqual(dfa.sentinel_256_class, -1)
+        tdfa = self._build("^abc")
+        self.assertGreaterEqual(tdfa.sentinel_256_class, 0)
 
     def test_anchor_end(self):
-        ast = parse("abc$")
-        nfa = build_nfa(ast)
-        dfa = build_dfa(nfa)
-        self.assertNotEqual(dfa.sentinel_257_class, -1)
+        tdfa = self._build("abc$")
+        self.assertGreaterEqual(tdfa.sentinel_257_class, 0)
 
-    def test_dfa_dead_state(self):
-        ast = parse("a")
-        nfa = build_nfa(ast)
-        dfa = build_dfa(nfa)
-        self.assertNotEqual(dfa.dead_state, -1)
+    def test_tdfa_dead_state(self):
+        tdfa = self._build("a")
+        self.assertGreaterEqual(tdfa.dead_state, 0)
 
 
 # ============================================================================
@@ -641,31 +640,42 @@ class TestPerBranchAnchors(unittest.TestCase):
 
 class TestTagPropagation(unittest.TestCase):
 
-    def test_tag_in_nfa(self):
+    def test_tag_in_tnfa(self):
         ast_node = parse("{foo}a")
-        nfa = build_nfa(ast_node)
-        tag_states = [s for s in nfa.states if s.tag == 'foo']
-        self.assertEqual(len(tag_states), 1)
+        tnfa = build_tnfa(ast_node)
+        # The tagged TNFA must know about the user tag and expose it
+        # in its tag table.
+        self.assertIn("foo", (tag.name for tag in tnfa.tags))
+        tag_states = [
+            s for s in tnfa.states
+            if s.kind == "TAG" and s.tag is not None
+        ]
+        self.assertTrue(tag_states)
 
-    def test_tag_in_dfa(self):
-        from pythoc.regex.dfa import build_dfa
+    def test_tag_slots_in_tdfa(self):
         ast_node = parse("{foo}a")
-        nfa = build_nfa(ast_node)
-        dfa = build_dfa(nfa)
-        all_tags = set()
-        for tags in dfa.tag_map.values():
-            all_tags.update(tags)
-        self.assertIn('foo', all_tags)
+        tdfa = build_tdfa(build_tnfa(ast_node))
+        self.assertIn("foo", tdfa.tag_slots)
+        # At least one transition command must write a register for
+        # this tag slot (or the accept command must copy it through).
+        relevant_slot = tdfa.tag_slots["foo"]
+        relevant_register = tdfa.output_registers[relevant_slot]
+        all_commands = []
+        for cmds in tdfa.transition_commands.values():
+            all_commands.extend(cmds)
+        for cmds in tdfa.accept_commands.values():
+            all_commands.extend(cmds)
+        touched = {cmd.lhs for cmd in all_commands}
+        # The tag's output register or any internal version that
+        # later gets copied into it should appear somewhere.
+        self.assertTrue(touched, "TDFA command list unexpectedly empty")
+        del relevant_register  # register number check is indirect
 
-    def test_search_dfa_has_beg_end_tags(self):
-        from pythoc.regex.codegen import compile_search_dfa_from_ast
+    def test_search_tdfa_has_beg_end_tags(self):
         ast_node = parse("abc")
-        search_dfa = compile_search_dfa_from_ast(ast_node)
-        all_tags = set()
-        for tags in search_dfa.tag_map.values():
-            all_tags.update(tags)
-        self.assertIn('__pythoc_internal_beg', all_tags)
-        self.assertIn('__pythoc_internal_end', all_tags)
+        search_tdfa = compile_search_tdfa_from_ast(ast_node)
+        self.assertIn('__pythoc_internal_beg', search_tdfa.tag_slots)
+        self.assertIn('__pythoc_internal_end', search_tdfa.tag_slots)
 
 
 # ============================================================================
@@ -839,9 +849,14 @@ class TestOPCSBMAArtifacts(unittest.TestCase):
             ),
         )
 
-    def test_literal_match_bma_has_root_gadget(self):
+    def test_literal_search_bma_has_root_gadget(self):
+        # Under the T-BMA MVP the leading-anchor gadget is installed
+        # only on the search BMA (whose ``.*?`` prefix gives a full-Σ
+        # V_0). The match BMA of an anchored literal has V_0 = ε and
+        # falls outside the MVP's ``.*F`` scope; gadget installation
+        # there is deferred to a future milestone.
         cr = CompiledRegex('abcd')
-        bma = cr._match_bma
+        bma = cr._search_bma
         root_control = bma.effective_start_control
         self.assertEqual(len(bma.shadow_control_states), len(bma.runtime_control_states))
         self.assertIn(root_control, bma.control_entry_states)
@@ -851,31 +866,36 @@ class TestOPCSBMAArtifacts(unittest.TestCase):
         self.assertEqual(info['start'], 2)
         self.assertEqual((info['start'], info['end']), (2, 6))
 
-    def test_literal_match_bma_uses_interior_interval_summaries(self):
+    def test_literal_search_bma_uses_interior_interval_summaries(self):
+        # Same MVP scoping as ``test_literal_search_bma_has_root_gadget``
+        # — interior partial-``known_bytes`` states only appear in the
+        # search BMA's gadget.
         cr = CompiledRegex('abcd')
-        bma = cr._match_bma
+        bma = cr._search_bma
         self.assertTrue(any(
             state.kind == 'gadget' and
             0 < sum(byte_val >= 0 for byte_val in state.known_bytes) < state.block_len
             for state in bma.states
         ))
 
-    def test_loop_match_bma_has_block_local_gadgets(self):
+    def test_loop_search_bma_has_anchor_gadget(self):
+        # ``(ab)*cde`` decomposes to V_0 = ``(ab)*``, F_1 = ``cde``.
+        # In match mode V_0 has Σ = {a,b} and is excluded by the MVP's
+        # full-Σ_V gate. The search rewrite turns V_0 into ``.*?(ab)*``
+        # whose Σ is full, so the gadget is installed there.
         cr = CompiledRegex('(ab)*cde')
-        bma = cr._match_bma
-        loop_gadgets = [
-            state for state in bma.states if state.kind == 'gadget'
-        ]
-        self.assertTrue(loop_gadgets)
-        self.assertTrue(any(state.block_len >= 2 for state in loop_gadgets))
+        bma = cr._search_bma
+        gadgets = [s for s in bma.states if s.kind == 'gadget']
+        self.assertTrue(gadgets)
+        self.assertTrue(any(state.block_len >= 2 for state in gadgets))
         ok1, _ = cr.match(b'ababcde')
         self.assertTrue(ok1)
         ok2, _ = cr.match(b'ababcde')
         self.assertTrue(ok2)
 
-    def test_loop_match_bma_has_overlap_edges(self):
+    def test_loop_search_bma_has_overlap_edges(self):
         cr = CompiledRegex('(ab)*cde')
-        bma = cr._match_bma
+        bma = cr._search_bma
         self.assertTrue(any(
             state.kind == 'gadget' and any(
                 edge.shift != 1

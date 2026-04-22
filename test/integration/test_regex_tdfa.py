@@ -2,8 +2,10 @@
 """
 Python-level TNFA/TDFA consistency tests for pythoc.regex.
 
-These tests validate the new TDFA layer against the prioritized TNFA
-reference runner before it is wired into the native DFA/BMA pipeline.
+These tests pin the TDFA frontend to the prioritized TNFA reference
+runner. They run purely in Python (no ``@compile`` / native code) and
+serve as the oracle the native pipeline (T-BMA + codegen) is
+checked against elsewhere.
 """
 
 import os

@@ -221,34 +221,52 @@ class CFG:
         
         This ordering ensures that all predecessors of a block (except back edges)
         are visited before the block itself, which is required for dataflow analysis.
-        
+
+        Implementation note: uses an explicit stack rather than Python
+        recursion, because regex-style code generators emit CFGs with
+        thousands of blocks (one per FSM state) which overflows
+        Python's default 1000-frame recursion limit.
+
         Returns:
             List of CFGBlocks in topological order
         """
         visited: Set[int] = set()
         post_order: List[int] = []
-        
-        def dfs(block_id: int):
-            if block_id in visited:
-                return
-            visited.add(block_id)
-            
+
+        # Each stack frame is (block_id, successors_iterator).  When
+        # the iterator is exhausted we emit the block into post_order.
+        stack: List[Tuple[int, Iterator[int]]] = []
+
+        def _iter_forward_successors(block_id: int) -> Iterator[int]:
             for edge in self.get_successors(block_id):
-                # Skip back edges to avoid infinite recursion
+                # Skip back edges to avoid revisiting loop heads.
                 if edge.kind != 'loop_back':
-                    dfs(edge.target_id)
-            
-            post_order.append(block_id)
-        
-        # Start DFS from entry
-        dfs(self.entry_id)
-        
+                    yield edge.target_id
+
+        if self.entry_id not in visited:
+            visited.add(self.entry_id)
+            stack.append((self.entry_id, _iter_forward_successors(self.entry_id)))
+
+        while stack:
+            block_id, successors = stack[-1]
+            advanced = False
+            for target_id in successors:
+                if target_id in visited:
+                    continue
+                visited.add(target_id)
+                stack.append((target_id, _iter_forward_successors(target_id)))
+                advanced = True
+                break
+            if not advanced:
+                stack.pop()
+                post_order.append(block_id)
+
         # Reverse post-order gives topological order
         result = []
         for block_id in reversed(post_order):
             if block_id in self.blocks:
                 result.append(self.blocks[block_id])
-        
+
         return result
     
     def iter_blocks(self) -> Iterator[CFGBlock]:
