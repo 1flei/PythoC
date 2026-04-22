@@ -1,16 +1,18 @@
 """
-pythoc.regex — Compile-time regex for PythoC.
+pythoc.regex -- Compile-time regex for PythoC.
 
 This package provides a compile-time regex system that:
-  1. Parses regex patterns at compile time (pure Python)
-  2. Builds NFA/DFA data structures
-  3. Generates @compile functions with the universal ABI
-  4. Provides match() and search() for native execution
+  1. Parses regex patterns at compile time (pure Python).
+  2. Builds a TNFA, determinizes it into a leftmost TDFA with explicit
+     tag commands on its edges, then lifts it into a Tagged T-BMA.
+  3. Generates pattern-specialized ``@compile`` functions with the
+     universal ABI.
+  4. Provides ``match()`` and ``search()`` for native execution.
 
 Usage:
     from pythoc.regex import compile
 
-    r = compile("[a-z]+@[a-z]+\\.[a-z]+")
+    r = compile("[a-z]+@[a-z]+\\\\.[a-z]+")
     r.match(b"foo@bar.com")             # (True, {})
     r.search(b"email: a@b.c")           # (True, {'start': 7, 'end': 12})
 """
