@@ -46,7 +46,10 @@ def get_target_abi(triple: str = None) -> ABIInfo:
         # Windows x64 ABI: max 8 bytes in registers
         # System V ABI (Linux/macOS): max 16 bytes in registers
         max_reg_size = 8 if is_windows else 16
-        return X86_64ABI(max_register_size=max_reg_size)
+        return X86_64ABI(
+            max_register_size=max_reg_size,
+            use_byval_for_indirect_args=not is_windows,
+        )
     elif arch in ('aarch64', 'arm64'):
         from .aarch64 import AArch64ABI
         return AArch64ABI()
