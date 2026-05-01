@@ -30,7 +30,11 @@ from pythoc import (
     void,
 )
 from pythoc.utils.cc_utils import find_available_cc
-from pythoc.utils.link_utils import get_shared_lib_extension, get_static_lib_extension
+from pythoc.utils.link_utils import (
+    get_platform_link_flags,
+    get_shared_lib_extension,
+    get_static_lib_extension,
+)
 
 
 @struct
@@ -414,6 +418,15 @@ class TestLibraryExports(unittest.TestCase):
             )
         return consumer_path
 
+    def _consumer_compile_command(self, header_path, source_path, link_library, exe_path):
+        cc = find_available_cc()
+        return cc.split() + get_platform_link_flags(shared=False, linker=cc) + [
+            '-I', os.path.abspath(os.path.dirname(header_path)),
+            os.path.abspath(source_path),
+            os.path.abspath(link_library),
+            '-o', os.path.abspath(exe_path),
+        ]
+
     def _compile_consumer(self, header_path, library_path, exe_name, dynamic=False):
         consumer_path = self._write_consumer(header_path, exe_name)
         exe_path = os.path.join(self.build_dir, exe_name)
@@ -426,12 +439,9 @@ class TestLibraryExports(unittest.TestCase):
             if os.path.exists(implib):
                 link_library = implib
 
-        cmd = find_available_cc().split() + [
-            '-I', os.path.abspath(os.path.dirname(header_path)),
-            os.path.abspath(consumer_path),
-            os.path.abspath(link_library),
-            '-o', os.path.abspath(exe_path),
-        ]
+        cmd = self._consumer_compile_command(
+            header_path, consumer_path, link_library, exe_path
+        )
         if dynamic and sys.platform in ('linux', 'darwin'):
             cmd.append('-Wl,-rpath,' + os.path.abspath(os.path.dirname(library_path)))
 
@@ -479,12 +489,9 @@ class TestLibraryExports(unittest.TestCase):
                 '}\n'
             )
 
-        cmd = find_available_cc().split() + [
-            '-I', os.path.abspath(os.path.dirname(header_path)),
-            os.path.abspath(consumer_path),
-            os.path.abspath(static_path),
-            '-o', os.path.abspath(exe_path),
-        ]
+        cmd = self._consumer_compile_command(
+            header_path, consumer_path, static_path, exe_path
+        )
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=120,
             stdin=subprocess.DEVNULL,
