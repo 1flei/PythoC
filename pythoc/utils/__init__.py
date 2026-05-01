@@ -10,10 +10,19 @@ from .inspect_utils import (
     get_function_file_source_and_line,
 )
 from .id_generator import get_next_id, reset_id_generator, peek_next_id
-from .build_utils import compile_to_executable, link_executable
+from .build_utils import (
+    compile_to_executable,
+    compile_to_static_library,
+    compile_to_dynamic_library,
+    export_c_headers,
+    link_executable,
+    link_static_library,
+    link_dynamic_library,
+)
 from .link_utils import (
     link_files, build_link_command, try_link_with_linkers,
-    get_shared_lib_extension, get_executable_extension,
+    archive_files, build_archive_command, try_archive_with_archivers,
+    get_shared_lib_extension, get_executable_extension, get_static_lib_extension,
 )
 
 __all__ = [
@@ -32,13 +41,22 @@ __all__ = [
     'peek_next_id',
     # Build utilities
     'compile_to_executable',
+    'compile_to_static_library',
+    'compile_to_dynamic_library',
+    'export_c_headers',
     'link_executable',
+    'link_static_library',
+    'link_dynamic_library',
     # Link utilities
     'link_files',
     'build_link_command',
     'try_link_with_linkers',
+    'archive_files',
+    'build_archive_command',
+    'try_archive_with_archivers',
     'get_shared_lib_extension',
     'get_executable_extension',
+    'get_static_lib_extension',
     # Test/analysis utilities
     'analyze_function',
     'get_llvm_version',

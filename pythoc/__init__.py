@@ -36,7 +36,12 @@ from .utils import (
     disassemble_to_native,
     create_build_info
 )
-from .utils.build_utils import compile_to_executable
+from .utils.build_utils import (
+    compile_to_executable,
+    compile_to_static_library,
+    compile_to_dynamic_library,
+    export_c_headers,
+)
 from .cimport import cimport, cimport_header, cimport_source
 
 # Import libc module for convenient access
@@ -114,6 +119,9 @@ __all__ = [
     'va_end',
 
     'compile_to_executable',
+    'compile_to_static_library',
+    'compile_to_dynamic_library',
+    'export_c_headers',
     
     # C Import
     'cimport',
