@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776419990829,
+  "lastUpdate": 1777602617250,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1437,6 +1437,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.015,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "b64cedcd7c7b02235bc5e66adbadad81ffd7297b",
+          "message": "Add python level export library and cheaderes for convenience",
+          "timestamp": "2026-05-01T10:25:30+08:00",
+          "tree_id": "e30a215d8981ed3ce123637b5a8ff056066c897b",
+          "url": "https://github.com/1flei/PythoC/commit/b64cedcd7c7b02235bc5e66adbadad81ffd7297b"
+        },
+        "date": 1777602616334,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.78,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.003,
             "unit": "seconds/test"
           }
         ]
