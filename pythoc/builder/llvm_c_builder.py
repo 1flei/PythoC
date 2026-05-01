@@ -407,6 +407,7 @@ class LLVMCBuilder(LLVMBuilder):
         
         # Apply ABI coercion to aggregate arguments (struct or array)
         coerced_args = list(args)
+        byval_arg_indices = set()
         if arg_type_hints and module_context:
             from .abi import get_target_abi
             from .abi.coercion import pack_struct_for_argument
@@ -420,6 +421,8 @@ class LLVMCBuilder(LLVMBuilder):
                         if coercion.needs_coercion:
                             # Coerce aggregate argument (both coerced and indirect)
                             coerced_args[i] = pack_struct_for_argument(self._builder, arg, coercion)
+                            if coercion.is_indirect and abi.uses_byval_for_indirect_args():
+                                byval_arg_indices.add(i)
                             logger.debug(f"LLVMCBuilder.call: coerced arg {i} from {arg.type} to {coerced_args[i].type}")
         
         # Check if we need to handle sret (indirect aggregate return)
@@ -438,17 +441,32 @@ class LLVMCBuilder(LLVMBuilder):
                     logger.debug(f"LLVMCBuilder.call: using sret for {getattr(fn, 'name', fn)}, agg_type={agg_type}")
                     sret_buf = self._builder.alloca(agg_type, name="sret.buf")
                     call_args = [sret_buf] + coerced_args
+                    call_arg_attrs = {0: ['sret', 'noalias']}
+                    for byval_index in byval_arg_indices:
+                        call_arg_attrs[byval_index + 1] = ['byval']
                     logger.debug(f"LLVMCBuilder.call: sret call_args={len(call_args)}, fn.function_type={fn.function_type}")
-                    self._builder.call(fn, call_args, name=name)
+                    self._builder.call(fn, call_args, name=name, arg_attrs=call_arg_attrs)
                     # Load and return the aggregate value
                     return self._builder.load(sret_buf, name="sret.load")
                 
                 elif coercion.needs_coercion:
                     # Coerced return: call and unpack
-                    call_result = self._builder.call(fn, coerced_args, name=name)
+                    call_arg_attrs = {idx: ['byval'] for idx in byval_arg_indices}
+                    call_result = self._builder.call(
+                        fn,
+                        coerced_args,
+                        name=name,
+                        arg_attrs=call_arg_attrs or None,
+                    )
                     from .abi.coercion import unpack_struct_from_return
                     return unpack_struct_from_return(self._builder, call_result, coercion)
         
         # Default: direct call
-        call_result = self._builder.call(fn, coerced_args, name=name)
+        call_arg_attrs = {idx: ['byval'] for idx in byval_arg_indices}
+        call_result = self._builder.call(
+            fn,
+            coerced_args,
+            name=name,
+            arg_attrs=call_arg_attrs or None,
+        )
         return call_result

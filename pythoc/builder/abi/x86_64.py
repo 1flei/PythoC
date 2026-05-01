@@ -47,15 +47,26 @@ class X86_64ABI(ABIInfo):
     # Windows x64 uses 8 bytes threshold
     MAX_REGISTER_SIZE = 16
     
-    def __init__(self, max_register_size: int = 16):
+    def __init__(
+        self,
+        max_register_size: int = 16,
+        use_byval_for_indirect_args: bool = True,
+    ):
         """Initialize x86-64 ABI.
         
         Args:
             max_register_size: Maximum struct size that can be passed in registers.
                               16 for System V (Linux/macOS), 8 for Windows x64.
+            use_byval_for_indirect_args: Whether indirect aggregate arguments
+                              should be marked with LLVM's byval attribute.
+                              SysV uses byval; Windows x64 passes a plain pointer.
         """
         super().__init__()
         self.max_register_size = max_register_size
+        self._use_byval_for_indirect_args = use_byval_for_indirect_args
+
+    def uses_byval_for_indirect_args(self) -> bool:
+        return self._use_byval_for_indirect_args
     
     def classify_return_type(self, llvm_type: ir.Type) -> CoercedType:
         """Classify return type for x86-64 ABI.
