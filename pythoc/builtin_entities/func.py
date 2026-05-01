@@ -49,55 +49,66 @@ class func(BuiltinType):
 
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Get LLVM function pointer type"""
-        if cls.param_types is None or cls.return_type is None:
-            # Default to void()*
-            func_type = ir.FunctionType(ir.VoidType(), [])
-            return ir.PointerType(func_type)
+        """Get C ABI lowered LLVM function pointer type."""
+        return ir.PointerType(cls.get_function_type(module_context))
 
-        # Get parameter LLVM types
-        param_llvm_types = []
-        for param_type in cls.param_types:
-            if hasattr(param_type, 'get_llvm_type'):
-                # All PC types now accept module_context parameter uniformly
-                param_llvm_types.append(param_type.get_llvm_type(module_context))
-            elif isinstance(param_type, ir.Type):
-                # ANTI-PATTERN: param_type should be BuiltinEntity, not ir.Type
-                logger.error(
-                    f"function param type is raw LLVM type {param_type}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
-                    node=None,
-                    exc_type=TypeError,
-                )
-            else:
-                logger.error(
-                    f"Unknown function param type {param_type}",
-                    node=None,
-                    exc_type=TypeError,
-                )
-
-        # Get return LLVM type
-        if hasattr(cls.return_type, 'get_llvm_type'):
-            # All PC types now accept module_context parameter uniformly
-            return_llvm_type = cls.return_type.get_llvm_type(module_context)
-        elif isinstance(cls.return_type, ir.Type):
-            # ANTI-PATTERN: return_type should be BuiltinEntity, not ir.Type
+    @classmethod
+    def _pc_type_to_llvm(cls, pc_type, module_context=None):
+        if hasattr(pc_type, 'get_llvm_type'):
+            return pc_type.get_llvm_type(module_context)
+        if isinstance(pc_type, ir.Type):
             logger.error(
-                f"function return type is raw LLVM type {cls.return_type}. "
+                f"function type contains raw LLVM type {pc_type}. "
                 f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
                 node=None,
                 exc_type=TypeError,
             )
-        else:
-            logger.error(
-                f"Unknown function return type {cls.return_type}",
-                node=None,
-                exc_type=TypeError,
-            )
+        logger.error(
+            f"Unknown function type component {pc_type}",
+            node=None,
+            exc_type=TypeError,
+        )
 
-        # Create function type and return pointer to it
-        func_type = ir.FunctionType(return_llvm_type, param_llvm_types)
-        return ir.PointerType(func_type)
+    @classmethod
+    def _get_user_signature(cls, module_context=None):
+        if cls.param_types is None or cls.return_type is None:
+            return [], ir.VoidType()
+        param_llvm_types = [
+            cls._pc_type_to_llvm(param_type, module_context)
+            for param_type in cls.param_types
+        ]
+        return_llvm_type = cls._pc_type_to_llvm(cls.return_type, module_context)
+        return param_llvm_types, return_llvm_type
+
+    @classmethod
+    def _lower_c_abi_signature(cls, param_llvm_types, return_llvm_type):
+        from ..builder.abi import get_target_abi
+
+        abi = get_target_abi()
+        actual_param_types = []
+
+        for param_type in param_llvm_types:
+            if abi.is_aggregate_type(param_type):
+                coercion = abi.classify_argument_type(param_type)
+                if coercion.is_indirect:
+                    actual_param_types.append(ir.PointerType(param_type))
+                elif coercion.needs_coercion and coercion.coerced_type is not None:
+                    actual_param_types.append(coercion.coerced_type)
+                else:
+                    actual_param_types.append(param_type)
+            else:
+                actual_param_types.append(param_type)
+
+        actual_return_type = return_llvm_type
+        if abi.is_aggregate_type(return_llvm_type):
+            coercion = abi.classify_return_type(return_llvm_type)
+            if coercion.is_indirect:
+                actual_return_type = ir.VoidType()
+                actual_param_types.insert(0, ir.PointerType(return_llvm_type))
+            elif coercion.needs_coercion and coercion.coerced_type is not None:
+                actual_return_type = coercion.coerced_type
+
+        return actual_param_types, actual_return_type
 
     @classmethod
     def get_ctypes_type(cls):
@@ -253,51 +264,16 @@ class func(BuiltinType):
 
     @classmethod
     def get_function_type(cls, module_context=None):
-        """Get the underlying LLVM function type (not pointer)"""
-        if cls.param_types is None or cls.return_type is None:
-            return ir.FunctionType(ir.VoidType(), [])
-
-        # Get parameter LLVM types
-        param_llvm_types = []
-        for param_type in cls.param_types:
-            if hasattr(param_type, 'get_llvm_type'):
-                # All PC types now accept module_context parameter uniformly
-                param_llvm_types.append(param_type.get_llvm_type(module_context))
-            elif isinstance(param_type, ir.Type):
-                # ANTI-PATTERN: param_type should be BuiltinEntity, not ir.Type
-                logger.error(
-                    f"function param type is raw LLVM type {param_type}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
-                    node=None,
-                    exc_type=TypeError,
-                )
-            else:
-                logger.error(
-                    f"Unknown function param type {param_type}",
-                    node=None,
-                    exc_type=TypeError,
-                )
-
-        # Get return LLVM type
-        if hasattr(cls.return_type, 'get_llvm_type'):
-            # All PC types now accept module_context parameter uniformly
-            return_llvm_type = cls.return_type.get_llvm_type(module_context)
-        elif isinstance(cls.return_type, ir.Type):
-            # ANTI-PATTERN: return_type should be BuiltinEntity, not ir.Type
-            logger.error(
-                f"function return type is raw LLVM type {cls.return_type}. "
-                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
-                node=None,
-                exc_type=TypeError,
-            )
-        else:
-            logger.error(
-                f"Unknown function return type {cls.return_type}",
-                node=None,
-                exc_type=TypeError,
-            )
-
-        return ir.FunctionType(return_llvm_type, param_llvm_types)
+        """Get the C ABI lowered LLVM function type (not pointer)."""
+        param_llvm_types, return_llvm_type = cls._get_user_signature(module_context)
+        actual_param_types, actual_return_type = cls._lower_c_abi_signature(
+            param_llvm_types, return_llvm_type,
+        )
+        return ir.FunctionType(
+            actual_return_type,
+            actual_param_types,
+            var_arg=cls.has_llvm_varargs,
+        )
 
     @classmethod
     def handle_type_subscript(cls, items):

@@ -162,7 +162,10 @@ class ControlFlowBuilder:
 
         # During build phase: return a PCIR recorder
         def _record(*args, **kwargs):
-            result_type = infer_result_type(name, args, kwargs)
+            infer_kwargs = dict(kwargs)
+            if self._visitor is not None and getattr(self._visitor, 'module', None) is not None:
+                infer_kwargs['_module_context'] = self._visitor.module.context
+            result_type = infer_result_type(name, args, infer_kwargs)
             if result_type is not None:
                 vreg = VReg(result_type)
                 inst = PCIRInst(op=name, args=args, kwargs=kwargs, result=vreg)

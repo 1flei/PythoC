@@ -295,8 +295,8 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
         return_type_hint = kwargs.get('return_type_hint')
         if return_type_hint is not None and hasattr(return_type_hint, 'get_llvm_type'):
             fn = args[0] if args else None
-            module_context = None
-            if fn is not None and hasattr(fn, 'module') and fn.module:
+            module_context = kwargs.get('_module_context')
+            if module_context is None and fn is not None and hasattr(fn, 'module') and fn.module:
                 module_context = fn.module.context
 
             if module_context is not None:

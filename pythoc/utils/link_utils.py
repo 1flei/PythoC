@@ -239,6 +239,13 @@ def get_executable_extension() -> str:
         return ''
 
 
+def get_static_lib_extension() -> str:
+    """Get platform-specific static library extension."""
+    if sys.platform == 'win32':
+        return '.lib'
+    return '.a'
+
+
 def _get_linker_candidates() -> List[str]:
     """Get linker candidates based on availability.
     
@@ -300,6 +307,49 @@ def get_default_linkers() -> List[str]:
     """
     candidates = _get_linker_candidates()
     return candidates if candidates else ['cc', 'clang', 'gcc']
+
+
+def _get_archiver_candidates() -> List[str]:
+    """Get static archiver candidates based on availability."""
+    candidates = []
+
+    if sys.platform == 'win32':
+        zig_ar = _zig_tool_cmd('ar')
+        if zig_ar:
+            candidates.append(' '.join(zig_ar))
+        if _which_cached('llvm-ar'):
+            candidates.append('llvm-ar')
+    else:
+        for archiver in ['llvm-ar', 'ar']:
+            if _which_cached(archiver):
+                candidates.append(archiver)
+        zig_ar = _zig_tool_cmd('ar')
+        if zig_ar:
+            candidates.append(' '.join(zig_ar))
+
+    return candidates
+
+
+def find_available_archiver() -> str:
+    """Find an available static library archiver."""
+    candidates = _get_archiver_candidates()
+    if candidates:
+        return candidates[0]
+    if sys.platform == 'win32':
+        raise RuntimeError(
+            "No archiver found. On Windows, zig or llvm-ar is required.\n"
+            "Tip: Install zig via pip: pip install ziglang"
+        )
+    raise RuntimeError(
+        "No archiver found. Please install one of: llvm-ar, ar, or zig.\n"
+        "Tip: Install zig via pip: pip install ziglang"
+    )
+
+
+def get_default_archivers() -> List[str]:
+    """Get list of available archivers to try in order."""
+    candidates = _get_archiver_candidates()
+    return candidates if candidates else ['llvm-ar', 'ar']
 
 
 def get_link_flags(link_libraries: Optional[List[str]] = None) -> List[str]:
@@ -728,5 +778,104 @@ def link_files(
             
         finally:
             # Release all .o file locks in reverse order
+            for lock in reversed(obj_locks):
+                lock.__exit__(None, None, None)
+
+
+def build_archive_command(obj_files: List[str], output_file: str,
+                          archiver: str = 'ar') -> List[str]:
+    """Build a static library archive command."""
+    archiver_cmd = archiver.split()
+    all_obj_files = [os.path.abspath(p) for p in obj_files]
+    return archiver_cmd + ['rcs', os.path.abspath(output_file)] + all_obj_files
+
+
+def try_archive_with_archivers(
+    obj_files: List[str],
+    output_file: str,
+    archivers: Optional[List[str]] = None,
+) -> str:
+    """Try creating a static archive with multiple archivers."""
+    if archivers is None:
+        archivers = get_default_archivers()
+
+    errors = []
+    for archiver in archivers:
+        archiver_exe = archiver.split()[0]
+        if not _which_cached(archiver_exe):
+            errors.append(f"{archiver}: not found")
+            continue
+
+        archive_cmd: List[str] = []
+        tmp_output = output_file + '.tmp.' + str(os.getpid())
+        try:
+            if os.path.exists(tmp_output):
+                os.remove(tmp_output)
+            archive_cmd = build_archive_command(obj_files, tmp_output, archiver)
+            subprocess.run(
+                archive_cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                stdin=subprocess.DEVNULL,
+            )
+            os.replace(tmp_output, output_file)
+            return output_file
+        except subprocess.TimeoutExpired:
+            errors.append(f"{archiver}: timed out after 120s")
+        except subprocess.CalledProcessError as e:
+            msg = (e.stdout or '') + ("\n" if e.stdout else '') + (e.stderr or '')
+            cmd_str = ' '.join(archive_cmd) if archive_cmd else '<archive_cmd unavailable>'
+            errors.append(f"{archiver}: {msg.strip()}\nCMD: {cmd_str}")
+        finally:
+            if os.path.exists(tmp_output):
+                try:
+                    os.remove(tmp_output)
+                except OSError:
+                    pass
+
+    raise RuntimeError(
+        f"Failed to create static library with all archivers ({', '.join(archivers)}):\n" +
+        "\n".join(errors)
+    )
+
+
+def archive_files(
+    obj_files: List[str],
+    output_file: str,
+    archiver: Optional[str] = None,
+) -> str:
+    """Archive object files into a static library."""
+    output_dir = os.path.dirname(output_file)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir, exist_ok=True)
+
+    lockfile_path = output_file + '.lock'
+    with file_lock(lockfile_path):
+        obj_locks = []
+        try:
+            for obj_file in sorted(obj_files):
+                obj_lockfile = obj_file + '.lock'
+                lock = file_lock(obj_lockfile)
+                lock.__enter__()
+                obj_locks.append(lock)
+
+            if os.path.exists(output_file):
+                output_mtime = os.path.getmtime(output_file)
+                obj_mtimes = [
+                    os.path.getmtime(obj) for obj in obj_files
+                    if os.path.exists(obj)
+                ]
+                if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
+                    return output_file
+
+            if archiver:
+                archivers = [archiver] + [a for a in get_default_archivers() if a != archiver]
+            else:
+                archivers = get_default_archivers()
+
+            return try_archive_with_archivers(obj_files, output_file, archivers)
+        finally:
             for lock in reversed(obj_locks):
                 lock.__exit__(None, None, None)
