@@ -8,8 +8,8 @@ This module provides the cimport() function to:
 4. Optionally compile C sources and register for linking
 
 Architecture:
-- Uses compiled bindings from pythoc.bindings module (c_parser + pythoc_backend)
-- Compiled bindings provide better parsing accuracy for complex C headers
+- Can use optional libclang to read C declarations and layout-aware types
+- Falls back to the compiled native pythoc bindings parser when libclang is not available
 
 Usage:
     from pythoc.cimport import cimport
@@ -30,6 +30,7 @@ import hashlib
 import importlib.util
 import subprocess
 import warnings
+import shlex
 from typing import Optional, List, Any
 from types import ModuleType
 
@@ -40,6 +41,127 @@ from .utils.cc_utils import compile_c_to_object, compile_c_sources, find_availab
 def _get_bindgen():
     from .bindings.bindgen import generate_bindings_to_file
     return generate_bindings_to_file
+
+
+_VALID_CIMPORT_BACKENDS = {"auto", "clang", "native"}
+
+
+def _normalize_cimport_backend(backend: Optional[str]) -> str:
+    """Resolve backend request from API/env into auto|clang|native."""
+    requested = backend or os.environ.get("PC_CIMPORT_BACKEND")
+
+    # Compatibility knob for experiments: PC_ENABLE_CLANG_CIMPORT=1 forces clang
+    # unless PC_CIMPORT_BACKEND or the explicit API argument says otherwise.
+    if requested is None:
+        legacy_enable = os.environ.get("PC_ENABLE_CLANG_CIMPORT")
+        if legacy_enable and legacy_enable.lower() not in {"0", "false", "no", "off"}:
+            requested = "clang"
+
+    requested = (requested or "auto").strip().lower()
+    if requested not in _VALID_CIMPORT_BACKENDS:
+        valid = ", ".join(sorted(_VALID_CIMPORT_BACKENDS))
+        raise ValueError(f"Invalid cimport backend '{requested}'. Expected one of: {valid}")
+    return requested
+
+
+def _clang_backend_available() -> bool:
+    try:
+        from .cimport_clang import is_clang_backend_available
+    except Exception:
+        return False
+    return is_clang_backend_available()
+
+
+def _select_cimport_backend(requested: str) -> str:
+    if requested == "auto":
+        return "clang" if _clang_backend_available() else "native"
+    return requested
+
+
+def _bindings_path_for_backend(cache_dir: str, basename: str, backend_name: str) -> str:
+    if backend_name == "native":
+        # Preserve the historical filename for the existing compiled bindgen path.
+        return os.path.join(cache_dir, f"bindings_{basename}.py")
+    return os.path.join(cache_dir, f"bindings_{backend_name}_{basename}.py")
+
+
+def _bindings_need_regen(input_path: str, bindings_path: str) -> bool:
+    if not os.path.exists(bindings_path):
+        return True
+    return os.path.getmtime(input_path) > os.path.getmtime(bindings_path)
+
+
+def _normalize_lib_for_generated_source(lib: str) -> str:
+    # IMPORTANT (Windows): absolute `lib` paths may contain backslashes.
+    # If those are embedded into generated Python source like
+    # `@extern(lib='C:\\Users\\...')`, sequences like `\U` can be parsed as
+    # unicode escapes and break import. Normalize to forward slashes.
+    if os.name == 'nt' and lib:
+        return os.path.abspath(lib).replace('\\', '/')
+    return lib
+
+
+def _generate_bindings_native(
+    path: str,
+    lib: str,
+    bindings_path: str,
+    *,
+    cc: Optional[str],
+    cflags: Optional[List[str]],
+    include_dirs: Optional[List[str]],
+    defines: Optional[List[str]],
+) -> None:
+    source_text = _preprocess_source(
+        path, cc=cc, cflags=cflags,
+        include_dirs=include_dirs, defines=defines
+    )
+    generate_bindings_to_file = _get_bindgen()
+    lib_for_bindgen = _normalize_lib_for_generated_source(lib or '')
+    result = generate_bindings_to_file(
+        source_text.encode('utf-8') + b'\0',
+        lib_for_bindgen.encode('utf-8') + b'\0',
+        bindings_path.encode('utf-8') + b'\0'
+    )
+    if result != 0:
+        raise RuntimeError(f"Failed to generate native bindings for {path}, error code: {result}")
+
+
+def _env_list(name: str) -> List[str]:
+    value = os.environ.get(name)
+    if not value:
+        return []
+    return shlex.split(value)
+
+
+def _generate_bindings_clang(
+    path: str,
+    lib: str,
+    bindings_path: str,
+    *,
+    cflags: Optional[List[str]],
+    include_dirs: Optional[List[str]],
+    defines: Optional[List[str]],
+    target: Optional[str],
+    sysroot: Optional[str],
+    clang_args: Optional[List[str]],
+) -> None:
+    from .cimport_clang import generate_bindings_to_file
+
+    effective_clang_args = _env_list("PC_CIMPORT_CLANG_ARGS")
+    if clang_args:
+        effective_clang_args.extend(clang_args)
+
+    generate_bindings_to_file(
+        path,
+        _normalize_lib_for_generated_source(lib or ''),
+        bindings_path,
+        cflags=cflags,
+        include_dirs=include_dirs,
+        defines=defines,
+        target=target or os.environ.get("PC_CIMPORT_TARGET"),
+        sysroot=sysroot or os.environ.get("PC_CIMPORT_SYSROOT"),
+        clang_args=effective_clang_args,
+    )
 
 
 def _compute_cache_key(path: str, lib: str, sources: Optional[List[str]] = None,
@@ -169,6 +291,10 @@ def cimport(path: str, *,
             cflags: Optional[List[str]] = None,
             include_dirs: Optional[List[str]] = None,
             defines: Optional[List[str]] = None,
+            backend: Optional[str] = None,
+            target: Optional[str] = None,
+            sysroot: Optional[str] = None,
+            clang_args: Optional[List[str]] = None,
             export: Optional[List[str]] = None,
             export_all: bool = False,
             prefix: Optional[str] = None) -> ModuleType:
@@ -185,6 +311,10 @@ def cimport(path: str, *,
         cflags: Additional compiler flags
         include_dirs: Include directories for compilation
         defines: Preprocessor defines
+        backend: 'auto', 'clang', or 'native'. Defaults to PC_CIMPORT_BACKEND or auto.
+        target: Optional clang target triple for the clang backend.
+        sysroot: Optional sysroot for the clang backend.
+        clang_args: Additional raw clang parse arguments.
         export: Symbol names to export to caller globals (explicit opt-in)
         export_all: If True, export all symbols to caller globals
         prefix: Optional symbol prefix
@@ -270,43 +400,58 @@ def cimport(path: str, *,
         module_name = f"_cimport_{prefix}_{basename}"
     else:
         module_name = f"_cimport_{basename}"
-    bindings_path = os.path.join(cache_dir, f"bindings_{basename}.py")
-    
-    # Check if bindings need regeneration
-    needs_regen = not os.path.exists(bindings_path)
-    if not needs_regen:
-        bindings_mtime = os.path.getmtime(bindings_path)
-        source_mtime = os.path.getmtime(path)
-        if source_mtime > bindings_mtime:
-            needs_regen = True
+
+    backend_request = _normalize_cimport_backend(backend)
+    selected_backend = _select_cimport_backend(backend_request)
+    bindings_path = _bindings_path_for_backend(cache_dir, basename, selected_backend)
+    needs_regen = _bindings_need_regen(path, bindings_path)
     
     # Generate bindings if needed
     if needs_regen:
-        # Preprocess source file
-        source_text = _preprocess_source(
-            path, cc=cc, cflags=cflags,
-            include_dirs=include_dirs, defines=defines
-        )
-        
-        # Use compiled bindgen
-        generate_bindings_to_file = _get_bindgen()
+        try:
+            if selected_backend == "clang":
+                _generate_bindings_clang(
+                    path,
+                    lib or '',
+                    bindings_path,
+                    cflags=cflags,
+                    include_dirs=include_dirs,
+                    defines=defines,
+                    target=target,
+                    sysroot=sysroot,
+                    clang_args=clang_args,
+                )
+            else:
+                _generate_bindings_native(
+                    path,
+                    lib or '',
+                    bindings_path,
+                    cc=cc,
+                    cflags=cflags,
+                    include_dirs=include_dirs,
+                    defines=defines,
+                )
+        except Exception as exc:
+            if backend_request != "auto" or selected_backend != "clang":
+                raise
 
-        # IMPORTANT (Windows): absolute `lib` paths may contain backslashes.
-        # If those are embedded into generated Python source like
-        # `@extern(lib='C:\\Users\\...')`, sequences like `\U` can be parsed as
-        # unicode escapes and break import. Normalize to forward slashes.
-        lib_for_bindgen = lib or ''
-        if os.name == 'nt' and lib_for_bindgen:
-            lib_for_bindgen = os.path.abspath(lib_for_bindgen).replace('\\', '/')
-
-        result = generate_bindings_to_file(
-            source_text.encode('utf-8') + b'\0',  # null-terminated
-            lib_for_bindgen.encode('utf-8') + b'\0',  # null-terminated
-            bindings_path.encode('utf-8') + b'\0'  # null-terminated
-        )
-        
-        if result != 0:
-            raise RuntimeError(f"Failed to generate bindings for {path}, error code: {result}")
+            warnings.warn(
+                f"clang cimport backend failed for {path}: {exc}. "
+                "Falling back to native cimport backend.",
+                stacklevel=2,
+            )
+            selected_backend = "native"
+            bindings_path = _bindings_path_for_backend(cache_dir, basename, selected_backend)
+            if _bindings_need_regen(path, bindings_path):
+                _generate_bindings_native(
+                    path,
+                    lib or '',
+                    bindings_path,
+                    cc=cc,
+                    cflags=cflags,
+                    include_dirs=include_dirs,
+                    defines=defines,
+                )
     
     # Compile sources if requested
     if compile_sources and sources:
