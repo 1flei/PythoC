@@ -134,17 +134,20 @@ class TestConstantForLoop(unittest.TestCase):
     def test_constant_loop_with_break(self):
         """Test constant loop with break"""
         result = test_constant_loop_with_break()
-        self.assertIsInstance(result, int)
+        self.assertIsInstance(int(result), int)
+        self.assertEqual(result, 1020)
 
     def test_constant_loop_with_continue(self):
         """Test constant loop with continue"""
         result = test_constant_loop_with_continue()
-        self.assertIsInstance(result, int)
+        self.assertIsInstance(int(result), int)
+        self.assertEqual(result, 1020)
 
     def test_constant_loop_with_return(self):
         """Test constant loop with return"""
         result = test_constant_loop_with_return()
-        self.assertIsInstance(result, int)
+        self.assertIsInstance(int(result), int)
+        self.assertEqual(result, 1020)
 
 
 if __name__ == '__main__':

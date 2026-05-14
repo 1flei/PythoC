@@ -347,6 +347,29 @@ class pc_literal:
             return
         object.__setattr__(self, name, value)
 
+    def __iter__(self):
+        """Allow *struct_val unpacking by iterating over field values."""
+        fields = object.__getattribute__(self, '_fields')
+        if fields is not None:
+            field_names = object.__getattribute__(self, '_field_names')
+            for name in (field_names or []):
+                yield fields[name]
+        else:
+            raise TypeError(
+                f"'{self._pc_type.get_name() if self._pc_type else 'pc_literal'}'"
+                f" is not iterable (scalar value)"
+            )
+
+    def __len__(self):
+        """Return number of fields for struct pc_literal."""
+        fields = object.__getattribute__(self, '_fields')
+        if fields is not None:
+            return len(fields)
+        raise TypeError(
+            f"'{self._pc_type.get_name() if self._pc_type else 'pc_literal'}'"
+            f" has no len() (scalar value)"
+        )
+
     # ------------------------------------------------------------------
     # Arithmetic helpers
     # ------------------------------------------------------------------

@@ -497,6 +497,9 @@ class MultiSOExecutor:
                 if param_type == ctypes.c_void_p:
                     if isinstance(arg, int):
                         c_args.append(arg)
+                    elif hasattr(arg, '_value') and hasattr(arg, '_pc_type'):
+                        # pc_literal pointer: extract raw int value
+                        c_args.append(int(arg._value))
                     elif hasattr(arg, 'value'):
                         c_args.append(arg.value)
                     else:
