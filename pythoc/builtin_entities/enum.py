@@ -392,6 +392,15 @@ class EnumType(CompositeType):
                 python_type_inst._variant_name = attr_name
                 return wrap_value(tag_value, kind="python", type_hint=python_type_inst)
 
+        # Fall back to class-level method lookup (compiled wrappers attached
+        # by @enum/class-method support).
+        from ..decorators.class_methods import (
+            lookup_class_method, wrap_class_method_as_python_value,
+        )
+        method = lookup_class_method(cls, attr_name)
+        if method is not None:
+            return wrap_class_method_as_python_value(method, node)
+
         logger.error(f"Enum type {cls.get_name()} has no attribute '{attr_name}'",
                     node=node, exc_type=AttributeError)
     
@@ -643,7 +652,12 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     """
     from ..type_resolver import TypeResolver
     from ..registry import get_unified_registry
-    
+    from ..decorators.visible import capture_user_caller_symbols
+
+    # Capture user-frame symbols before walking pythoc-internal frames so the
+    # enum body's plain-def methods can resolve factory closures.
+    captured_symbols = capture_user_caller_symbols()
+
     # Get annotations
     annotations = getattr(cls, '__annotations__', {})
     
@@ -746,5 +760,15 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     mark_type_defined(cls.__name__, enum_cls)
     
     # handle_attribute is inherited from EnumType base class (no need to override)
-    
+
+    # Compile and attach plain-def methods declared in the enum body. Source
+    # is taken from the original `cls`; wrappers are attached on `enum_cls`.
+    from ..decorators.class_methods import attach_class_methods
+    attach_class_methods(
+        enum_cls,
+        source_cls=cls,
+        class_compile_suffix=suffix,
+        captured_symbols=captured_symbols,
+    )
+
     return enum_cls

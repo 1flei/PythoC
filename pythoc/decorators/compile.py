@@ -215,7 +215,11 @@ def _compile_impl(func_or_class,
         fn_attrs: Set of LLVM function-level attributes for cross-module declares.
     """
     if inspect.isclass(func_or_class):
-        return _compile_dynamic_class(func_or_class, suffix=compile_suffix)
+        return _compile_dynamic_class(
+            func_or_class,
+            suffix=compile_suffix,
+            captured_symbols=captured_symbols,
+        )
 
     func = func_or_class
 

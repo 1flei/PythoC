@@ -17,18 +17,28 @@ def get_closure_variables(func) -> Dict[str, Any]:
         func: Function object to inspect
         
     Returns:
-        Dictionary mapping closure variable names to their values
+        Dictionary mapping closure variable names to their values.
+        Cells that have not been assigned yet (typical when inspecting a
+        method defined inside an as-yet-unbound class body) are silently
+        skipped; the consumer is expected to fall back to its own resolution
+        path (captured_symbols, type_resolver) for those names.
     """
     if not callable(func):
         raise TypeError(f"Expected callable, got {type(func).__name__}")
     
-    closure_vars = {}
+    closure_vars: Dict[str, Any] = {}
     
     if hasattr(func, '__closure__') and func.__closure__ is not None:
         if hasattr(func, '__code__'):
             freevars = func.__code__.co_freevars
-            closure_values = [cell.cell_contents for cell in func.__closure__]
-            closure_vars = dict(zip(freevars, closure_values))
+            for name, cell in zip(freevars, func.__closure__):
+                try:
+                    closure_vars[name] = cell.cell_contents
+                except ValueError:
+                    # Cell is empty: name is not yet bound at the time of
+                    # inspection (e.g. self-reference inside a class body
+                    # whose class object is still being constructed).
+                    continue
     
     return closure_vars
 
@@ -65,6 +75,29 @@ def capture_caller_symbols(depth: int = 1) -> Dict[str, Any]:
         return symbols
     finally:
         del frame
+
+
+def capture_user_caller_symbols() -> Dict[str, Any]:
+    """Capture symbols from the first user frame, skipping pythoc internals.
+
+    Decorators such as ``@union`` or ``@enum`` go through several pythoc
+    layers (factory dispatch, ``DecoratorInstance.__call__``, base-class
+    helpers) before reaching the user's module/function frame. Counting
+    frames by hand is fragile, so this helper relies on
+    :func:`find_caller_frame` to skip pythoc package files and returns the
+    first user frame's globals merged with its locals (locals win).
+
+    Returns an empty dict when no user frame is found.
+    """
+    from ..utils.frame_utils import find_caller_frame
+
+    frame = find_caller_frame()
+    if frame is None:
+        return {}
+
+    symbols = dict(frame.f_globals)
+    symbols.update(frame.f_locals)
+    return symbols
 
 
 def get_all_accessible_symbols(

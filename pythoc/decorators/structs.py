@@ -135,7 +135,7 @@ def add_struct_handle_call(cls):
     return cls
 
 
-def compile_dynamic_class(cls, suffix=None, type_factory=None):
+def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=None):
     """Compile a @compile decorated class into a unified struct/union type
     
     This function now uses the unified struct type system with structural typing.
@@ -146,6 +146,10 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None):
         suffix: If provided, use this as custom suffix for output files (e.g., "int" for Vector(int))
         type_factory: Optional factory function to create the type (default: create_struct_type)
                       For union, pass create_union_type
+        captured_symbols: Symbols captured at @compile decoration time. Forwarded to
+                      attach_class_methods so that class-body ``def`` methods can resolve
+                      names visible at the decoration site (closure variables, the class
+                      itself for self-referential annotations, etc.).
     """
     # Default to struct type factory
     if type_factory is None:
@@ -320,4 +324,12 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None):
     from ..forward_ref import mark_type_defined
     mark_type_defined(original_cls_name, cls)
     
+    # Compile and attach plain-def methods declared in the class body.
+    from .class_methods import attach_class_methods
+    attach_class_methods(
+        cls,
+        class_compile_suffix=suffix,
+        captured_symbols=captured_symbols,
+    )
+
     return cls

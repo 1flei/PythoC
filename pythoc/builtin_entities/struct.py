@@ -492,6 +492,14 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Check if it's a field access
         if not cls.has_field(attr_name):
+            # Fall back to class-level method lookup (compiled wrappers
+            # attached by @compile/class-method support).
+            from ..decorators.class_methods import (
+                lookup_class_method, wrap_class_method_as_python_value,
+            )
+            method = lookup_class_method(cls, attr_name)
+            if method is not None:
+                return wrap_class_method_as_python_value(method, node)
             logger.error(f"struct '{cls.get_name()}' has no field named '{attr_name}'",
                         node=node, exc_type=AttributeError)
         
