@@ -63,6 +63,9 @@ from .python_type import PythonType, is_python_type, pyconst
 # PC list type (for list literals with IR values)
 from .pc_list import pc_list, PCListType
 
+# PC literal (tagged Python value carrier for PC types)
+from .pc_literal import pc_literal
+
 # Registry and query functions
 from .utility import (
     get_builtin_entity,
@@ -168,6 +171,7 @@ __all__ = [
     'PCTupleType',
     'pc_dict',
     'PCDictType',
+    'pc_literal',
     
     # Registry and query functions
     'get_builtin_entity',

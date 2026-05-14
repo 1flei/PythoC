@@ -20,6 +20,7 @@ from .builtin_entities import (
     refined, assume, refine,
     pyconst, defer, label, goto, goto_end,
     va_start, va_arg, va_end,
+    pc_literal,
 )
 
 # Provide lowercase alias for convenience
@@ -117,6 +118,9 @@ __all__ = [
     'va_start',
     'va_arg',
     'va_end',
+
+    # PC literal carrier
+    'pc_literal',
 
     'compile_to_executable',
     'compile_to_static_library',

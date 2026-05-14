@@ -502,6 +502,9 @@ class CompositeType(BuiltinType):
         target_cls._ensure_field_types_resolved = unified_type._ensure_field_types_resolved
         target_cls.get_type_id = unified_type.get_type_id
         
+        # Inject Python-level constructor that returns pc_literal
+        _inject_pc_literal_constructor(target_cls, unified_type)
+
         # Register and mark as defined
         register_struct_from_class(target_cls)
         mark_type_defined(target_cls.__name__, target_cls)
@@ -554,4 +557,21 @@ class CompositeType(BuiltinType):
         return compile_dynamic_class(target_cls, suffix=suffix)
 
 
-__all__ = ['CompositeType']
+def _inject_pc_literal_constructor(target_cls, unified_type):
+    """Inject ``__new__`` so Python-level construction returns a pc_literal.
+
+    This is called from the decorator paths for @compile class (struct),
+    @union, and @enum.  Inside @compile, construction goes through the AST
+    visitor's handle_type_call -- never through Python's ``__new__`` -- so
+    there is no interference with the compiled code path.
+    """
+    original_new = target_cls.__new__
+
+    def __new__(cls, *args, **kwargs):
+        from .pc_literal import pc_literal
+        return pc_literal._from_composite_call(unified_type, *args, **kwargs)
+
+    target_cls.__new__ = __new__
+
+
+__all__ = ['CompositeType', '_inject_pc_literal_constructor']

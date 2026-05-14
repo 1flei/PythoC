@@ -52,7 +52,25 @@ class BuiltinEntityMeta(ABCMeta):
                 registry.register_builtin_entity(entity_name, cls)
             mcs._pending_registrations.clear()
 
+    def __call__(cls, *args, **kwargs):
+        """Intercept type constructor calls at Python runtime.
 
+        Inside @compile, type calls go through the AST visitor's
+        handle_type_call and never reach this code path.  At Python level
+        (outside @compile) we return a ``pc_literal`` so that ``u64(42)``
+        produces a tagged value instead of a useless BuiltinType instance.
+
+        Only numeric BuiltinType subclasses (with _is_integer / _is_float /
+        _is_bool class attrs) are intercepted.  Other metaclass users like
+        PythonType fall through to normal construction.
+        """
+        is_numeric = (getattr(cls, '_is_integer', False)
+                      or getattr(cls, '_is_float', False)
+                      or getattr(cls, '_is_bool', False))
+        if is_numeric:
+            from .pc_literal import pc_literal
+            return pc_literal._from_type_call(cls, *args, **kwargs)
+        return super().__call__(*args, **kwargs)
 
 
 

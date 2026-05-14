@@ -309,6 +309,10 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None):
     
     cls.__iter__ = __iter__
     
+    # Inject Python-level constructor that returns pc_literal
+    from ..builtin_entities.composite_base import _inject_pc_literal_constructor
+    _inject_pc_literal_constructor(cls, unified_type)
+
     # === REGISTER AND MARK AS DEFINED ===
     register_struct_from_class(cls)
     

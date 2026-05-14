@@ -458,7 +458,7 @@ class MultiSOExecutor:
         if signature is None:
             raise RuntimeError(f"Function {func_name} not found in module")
         
-        return_type, param_types = signature
+        return_type, param_types, return_pc_type = signature
         
         # Filter out None types (linear/zero-size types) from param_types
         # Keep track of which indices have real types
@@ -502,20 +502,20 @@ class MultiSOExecutor:
                     else:
                         c_args.append(ctypes.cast(arg, ctypes.c_void_p).value)
                 elif isinstance(arg, param_type):
-                    # Already correct type (e.g., struct), pass as-is
                     c_args.append(arg)
+                elif hasattr(arg, '_to_ctypes'):
+                    c_args.append(arg._to_ctypes(param_type))
                 else:
-                    # Convert to target type (e.g., int -> c_int32)
                     c_args.append(param_type(arg))
             
             result = native_func(*c_args)
             
             if return_type is None:
                 return None
-            elif return_type == ctypes.c_bool:
-                return bool(result)
-            else:
-                return result
+            if return_pc_type is not None:
+                from .builtin_entities.pc_literal import pc_literal
+                return pc_literal._from_ctypes_result(result, return_pc_type)
+            return result
         
         self.function_cache[cache_key] = wrapper
         return wrapper
@@ -526,24 +526,20 @@ class MultiSOExecutor:
         Uses pythoc types for correct ctypes mapping,
         especially for signed/unsigned distinction that LLVM IR doesn't preserve.
         
-        Args:
-            func_name: Function name (for error messages)
-            compiler: LLVMCompiler instance
-            wrapper: Optional @compile wrapper with _func_info attribute
+        Returns:
+            (ctypes_return_type, [ctypes_param_types], pc_return_type_hint) or None
         """
-        # Prefer getting func_info directly from wrapper
         func_info = None
         if wrapper is not None:
             func_info = getattr(wrapper, '_func_info', None)
         
         if func_info:
-            # Use pythoc types for accurate ctypes mapping
             return_type = self._pc_type_to_ctypes(func_info.return_type_hint)
             param_types = [
                 self._pc_type_to_ctypes(func_info.param_type_hints.get(name))
                 for name in func_info.param_names
             ]
-            return (return_type, param_types)
+            return (return_type, param_types, func_info.return_type_hint)
         
         return None
     

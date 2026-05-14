@@ -737,6 +737,10 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     # Preserve original module for debugging
     enum_cls.__module__ = cls.__module__
     
+    # Inject Python-level constructor that returns pc_literal
+    from .composite_base import _inject_pc_literal_constructor
+    _inject_pc_literal_constructor(enum_cls, enum_cls)
+
     # Register in forward reference system so other types can reference this enum
     from ..forward_ref import mark_type_defined
     mark_type_defined(cls.__name__, enum_cls)

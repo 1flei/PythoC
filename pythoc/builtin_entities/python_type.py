@@ -41,15 +41,20 @@ class PythonType(_PythonTypeBase):
     not registered as builtin entities since each instance wraps a different value.
     """
     
-    def __init__(self, python_obj: Any, is_constant: bool = False):
+    def __init__(self, python_obj: Any, is_constant: bool = False,
+                 preferred_pc_type: Any = None):
         """Initialize a PythonType instance wrapping a Python object.
         
         Args:
             python_obj: The Python object to wrap
             is_constant: Whether this is a compile-time constant
+            preferred_pc_type: Optional PC type (e.g. u64, i32) that this value
+                should be promoted to instead of using default inference.
+                Set by pc_literal.get_value() for tagged values.
         """
         self._python_object = python_obj
         self._python_type = type(python_obj)
+        self._preferred_pc_type = preferred_pc_type
         
         # Determine if this can be a compile-time constant
         # Include lists, tuples, dicts for compile-time subscripting
@@ -58,17 +63,19 @@ class PythonType(_PythonTypeBase):
         self._constant_value = python_obj if self._is_constant else None
     
     @classmethod
-    def wrap(cls, python_obj: Any, is_constant: bool = False):
+    def wrap(cls, python_obj: Any, is_constant: bool = False,
+             preferred_pc_type: Any = None):
         """Create a PythonType wrapper for a Python object.
         
         Args:
             python_obj: The Python object to wrap
             is_constant: Whether this is a compile-time constant
+            preferred_pc_type: Optional PC type for tagged promotion
             
         Returns:
             A new PythonType instance wrapping the object
         """
-        return cls(python_obj, is_constant)
+        return cls(python_obj, is_constant, preferred_pc_type=preferred_pc_type)
     
     @classmethod
     def get_name(cls) -> str:
@@ -539,7 +546,10 @@ class PythonType(_PythonTypeBase):
     def promote_to_default_pc_type(self):
         """Promote this Python value to default PC type based on Python type.
         
-        Default promotions:
+        If ``preferred_pc_type`` is set (from ``pc_literal``), uses that
+        instead of inferring from the Python value's type.
+        
+        Default promotions (when no preferred type):
         - bool -> i32 (C default)
         - int -> i32 (if fits) or i64
         - float -> f64
@@ -549,6 +559,9 @@ class PythonType(_PythonTypeBase):
         """
         if not self._is_constant:
             logger.error(f"Cannot promote non-constant Python value to PC type", node=None, exc_type=TypeError)
+
+        if self._preferred_pc_type is not None:
+            return self.promote_to_pc_type(self._preferred_pc_type)
         
         from llvmlite import ir
         from ..valueref import wrap_value

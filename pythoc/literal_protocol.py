@@ -28,6 +28,11 @@ def is_pc_dict_type(value: Any) -> bool:
     return _has_flag(value, '_is_pc_dict')
 
 
+def is_pc_literal(value: Any) -> bool:
+    from .builtin_entities.pc_literal import pc_literal
+    return isinstance(value, pc_literal)
+
+
 def is_sequence_carrier(value: Any) -> bool:
     return (
         isinstance(value, (tuple, list))
