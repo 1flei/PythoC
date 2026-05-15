@@ -252,5 +252,187 @@ class TestPcLiteralFactory(unittest.TestCase):
         self.assertEqual(r, 42)  # passthrough
 
 
+class TestPcLiteralCtypesOwner(unittest.TestCase):
+    """ctypes-backed pc_literal: pointer + live struct semantics."""
+
+    def _make_ptr_pc_type(self):
+        # Minimal duck-typed PC type with _is_pointer flag; pc_literal
+        # only consults attribute presence, not ctypes details.
+        class _PtrTy:
+            _is_pointer = True
+            _is_integer = False
+            _is_float = False
+            _is_bool = False
+            _size_bytes = 8
+
+            @classmethod
+            def get_name(cls):
+                return 'ptr[u8]'
+        return _PtrTy
+
+    def test_pointer_keeps_owner(self):
+        import ctypes as ct
+        ptr_ty = self._make_ptr_pc_type()
+        buf = (ct.c_uint8 * 4)(1, 2, 3, 4)
+        addr = ct.addressof(buf)
+        owner = ct.c_void_p(addr)
+        r = pc_literal._from_ctypes_result(owner, ptr_ty)
+        self.assertIsInstance(r, pc_literal)
+        self.assertEqual(r._value, addr)
+        self.assertIs(r._ctypes_owner, owner)
+
+    def test_pointer_to_ctypes_zero_copy(self):
+        import ctypes as ct
+        ptr_ty = self._make_ptr_pc_type()
+        owner = ct.c_void_p(0xCAFEBABE)
+        r = pc_literal._from_ctypes_result(owner, ptr_ty)
+        out = r._to_ctypes(ct.c_void_p)
+        # Owner is itself a c_void_p so zero-copy returns it directly.
+        self.assertIs(out, owner)
+        self.assertEqual(out.value, 0xCAFEBABE)
+
+    def test_pointer_to_ctypes_void_p_from_typed_owner(self):
+        import ctypes as ct
+        ptr_ty = self._make_ptr_pc_type()
+        # Owner is a typed pointer rather than c_void_p; bridging path
+        # extracts the integer address while self still roots the buffer.
+        buf = (ct.c_uint8 * 4)(1, 2, 3, 4)
+        typed_owner = ct.cast(buf, ct.POINTER(ct.c_uint8))
+        r = pc_literal._from_ctypes_result(typed_owner, ptr_ty)
+        out = r._to_ctypes(ct.c_void_p)
+        self.assertIsInstance(out, int)
+        self.assertEqual(out, ct.addressof(buf))
+
+    def test_live_struct_lazy_field_read(self):
+        import ctypes as ct
+
+        class _CT(ct.Structure):
+            _fields_ = [('a', ct.c_int32), ('b', ct.c_int64)]
+
+        class _PCStruct:
+            _field_names = ['a', 'b']
+            _field_types = [i32, i64]
+
+            @classmethod
+            def get_name(cls):
+                return 'PCStruct'
+
+        ct_inst = _CT(7, 99)
+        r = pc_literal._from_ctypes_result(ct_inst, _PCStruct)
+        self.assertIs(r._ctypes_owner, ct_inst)
+        # Lazy read sees current buffer.
+        self.assertEqual(int(r.a), 7)
+        self.assertEqual(int(r.b), 99)
+        # Mutating the live owner is visible through pc_literal.
+        ct_inst.a = 11
+        self.assertEqual(int(r.a), 11)
+
+    def test_live_struct_writeback(self):
+        import ctypes as ct
+
+        class _CT(ct.Structure):
+            _fields_ = [('a', ct.c_int32)]
+
+        class _PCStruct:
+            _field_names = ['a']
+            _field_types = [i32]
+
+            @classmethod
+            def get_name(cls):
+                return 'PCStruct'
+
+        ct_inst = _CT(0)
+        r = pc_literal._from_ctypes_result(ct_inst, _PCStruct)
+        r.a = 123
+        self.assertEqual(ct_inst.a, 123)
+
+    def test_live_struct_to_ctypes_zero_copy(self):
+        import ctypes as ct
+
+        class _CT(ct.Structure):
+            _fields_ = [('a', ct.c_int32)]
+
+        class _PCStruct:
+            _field_names = ['a']
+            _field_types = [i32]
+
+            @classmethod
+            def get_name(cls):
+                return 'PCStruct'
+
+        ct_inst = _CT(5)
+        r = pc_literal._from_ctypes_result(ct_inst, _PCStruct)
+        out = r._to_ctypes(_CT)
+        self.assertIs(out, ct_inst)
+
+    def test_live_struct_same_layout_different_class(self):
+        import ctypes as ct
+
+        class _CT_A(ct.Structure):
+            _fields_ = [('x', ct.c_int32), ('y', ct.c_int32)]
+
+        class _CT_B(ct.Structure):
+            _fields_ = [('x', ct.c_int32), ('y', ct.c_int32)]
+
+        class _PCStruct:
+            _field_names = ['x', 'y']
+            _field_types = [i32, i32]
+
+            @classmethod
+            def get_name(cls):
+                return 'PCStruct'
+
+        a = _CT_A(11, 22)
+        r = pc_literal._from_ctypes_result(a, _PCStruct)
+        out = r._to_ctypes(_CT_B)
+        self.assertIsInstance(out, _CT_B)
+        self.assertEqual(out.x, 11)
+        self.assertEqual(out.y, 22)
+
+    def test_get_value_pointer_owner_rejected(self):
+        """Capturing a runtime pointer is rejected: a heap address has
+        no stable identity to bake into a cacheable IR artefact.  Users
+        are expected to pass the pointer as an explicit argument
+        instead (which goes through ``_to_ctypes`` zero-copy)."""
+        import ctypes as ct
+        ptr_ty = self._make_ptr_pc_type()
+        owner = ct.c_void_p(0xDEADBEEF)
+        r = pc_literal._from_ctypes_result(owner, ptr_ty)
+        with self.assertRaises((TypeError, SystemExit)):
+            r.get_value()
+
+    def test_get_value_live_struct_owner(self):
+        """ctypes-backed by-value struct pc_literal forwards itself as the
+        PythonType payload; PythonType's hasattr-handle_attribute hook
+        then routes field access through pc_literal.handle_attribute at
+        IR build time (which has access to module.context)."""
+        import ctypes as ct
+
+        class _CT(ct.Structure):
+            _fields_ = [('a', ct.c_int32), ('b', ct.c_int64)]
+
+        class _PCStruct:
+            _field_names = ['a', 'b']
+            _field_types = [i32, i64]
+
+            @classmethod
+            def get_name(cls):
+                return 'PCStruct'
+
+        ct_inst = _CT(11, 22)
+        r = pc_literal._from_ctypes_result(ct_inst, _PCStruct)
+        vr = r.get_value()
+        # Carrier is the pc_literal itself; downstream hits
+        # pc_literal.handle_attribute on field access.
+        self.assertIs(vr.value, r)
+        self.assertTrue(callable(getattr(vr.value, 'handle_attribute', None)))
+        # Lazy field reads still see the live owner.
+        self.assertEqual(int(r.a), 11)
+        self.assertEqual(int(r.b), 22)
+        # Mutation through Python remains visible.
+        ct_inst.a = 99
+        self.assertEqual(int(r.a), 99)
+
+
 if __name__ == '__main__':
     unittest.main()

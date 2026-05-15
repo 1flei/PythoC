@@ -494,20 +494,19 @@ class MultiSOExecutor:
             
             c_args = []
             for arg, param_type in zip(filtered_args, real_param_types):
-                if param_type == ctypes.c_void_p:
+                # pc_literal carries its own conversion (handles scalar,
+                # pointer, and live-struct cases including c_void_p).
+                if hasattr(arg, '_to_ctypes'):
+                    c_args.append(arg._to_ctypes(param_type))
+                elif param_type == ctypes.c_void_p:
                     if isinstance(arg, int):
                         c_args.append(arg)
-                    elif hasattr(arg, '_value') and hasattr(arg, '_pc_type'):
-                        # pc_literal pointer: extract raw int value
-                        c_args.append(int(arg._value))
                     elif hasattr(arg, 'value'):
                         c_args.append(arg.value)
                     else:
                         c_args.append(ctypes.cast(arg, ctypes.c_void_p).value)
                 elif isinstance(arg, param_type):
                     c_args.append(arg)
-                elif hasattr(arg, '_to_ctypes'):
-                    c_args.append(arg._to_ctypes(param_type))
                 else:
                     c_args.append(param_type(arg))
             
