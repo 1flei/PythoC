@@ -9,6 +9,7 @@ of a decorated Python function.
 
 import ast
 import copy
+import hashlib
 import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Set, Union
@@ -44,6 +45,7 @@ def compile_ast(
     effect_suffix=None,
     effect_scope=None,
     copy_ast=True,
+    debug=False,
 ):
     """Compile an ast.FunctionDef through the standard @compile lifecycle.
 
@@ -80,16 +82,42 @@ def compile_ast(
     if copy_ast:
         fn_ast = copy.deepcopy(fn_ast)
 
+    # #3: Automatically fix missing locations — always safe, only fills in
+    # missing lineno/col_offset without overwriting existing ones.
+    ast.fix_missing_locations(fn_ast)
+
     # Apply name override
     if name is not None:
         fn_ast.name = name
 
     func_name = fn_ast.name
+
+    # #6: Debug dump — print the generated Python-like source for inspection.
+    if debug:
+        try:
+            unparsed = ast.unparse(fn_ast)
+            print("--- [pythoc debug] compile_ast: {} ---".format(func_name))
+            print(unparsed)
+            print("--- end ---")
+        except Exception:
+            print("--- [pythoc debug] compile_ast: {} (unparse failed) ---".format(
+                func_name))
+
     param_type_hints = dict(param_types) if param_types else {}
     return_type_hint = return_type
     if return_type_hint is None:
         from ..builtin_entities.types import void
         return_type_hint = void
+
+    # #1/#9: Compute content hash of the AST body for cache invalidation.
+    # This catches cases where source_file stays the same but the generated
+    # AST changes (e.g. meta-generated code from different programs).
+    try:
+        _ast_content_hash = hashlib.sha256(
+            ast.dump(fn_ast).encode('utf-8')
+        ).hexdigest()[:12]
+    except Exception:
+        _ast_content_hash = None
 
     user_globals = dict(user_globals) if user_globals else {}
     fn_attrs = set(attrs) if attrs else set()
@@ -102,6 +130,11 @@ def compile_ast(
             source_file = caller.f_code.co_filename if caller else "<meta>"
         finally:
             del frame
+
+    # #1/#9: Always canonicalize source_file to avoid cache collisions
+    # from /../ or symlink differences.
+    if source_file and source_file != "<meta>":
+        source_file = os.path.realpath(source_file)
 
     # Synthesize source_code from AST if not provided
     if source_code is None:
@@ -217,6 +250,12 @@ def compile_ast(
         group_key, compiler, ir_file, obj_file, so_file, source_file
     )
     compiler = group['compiler']
+
+    # #1/#9: Store content hash for cache invalidation
+    if _ast_content_hash:
+        hashes = group.setdefault('_ast_content_hashes', [])
+        hashes.append(_ast_content_hash)
+
     logger.debug("meta.compile_ast {}: group_key={}".format(func_name, group_key))
 
     # Capture effect context
@@ -325,6 +364,7 @@ def compile_generated(
     suffix=None,
     source_file=None,
     group_key=None,
+    debug=False,
 ):
     """Compile a GeneratedFunction through the standard lifecycle.
 
@@ -337,6 +377,7 @@ def compile_generated(
         suffix: Compile suffix for specialization.
         source_file: Source file for grouping. If None, uses caller's file.
         group_key: Explicit group key (for artifact compilation).
+        debug: If True, print the generated Python-like source before compiling.
 
     Returns:
         A compiled wrapper function.
@@ -376,6 +417,7 @@ def compile_generated(
         source_code=fn.debug_source,
         start_line=fn.start_line,
         copy_ast=False,
+        debug=debug,
     )
 
 

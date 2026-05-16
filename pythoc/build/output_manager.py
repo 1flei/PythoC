@@ -236,6 +236,29 @@ class OutputManager:
             )
             return False
 
+        # #1/#9: Check AST content hash — detect stale cache when source_file
+        # stays the same but the generated AST body changed.
+        if group.get('_ast_content_hashes'):
+            import hashlib
+            combined = '|'.join(sorted(group['_ast_content_hashes']))
+            current_hash = hashlib.sha256(
+                combined.encode('utf-8')
+            ).hexdigest()[:16]
+
+            obj_file = group.get('obj_file')
+            if obj_file:
+                from .deps import get_dependency_tracker
+                dep_tracker = get_dependency_tracker()
+                cached_deps = dep_tracker.load_deps(obj_file)
+                if cached_deps and cached_deps.ast_content_hash:
+                    if cached_deps.ast_content_hash != current_hash:
+                        from ..logger import logger
+                        logger.debug(
+                            f"Cache miss for {group_key}: AST content hash changed "
+                            f"({cached_deps.ast_content_hash} -> {current_hash})"
+                        )
+                        return False
+
         if not self._cached_dependency_outputs_exist(group):
             return False
 
@@ -622,6 +645,14 @@ class OutputManager:
         
         if compiled_symbols is not None:
             group_deps.compiled_symbols = sorted(compiled_symbols)
+
+        # #1/#9: Persist AST content hash for meta-generated code invalidation.
+        if group and group.get('_ast_content_hashes'):
+            import hashlib
+            combined = '|'.join(sorted(group['_ast_content_hashes']))
+            group_deps.ast_content_hash = hashlib.sha256(
+                combined.encode('utf-8')
+            ).hexdigest()[:16]
 
         # Propagate transitive effects from dependent groups.
         # If this group calls functions in groups that use effects (e.g., c_ast uses

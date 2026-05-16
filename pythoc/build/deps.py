@@ -171,6 +171,11 @@ class GroupDeps:
     # Used to decide whether an up-to-date .o fully covers current pending defs.
     compiled_symbols: List[str] = field(default_factory=list)
 
+    # Content hash of the AST bodies compiled into this group.
+    # Used to detect stale cache entries when source_file stays the same but
+    # the generated AST changes (common in meta-generated code).
+    ast_content_hash: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization with compressed group keys."""
         # Collect all unique group keys
@@ -204,6 +209,9 @@ class GroupDeps:
 
         if self.compiled_symbols:
             result['compiled_symbols'] = sorted(self.compiled_symbols)
+
+        if self.ast_content_hash:
+            result['ast_content_hash'] = self.ast_content_hash
 
         # Add group keys table if we have any
         if unique_group_keys:
@@ -244,6 +252,7 @@ class GroupDeps:
         # Parse effects
         effects_used = set(d.get('effects_used', []))
         compiled_symbols = d.get('compiled_symbols', [])
+        ast_content_hash = d.get('ast_content_hash')
 
         return cls(
             version=d.get('version', DEPS_VERSION),
@@ -254,6 +263,7 @@ class GroupDeps:
             link_libraries=d.get('link_libraries', []),
             effects_used=effects_used,
             compiled_symbols=compiled_symbols,
+            ast_content_hash=ast_content_hash,
         )
 
     
