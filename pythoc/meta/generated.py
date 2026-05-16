@@ -13,7 +13,7 @@ import ast
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from .fragment import MetaFragment, FragmentKind
+from .fragment import Fragment
 
 
 @dataclass
@@ -28,7 +28,7 @@ class GeneratedFunction:
         name: The function name.
         params: List of (param_name, type_hint) tuples.
         return_type: A pythoc type object (e.g., i32, void) or None.
-        body: Either a list of ast.stmt or a MetaFragment(kind=STMTS).
+        body: Either a list of ast.stmt or a Fragment.
         attrs: Optional set of LLVM function-level attributes.
         required_globals: Additional globals needed for compilation.
         source_file: Diagnostic source file path.
@@ -38,7 +38,7 @@ class GeneratedFunction:
     name: str
     params: List[Tuple[str, Any]]
     return_type: Optional[Any]
-    body: Union[List[ast.stmt], MetaFragment]
+    body: Union[List[ast.stmt], Fragment]
     attrs: Optional[Set[str]] = None
     required_globals: Optional[Dict[str, Any]] = None
     source_file: Optional[str] = None
@@ -55,8 +55,8 @@ class GeneratedFunction:
         args = [ast.arg(arg=pname) for pname, _ in self.params]
 
         body_stmts = self.body
-        if isinstance(body_stmts, MetaFragment):
-            body_stmts = body_stmts.as_stmts
+        if isinstance(body_stmts, Fragment):
+            body_stmts = body_stmts.stmts
 
         if not body_stmts:
             body_stmts = [ast.Pass()]
@@ -101,7 +101,7 @@ class MetaArtifact:
         suffix_seed: Data used to derive a specialization suffix.
         debug_source: Optional diagnostic source text.
     """
-    primary: Union[GeneratedFunction, MetaFragment, ast.FunctionDef]
+    primary: Union[GeneratedFunction, Fragment, ast.FunctionDef]
     helpers: Tuple[Union[GeneratedFunction, ast.FunctionDef], ...] = ()
     required_globals: Optional[Dict[str, Any]] = None
     suffix_seed: Optional[Any] = None

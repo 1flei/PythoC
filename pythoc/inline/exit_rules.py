@@ -13,7 +13,7 @@ import copy
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
-from ..meta.template import quote_expr, quote_stmt, quote_stmts, splice_stmts
+from ..meta.template import quote
 
 if TYPE_CHECKING:
     from .transformers import InlineContext
@@ -26,54 +26,54 @@ if TYPE_CHECKING:
 # compiler intrinsics via the ``__pc_intrinsics`` namespace object which is
 # always available in generated code.
 
-@quote_stmts
+@quote
 def _return_assign_and_goto(result_var, value, label):
     result_var = __pc_intrinsics.move(value)  # noqa: F821
     __pc_intrinsics.goto_end(label)  # noqa: F821
 
 
-@quote_stmt
+@quote
 def _return_goto_only(label):
     __pc_intrinsics.goto_end(label)  # noqa: F821
 
 
-@quote_stmt
+@quote
 def _yield_assign(target, value):
     target = __pc_intrinsics.move(value)  # noqa: F821
 
 
-@quote_stmt
+@quote
 def _yield_tuple_assign(targets, value):
     targets = __pc_intrinsics.move(value)  # noqa: F821
 
 
-@quote_stmts
+@quote
 def _yield_labeled_block(label_name, inner):
     with __pc_intrinsics.label(label_name):  # noqa: F821
         inner
 
 
-@quote_expr
+@quote
 def _type_convert(converter, value):
     return converter(value)
 
 
-@quote_stmt
+@quote
 def _macro_expr(value):
     value
 
 
-@quote_stmt
+@quote
 def _goto_begin(label):
     __pc_intrinsics.goto_begin(label)  # noqa: F821
 
 
-@quote_stmt
+@quote
 def _goto_end(label):
     __pc_intrinsics.goto_end(label)  # noqa: F821
 
 
-@quote_stmt
+@quote
 def _empty_label_block(label_name):
     with __pc_intrinsics.label(label_name):  # noqa: F821
         pass
@@ -186,16 +186,16 @@ class ReturnExitRule(ExitPointRule):
                     ast.Name(id=self.result_var, ctx=ast.Store()),
                     renamed_value,
                     ast.Constant(value=self.exit_label),
-                ).as_stmts
+                ).stmts
             else:
                 return [_yield_assign(
                     ast.Name(id=self.result_var, ctx=ast.Store()),
                     renamed_value,
-                ).as_stmt]
+                ).stmt]
         elif self.exit_label:
             return [_return_goto_only(
                 ast.Constant(value=self.exit_label),
-            ).as_stmt]
+            ).stmt]
         return []
 
 
@@ -319,7 +319,7 @@ class YieldExitRule(ExitPointRule):
                 renamed_value = _type_convert(
                     copy.deepcopy(self.return_type_annotation),
                     renamed_value,
-                ).as_expr
+                ).expr
 
             # Handle tuple unpacking vs simple assignment
             if isinstance(self.loop_var, ast.Tuple):
@@ -327,7 +327,7 @@ class YieldExitRule(ExitPointRule):
                     _yield_tuple_assign(
                         copy.deepcopy(self.loop_var),
                         renamed_value,
-                    ).as_stmt
+                    ).stmt
                 )
             else:
                 loop_var_name = self.loop_var.id if isinstance(self.loop_var, ast.Name) else str(self.loop_var)
@@ -335,7 +335,7 @@ class YieldExitRule(ExitPointRule):
                     _yield_assign(
                         ast.Name(id=loop_var_name, ctx=ast.Store()),
                         renamed_value,
-                    ).as_stmt
+                    ).stmt
                 )
 
         # Insert loop body (deep copy to avoid mutation)
@@ -356,8 +356,8 @@ class YieldExitRule(ExitPointRule):
         if yield_label:
             body_stmts = _yield_labeled_block(
                 ast.Constant(value=yield_label),
-                splice_stmts(inner_stmts),
-            ).as_stmts
+                inner_stmts,
+            ).stmts
         else:
             body_stmts = inner_stmts
 
@@ -394,7 +394,7 @@ class MacroExitRule(ExitPointRule):
         return expr  -->  expr (as expression statement)
         """
         if exit_node.value:
-            return [_macro_expr(self._rename(exit_node.value, context)).as_stmt]
+            return [_macro_expr(self._rename(exit_node.value, context)).stmt]
         return []
 
 
@@ -505,7 +505,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         """
         if self.loop_depth > 0:
             return node
-        return _goto_begin(ast.Constant(value=self.after_else_label)).as_stmt
+        return _goto_begin(ast.Constant(value=self.after_else_label)).stmt
 
     def visit_Continue(self, node: ast.Continue) -> ast.stmt:
         """Transform continue to skip to next yield
@@ -514,4 +514,4 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         """
         if self.loop_depth > 0:
             return node
-        return _goto_end(ast.Constant(value=self.yield_label)).as_stmt
+        return _goto_end(ast.Constant(value=self.yield_label)).stmt

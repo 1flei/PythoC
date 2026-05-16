@@ -269,62 +269,62 @@ def _warn_multi_write_slots(pattern: str,
 # Quasi-quote expression templates
 # ---------------------------------------------------------------------------
 
-@meta.quote_expr
+@meta.quote
 def _tpl_i32(v):
     return i32(v)
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_u8(v):
     return u8(v)
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_i64(v):
     return i64(v)
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_u64(v):
     return u64(v)
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_eq(lhs, rhs):
     return lhs == rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_lte(lhs, rhs):
     return lhs <= rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_gte(lhs, rhs):
     return lhs >= rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_add(lhs, rhs):
     return lhs + rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_and(lhs, rhs):
     return lhs and rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_or(lhs, rhs):
     return lhs or rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_sub(lhs, rhs):
     return lhs - rhs
 
 
-@meta.quote_expr
+@meta.quote
 def _tpl_lt(lhs, rhs):
     return lhs < rhs
 
@@ -333,13 +333,13 @@ def _tpl_lt(lhs, rhs):
 # Quasi-quote structural templates (large skeletons)
 # ---------------------------------------------------------------------------
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_if(test_expr, then_body):
     if test_expr:
         then_body
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_if_else(test_expr, then_body, else_body):
     if test_expr:
         then_body
@@ -347,38 +347,38 @@ def _tpl_if_else(test_expr, then_body, else_body):
         else_body
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_assign(target, value):
     target = value
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_assign_typed(target, type_ann, value):
     target: type_ann = value
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_return(val):
     return val
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_with_label(label_name, body):
     with label(label_name):
         body
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_goto(label_name):
     goto(label_name)
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_pass():
     pass
 
 
-@meta.quote_stmts
+@meta.quote
 def _tpl_goto_state_program(skip_probe, eof_guard, load_byte, transitions):
     """Skeleton for a single goto-FSM state block."""
     skip_probe
@@ -387,12 +387,12 @@ def _tpl_goto_state_program(skip_probe, eof_guard, load_byte, transitions):
     transitions
 
 
-@meta.quote_stmt
+@meta.quote
 def _tpl_load_byte_as(var_name, idx_expr):
     var_name: i32 = i32(data[idx_expr]) & 0xFF
 
 
-@meta.quote_stmts
+@meta.quote
 def _tpl_bma_fsm_program(init_body, goto_start, label_blocks, fallback_return):
     init_body
     goto_start
@@ -409,10 +409,15 @@ del _tpl_name, _tpl
 # ---------------------------------------------------------------------------
 # Convenience wrappers (template call -> raw AST node)
 # ---------------------------------------------------------------------------
-
-def _q(template, *args):
-    """Call a template, return the raw AST node."""
-    return template(*args).node
+# After the "fragment as universal currency" simplification, templates
+# return Fragment objects. To get the raw underlying AST node we use the
+# corresponding cast property:
+#   - expression templates  -> .expr   (single ast.expr)
+#   - single-statement tpls -> .stmt   (single ast.stmt)
+#   - multi-statement tpls  -> .stmts  (list[ast.stmt])
+# Most regex helpers below build raw AST nodes directly (without going
+# through a template), so they only need the `_coerce_expr` adapter for
+# value-to-expr conversion.
 
 
 def _coerce_expr(value) -> ast.expr:
@@ -522,20 +527,16 @@ def _q_assign(target, value):
     )
 
 
-def _splice(stmts):
-    return meta.splice_stmts(stmts)
-
-
 def _q_label_block(label_name: str, body: List[ast.stmt]):
-    return _q(_tpl_with_label, meta.const(label_name), _splice(body))
+    return _tpl_with_label(meta.const(label_name), body).stmt
 
 
 def _q_goto(label_name: str):
-    return _q(_tpl_goto, meta.const(label_name))
+    return _tpl_goto(meta.const(label_name)).stmt
 
 
 def _q_pass():
-    return _q(_tpl_pass)
+    return _tpl_pass().stmt
 
 
 def _stmt_list(node_or_nodes) -> List[ast.stmt]:
@@ -623,18 +624,18 @@ def _byte_condition_template(byte_values: Tuple[int, ...],
             end = v
     ranges.append((start, end))
 
-    ch = meta.ref(ch_name)
+    ch = ch_name  # str -> auto-coerced to Name(Load) by _coerce_expr
     parts = []
     for lo, hi in ranges:
         if lo == hi:
-            parts.append(_q_eq(ch, meta.const(lo)))
+            parts.append(_q_eq(ch, lo))
         elif lo == 0:
-            parts.append(_q_lte(ch, meta.const(hi)))
+            parts.append(_q_lte(ch, hi))
         elif hi == 255:
-            parts.append(_q_gte(ch, meta.const(lo)))
+            parts.append(_q_gte(ch, lo))
         else:
             parts.append(_q_and(
-                _q_lte(meta.const(lo), ch), _q_lte(ch, meta.const(hi)),
+                _q_lte(lo, ch), _q_lte(ch, hi),
             ))
 
     return _q_or_chain(parts)
@@ -658,7 +659,7 @@ def _bma_tag_pos_expr(base_expr: ast.expr, delta: int) -> ast.expr:
         return base_expr
     return _q_add(
         base_expr,
-        _q(_tpl_u64, meta.const(delta)),
+        _tpl_u64(delta).expr,
     )
 
 
@@ -677,13 +678,13 @@ def _emit_bma_commands(commands: Tuple[opcs.OPCSCommand, ...],
         if command.kind == "set":
             pos_expr = _bma_tag_pos_expr(base_expr, command.delta)
             stmts.append(_q_assign(
-                meta.ref(_bma_reg_name(command.lhs)),
+                _bma_reg_name(command.lhs),
                 _q_i64(pos_expr),
             ))
         elif command.kind == "copy":
             stmts.append(_q_assign(
-                meta.ref(_bma_reg_name(command.lhs)),
-                meta.ref(_bma_reg_name(command.rhs)),
+                _bma_reg_name(command.lhs),
+                _bma_reg_name(command.rhs),
             ))
         elif command.kind == "add":
             raise NotImplementedError("BMA lowering does not support history-tag add commands yet")
@@ -699,9 +700,9 @@ def _emit_bma_output_flush(output_registers: Tuple[int, ...],
     stmts: List[ast.stmt] = []
     for slot, reg_id in enumerate(output_registers):
         value_expr = (
-            _q_i64(meta.const(-1))
+            _q_i64(-1)
             if reg_id <= 0 else
-            _q_i64(meta.ref(_bma_reg_name(reg_id)))
+            _q_i64(_bma_reg_name(reg_id))
         )
         stmts.append(_q_ptr_assign('out', ast.Constant(slot), value_expr))
     return stmts
@@ -794,11 +795,11 @@ def _build_bma_fsm_edge_body(runtime: _BMARuntime,
     branch_body: List[ast.stmt] = []
     if edge.commands:
         branch_body.extend(_emit_bma_commands(
-            edge.commands, meta.ref('i'), with_tags=with_tags))
+            edge.commands, _coerce_expr('i'), with_tags=with_tags))
     if edge.shift:
         branch_body.append(_q_assign(
-            meta.ref('i'),
-            _q_add(meta.ref('i'), _q(_tpl_u64, meta.const(edge.shift))),
+            'i',
+            _q_add('i', _tpl_u64(edge.shift).expr),
         ))
     branch_body.append(_q_goto(runtime.state_by_id[edge.target].label_name))
     return branch_body
@@ -812,7 +813,7 @@ def _build_bma_eof_success_body(state: _BMARuntimeState,
         body: List[ast.stmt] = []
         if state.accept_commands:
             body.extend(_emit_bma_commands(
-                state.accept_commands, meta.ref('i'), with_tags=with_tags))
+                state.accept_commands, _coerce_expr('i'), with_tags=with_tags))
         body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
         body.append(_q_return(_q_u8(1)))
         return body
@@ -822,7 +823,7 @@ def _build_bma_eof_success_body(state: _BMARuntimeState,
     body: List[ast.stmt] = []
     if state.eof_commands:
         body.extend(_emit_bma_commands(
-            state.eof_commands, meta.ref('i'), with_tags=with_tags))
+            state.eof_commands, _coerce_expr('i'), with_tags=with_tags))
     body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
     body.append(_q_return(_q_u8(1)))
     return body
@@ -839,34 +840,30 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
         body: List[ast.stmt] = []
         if state.accept_commands:
             body.extend(_emit_bma_commands(
-                state.accept_commands, meta.ref('i'), with_tags=with_tags))
+                state.accept_commands, _coerce_expr('i'), with_tags=with_tags))
         body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
         body.append(_q_return(_q_u8(1)))
         return body
 
     eof_success = _build_bma_eof_success_body(state, runtime, with_tags=with_tags)
     eof_guard = _raw_if(
-        _q_gte(meta.ref('i'), meta.ref('n')),
+        _q_gte('i', 'n'),
         eof_success if eof_success is not None else [_q_goto(runtime.dead_label)],
     )
 
-    probe_idx: ast.expr = meta.ref('i')
+    probe_idx: ast.expr = _coerce_expr('i')
     probe_guard: List[ast.stmt] = []
     if state.probe_offset:
         probe_idx = _q_add(
-            meta.ref('i'),
-            _q(_tpl_u64, meta.const(state.probe_offset)),
+            'i',
+            _tpl_u64(state.probe_offset).expr,
         )
         probe_guard.append(_raw_if(
-            _q_gte(probe_idx, meta.ref('n')),
+            _q_gte(probe_idx, 'n'),
             [_q_goto(runtime.dead_label)],
         ))
 
-    load_byte_stmt = _q(
-        _tpl_load_byte_as,
-        meta.ident('ch'),
-        probe_idx,
-    )
+    load_byte_stmt = _tpl_load_byte_as('ch', probe_idx).stmt
 
     edge_branches = [
         (
@@ -881,13 +878,12 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
         _q_goto(runtime.dead_label)
     )
 
-    return _stmt_list(_q(
-        _tpl_goto_state_program,
-        _splice(_body_or_pass(probe_guard)),
-        _splice([eof_guard]),
-        _splice([load_byte_stmt]),
-        _splice([transitions_stmt]),
-    ))
+    return _tpl_goto_state_program(
+        _body_or_pass(probe_guard),
+        [eof_guard],
+        [load_byte_stmt],
+        [transitions_stmt],
+    ).stmts
 
 
 def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
@@ -899,11 +895,11 @@ def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
     program_init = list(init_body)
     if runtime.initial_commands:
         program_init.extend(_emit_bma_commands(
-            runtime.initial_commands, meta.ref('i'), with_tags=with_tags))
+            runtime.initial_commands, _coerce_expr('i'), with_tags=with_tags))
     if eager_accept and runtime.initial_accepting:
         if runtime.initial_accept_commands:
             program_init.extend(_emit_bma_commands(
-                runtime.initial_accept_commands, meta.ref('i'), with_tags=with_tags))
+                runtime.initial_accept_commands, _coerce_expr('i'), with_tags=with_tags))
         program_init.extend(_emit_bma_output_flush(
             runtime.output_registers, with_tags=with_tags))
         program_init.append(_q_return(_q_u8(1)))
@@ -920,13 +916,12 @@ def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
         for state in runtime.states
     ]
 
-    return _stmt_list(_q(
-        _tpl_bma_fsm_program,
-        _splice(_body_or_pass(program_init)),
-        _splice([_q_goto(runtime.start_label)]),
-        _splice(label_blocks),
-        _splice([_q_return(_q_u8(0))]),
-    ))
+    return _tpl_bma_fsm_program(
+        _body_or_pass(program_init),
+        [_q_goto(runtime.start_label)],
+        label_blocks,
+        [_q_return(_q_u8(0))],
+    ).stmts
 
 
 def _build_bma_body(bma: opcs.TaggedOPCSBMA,
@@ -939,19 +934,19 @@ def _build_bma_body(bma: opcs.TaggedOPCSBMA,
     """
     num_slots = len(bma.tag_names) if with_tags else 0
     init_stmts: List[ast.stmt] = [
-        _q(_tpl_assign_typed, meta.ident('i'), meta.type_expr(u64),
-           _q(_tpl_u64, meta.const(0))),
+        _tpl_assign_typed('i', u64, _tpl_u64(0)).stmt,
     ]
     if with_tags:
         for reg_id in range(1, bma.register_count + 1):
             init_stmts.append(
-                _q(_tpl_assign_typed,
-                   meta.ident(_bma_reg_name(reg_id)),
-                   meta.type_expr(i64),
-                   _q_i64(meta.const(-1))))
+                _tpl_assign_typed(
+                    _bma_reg_name(reg_id),
+                    i64,
+                    _q_i64(-1),
+                ).stmt)
     for slot in range(num_slots):
         init_stmts.append(
-            _q_ptr_assign('out', ast.Constant(slot), _q_i64(meta.const(-1))))
+            _q_ptr_assign('out', ast.Constant(slot), _q_i64(-1)))
 
     return _build_bma_fsm_body(
         bma,

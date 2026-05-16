@@ -2,39 +2,30 @@
 pythoc.meta - Unified compile-time program generation.
 
 This module is the single public home for compile-time code generation
-in PythoC. It unifies quasi-quote templates, generated functions,
-inline expansion, factories, and AST compilation under one roof.
+in PythoC. After the "fragment as universal currency" simplification it
+exposes a small surface:
 
-Core concepts:
-    MetaFragment   - a typed fragment of Python AST
-    MetaTemplate   - a compile-time template captured from Python code
-    GeneratedFunction - a thin structured function that lowers to ast.FunctionDef
-    MetaArtifact   - a multi-function output from a meta factory
+Core types:
+    Fragment            - the universal AST currency (list[ast.stmt] inside)
+    MetaTemplate        - a compile-time template captured from Python code
+    GeneratedFunction   - a thin structured function that lowers to ast.FunctionDef
+    MetaArtifact        - a multi-function output from a meta factory
 
 Public API:
-    Quote decorators:  quote_expr, quote_stmt, quote_stmts, quote_func, quote_module
-    Binding helpers:   ref, ident, const, type_expr, splice_stmt, splice_stmts
-    Builders:          func, artifact
-    Compilation:       compile_ast, compile_generated, compile_artifact
-    Factories:         factory, compile_factory
-    Normalization:     normalize_factory_key
+    Quote decorator:    quote
+    Const helper:       const                    (only when you need a string *literal*)
+    Builders:           func, artifact
+    Compilation:        compile_ast, compile_generated, compile_artifact
+    Factories:          factory, compile_factory
+    Normalization:      normalize_factory_key
 """
 
-from .fragment import MetaFragment, FragmentKind
+from .fragment import Fragment
 
 from .template import (
     MetaTemplate,
-    quote_expr,
-    quote_stmt,
-    quote_stmts,
-    quote_func,
-    quote_module,
-    ref,
-    ident,
+    quote,
     const,
-    type_expr,
-    splice_stmt,
-    splice_stmts,
 )
 
 from .generated import (
@@ -61,24 +52,13 @@ from .factory import (
 
 __all__ = [
     # Core types
-    'MetaFragment',
-    'FragmentKind',
+    'Fragment',
     'MetaTemplate',
     'GeneratedFunction',
     'MetaArtifact',
-    # Quote decorators
-    'quote_expr',
-    'quote_stmt',
-    'quote_stmts',
-    'quote_func',
-    'quote_module',
-    # Binding helpers
-    'ref',
-    'ident',
+    # Quote decorator + helpers
+    'quote',
     'const',
-    'type_expr',
-    'splice_stmt',
-    'splice_stmts',
     # Builders
     'func',
     'artifact',

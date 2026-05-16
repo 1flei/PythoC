@@ -31,10 +31,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..meta.template import (
-    quote_expr, quote_stmt, quote_stmts,
-    splice_stmts,
-)
+from ..meta.template import quote
 
 
 # ---------------------------------------------------------------------------
@@ -88,24 +85,24 @@ class MetaInlineRequest:
 # -- Per-param binding templates --
 
 # target: annotation = move(value)
-@quote_stmt
+@quote
 def _annotated_binding(target, annotation, value):
     target: annotation = __pc_intrinsics.move(value)  # noqa: F821
 
 # target = move(value)
-@quote_stmt
+@quote
 def _plain_binding(target, value):
     target = __pc_intrinsics.move(value)  # noqa: F821
 
 # converter(value) -- type-convert a constant arg
-@quote_expr
+@quote
 def _type_convert(converter, value):
     return converter(value)
 
 # -- Frame templates (one per exit-rule variant) --
 
 # Return with typed result: bindings + result decl + scoped-label body
-@quote_stmts
+@quote
 def _return_typed_frame(bindings, result_var, result_type, label_name, body):
     bindings
     result_var: result_type
@@ -113,20 +110,20 @@ def _return_typed_frame(bindings, result_var, result_type, label_name, body):
         body
 
 # Return void/untyped: bindings + scoped-label body (no result decl)
-@quote_stmts
+@quote
 def _return_void_frame(bindings, label_name, body):
     bindings
     with __pc_intrinsics.label(label_name):  # noqa: F821
         body
 
 # Passthrough (no return wrapping, no loop-var decls)
-@quote_stmts
+@quote
 def _passthrough_frame(bindings, body):
     bindings
     body
 
 # Yield with loop-var declarations prepended
-@quote_stmts
+@quote
 def _yield_frame(bindings, decls, body):
     bindings
     decls
@@ -187,16 +184,16 @@ def _build_param_bindings(callee_params, call_args, rename_map, inline_id):
         if param.annotation and isinstance(arg_value, ast.Constant):
             arg_value = _type_convert(
                 copy.deepcopy(param.annotation), arg_value
-            ).as_expr
+            ).expr
 
         target = ast.Name(id=renamed, ctx=ast.Store())
 
         if param.annotation:
             stmt = _annotated_binding(
                 target, copy.deepcopy(param.annotation), arg_value,
-            ).as_stmt
+            ).stmt
         else:
-            stmt = _plain_binding(target, arg_value).as_stmt
+            stmt = _plain_binding(target, arg_value).stmt
         stmts.append(stmt)
     return stmts
 
@@ -363,18 +360,18 @@ def expand_inline(request):
         if result_type and result_var:
             # Return with typed result
             frame = _return_typed_frame(
-                splice_stmts(binding_stmts),
+                binding_stmts,
                 ast.Name(id=result_var, ctx=ast.Store()),
                 copy.deepcopy(result_type),
                 ast.Constant(value=exit_label),
-                splice_stmts(body_stmts),
+                body_stmts,
             )
         else:
             # Return void / untyped
             frame = _return_void_frame(
-                splice_stmts(binding_stmts),
+                binding_stmts,
                 ast.Constant(value=exit_label),
-                splice_stmts(body_stmts),
+                body_stmts,
             )
     elif isinstance(request.exit_rule, YieldExitRule):
         # Yield: build loop-var declarations if type annotation exists
@@ -389,23 +386,23 @@ def expand_inline(request):
 
         if decl_stmts:
             frame = _yield_frame(
-                splice_stmts(binding_stmts),
-                splice_stmts(decl_stmts),
-                splice_stmts(body_stmts),
+                binding_stmts,
+                decl_stmts,
+                body_stmts,
             )
         else:
             frame = _passthrough_frame(
-                splice_stmts(binding_stmts),
-                splice_stmts(body_stmts),
+                binding_stmts,
+                body_stmts,
             )
     else:
         # Passthrough (other exit rules)
         frame = _passthrough_frame(
-            splice_stmts(binding_stmts),
-            splice_stmts(body_stmts),
+            binding_stmts,
+            body_stmts,
         )
 
-    result_stmts = frame.as_stmts
+    result_stmts = frame.stmts
 
     # --- Fix locations from call site ---
     for stmt in result_stmts:

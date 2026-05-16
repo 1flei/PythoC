@@ -364,7 +364,7 @@ class LoopsMixin:
                 from ..inline.exit_rules import _empty_label_block
                 label_stmt = _empty_label_block(
                     ast.Constant(value=after_else_label)
-                ).as_stmt
+                ).stmt
                 ast.copy_location(label_stmt, node)
                 ast.fix_missing_locations(label_stmt)
                 if not cf.is_terminated():

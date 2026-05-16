@@ -37,7 +37,7 @@ from ..utils import get_next_id
 from ..logger import logger
 from ..valueref import ValueRef, wrap_value
 from ..context import VariableInfo
-from ..meta.template import quote_stmts, splice_stmts
+from ..meta.template import quote
 from ._intrinsics import _PC_INTRINSICS
 from .exit_rules import _empty_label_block, _goto_begin, _goto_end
 
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 # Templates
 # ---------------------------------------------------------------------------
 
-@quote_stmts
+@quote
 def _const_iter_block(label_name, target, value, body):
     """One unrolled iteration: labeled scope with binding + transformed body."""
     with __pc_intrinsics.label(label_name):  # noqa: F821
@@ -127,7 +127,7 @@ class ConstantLoopAdapter:
             if has_else:
                 stmts.extend(copy.deepcopy(for_node.orelse))
             stmts.append(
-                _empty_label_block(ast.Constant(value=exit_label)).as_stmt)
+                _empty_label_block(ast.Constant(value=exit_label)).stmt)
             return ConstantLoopResult(
                 stmts, exit_label, after_else_label,
                 iter_var_names, required_globals)
@@ -153,8 +153,8 @@ class ConstantLoopAdapter:
                 ast.Constant(value=iter_label),
                 copy.deepcopy(for_node.target),
                 ast.Name(id=iter_value_vars[i], ctx=ast.Load()),
-                splice_stmts(transformed_body),
-            ).as_stmts
+                transformed_body,
+            ).stmts
             stmts.extend(iter_stmts)
 
         # Else clause (only reached when no break)
@@ -164,7 +164,7 @@ class ConstantLoopAdapter:
         # Final label (exit or after-else)
         final_label = after_else_label if after_else_label else exit_label
         stmts.append(
-            _empty_label_block(ast.Constant(value=final_label)).as_stmt)
+            _empty_label_block(ast.Constant(value=final_label)).stmt)
 
         return ConstantLoopResult(
             stmts, exit_label, after_else_label,
@@ -261,7 +261,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         if self.loop_depth > 0:
             return node
 
-        goto_call = _goto_begin(ast.Constant(value=self.break_target)).as_stmt
+        goto_call = _goto_begin(ast.Constant(value=self.break_target)).stmt
         ast.copy_location(goto_call, node)
         return goto_call
     
@@ -270,7 +270,7 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         if self.loop_depth > 0:
             return node
 
-        goto_call = _goto_end(ast.Constant(value=self.continue_target)).as_stmt
+        goto_call = _goto_end(ast.Constant(value=self.continue_target)).stmt
         ast.copy_location(goto_call, node)
         return goto_call
 

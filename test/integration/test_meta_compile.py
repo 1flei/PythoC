@@ -105,28 +105,29 @@ meta_add_i64 = meta.compile_ast(
     user_globals=globals(),
 )
 
-# --- Test 5 & 6: quote_expr (AST-only, no compilation needed) ---
+# --- Test 5 & 6: quote (AST-only, no compilation needed) ---
 
-@meta.quote_expr
+@meta.quote
 def add_expr(x, y):
     return x + y
 
-@meta.quote_expr
+@meta.quote
 def scalar_expr(x, y):
     return x + y
 
-# --- Test 7: quote_func + compile (design doc 15.2) ---
+# --- Test 7: quote function-template + with_func_name + compile ---
 
-@meta.quote_func
+@meta.quote
 def add_template(ret_ty):
     def generated(x, y) -> ret_ty:
         tmp = x + y
         return tmp
 
-add_i32_frag = add_template(i32).with_name("add_i32")
+# The Fragment's body[0] is the inner FunctionDef; with_func_name renames it.
+add_i32_frag = add_template("i32").with_func_name("add_i32")
 
 add_i32_fn = meta.compile_ast(
-    add_i32_frag.to_ast(),
+    add_i32_frag.stmts[0],
     param_types={"x": i32, "y": i32},
     return_type=i32,
     user_globals=globals(),
@@ -193,18 +194,19 @@ meta_cross = meta.compile_ast(
     user_globals={**globals(), 'base_add': base_add},
 )
 
-# --- Test 10: quote_func with type_expr ---
+# --- Test 10: quote function-template with PythoC type bound to ret-ty ---
 
-@meta.quote_func
+@meta.quote
 def typed_template(T):
     def neg(x) -> T:
         return 0 - x
 
 
-neg_frag = typed_template(meta.type_expr(i32)).with_name("neg_i32")
+# Pass i32 directly (PythoC type auto-coerces to Name('i32') + registers global)
+neg_frag = typed_template(i32).with_func_name("neg_i32")
 
 neg_i32 = meta.compile_ast(
-    neg_frag.to_ast(),
+    neg_frag.stmts[0],
     param_types={"x": i32},
     return_type=i32,
     user_globals={**globals(), **getattr(neg_frag, '_user_globals', {})},
@@ -273,11 +275,10 @@ def test_compile_ast_with_suffix():
 
 
 def test_quote_expr():
-    """Test quote_expr: param-based holes with ref() binding helpers"""
-    expr_ast = add_expr(meta.ref("a"), meta.ref("b"))
-    assert isinstance(expr_ast, meta.MetaFragment)
-    assert expr_ast.kind == meta.FragmentKind.EXPR
-    expr = expr_ast.as_expr
+    """Test quote: param-based holes with str-as-Name coercion"""
+    frag = add_expr("a", "b")
+    assert isinstance(frag, meta.Fragment)
+    expr = frag.expr
     assert isinstance(expr, ast.BinOp)
     assert isinstance(expr.left, ast.Name)
     assert expr.left.id == "a"
@@ -289,7 +290,7 @@ def test_quote_expr():
 def test_quote_expr_scalar():
     """Test that plain scalars auto-lower to ast.Constant"""
     frag = scalar_expr(10, 20)
-    expr = frag.as_expr
+    expr = frag.expr
     assert isinstance(expr, ast.BinOp)
     assert isinstance(expr.left, ast.Constant)
     assert expr.left.value == 10
