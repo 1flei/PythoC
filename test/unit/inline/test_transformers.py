@@ -214,8 +214,8 @@ def f():
     
     def test_return_exit_transformation(self):
         """
-        Transform return with ReturnExitRule (goto-based):
-        return x + 1  -->  result = move(x + 1); __goto("exit_label")
+        Transform return with ReturnExitRule (unified template):
+        return x + 1  -->  result = move(x + 1); goto_end("exit_label")
         """
         code = """
 def f():

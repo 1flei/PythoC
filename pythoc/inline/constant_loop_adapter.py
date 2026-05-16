@@ -37,7 +37,7 @@ from ..utils import get_next_id
 from ..logger import logger
 from ..valueref import ValueRef, wrap_value
 from ..context import VariableInfo
-from ..meta.template import quote
+from ..meta.template import quote, const as meta_const
 from ._intrinsics import _PC_INTRINSICS
 from .exit_rules import _empty_label_block, _goto_begin, _goto_end
 
@@ -51,10 +51,25 @@ if TYPE_CHECKING:
 
 @quote
 def _const_iter_block(label_name, target, value, body):
-    """One unrolled iteration: labeled scope with binding + transformed body."""
+    # One unrolled iteration: labeled scope with binding + transformed body.
     with __pc_intrinsics.label(label_name):  # noqa: F821
         target = value
         body
+
+
+@quote
+def _const_loop(has_else, has_after_else_label,
+                iter_blocks, else_clause,
+                after_else_label_block, exit_label_block):
+    # Unified constant-loop template.
+    # has_else / has_after_else_label are const(True/False); dead branches
+    # are folded away at template instantiation time.
+    iter_blocks
+    if has_else:
+        else_clause
+    if has_after_else_label:
+        after_else_label_block
+    exit_label_block
 
 
 @dataclass
@@ -94,14 +109,11 @@ class ConstantLoopAdapter:
         iterable: Any
     ) -> ConstantLoopResult:
         """
-        Transform a constant for loop into repeated scope blocks
+        Transform a constant for loop into repeated scope blocks.
 
-        Args:
-            for_node: The for loop AST node
-            iterable: The compile-time constant iterable (list, tuple, range, etc.)
-
-        Returns:
-            ConstantLoopResult with transformed statements and registered var names
+        Uses a single unified template call — all conditional logic (has_else,
+        has_after_else_label) is encoded as ``const(True/False)`` guards that
+        are folded away at template instantiation time.
         """
         elements = list(iterable)
         required_globals = {'__pc_intrinsics': _PC_INTRINSICS}
@@ -112,62 +124,50 @@ class ConstantLoopAdapter:
         body_has_break = _has_break_in_body(for_node.body)
         body_has_continue = _has_continue_in_body(for_node.body)
 
-        has_else = for_node.orelse and len(for_node.orelse) > 0
+        has_else = bool(for_node.orelse and len(for_node.orelse) > 0)
         after_else_label = (
             f"_const_loop_after_else_{loop_id}"
             if has_else and body_has_break else None
         )
         break_target = after_else_label if after_else_label else exit_label
 
-        stmts = []
-        iter_var_names = []
-
-        # Empty iterable: optional else + exit label
-        if len(elements) == 0:
-            if has_else:
-                stmts.extend(copy.deepcopy(for_node.orelse))
-            stmts.append(
-                _empty_label_block(ast.Constant(value=exit_label)).stmt)
-            return ConstantLoopResult(
-                stmts, exit_label, after_else_label,
-                iter_var_names, required_globals)
-
         # Pre-register iteration value variables
-        iter_value_vars = self._register_iteration_values(elements, loop_id)
-        iter_var_names = list(iter_value_vars.keys())
+        iter_var_names = []
+        if elements:
+            iter_value_vars = self._register_iteration_values(elements, loop_id)
+            iter_var_names = list(iter_value_vars.keys())
 
-        # Build per-iteration blocks via template
+        # Build per-iteration fragments
+        iter_block_frags = []
         for i, _element in enumerate(elements):
             iter_label = f"_const_loop_iter_{loop_id}_{i}"
-
-            # Transform break/continue in a deep copy of the loop body
             transformed_body = self._transform_body(
                 for_node.body, break_target, iter_label,
                 body_has_break, body_has_continue)
+            iter_block_frags.append(
+                _const_iter_block(
+                    ast.Constant(value=iter_label),
+                    copy.deepcopy(for_node.target),
+                    ast.Name(id=iter_value_vars[i], ctx=ast.Load()),
+                    transformed_body,
+                )
+            )
 
-            # Single template call produces the whole iteration block:
-            #   with label(iter_label):
-            #       target = _iter_val_N
-            #       <transformed_body>
-            iter_stmts = _const_iter_block(
-                ast.Constant(value=iter_label),
-                copy.deepcopy(for_node.target),
-                ast.Name(id=iter_value_vars[i], ctx=ast.Load()),
-                transformed_body,
-            ).stmts
-            stmts.extend(iter_stmts)
-
-        # Else clause (only reached when no break)
-        if has_else:
-            stmts.extend(copy.deepcopy(for_node.orelse))
-
-        # Final label (exit or after-else)
+        # Final label
         final_label = after_else_label if after_else_label else exit_label
-        stmts.append(
-            _empty_label_block(ast.Constant(value=final_label)).stmt)
+
+        # Single template call — zero manual stmts splicing
+        result_frag = _const_loop(
+            meta_const(has_else),
+            meta_const(after_else_label is not None),
+            iter_block_frags,                          # list[Fragment] -> splice
+            copy.deepcopy(for_node.orelse) if has_else else [],
+            _empty_label_block(ast.Constant(value=after_else_label or "_unused")),
+            _empty_label_block(ast.Constant(value=exit_label)),
+        )
 
         return ConstantLoopResult(
-            stmts, exit_label, after_else_label,
+            result_frag.stmts, exit_label, after_else_label,
             iter_var_names, required_globals)
     
     def _register_iteration_values(

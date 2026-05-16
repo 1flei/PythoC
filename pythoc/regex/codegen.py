@@ -28,6 +28,7 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
 from pythoc import meta
 from pythoc.meta.template import _coerce_to_ast as _meta_coerce_to_ast
+from pythoc.meta.template import const as meta_const
 from pythoc.builtin_entities.types import i8, i32, i64, u8, u64, ptr
 from pythoc.builtin_entities.scoped_label import label, goto, goto_end
 from pythoc.builtin_entities.struct import create_struct_type
@@ -789,20 +790,38 @@ def _normalize_bma_runtime(bma: opcs.TaggedOPCSBMA) -> _BMARuntime:
     )
 
 
+@meta.quote
+def _tpl_edge_body(has_commands, has_shift, commands, shift_stmt, goto_stmt):
+    if has_commands:
+        commands
+    if has_shift:
+        shift_stmt
+    goto_stmt
+
+
 def _build_bma_fsm_edge_body(runtime: _BMARuntime,
                              edge: opcs.OPCSEdge,
                              with_tags: bool) -> List[ast.stmt]:
-    branch_body: List[ast.stmt] = []
-    if edge.commands:
-        branch_body.extend(_emit_bma_commands(
-            edge.commands, _coerce_expr('i'), with_tags=with_tags))
-    if edge.shift:
-        branch_body.append(_q_assign(
-            'i',
-            _q_add('i', _tpl_u64(edge.shift).expr),
-        ))
-    branch_body.append(_q_goto(runtime.state_by_id[edge.target].label_name))
-    return branch_body
+    commands = _emit_bma_commands(
+        edge.commands, _coerce_expr('i'), with_tags=with_tags)
+    shift_stmt = [_q_assign(
+        'i', _q_add('i', _tpl_u64(edge.shift).expr),
+    )] if edge.shift else []
+    goto_stmt = _q_goto(runtime.state_by_id[edge.target].label_name)
+
+    return _tpl_edge_body(
+        meta_const(bool(edge.commands and with_tags)),
+        meta_const(bool(edge.shift)),
+        commands, shift_stmt, goto_stmt,
+    ).stmts
+
+
+@meta.quote
+def _tpl_success_body(has_commands, commands, flush, return_val):
+    if has_commands:
+        commands
+    flush
+    return return_val
 
 
 def _build_bma_eof_success_body(state: _BMARuntimeState,
@@ -810,23 +829,24 @@ def _build_bma_eof_success_body(state: _BMARuntimeState,
                                 with_tags: bool) -> Optional[List[ast.stmt]]:
     """Build the success branch taken when execution reaches EOF."""
     if state.accepting:
-        body: List[ast.stmt] = []
-        if state.accept_commands:
-            body.extend(_emit_bma_commands(
-                state.accept_commands, _coerce_expr('i'), with_tags=with_tags))
-        body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
-        body.append(_q_return(_q_u8(1)))
-        return body
+        commands = _emit_bma_commands(
+            state.accept_commands, _coerce_expr('i'), with_tags=with_tags)
+        flush = _emit_bma_output_flush(runtime.output_registers, with_tags=with_tags)
+        return _tpl_success_body(
+            meta_const(bool(state.accept_commands and with_tags)),
+            commands, flush, _q_u8(1),
+        ).stmts
+
     if not state.eof_accept:
         return None
 
-    body: List[ast.stmt] = []
-    if state.eof_commands:
-        body.extend(_emit_bma_commands(
-            state.eof_commands, _coerce_expr('i'), with_tags=with_tags))
-    body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
-    body.append(_q_return(_q_u8(1)))
-    return body
+    commands = _emit_bma_commands(
+        state.eof_commands, _coerce_expr('i'), with_tags=with_tags)
+    flush = _emit_bma_output_flush(runtime.output_registers, with_tags=with_tags)
+    return _tpl_success_body(
+        meta_const(bool(state.eof_commands and with_tags)),
+        commands, flush, _q_u8(1),
+    ).stmts
 
 
 def _build_bma_fsm_state_body(runtime: _BMARuntime,
@@ -837,13 +857,13 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
         return [_q_return(_q_u8(0))]
 
     if eager_accept and state.accepting:
-        body: List[ast.stmt] = []
-        if state.accept_commands:
-            body.extend(_emit_bma_commands(
-                state.accept_commands, _coerce_expr('i'), with_tags=with_tags))
-        body.extend(_emit_bma_output_flush(runtime.output_registers, with_tags=with_tags))
-        body.append(_q_return(_q_u8(1)))
-        return body
+        commands = _emit_bma_commands(
+            state.accept_commands, _coerce_expr('i'), with_tags=with_tags)
+        flush = _emit_bma_output_flush(runtime.output_registers, with_tags=with_tags)
+        return _tpl_success_body(
+            meta_const(bool(state.accept_commands and with_tags)),
+            commands, flush, _q_u8(1),
+        ).stmts
 
     eof_success = _build_bma_eof_success_body(state, runtime, with_tags=with_tags)
     eof_guard = _raw_if(
@@ -886,23 +906,46 @@ def _build_bma_fsm_state_body(runtime: _BMARuntime,
     ).stmts
 
 
+@meta.quote
+def _tpl_fsm_init(has_commands, has_early_accept,
+                  base_init, commands, accept_commands, flush, early_return):
+    base_init
+    if has_commands:
+        commands
+    if has_early_accept:
+        accept_commands
+        flush
+        early_return
+
+
 def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
                         init_body: List[ast.stmt],
                         with_tags: bool,
                         eager_accept: bool) -> List[ast.stmt]:
     """Lower a TaggedOPCSBMA into one u8-returning goto/FSM runner."""
     runtime = _normalize_bma_runtime(bma)
-    program_init = list(init_body)
-    if runtime.initial_commands:
-        program_init.extend(_emit_bma_commands(
-            runtime.initial_commands, _coerce_expr('i'), with_tags=with_tags))
-    if eager_accept and runtime.initial_accepting:
-        if runtime.initial_accept_commands:
-            program_init.extend(_emit_bma_commands(
-                runtime.initial_accept_commands, _coerce_expr('i'), with_tags=with_tags))
-        program_init.extend(_emit_bma_output_flush(
-            runtime.output_registers, with_tags=with_tags))
-        program_init.append(_q_return(_q_u8(1)))
+
+    has_initial_commands = bool(runtime.initial_commands and with_tags)
+    has_early_accept = bool(eager_accept and runtime.initial_accepting)
+
+    init_commands = _emit_bma_commands(
+        runtime.initial_commands, _coerce_expr('i'), with_tags=with_tags
+    ) if has_initial_commands else []
+
+    accept_commands = _emit_bma_commands(
+        runtime.initial_accept_commands, _coerce_expr('i'), with_tags=with_tags
+    ) if has_early_accept and runtime.initial_accept_commands and with_tags else []
+
+    flush = _emit_bma_output_flush(
+        runtime.output_registers, with_tags=with_tags
+    ) if has_early_accept else []
+
+    program_init_frag = _tpl_fsm_init(
+        meta_const(has_initial_commands),
+        meta_const(has_early_accept),
+        init_body, init_commands, accept_commands, flush,
+        [_q_return(_q_u8(1))] if has_early_accept else [],
+    )
 
     label_blocks = [
         _q_label_block(
@@ -917,11 +960,19 @@ def _build_bma_fsm_body(bma: opcs.TaggedOPCSBMA,
     ]
 
     return _tpl_bma_fsm_program(
-        _body_or_pass(program_init),
+        program_init_frag,
         [_q_goto(runtime.start_label)],
         label_blocks,
         [_q_return(_q_u8(0))],
     ).stmts
+
+
+@meta.quote
+def _tpl_bma_init(has_tags, i_init, reg_inits, slot_inits):
+    i_init
+    if has_tags:
+        reg_inits
+        slot_inits
 
 
 def _build_bma_body(bma: opcs.TaggedOPCSBMA,
@@ -933,24 +984,27 @@ def _build_bma_body(bma: opcs.TaggedOPCSBMA,
     parameter (``ptr[i64]``) and writes tag slot values into it.
     """
     num_slots = len(bma.tag_names) if with_tags else 0
-    init_stmts: List[ast.stmt] = [
-        _tpl_assign_typed('i', u64, _tpl_u64(0)).stmt,
+
+    i_init = _tpl_assign_typed('i', u64, _tpl_u64(0))
+
+    reg_inits = [
+        _tpl_assign_typed(_bma_reg_name(reg_id), i64, _q_i64(-1))
+        for reg_id in range(1, bma.register_count + 1)
+    ] if with_tags else []
+
+    slot_inits = [
+        _q_ptr_assign('out', ast.Constant(slot), _q_i64(-1))
+        for slot in range(num_slots)
     ]
-    if with_tags:
-        for reg_id in range(1, bma.register_count + 1):
-            init_stmts.append(
-                _tpl_assign_typed(
-                    _bma_reg_name(reg_id),
-                    i64,
-                    _q_i64(-1),
-                ).stmt)
-    for slot in range(num_slots):
-        init_stmts.append(
-            _q_ptr_assign('out', ast.Constant(slot), _q_i64(-1)))
+
+    init_frag = _tpl_bma_init(
+        meta_const(with_tags),
+        i_init, reg_inits, slot_inits,
+    )
 
     return _build_bma_fsm_body(
         bma,
-        init_body=init_stmts,
+        init_body=init_frag.stmts,
         with_tags=with_tags,
         eager_accept=eager_accept,
     )

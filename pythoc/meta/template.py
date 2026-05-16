@@ -103,12 +103,70 @@ def _expand_splices_in_node(node):
     for field_name in ('body', 'orelse', 'finalbody'):
         body = getattr(node, field_name, None)
         if isinstance(body, list) and body:
+
             setattr(node, field_name, _expand_splices(body))
     handlers = getattr(node, 'handlers', None)
     if isinstance(handlers, list):
         for handler in handlers:
             if hasattr(handler, 'body'):
                 handler.body = _expand_splices(handler.body)
+
+
+# ---------------------------------------------------------------------------
+# Constant-condition if-folding
+# ---------------------------------------------------------------------------
+# After template instantiation, ``if <const(True)>:`` / ``if <const(False)>:``
+# branches are statically resolved at the AST level:
+#   * ``if True:  body`` → inline *body*
+#   * ``if False: body`` → drop entirely
+#   * ``if True: body else: orelse`` → inline *body*
+#   * ``if False: body else: orelse`` → inline *orelse*
+# This mirrors what the PythoC compiler does at the visit stage but performs
+# it eagerly so that downstream consumers (tests, further templates) see a
+# clean AST without dead branches.
+
+def _is_const_true(test):
+    """Check if an if-test is a compile-time True (Constant(True) or not Constant(False))."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and isinstance(test.operand, ast.Constant)):
+        return not test.operand.value
+    return None  # not a constant
+
+
+def _fold_const_if(stmts):
+    """Fold ``if True``/``if False`` in a statement list (recursive).
+
+    Also handles ``if not True:``/``if not False:`` patterns.
+    """
+    result = []
+    for stmt in stmts:
+        if isinstance(stmt, ast.If):
+            truth = _is_const_true(stmt.test)
+            if truth is True:
+                result.extend(_fold_const_if(stmt.body))
+                continue
+            elif truth is False:
+                if stmt.orelse:
+                    result.extend(_fold_const_if(stmt.orelse))
+                continue
+        _fold_const_if_in_node(stmt)
+        result.append(stmt)
+    return result
+
+
+def _fold_const_if_in_node(node):
+    """Recursively fold constant-condition ifs in nested stmt-list fields."""
+    for field_name in ('body', 'orelse', 'finalbody'):
+        body = getattr(node, field_name, None)
+        if isinstance(body, list) and body:
+            setattr(node, field_name, _fold_const_if(body))
+    handlers = getattr(node, 'handlers', None)
+    if isinstance(handlers, list):
+        for handler in handlers:
+            if hasattr(handler, 'body'):
+                handler.body = _fold_const_if(handler.body)
 
 
 # ---------------------------------------------------------------------------
@@ -211,13 +269,19 @@ def _coerce_to_ast(value, extra_globals, position='expr'):
 
     if position == 'splice':
         if isinstance(value, list):
+            flat = []
             for item in value:
-                if not isinstance(item, ast.stmt):
+                if isinstance(item, Fragment):
+                    flat.extend(item.stmts)
+                elif isinstance(item, ast.stmt):
+                    flat.append(item)
+                else:
                     raise TypeError(
-                        "In splice position, list elements must be ast.stmt, "
-                        "got {}".format(type(item).__name__)
+                        "In splice position, list elements must be "
+                        "ast.stmt or Fragment, got {}".format(
+                            type(item).__name__)
                     )
-            return _SpliceMarker(stmts=list(value))
+            return _SpliceMarker(stmts=flat)
 
         if isinstance(value, Fragment):
             return _SpliceMarker(stmts=list(value.stmts))
@@ -398,6 +462,7 @@ class MetaTemplate:
             for stmt in self.template_body
         ]
         result_body = _expand_splices(result_body)
+        result_body = _fold_const_if(result_body)
 
         # 3. Fix locations
         for node in result_body:

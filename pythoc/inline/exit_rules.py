@@ -13,7 +13,7 @@ import copy
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
-from ..meta.template import quote
+from ..meta.template import quote, const as meta_const
 
 if TYPE_CHECKING:
     from .transformers import InlineContext
@@ -25,7 +25,41 @@ if TYPE_CHECKING:
 # Each template captures exactly one output shape.  The templates reference
 # compiler intrinsics via the ``__pc_intrinsics`` namespace object which is
 # always available in generated code.
+#
+# Where possible we use a single unified template with ``if True``/``if False``
+# guards so that the PythoC compiler (which eliminates constant-condition
+# branches at the AST-visit stage) produces exactly the right code without
+# any manual list-splicing on the Python side.
 
+@quote
+def _return_exit_template(has_value, has_label, result_var, value, label):
+    # Unified return-exit template.
+    # has_value / has_label are meta.const(True/False); the PythoC compiler
+    # eliminates the dead ``if False:`` branches at zero cost.
+    if has_value:
+        result_var = __pc_intrinsics.move(value)  # noqa: F821
+    if has_label:
+        __pc_intrinsics.goto_end(label)  # noqa: F821
+
+
+@quote
+def _yield_exit_template(has_label, no_label, has_value,
+                         label_name, target, value, loop_body):
+    # Unified yield-exit template.
+    # has_label/no_label/has_value are const(True/False).
+    # _fold_const_if ensures only the live branch survives.
+    if has_label:
+        with __pc_intrinsics.label(label_name):  # noqa: F821
+            if has_value:
+                target = __pc_intrinsics.move(value)  # noqa: F821
+            loop_body
+    if no_label:
+        if has_value:
+            target = __pc_intrinsics.move(value)  # noqa: F821
+        loop_body
+
+
+# Legacy single-purpose templates kept for other callers
 @quote
 def _return_assign_and_goto(result_var, value, label):
     result_var = __pc_intrinsics.move(value)  # noqa: F821
@@ -174,29 +208,37 @@ class ReturnExitRule(ExitPointRule):
         """
         return expr  -->  result_var = move(expr); goto_end("_inline_exit_{id}")
 
+        Uses a single unified template with ``if True``/``if False`` guards.
+        The PythoC compiler eliminates dead branches at zero cost.
+
         Note: We wrap the return value in move() to properly transfer
-        ownership of linear types. This is necessary because the generated
-        assignment `result_var = prf` would otherwise be rejected by the
-        linear type checker as an implicit copy.
+        ownership of linear types.
         """
-        if exit_node.value and self.result_var:
-            renamed_value = self._rename(exit_node.value, context)
-            if self.exit_label:
-                return _return_assign_and_goto(
-                    ast.Name(id=self.result_var, ctx=ast.Store()),
-                    renamed_value,
-                    ast.Constant(value=self.exit_label),
-                ).stmts
-            else:
-                return [_yield_assign(
-                    ast.Name(id=self.result_var, ctx=ast.Store()),
-                    renamed_value,
-                ).stmt]
-        elif self.exit_label:
-            return [_return_goto_only(
-                ast.Constant(value=self.exit_label),
-            ).stmt]
-        return []
+        has_value = bool(exit_node.value and self.result_var)
+        has_label = bool(self.exit_label)
+
+        if not has_value and not has_label:
+            return []
+
+        # Build arguments — unused paths get dummy values that will be
+        # dead-code-eliminated by the ``if False:`` guard.
+        result_var = (
+            ast.Name(id=self.result_var, ctx=ast.Store())
+            if has_value else "_unused"
+        )
+        value = (
+            self._rename(exit_node.value, context)
+            if has_value else ast.Constant(value=0)
+        )
+        label = (
+            ast.Constant(value=self.exit_label)
+            if has_label else ast.Constant(value="_unused")
+        )
+
+        return _return_exit_template(
+            meta_const(has_value), meta_const(has_label),
+            result_var, value, label,
+        ).stmts
 
 
 # ---------------------------------------------------------------------------
@@ -276,22 +318,11 @@ class YieldExitRule(ExitPointRule):
         context: 'InlineContext'
     ) -> List[ast.stmt]:
         """
-        yield expr  -->  with label("_yield_{id}"): loop_var = move(expr); <loop_body>
+        yield expr → single template call with const guards.
 
-        The move() wrapper is essential for linear types because:
-        - yield is semantically a continuation call: yield x <==> continuation(x)
-        - Function calls transfer ownership of linear arguments
-        - But the AST transformation converts this to an assignment
-        - Wrapping in move() restores the ownership transfer semantic
-
-        For non-linear types, move() is a no-op.
-
-        For tuple unpacking:
-            yield a, b  -->  x, y = move((a, b)); <loop_body>
-
-        When loop_body has break/continue, transforms them to scoped goto:
-            break    --> goto_begin("_for_after_else_{id}")
-            continue --> goto_end("_yield_{id}")
+        All branching (tuple/simple target, with/without label, with/without
+        type conversion) is handled by the unified ``_yield_exit_template``;
+        ``_fold_const_if`` eliminates dead branches at instantiation time.
         """
         from ..utils import get_next_id
 
@@ -301,71 +332,50 @@ class YieldExitRule(ExitPointRule):
         elif isinstance(exit_node, ast.Yield):
             yield_val = exit_node.value
         else:
-            # Not a yield - return as is
             return [exit_node]
 
-        # Generate unique label for this yield scope
-        yield_label = f"_yield_{get_next_id()}" if self._body_has_break_or_continue else None
+        has_value = bool(yield_val)
+        yield_label = (
+            f"_yield_{get_next_id()}"
+            if self._body_has_break_or_continue else None
+        )
+        has_label = yield_label is not None
 
-        # Build the body statements (assignment + loop body)
-        inner_stmts = []
-
-        # Assignment: loop_var = yield_value (with type conversion if needed)
-        if yield_val:
-            renamed_value = self._rename(yield_val, context)
-
-            # Apply type conversion if we have type annotation and value is constant
-            if self.return_type_annotation and isinstance(renamed_value, ast.Constant):
-                renamed_value = _type_convert(
-                    copy.deepcopy(self.return_type_annotation),
-                    renamed_value,
+        # Prepare value (apply type conversion if needed, before template)
+        if has_value:
+            value = self._rename(yield_val, context)
+            if self.return_type_annotation and isinstance(value, ast.Constant):
+                value = _type_convert(
+                    copy.deepcopy(self.return_type_annotation), value,
                 ).expr
+        else:
+            value = ast.Constant(value=0)  # dummy, dead-code eliminated
 
-            # Handle tuple unpacking vs simple assignment
-            if isinstance(self.loop_var, ast.Tuple):
-                inner_stmts.append(
-                    _yield_tuple_assign(
-                        copy.deepcopy(self.loop_var),
-                        renamed_value,
-                    ).stmt
-                )
-            else:
-                loop_var_name = self.loop_var.id if isinstance(self.loop_var, ast.Name) else str(self.loop_var)
-                inner_stmts.append(
-                    _yield_assign(
-                        ast.Name(id=loop_var_name, ctx=ast.Store()),
-                        renamed_value,
-                    ).stmt
-                )
+        # Prepare target — works for both Name and Tuple (store position)
+        target = copy.deepcopy(self.loop_var) if has_value else "_unused"
 
-        # Insert loop body (deep copy to avoid mutation)
+        # Prepare loop body (transform break/continue if needed)
         if self._body_has_break_or_continue and self.after_else_label:
-            # Transform break/continue in loop body to scoped goto
-            for stmt in self.loop_body:
-                transformed = _transform_break_continue_scoped(
-                    copy.deepcopy(stmt),
-                    self.after_else_label,
-                    yield_label
-                )
-                inner_stmts.append(transformed)
+            loop_body = [
+                _transform_break_continue_scoped(
+                    copy.deepcopy(stmt), self.after_else_label, yield_label)
+                for stmt in self.loop_body
+            ]
         else:
-            for stmt in self.loop_body:
-                inner_stmts.append(copy.deepcopy(stmt))
+            loop_body = [copy.deepcopy(s) for s in self.loop_body]
 
-        # Wrap in scoped label if we have break/continue
-        if yield_label:
-            body_stmts = _yield_labeled_block(
-                ast.Constant(value=yield_label),
-                inner_stmts,
-            ).stmts
-        else:
-            body_stmts = inner_stmts
+        # Single template call
+        result = _yield_exit_template(
+            meta_const(has_label), meta_const(not has_label),
+            meta_const(has_value),
+            ast.Constant(value=yield_label or "_unused"),
+            target, value, loop_body,
+        ).stmts
 
-        # Copy location from exit_node and fix missing locations
-        for stmt in body_stmts:
+        for stmt in result:
             ast.copy_location(stmt, exit_node)
             ast.fix_missing_locations(stmt)
-        return body_stmts
+        return result
 
 
 # ---------------------------------------------------------------------------

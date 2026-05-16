@@ -31,7 +31,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from ..meta.template import quote
+from ..meta.template import quote, const as meta_const
 
 
 # ---------------------------------------------------------------------------
@@ -84,50 +84,36 @@ class MetaInlineRequest:
 
 # -- Per-param binding templates --
 
-# target: annotation = move(value)
+# Unified: has_annotation controls whether annotation is emitted.
+# _fold_const_if eliminates the dead branch at instantiation.
 @quote
-def _annotated_binding(target, annotation, value):
-    target: annotation = __pc_intrinsics.move(value)  # noqa: F821
-
-# target = move(value)
-@quote
-def _plain_binding(target, value):
-    target = __pc_intrinsics.move(value)  # noqa: F821
+def _param_binding(has_annotation, target, annotation, value):
+    if has_annotation:
+        target: annotation = __pc_intrinsics.move(value)  # noqa: F821
+    if not has_annotation:
+        target = __pc_intrinsics.move(value)  # noqa: F821
 
 # converter(value) -- type-convert a constant arg
 @quote
 def _type_convert(converter, value):
     return converter(value)
 
-# -- Frame templates (one per exit-rule variant) --
-
-# Return with typed result: bindings + result decl + scoped-label body
+# -- Frame templates --
+# Unified: all branches encoded as const guards.
+# _fold_const_if eliminates dead branches at instantiation.
 @quote
-def _return_typed_frame(bindings, result_var, result_type, label_name, body):
+def _inline_frame(has_label, has_result_decl, has_decls,
+                  bindings, result_var, result_type, label_name, decls, body):
     bindings
-    result_var: result_type
-    with __pc_intrinsics.label(label_name):  # noqa: F821
+    if has_result_decl:
+        result_var: result_type
+    if has_decls:
+        decls
+    if has_label:
+        with __pc_intrinsics.label(label_name):  # noqa: F821
+            body
+    if not has_label:
         body
-
-# Return void/untyped: bindings + scoped-label body (no result decl)
-@quote
-def _return_void_frame(bindings, label_name, body):
-    bindings
-    with __pc_intrinsics.label(label_name):  # noqa: F821
-        body
-
-# Passthrough (no return wrapping, no loop-var decls)
-@quote
-def _passthrough_frame(bindings, body):
-    bindings
-    body
-
-# Yield with loop-var declarations prepended
-@quote
-def _yield_frame(bindings, decls, body):
-    bindings
-    decls
-    body
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +150,12 @@ def _build_rename_map(local_vars, param_vars, captured_vars, inline_id):
 
 
 def _build_param_bindings(callee_params, call_args, rename_map, inline_id):
-    """Build parameter binding statements via per-param templates.
+    """Build parameter binding statements via unified template.
 
-    Returns list[ast.stmt].
+    Each param is a single _param_binding call with has_annotation as
+    const guard. Returns list of Fragments (auto-spliced by consumers).
     """
-    stmts = []
+    frags = []
     for i, param in enumerate(callee_params):
         param_name = param.arg
         renamed = rename_map.get(param_name, param_name)
@@ -187,15 +174,15 @@ def _build_param_bindings(callee_params, call_args, rename_map, inline_id):
             ).expr
 
         target = ast.Name(id=renamed, ctx=ast.Store())
+        has_annotation = bool(param.annotation)
 
-        if param.annotation:
-            stmt = _annotated_binding(
-                target, copy.deepcopy(param.annotation), arg_value,
-            ).stmt
-        else:
-            stmt = _plain_binding(target, arg_value).stmt
-        stmts.append(stmt)
-    return stmts
+        frags.append(_param_binding(
+            meta_const(has_annotation),
+            target,
+            copy.deepcopy(param.annotation) if has_annotation else ast.Constant(value=0),
+            arg_value,
+        ))
+    return frags
 
 
 def _transform_body(callee_body, exit_rule, rename_map):
@@ -339,11 +326,12 @@ def expand_inline(request):
     rename_map = _build_rename_map(
         local_vars, param_vars, captured_vars, inline_id)
 
-    # --- Build param bindings ---
-    binding_stmts = _build_param_bindings(
+    # --- Build param bindings (list[Fragment]) ---
+    binding_frags = _build_param_bindings(
         callee_params, request.call_args, rename_map, inline_id)
 
     # --- Set exit label BEFORE body transform so goto_end nodes see it ---
+    exit_label = None
     if isinstance(request.exit_rule, ReturnExitRule):
         exit_label = "_inline_exit_{}".format(inline_id)
         request.exit_rule.exit_label = exit_label
@@ -351,56 +339,35 @@ def expand_inline(request):
     # --- Transform body (rename + exit-rule) ---
     body_stmts = _transform_body(callee_body, request.exit_rule, rename_map)
 
-    # --- Pick frame template and instantiate in one shot ---
-    if isinstance(request.exit_rule, ReturnExitRule):
-        # Read result_var from the single source of truth: the exit rule
-        result_var = request.exit_rule.result_var
-        result_type = _get_result_type(callee_ast)
+    # --- Compute frame parameters ---
+    has_label = exit_label is not None
+    result_var = getattr(request.exit_rule, 'result_var', None)
+    result_type = _get_result_type(callee_ast) if has_label else None
+    has_result_decl = bool(result_type and result_var)
 
-        if result_type and result_var:
-            # Return with typed result
-            frame = _return_typed_frame(
-                binding_stmts,
-                ast.Name(id=result_var, ctx=ast.Store()),
-                copy.deepcopy(result_type),
-                ast.Constant(value=exit_label),
-                body_stmts,
-            )
-        else:
-            # Return void / untyped
-            frame = _return_void_frame(
-                binding_stmts,
-                ast.Constant(value=exit_label),
-                body_stmts,
-            )
-    elif isinstance(request.exit_rule, YieldExitRule):
-        # Yield: build loop-var declarations if type annotation exists
+    decl_stmts = []
+    if isinstance(request.exit_rule, YieldExitRule):
         exit_rule = request.exit_rule
-        decl_stmts = []
         if exit_rule.return_type_annotation:
             decl_stmts = _build_loop_var_declarations(
                 exit_rule.loop_var,
                 exit_rule.return_type_annotation,
                 request.call_site,
             )
+    has_decls = bool(decl_stmts)
 
-        if decl_stmts:
-            frame = _yield_frame(
-                binding_stmts,
-                decl_stmts,
-                body_stmts,
-            )
-        else:
-            frame = _passthrough_frame(
-                binding_stmts,
-                body_stmts,
-            )
-    else:
-        # Passthrough (other exit rules)
-        frame = _passthrough_frame(
-            binding_stmts,
-            body_stmts,
-        )
+    # --- Single unified frame template call ---
+    frame = _inline_frame(
+        meta_const(has_label),
+        meta_const(has_result_decl),
+        meta_const(has_decls),
+        binding_frags,
+        ast.Name(id=result_var, ctx=ast.Store()) if has_result_decl else "_unused",
+        copy.deepcopy(result_type) if has_result_decl else ast.Constant(value=0),
+        ast.Constant(value=exit_label or "_unused"),
+        decl_stmts,
+        body_stmts,
+    )
 
     result_stmts = frame.stmts
 
