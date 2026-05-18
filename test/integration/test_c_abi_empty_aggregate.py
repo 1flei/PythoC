@@ -32,13 +32,6 @@ import re
 import sys
 import unittest
 
-# This test asserts on the emitted .ll IR text, so it has to opt in to
-# IR-file emission (default: off, to avoid filesystem churn).  The
-# config flip must happen before importing pythoc's compile machinery
-# so that the decorator's flush path observes it.
-from pythoc import config as _pc_config
-_pc_config.save_ir = True
-
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(os.path.dirname(_TEST_DIR))
 if _REPO_ROOT not in sys.path:
@@ -77,20 +70,19 @@ def _empty_arg_driver() -> i32:
     return r1 + r2 + r3                # 42 + 42 + 33 = 117
 
 
-def _find_ir_file_for(wrapper) -> str:
-    """Return the path of the ``.ll`` file produced for ``wrapper``.
+def _ir_text_for(wrapper) -> str:
+    """Return the optimised LLVM IR text for ``wrapper``'s group.
 
-    We derive it from ``wrapper._so_file`` by swapping the shared-lib
-    extension for ``.ll``. Using the ``.so`` path (rather than reading
-    from the in-memory module) means the check is robust even when the
-    build cache decides to skip re-emitting -- the on-disk ``.ll`` has
-    to exist whenever the ``.so`` exists.
+    We ask the output manager for the IR, which will materialise it
+    in-memory if the on-disk artifact was served from cache.  Going
+    through the on-disk ``.ll`` would be brittle: on a cache hit we
+    deliberately leave the ``.ll`` absent because rewriting it would
+    bump the ``.o`` mtime and force a relink of an already-mapped
+    shared library (fatal on Windows).
     """
-    so_path = wrapper._so_file
-    base, _ext = os.path.splitext(so_path)
-    ll_path = base + ".ll"
-    assert os.path.exists(ll_path), f"expected IR file missing: {ll_path}"
-    return ll_path
+    from pythoc.build.output_manager import get_output_manager
+
+    return get_output_manager().get_ir_text(wrapper._group_key)
 
 
 def _extract_define_header(ir_text: str, func_name: str) -> str | None:
@@ -110,9 +102,7 @@ class TestEmptyAggregateArgumentABI(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.result = _empty_arg_driver()
-        cls.ll_path = _find_ir_file_for(_empty_arg_driver)
-        with open(cls.ll_path, "r") as f:
-            cls.ir_text = f.read()
+        cls.ir_text = _ir_text_for(_empty_arg_driver)
 
     def test_runtime_result_is_correct(self):
         """Empty-struct arguments must not corrupt argument order."""

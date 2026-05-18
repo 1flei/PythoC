@@ -353,6 +353,85 @@ class OutputManager:
             var_arg=func_info.has_llvm_varargs
         )
     
+    def get_ir_text(self, group_key):
+        """Return the (optimised) LLVM IR text for *group_key*.
+
+        Intended for tests and tooling that want to inspect the
+        emitted IR without depending on the on-disk ``.ll``.  The
+        ``.ll`` is a pure debug artefact: when a group's ``.o`` is
+        served from cache (cache hit) we deliberately do *not* rewrite
+        it, because doing so bumps the ``.o`` mtime and forces a
+        relink of the dependent shared library -- on Windows that
+        fails with ``EACCES`` whenever the DLL is already mapped into
+        the running process.
+
+        This method instead materialises the IR purely in memory by
+        replaying the cached compilation callbacks against a fresh
+        ``LLVMCompiler``.  ``flush_all()`` and the on-disk ``.o`` are
+        left untouched.
+
+        Returns:
+            The optimised IR text as a string.
+
+        Raises:
+            KeyError: if no group with this key has been registered.
+        """
+        group = self._all_groups.get(group_key)
+        if group is None:
+            raise KeyError(
+                f"no group registered for key {group_key!r}; "
+                f"call the @compile-decorated function first"
+            )
+
+        compiler = group.get('compiler')
+        if compiler is None:
+            raise KeyError(
+                f"group {group_key!r} has no compiler attached"
+            )
+
+        # If the live compiler module already carries function bodies
+        # (cache miss path was taken during a prior flush), we can
+        # serve directly from it.
+        existing_ir = compiler.get_ir()
+        if 'define ' in existing_ir:
+            return existing_ir
+
+        # Cache-hit path: callbacks are parked in _cached_compilations.
+        # Replay them against a throwaway compiler that shares the
+        # same source_file/user_globals so that imports resolve
+        # consistently.
+        cached = self._cached_compilations.get(group_key, [])
+        if not cached:
+            raise KeyError(
+                f"group {group_key!r} has neither in-memory IR nor "
+                f"cached compilation callbacks"
+            )
+
+        from ..compiler import LLVMCompiler
+        scratch = LLVMCompiler(user_globals=getattr(compiler, 'user_globals', None))
+
+        # Phase 1: forward declare all functions on the scratch
+        # compiler so that references between them resolve.
+        for _callback, func_info in cached:
+            self._forward_declare_function(scratch, func_info)
+
+        # Phase 2: replay each compile callback against the scratch
+        # compiler. The callback signature is ``(compiler) -> None``,
+        # so passing the throwaway compiler keeps disk state
+        # untouched.
+        for callback, _func_info in cached:
+            callback(scratch)
+
+        if not scratch.verify_module():
+            raise RuntimeError(
+                f"in-memory IR materialisation failed verification "
+                f"for group {group_key!r}"
+            )
+
+        from ..config import config
+        scratch.optimize_module(optimization_level=int(config.opt_level))
+        return scratch.get_ir()
+
     def _compile_pending_for_group(self, group_key, group):
         """
         Compile all pending functions for a group using two-pass approach.
@@ -508,24 +587,40 @@ class OutputManager:
                 # see the .o written by the winner and skip compilation.
                 if source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
                     if self._cached_object_covers_pending_symbols(group_key, group):
-                        # If the user has opted into IR persistence but
-                        # the .ll companion is missing (e.g. the .o was
-                        # produced by an earlier run with save_ir=False),
-                        # treat the cache as stale for this group and
-                        # fall through to a full recompile so the .ll
-                        # gets written alongside the .o.
+                        # The cached .o is authoritative.  We must NOT
+                        # rewrite it on a hit, because doing so bumps
+                        # its mtime and forces a relink of the
+                        # dependent .so/.dll -- on Windows that fails
+                        # with EACCES whenever the DLL is already
+                        # mapped into the running process (e.g. a
+                        # second compiled function in the same group
+                        # is being looked up).  The .ll is purely a
+                        # debug artefact: if save_ir was off when the
+                        # .o was produced, we accept that the .ll is
+                        # missing for this group rather than perturb
+                        # already-loaded native state.  Users who need
+                        # the .ll for an existing build should remove
+                        # the corresponding .o to trigger a rebuild.
                         from ..config import config
                         ir_file = group.get('ir_file')
-                        if not (config.save_ir and ir_file
+                        if (config.save_ir and ir_file
                                 and not os.path.exists(ir_file)):
-                            self._restore_deps_from_cache(group_key, group)
-                            self._flushed_groups.add(group_key)
+                            from ..logger import logger
+                            logger.debug(
+                                f"save_ir=True but {ir_file} is absent "
+                                f"on cache hit; keeping cached .o "
+                                f"untouched. Remove {obj_file} to "
+                                f"force a rebuild that writes the .ll."
+                            )
 
-                            if group_key in self._pending_compilations:
-                                self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
-                            group['wrappers'] = []
+                        self._restore_deps_from_cache(group_key, group)
+                        self._flushed_groups.add(group_key)
 
-                            continue
+                        if group_key in self._pending_compilations:
+                            self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
+                        group['wrappers'] = []
+
+                        continue
 
                 # Cache miss -- this process is the first to compile this .o.
                 try:

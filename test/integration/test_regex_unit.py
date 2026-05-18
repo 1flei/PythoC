@@ -14,12 +14,6 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-# This file's regex codegen tests inspect emitted .ll IR text directly,
-# so we opt in to IR-file emission (default: off).  The flip must
-# happen before any @compile-decorated function flushes its IR.
-from pythoc import config as _pc_config
-_pc_config.save_ir = True
-
 from pythoc.regex.parse import (
     parse, ParseError,
     Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor, Tag,
@@ -931,36 +925,26 @@ class TestOPCSBMAArtifacts(unittest.TestCase):
 
     def test_literal_bma_codegen_all_entrypoints_lower_to_fsm_blocks(self):
         import re as stdlib_re
+        # Read the optimised LLVM IR straight out of the output
+        # manager.  Going through the on-disk .ll would be brittle:
+        # by the time this test runs, earlier tests have already
+        # caused flush_all() to mark the needle group as flushed, and
+        # on cache hits we deliberately leave the .ll absent (writing
+        # it would bump the .o mtime and force a relink of any DLL
+        # already mapped into the process -- fatal on Windows).
         CompiledRegex('needle')
+
         from pythoc.build.output_manager import get_output_manager
-        get_output_manager().flush_all()
+        from pythoc.utils.path_utils import sanitize_filename
+
+        output_manager = get_output_manager()
+        output_manager.flush_all()
+
         digest = _pattern_digest('needle')
-        candidate_paths = [
-            os.path.abspath(os.path.join(
-                os.getcwd(),
-                'build/pythoc/regex',
-                'codegen.meta.{}.ll'.format(digest),
-            )),
-            os.path.abspath(os.path.join(
-                os.getcwd(),
-                'build/external',
-                'codegen.meta.{}.ll'.format(digest),
-            )),
-            os.path.abspath(os.path.join(
-                os.path.dirname(__file__),
-                '../../build/pythoc/regex',
-                'codegen.meta.{}.ll'.format(digest),
-            )),
-            os.path.abspath(os.path.join(
-                os.path.dirname(__file__),
-                '../../build/external',
-                'codegen.meta.{}.ll'.format(digest),
-            )),
-        ]
-        ir_path = next((path for path in candidate_paths if os.path.exists(path)), candidate_paths[0])
-        self.assertTrue(os.path.exists(ir_path))
-        with open(ir_path, 'r', encoding='utf-8') as f:
-            ir = f.read()
+        codegen_path = os.path.realpath(os.path.join(
+            os.path.dirname(__file__), '../../pythoc/regex/codegen.py'))
+        group_key = (codegen_path, 'meta', sanitize_filename(digest), None)
+        ir = output_manager.get_ir_text(group_key)
         self.assertRegex(ir, stdlib_re.compile(
             r'define\b.*\bi8 @regex_match_'))
         self.assertRegex(ir, stdlib_re.compile(
