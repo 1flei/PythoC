@@ -44,6 +44,7 @@ from .utils.build_utils import (
     export_c_headers,
 )
 from .cimport import cimport, cimport_header, cimport_source
+from .config import config
 
 # Import libc module for convenient access
 from . import libc
@@ -121,6 +122,9 @@ __all__ = [
 
     # PC literal carrier
     'pc_literal',
+
+    # Centralised runtime configuration
+    'config',
 
     'compile_to_executable',
     'compile_to_static_library',

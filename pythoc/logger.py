@@ -43,7 +43,6 @@ Error handling:
 """
 
 import sys
-import os
 import inspect
 import ast
 from enum import IntEnum
@@ -61,28 +60,35 @@ class Logger:
     """Simple logger for PC compiler"""
     
     def __init__(self, level: LogLevel = LogLevel.WARNING):
-        self.level = self._get_level_from_env(level)
+        self._default_level = level
+        self.reload_config()
         self.enabled = True
         self.current_source_file = None  # Track current source file being compiled
         self.current_line_offset = 0  # Line offset for AST nodes (function start line - 1)
-        # Default: exit on error (production mode). Set to True for tests that expect exceptions.
-        self.raise_on_error = os.environ.get('PC_RAISE_ON_ERROR') == '1'
-        # Module filtering for debug messages
-        self._enabled_modules, self._excluded_modules = self._parse_modules_from_env()
     
-    def _get_level_from_env(self, default_level: LogLevel) -> LogLevel:
-        """Get log level from environment variable PC_LOG_LEVEL or use default"""
-        env_level = int(os.environ.get('PC_LOG_LEVEL', '1'))
-        return env_level
+    def reload_config(self):
+        """Re-sample knobs from pythoc.config.
+        
+        Useful after a programmatic change like
+        ``config.log_level = LogLevel.DEBUG`` so that the in-memory
+        Logger picks up the new values without restarting the process.
+        """
+        from .config import config
+        self.level = int(config.log_level) if config.log_level is not None \
+            else self._default_level
+        self.raise_on_error = bool(config.raise_on_error)
+        self._enabled_modules, self._excluded_modules = \
+            self._parse_modules(config.log_modules)
     
-    def _parse_modules_from_env(self) -> tuple:
-        """Parse PC_LOG_MODULES environment variable.
+    @staticmethod
+    def _parse_modules(env_modules: str) -> tuple:
+        """Parse the log_modules config knob value.
         
         Returns:
             (enabled_modules, excluded_modules): Lists of module prefixes.
             If enabled_modules is None, all modules are enabled (unless excluded).
         """
-        env_modules = os.environ.get('PC_LOG_MODULES', '').strip()
+        env_modules = (env_modules or '').strip()
         if not env_modules or env_modules.lower() == 'all':
             return None, []  # All enabled, none excluded
         

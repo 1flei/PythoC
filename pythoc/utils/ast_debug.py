@@ -71,9 +71,10 @@ class ASTDebugger:
     """
     
     def __init__(self):
-        self.enabled = self._check_enabled()
-        self.export_format = os.environ.get('PC_DEBUG_AST_FORMAT', 'all')
-        self.show_diff = os.environ.get('PC_DEBUG_AST_DIFF', '0') == '1'
+        from ..config import config
+        self.enabled = bool(config.debug_ast)
+        self.export_format = config.debug_ast_format
+        self.show_diff = bool(config.debug_ast_diff)
         self.snapshots: List[ASTSnapshot] = []
         self.output_dir = None
         
@@ -81,8 +82,9 @@ class ASTDebugger:
             self._setup_output_dir()
     
     def _check_enabled(self) -> bool:
-        """Check if AST debugging is enabled via environment variable"""
-        return os.environ.get('PC_DEBUG_AST', '0') == '1'
+        """Check if AST debugging is enabled."""
+        from ..config import config
+        return bool(config.debug_ast)
     
     def _setup_output_dir(self):
         """Setup output directory for debug files"""
@@ -316,14 +318,16 @@ def compare_ast(node1: Union[ast.AST, List[ast.stmt]],
 
 
 def enable_ast_debug():
-    """Programmatically enable AST debugging"""
-    os.environ['PC_DEBUG_AST'] = '1'
+    """Programmatically enable AST debugging."""
+    from ..config import config
+    config.debug_ast = True
     global ast_debugger
     ast_debugger = ASTDebugger()
 
 
 def disable_ast_debug():
-    """Programmatically disable AST debugging"""
-    os.environ['PC_DEBUG_AST'] = '0'
+    """Programmatically disable AST debugging."""
+    from ..config import config
+    config.debug_ast = False
     global ast_debugger
     ast_debugger.enabled = False

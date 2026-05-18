@@ -14,6 +14,12 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
+# This file's regex codegen tests inspect emitted .ll IR text directly,
+# so we opt in to IR-file emission (default: off).  The flip must
+# happen before any @compile-decorated function flushes its IR.
+from pythoc import config as _pc_config
+_pc_config.save_ir = True
+
 from pythoc.regex.parse import (
     parse, ParseError,
     Literal, Dot, CharClass, Concat, Alternate, Repeat, Group, Anchor, Tag,

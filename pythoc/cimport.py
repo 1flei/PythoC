@@ -48,13 +48,13 @@ _VALID_CIMPORT_BACKENDS = {"auto", "clang", "native"}
 
 def _normalize_cimport_backend(backend: Optional[str]) -> str:
     """Resolve backend request from API/env into auto|clang|native."""
-    requested = backend or os.environ.get("PC_CIMPORT_BACKEND")
+    from .config import config
+    requested = backend or config.cimport_backend
 
-    # Compatibility knob for experiments: PC_ENABLE_CLANG_CIMPORT=1 forces clang
-    # unless PC_CIMPORT_BACKEND or the explicit API argument says otherwise.
+    # Compatibility knob for experiments: enable_clang_cimport=True forces clang
+    # unless an explicit backend is requested via API or config.
     if requested is None:
-        legacy_enable = os.environ.get("PC_ENABLE_CLANG_CIMPORT")
-        if legacy_enable and legacy_enable.lower() not in {"0", "false", "no", "off"}:
+        if config.enable_clang_cimport:
             requested = "clang"
 
     requested = (requested or "auto").strip().lower()
@@ -126,8 +126,8 @@ def _generate_bindings_native(
         raise RuntimeError(f"Failed to generate native bindings for {path}, error code: {result}")
 
 
-def _env_list(name: str) -> List[str]:
-    value = os.environ.get(name)
+def _env_list(value: Optional[str]) -> List[str]:
+    """Shell-tokenise a whitespace-separated config string."""
     if not value:
         return []
     return shlex.split(value)
@@ -146,8 +146,9 @@ def _generate_bindings_clang(
     clang_args: Optional[List[str]],
 ) -> None:
     from .cimport_clang import generate_bindings_to_file
+    from .config import config
 
-    effective_clang_args = _env_list("PC_CIMPORT_CLANG_ARGS")
+    effective_clang_args = _env_list(config.cimport_clang_args)
     if clang_args:
         effective_clang_args.extend(clang_args)
 
@@ -158,8 +159,8 @@ def _generate_bindings_clang(
         cflags=cflags,
         include_dirs=include_dirs,
         defines=defines,
-        target=target or os.environ.get("PC_CIMPORT_TARGET"),
-        sysroot=sysroot or os.environ.get("PC_CIMPORT_SYSROOT"),
+        target=target or config.cimport_target,
+        sysroot=sysroot or config.cimport_sysroot,
         clang_args=effective_clang_args,
     )
 

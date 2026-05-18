@@ -508,14 +508,24 @@ class OutputManager:
                 # see the .o written by the winner and skip compilation.
                 if source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
                     if self._cached_object_covers_pending_symbols(group_key, group):
-                        self._restore_deps_from_cache(group_key, group)
-                        self._flushed_groups.add(group_key)
+                        # If the user has opted into IR persistence but
+                        # the .ll companion is missing (e.g. the .o was
+                        # produced by an earlier run with save_ir=False),
+                        # treat the cache as stale for this group and
+                        # fall through to a full recompile so the .ll
+                        # gets written alongside the .o.
+                        from ..config import config
+                        ir_file = group.get('ir_file')
+                        if not (config.save_ir and ir_file
+                                and not os.path.exists(ir_file)):
+                            self._restore_deps_from_cache(group_key, group)
+                            self._flushed_groups.add(group_key)
 
-                        if group_key in self._pending_compilations:
-                            self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
-                        group['wrappers'] = []
+                            if group_key in self._pending_compilations:
+                                self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
+                            group['wrappers'] = []
 
-                        continue
+                            continue
 
                 # Cache miss -- this process is the first to compile this .o.
                 try:
@@ -541,18 +551,26 @@ class OutputManager:
                 if not compiler.verify_module():
                     raise RuntimeError(f"Module verification failed for group {group_key}")
 
-                if os.environ.get('PC_SAVE_UNOPT_IR'):
+                from ..config import config
+
+                if config.save_unopt_ir:
                     unopt_ir_file = group['ir_file'].replace('.ll', '.unopt.ll')
                     with open(unopt_ir_file, 'w') as f:
                         f.write(str(compiler.module))
 
-                opt_level = int(os.environ.get('PC_OPT_LEVEL', '2'))
+                opt_level = int(config.opt_level)
                 compiler.optimize_module(optimization_level=opt_level)
 
                 # Write .o atomically so concurrent readers never see a
-                # half-written file.
+                # half-written file.  The .ll text is a debug-only
+                # artefact: it is *not* an input to compile_to_object()
+                # (which uses the in-memory IR string directly) nor a
+                # cache layer (cache.py only tracks .o/.so).  Skip it by
+                # default to avoid filesystem churn, opt-in via
+                # config.save_ir = True when debugging.
                 tmp_obj = obj_file + '.tmp.' + str(os.getpid())
-                compiler.save_ir_to_file(group['ir_file'])
+                if config.save_ir:
+                    compiler.save_ir_to_file(group['ir_file'])
                 compiler.compile_to_object(tmp_obj)
                 _atomic_replace(tmp_obj, obj_file)
 

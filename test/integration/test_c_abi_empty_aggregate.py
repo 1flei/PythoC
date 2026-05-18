@@ -32,6 +32,13 @@ import re
 import sys
 import unittest
 
+# This test asserts on the emitted .ll IR text, so it has to opt in to
+# IR-file emission (default: off, to avoid filesystem churn).  The
+# config flip must happen before importing pythoc's compile machinery
+# so that the decorator's flush path observes it.
+from pythoc import config as _pc_config
+_pc_config.save_ir = True
+
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(os.path.dirname(_TEST_DIR))
 if _REPO_ROOT not in sys.path:

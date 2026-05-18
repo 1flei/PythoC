@@ -29,7 +29,9 @@ def _load_cindex():
             "packages 'clang' and 'libclang' to use PC_CIMPORT_BACKEND=clang"
         ) from exc
 
-    libclang_path = os.environ.get("PC_LIBCLANG_PATH")
+    from .config import config
+
+    libclang_path = config.libclang_path
     if libclang_path and not cindex.Config.loaded:
         if os.path.isdir(libclang_path):
             cindex.Config.set_library_path(libclang_path)
