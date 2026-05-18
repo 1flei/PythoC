@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1778903058378,
+  "lastUpdate": 1779102061272,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1701,6 +1701,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.036,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "ac0cd22a0581ae6822936465d34519bd3262758e",
+          "message": "Regulate env config to a unified config class",
+          "timestamp": "2026-05-18T15:35:47+08:00",
+          "tree_id": "164dbe8bd1fd33b7642608519603194c9456c248",
+          "url": "https://github.com/1flei/PythoC/commit/ac0cd22a0581ae6822936465d34519bd3262758e"
+        },
+        "date": 1779102060760,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.84,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.06,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.162,
             "unit": "seconds/test"
           }
         ]
