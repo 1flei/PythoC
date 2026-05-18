@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779102061272,
+  "lastUpdate": 1779115058533,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1740,6 +1740,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.162,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "5c2343eb7c3defd2cd530b33294184a03e40d16c",
+          "message": "Fix tests with ll ir output issue",
+          "timestamp": "2026-05-18T22:32:39+08:00",
+          "tree_id": "aa72b9f278a116237339f670132cb64e4b1437b9",
+          "url": "https://github.com/1flei/PythoC/commit/5c2343eb7c3defd2cd530b33294184a03e40d16c"
+        },
+        "date": 1779115058116,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.85,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.031,
             "unit": "seconds/test"
           }
         ]
