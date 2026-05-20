@@ -8,6 +8,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i8, i32, compile, ptr, enum
+from pythoc.build.output_manager import clear_failed_group
 import unittest
 
 
@@ -23,6 +24,23 @@ class Color:
     Red: None
     Green: None  
     Blue: None
+
+
+@compile
+class CounterPayload:
+    value: i32
+
+
+@enum(i32)
+class CounterState:
+    Counter: CounterPayload
+
+
+@compile
+def make_counter_payload(value: i32) -> CounterPayload:
+    p: CounterPayload
+    p.value = value
+    return p
 
 
 @compile
@@ -297,6 +315,26 @@ def test_enum_constructor_simple() -> i32:
 
 
 @compile
+def test_enum_payload_ptr_capture() -> i32:
+    s: CounterState = CounterState(CounterState.Counter, make_counter_payload(1))
+    match s:
+        case (CounterState.Counter, ptr(payload)):
+            payload.value = 7
+    match s:
+        case (CounterState.Counter, payload):
+            return payload.value
+
+
+@compile
+def test_whole_subject_ptr_capture() -> i32:
+    s: CounterPayload = make_counter_payload(1)
+    match s:
+        case ptr(payload):
+            payload.value = 9
+    return s.value
+
+
+@compile
 def test_enum_constructor_tag_only() -> i32:
     """Constructor syntax matching only tag"""
     s: Status = make_status_ok(456)
@@ -470,6 +508,31 @@ class TestMatchEnumConstructorSyntax(unittest.TestCase):
     
     def test_constructor_tag_only(self):
         self.assertEqual(test_enum_constructor_tag_only(), 111)
+
+    def test_enum_payload_ptr_capture(self):
+        self.assertEqual(test_enum_payload_ptr_capture(), 7)
+
+    def test_whole_subject_ptr_capture(self):
+        self.assertEqual(test_whole_subject_ptr_capture(), 9)
+
+    def test_ptr_capture_requires_place(self):
+        source_file = os.path.abspath(__file__)
+        group_key = (source_file, 'module', 'bad_ptr_capture_rvalue', None)
+        try:
+            @compile(suffix="bad_ptr_capture_rvalue")
+            def bad_ptr_capture_rvalue() -> i32:
+                match make_counter_payload(1):
+                    case ptr(payload):
+                        return payload.value
+                return 0
+
+            bad_ptr_capture_rvalue()
+        except SystemExit:
+            pass
+        else:
+            self.fail("ptr(...) capture on rvalue should fail")
+        finally:
+            clear_failed_group(group_key)
 
 
 class TestMatchEnumComplexPatterns(unittest.TestCase):

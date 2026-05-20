@@ -58,6 +58,35 @@ def test_struct_methods() -> i32:
     return 0
 
 
+@compile
+class NamedA:
+    x: i32
+
+    def make(v: i32) -> "NamedA":
+        a: NamedA
+        a.x = v
+        return a
+
+
+@compile
+class NamedB:
+    x: i64
+    y: i64
+
+    def make(x: i64, y: i64) -> "NamedB":
+        b: NamedB
+        b.x = x
+        b.y = y
+        return b
+
+
+@compile
+def test_same_method_name_different_classes() -> i32:
+    a: NamedA = NamedA.make(7)
+    b: NamedB = NamedB.make(10, 20)
+    return a.x + i32(b.x + b.y)
+
+
 # ---------------------------------------------------------------------------
 # union: methods on a @union class
 # ---------------------------------------------------------------------------
@@ -241,6 +270,8 @@ def test_self_calls() -> i32:
 @compile
 def main() -> i32:
     test_struct_methods()
+    if test_same_method_name_different_classes() != 37:
+        return 1
     test_union_methods()
     test_enum_methods()
     test_generic_box()

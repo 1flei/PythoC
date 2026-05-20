@@ -423,6 +423,8 @@ class MatchStatementMixin:
             return wrap_value(result_ir, kind="value", type_hint=pc_bool), []
         
         elif isinstance(pattern, ast.MatchClass):
+            if self._is_ptr_capture_pattern(pattern):
+                return self._generate_ptr_capture_pattern(pattern, subject)
             # Struct destructuring pattern
             return self._generate_struct_pattern(pattern, subject)
         
@@ -486,6 +488,59 @@ class MatchStatementMixin:
             result_ir = ir.Constant(ir.IntType(1), 1)
         
         return wrap_value(result_ir, kind="value", type_hint=pc_bool), bindings
+
+    def _is_ptr_capture_pattern(self, pattern):
+        """Return True for PythoC's explicit pointer-capture pattern.
+
+        Python parses ``case ptr(x):`` as a MatchClass pattern. In PythoC we
+        reserve that spelling to mean "bind x to a pointer to this matched
+        place", analogous to Zig's ``|*payload|`` switch capture.
+        """
+        if not isinstance(pattern, ast.MatchClass):
+            return False
+        return isinstance(pattern.cls, ast.Name) and pattern.cls.id == "ptr"
+
+    def _generate_ptr_capture_pattern(self, pattern, subject):
+        """Generate binding for ``case ptr(name):``.
+
+        This pattern is irrefutable but requires the matched subobject to be an
+        addressable place. The bound name has type ``ptr[SubobjectType]`` and
+        receives the underlying place pointer.
+        """
+        from ..valueref import wrap_value
+        from ..builtin_entities import bool as pc_bool, ptr
+
+        if pattern.kwd_attrs or pattern.kwd_patterns or len(pattern.patterns) != 1:
+            logger.error(
+                "ptr(...) pattern supports exactly one positional capture",
+                node=pattern, exc_type=TypeError,
+            )
+
+        inner = pattern.patterns[0]
+        if not isinstance(inner, ast.MatchAs) or inner.pattern is not None:
+            logger.error(
+                "ptr(...) pattern supports only a single capture name, e.g. ptr(x)",
+                node=pattern, exc_type=TypeError,
+            )
+
+        true_val = wrap_value(ir.Constant(ir.IntType(1), 1), kind="value", type_hint=pc_bool)
+
+        if inner.name is None:
+            return true_val, []
+
+        if not subject.has_place():
+            logger.error(
+                "ptr(...) pattern requires an addressable matched value",
+                node=pattern, exc_type=TypeError,
+            )
+
+        ptr_type = ptr[subject.type_hint]
+        ptr_ref = wrap_value(
+            subject.require_place(),
+            kind="value",
+            type_hint=ptr_type,
+        )
+        return true_val, [(inner.name, ptr_ref)]
     
     def _generate_struct_pattern(self, pattern, subject):
         """Generate condition and bindings for struct pattern
@@ -760,7 +815,7 @@ class MatchStatementMixin:
         if pc_type is None:
             logger.error(f"Cannot bind variable '{var_name}' - value has no type",
                         node=None, exc_type=TypeError)
-        
+
         # Create alloca for the variable
         llvm_type = pc_type.get_llvm_type(self.module.context)
         alloca = self._create_alloca_in_entry(llvm_type, f"{var_name}_addr")

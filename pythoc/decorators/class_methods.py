@@ -12,11 +12,13 @@ Design summary
 ==============
 * Methods do **not** receive a synthetic ``self`` -- the first parameter is a
   regular pythoc parameter, identical to today's manual pattern.
-* The compile_suffix of the enclosing class is inherited by each method so
-  generic factories (e.g. ``Vector(int)``) do not have to repeat the suffix on
-  every method. A method may still be explicitly decorated with
-  ``@compile(suffix=...)`` to override; such members are detected via
-  ``_is_compiled`` and attached as-is.
+* Plain methods are compiled with an implicit class-qualified suffix. This
+  gives ``A.make`` and ``B.make`` distinct native symbols while preserving the
+  user-facing ``Cls.method(...)`` spelling. The enclosing class
+  compile_suffix is included in that method suffix so generic factories (e.g.
+  ``Vector(int)``) remain deduplicated per instantiation. A method may still
+  be explicitly decorated with ``@compile(suffix=...)`` to override; such
+  members are detected via ``_is_compiled`` and attached as-is.
 * Non-function descriptors (``classmethod``/``staticmethod``/``property`` ...)
   are left alone so users keep their full Python-side flexibility.
 * The class object itself is injected into the per-method symbol namespace so
@@ -111,6 +113,11 @@ def attach_class_methods(
     from .compile import _compile_impl
 
     attached: List[str] = []
+    class_suffix_parts = [target_cls.__name__]
+    if class_compile_suffix:
+        class_suffix_parts.append(class_compile_suffix)
+    implicit_method_suffix = "_".join(class_suffix_parts)
+
     for name, _ast_node in methods:
         member = source_cls.__dict__.get(name)
         if member is None:
@@ -131,7 +138,7 @@ def attach_class_methods(
 
         wrapper = _compile_impl(
             member,
-            compile_suffix=class_compile_suffix,
+            compile_suffix=implicit_method_suffix,
             effect_suffix=None,
             captured_symbols=method_symbols,
         )
