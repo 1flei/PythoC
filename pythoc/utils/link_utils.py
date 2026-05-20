@@ -442,11 +442,25 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
             return arch_flag
     else:  # Linux
         if shared:
+            # `-Bsymbolic-functions` makes intra-DSO function calls resolve to
+            # the local definition rather than walking the global symbol scope.
+            # Without this, any @compile function whose name collides with a
+            # libc symbol (e.g. `advance`, `index`, `div`, ...) gets silently
+            # interposed at runtime: the .so's own call site goes through the
+            # PLT and the dynamic linker hands back the libc version with a
+            # totally unrelated signature, causing immediate SIGSEGV the first
+            # time it's invoked from within the .so. `--export-dynamic` (kept
+            # below) still ensures ctypes/dlsym can reach these symbols from
+            # outside the .so.
+            common = ['-shared', '-fPIC', '-Wl,-Bsymbolic-functions']
             if is_zig:
-                return ['-shared', '-fPIC']
+                return common
             else:
-                return ['-shared', '-fPIC', '-Wl,--export-dynamic', 
-                       '-Wl,--allow-shlib-undefined', '-Wl,--unresolved-symbols=ignore-all']
+                return common + [
+                    '-Wl,--export-dynamic',
+                    '-Wl,--allow-shlib-undefined',
+                    '-Wl,--unresolved-symbols=ignore-all',
+                ]
         else:
             return []
 
