@@ -95,7 +95,27 @@ class LLVMBuilder(AbstractBuilder):
     
     def lshr(self, lhs: Any, rhs: Any, name: str = "") -> Any:
         return self._builder.lshr(lhs, rhs, name=name)
-    
+
+    # ========== Checked Arithmetic (LLVM intrinsics) ==========
+
+    def sadd_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        return self._builder.sadd_with_overflow(lhs, rhs, name=name)
+
+    def ssub_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        return self._builder.ssub_with_overflow(lhs, rhs, name=name)
+
+    def smul_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        return self._builder.smul_with_overflow(lhs, rhs, name=name)
+
+    def uadd_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        return self._builder.uadd_with_overflow(lhs, rhs, name=name)
+
+    def usub_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        return self._builder.usub_with_overflow(lhs, rhs, name=name)
+
+    def umul_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        return self._builder.umul_with_overflow(lhs, rhs, name=name)
+
     # ========== Comparison Operations ==========
     
     def icmp_signed(self, op: str, lhs: Any, rhs: Any, name: str = "") -> Any:

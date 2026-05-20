@@ -108,7 +108,44 @@ class AbstractBuilder(ABC):
     def lshr(self, lhs: Any, rhs: Any, name: str = "") -> Any:
         """Logical shift right (zero-filling)."""
         pass
-    
+
+    # ========== Checked Arithmetic (LLVM intrinsics) ==========
+    # These mirror llvmlite's `*_with_overflow` builders. Each returns an
+    # aggregate {iN, i1} whose first field is the (possibly-wrapped) result
+    # and whose second field is the overflow flag. Lower the aggregate with
+    # extract_value(idx=0/1). Backends that cannot model LLVM intrinsics
+    # (e.g. NullBuilder) may raise on use.
+
+    @abstractmethod
+    def sadd_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        """Signed integer addition with overflow detection -> {iN, i1}."""
+        pass
+
+    @abstractmethod
+    def ssub_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        """Signed integer subtraction with overflow detection -> {iN, i1}."""
+        pass
+
+    @abstractmethod
+    def smul_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        """Signed integer multiplication with overflow detection -> {iN, i1}."""
+        pass
+
+    @abstractmethod
+    def uadd_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        """Unsigned integer addition with overflow detection -> {iN, i1}."""
+        pass
+
+    @abstractmethod
+    def usub_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        """Unsigned integer subtraction with overflow detection -> {iN, i1}."""
+        pass
+
+    @abstractmethod
+    def umul_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        """Unsigned integer multiplication with overflow detection -> {iN, i1}."""
+        pass
+
     # ========== Comparison Operations ==========
     
     @abstractmethod

@@ -222,6 +222,14 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
               'and_', 'or_', 'xor', 'shl', 'ashr', 'lshr'):
         return _get_vreg_type(args[0])
 
+    # Checked arithmetic: result is a struct {T, i1} where T = type of first operand
+    if op in ('sadd_with_overflow', 'ssub_with_overflow', 'smul_with_overflow',
+              'uadd_with_overflow', 'usub_with_overflow', 'umul_with_overflow'):
+        t = _get_vreg_type(args[0])
+        if t is None:
+            return None
+        return ir.LiteralStructType([t, ir.IntType(1)])
+
     # Comparisons: always i1
     if op in ('icmp_signed', 'icmp_unsigned', 'fcmp_ordered', 'fcmp_unordered'):
         return ir.IntType(1)

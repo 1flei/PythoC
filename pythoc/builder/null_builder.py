@@ -101,7 +101,27 @@ class NullBuilder(AbstractBuilder):
     
     def lshr(self, lhs: Any, rhs: Any, name: str = "") -> Any:
         self._raise_error("lshr")
-    
+
+    # ========== Checked Arithmetic (LLVM intrinsics) ==========
+
+    def sadd_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        self._raise_error("sadd_with_overflow")
+
+    def ssub_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        self._raise_error("ssub_with_overflow")
+
+    def smul_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        self._raise_error("smul_with_overflow")
+
+    def uadd_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        self._raise_error("uadd_with_overflow")
+
+    def usub_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        self._raise_error("usub_with_overflow")
+
+    def umul_with_overflow(self, lhs: Any, rhs: Any, name: str = "") -> Any:
+        self._raise_error("umul_with_overflow")
+
     # ========== Comparison Operations ==========
     
     def icmp_signed(self, op: str, lhs: Any, rhs: Any, name: str = "") -> Any:
