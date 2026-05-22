@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779294221881,
+  "lastUpdate": 1779445383799,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -1817,6 +1817,38 @@ window.BENCHMARK_DATA = {
             "name": "compile_speed",
             "value": 0.923,
             "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yifanlei@tencent.com",
+            "name": "yifanlei"
+          },
+          "committer": {
+            "email": "yifanlei@tencent.com",
+            "name": "yifanlei"
+          },
+          "distinct": true,
+          "id": "18236846e1fc8491ef60a050cc3782cdda1c77d5",
+          "message": "Simple n to m async impl",
+          "timestamp": "2026-05-22T18:17:24+08:00",
+          "tree_id": "eb332588dea089a2b14041b5be8374879d36811e",
+          "url": "https://github.com/1flei/PythoC/commit/18236846e1fc8491ef60a050cc3782cdda1c77d5"
+        },
+        "date": 1779445383189,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.69,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.06,
+            "unit": "PC/C ratio"
           }
         ]
       }
