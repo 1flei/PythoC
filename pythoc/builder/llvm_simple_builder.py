@@ -140,6 +140,38 @@ class LLVMBuilder(AbstractBuilder):
     
     def store(self, value: Any, ptr: Any, align: Any = None) -> Any:
         return self._builder.store(value, ptr, align=align)
+
+    def load_atomic(
+        self, ptr: Any, ordering: str, align: int, name: str = "",
+        typ: Any = None,
+    ) -> Any:
+        return self._builder.load_atomic(
+            ptr, ordering=ordering, align=align, name=name, typ=typ,
+        )
+
+    def store_atomic(
+        self, value: Any, ptr: Any, ordering: str, align: int,
+    ) -> Any:
+        return self._builder.store_atomic(
+            value, ptr, ordering=ordering, align=align,
+        )
+
+    def atomic_rmw(
+        self, op: str, ptr: Any, value: Any, ordering: str,
+        name: str = "",
+    ) -> Any:
+        return self._builder.atomic_rmw(
+            op, ptr, value, ordering=ordering, name=name,
+        )
+
+    def cmpxchg(
+        self, ptr: Any, cmp: Any, value: Any, ordering: str,
+        failordering: str = None, name: str = "",
+    ) -> Any:
+        return self._builder.cmpxchg(
+            ptr, cmp, value, ordering=ordering,
+            failordering=failordering, name=name,
+        )
     
     def gep(self, ptr: Any, indices: List[Any], inbounds: bool = False, name: str = "") -> Any:
         return self._builder.gep(ptr, indices, inbounds=inbounds, name=name)

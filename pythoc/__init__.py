@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from .builtin_entities import (
     i8, i16, i32, i64,
-    u8, u16, u32, u64, 
+    u8, u16, u32, u64,
     f16, bf16, f32, f64, f128, bool,
     ptr, array, struct, union, func, enum,
     const, static, volatile,
@@ -21,6 +21,7 @@ from .builtin_entities import (
     pyconst, defer, label, goto, goto_end,
     va_start, va_arg, va_end,
     pc_literal,
+    llvm_asm,
 )
 
 # Provide lowercase alias for convenience

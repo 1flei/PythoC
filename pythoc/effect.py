@@ -312,6 +312,26 @@ class EffectImportHook:
         return module
 
 
+def _caller_module_from_visitor(visitor) -> Optional[str]:
+    """Return the Python module name for the function currently being compiled."""
+    if visitor is None:
+        return None
+    ctx = getattr(visitor, 'ctx', None)
+    if ctx is None:
+        return None
+    user_globals = getattr(ctx, 'user_globals', None) or {}
+    return user_globals.get('__name__')
+
+
+def _module_default_impl(effect_name: str, caller_module: Optional[str]) -> Any:
+    """Lookup per-module effect default registered via effect.default/bind_mem."""
+    if not caller_module:
+        return None
+    with effect._lock:
+        module_defaults = effect._defaults.get(caller_module, {})
+        return module_defaults.get(effect_name)
+
+
 class EffectNamespace:
     """
     A namespace object that represents an effect category (e.g., rng, allocator).
@@ -379,12 +399,16 @@ class EffectNamespace:
         Returns:
             ValueRef wrapping the resolved attribute (usually a @compile function)
         """
-        impl = object.__getattribute__(self, '_impl')
         name = object.__getattribute__(self, '_name')
 
         # Record effect usage for transitive propagation
         # This tracks that the current function being compiled uses this effect
         record_effect_usage(name)
+
+        caller_module = _caller_module_from_visitor(visitor)
+        impl = _module_default_impl(name, caller_module)
+        if impl is None:
+            impl = object.__getattribute__(self, '_impl')
 
         if impl is None:
             from .logger import logger

@@ -57,6 +57,15 @@ from .intrinsics import va_start, va_arg, va_end
 # Scoped goto/label (user-facing API)
 from .intrinsics import label, goto, goto_begin, goto_end
 
+# Inline assembly intrinsic
+from .llvm_asm import llvm_asm
+
+# Atomic operation intrinsics
+from .atomic import (
+    atomic_load_i64, atomic_store_i64, atomic_fetch_add_i64, atomic_cas_i64,
+    atomic_load_i32, atomic_store_i32,
+)
+
 # Python type wrapper
 from .python_type import PythonType, is_python_type, pyconst
 
@@ -158,6 +167,12 @@ __all__ = [
     'goto',
     'goto_begin',  # Public alias of ``goto`` for readability next to goto_end
     'goto_end',
+
+    # Inline assembly intrinsic
+    'llvm_asm',
+    'atomic_load_i64', 'atomic_store_i64',
+    'atomic_fetch_add_i64', 'atomic_cas_i64',
+    'atomic_load_i32', 'atomic_store_i32',
     
     # Python type wrapper
     'PythonType',

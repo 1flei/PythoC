@@ -45,7 +45,7 @@ Documentation = "https://github.com/1flei/PythoC/blob/master/README.md"
 packages = ["pythoc"]
 
 [tool.setuptools.package-data]
-pythoc = ["py.typed"]
+pythoc = ["py.typed", "std/runtime/asm/*.S"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

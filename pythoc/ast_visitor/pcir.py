@@ -246,7 +246,25 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
             return ptr_type.pointee
         return None
 
-    if op == 'store':
+    if op == 'load_atomic':
+        typ = kwargs.get('typ')
+        if typ is not None:
+            return typ
+        ptr_type = _get_vreg_type(args[0])
+        if ptr_type and isinstance(ptr_type, ir.PointerType):
+            return ptr_type.pointee
+        return None
+
+    if op == 'atomic_rmw':
+        return _get_vreg_type(args[2])
+
+    if op == 'cmpxchg':
+        value_type = _get_vreg_type(args[2])
+        if value_type is None:
+            return None
+        return ir.LiteralStructType([value_type, ir.IntType(1)])
+
+    if op in ('store', 'store_atomic'):
         return None
 
     # GEP

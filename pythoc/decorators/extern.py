@@ -85,8 +85,31 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
     def decorator(f):
         import inspect
         sig = inspect.signature(f)
-        return_type = sig.return_annotation if sig.return_annotation != inspect.Signature.empty else None
-        param_types = [(name, param.annotation) for name, param in sig.parameters.items()]
+        resolved_annotations = {}
+        if getattr(f, '__annotations__', None):
+            from ..type_resolver import TypeResolver
+            from .annotation_resolver import (
+                build_annotation_namespace,
+                resolve_annotations_dict,
+            )
+
+            is_dynamic = '.<locals>.' in f.__qualname__
+            type_resolver = TypeResolver(user_globals=f.__globals__)
+            eval_namespace = build_annotation_namespace(
+                f.__globals__, is_dynamic=is_dynamic,
+            )
+            resolved_annotations = resolve_annotations_dict(
+                f.__annotations__, eval_namespace, type_resolver,
+            )
+
+        return_type = resolved_annotations.get('return', sig.return_annotation)
+        if return_type == inspect.Signature.empty:
+            return_type = None
+
+        param_types = []
+        for name, param in sig.parameters.items():
+            param_type = resolved_annotations.get(name, param.annotation)
+            param_types.append((name, param_type))
         # Note: No longer registering in registry - info is stored on wrapper
         wrapper = ExternFunctionWrapper(
             func=f,

@@ -21,6 +21,7 @@ except RuntimeError:
     pass
 binding.initialize_native_target()
 binding.initialize_native_asmprinter()
+binding.initialize_native_asmparser()
 
 # Detect pass manager API: llvmlite <0.45 uses legacy PM, >=0.45 uses new PM.
 _USE_NEW_PM = not hasattr(binding, 'create_function_pass_manager')

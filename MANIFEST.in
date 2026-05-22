@@ -1,6 +1,7 @@
 include README.md
 include LICENSE
 recursive-include pythoc *.py
+recursive-include pythoc/std/runtime/asm *.S
 recursive-exclude test *
 recursive-exclude docs *
 recursive-exclude backup *
