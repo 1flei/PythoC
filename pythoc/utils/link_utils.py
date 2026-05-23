@@ -13,7 +13,7 @@ import subprocess
 import time
 from functools import lru_cache
 from typing import List, Optional, Set
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 
 @lru_cache(maxsize=None)
@@ -719,6 +719,7 @@ def link_files(
     linker: Optional[str] = None,
     link_objects: Optional[List[str]] = None,
     link_libraries: Optional[List[str]] = None,
+    lock_policy: str = 'internal',
 ) -> str:
     """Link object files to executable or shared library
     
@@ -739,61 +740,51 @@ def link_files(
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
     
-    # Use file lock to prevent concurrent linking of the same output file
-    # This is critical when running parallel tests that import the same modules
-    lockfile_path = output_file + '.lock'
-    
-    with file_lock(lockfile_path):
-        # Also acquire locks for all input .o files to ensure they are fully written
-        # This prevents "file truncated" errors when another process is still writing
-        obj_locks = []
-        try:
-            # Acquire .o locks in sorted order to prevent deadlocks when
-            # multiple processes link different DLLs with overlapping deps.
-            for obj_file in sorted(obj_files):
-                obj_lockfile = obj_file + '.lock'
-                lock = file_lock(obj_lockfile)
-                lock.__enter__()
-                obj_locks.append(lock)
-            
-            # Check if output file already exists and is up-to-date.
-            #
-            # IMPORTANT (Windows): for DLLs we also require the sidecar export
-            # definition + import library to exist; otherwise we must relink to
-            # get a usable export table and `.lib`.
-            if os.path.exists(output_file):
-                output_mtime = os.path.getmtime(output_file)
-                obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
-                if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
-                    if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
-                        exports_def = os.path.splitext(output_file)[0] + '.exports.def'
-                        implib = os.path.splitext(output_file)[0] + '.lib'
-                        if os.path.exists(exports_def) and os.path.exists(implib):
-                            return output_file
-                    else:
-                        # Output is up-to-date, skip linking
-                        return output_file
+    if lock_policy not in ('internal', 'external'):
+        raise ValueError(f"Unknown lock_policy: {lock_policy}")
 
-            
-            # If specific linker requested, try it first then fallback
-            if linker:
-                linkers = [linker] + [l for l in get_default_linkers() if l != linker]
-            else:
-                linkers = get_default_linkers()
-            
-            return try_link_with_linkers(
-                obj_files,
-                output_file,
-                shared=shared,
-                linkers=linkers,
-                link_objects=link_objects,
-                link_libraries=link_libraries,
-            )
-            
-        finally:
-            # Release all .o file locks in reverse order
-            for lock in reversed(obj_locks):
-                lock.__exit__(None, None, None)
+    with ExitStack() as stack:
+        if lock_policy == 'internal':
+            # Use file lock to prevent concurrent linking of the same output file.
+            # This is critical when running parallel tests that import the same modules.
+            stack.enter_context(file_lock(output_file + '.lock'))
+            # Also acquire locks for all input .o files to ensure they are fully written.
+            # This prevents "file truncated" errors when another process is still writing.
+            for obj_file in sorted(obj_files):
+                stack.enter_context(file_lock(obj_file + '.lock'))
+
+        # Check if output file already exists and is up-to-date.
+        #
+        # IMPORTANT (Windows): for DLLs we also require the sidecar export
+        # definition + import library to exist; otherwise we must relink to
+        # get a usable export table and `.lib`.
+        if os.path.exists(output_file):
+            output_mtime = os.path.getmtime(output_file)
+            obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
+            if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
+                if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
+                    exports_def = os.path.splitext(output_file)[0] + '.exports.def'
+                    implib = os.path.splitext(output_file)[0] + '.lib'
+                    if os.path.exists(exports_def) and os.path.exists(implib):
+                        return output_file
+                else:
+                    # Output is up-to-date, skip linking
+                    return output_file
+
+        # If specific linker requested, try it first then fallback
+        if linker:
+            linkers = [linker] + [l for l in get_default_linkers() if l != linker]
+        else:
+            linkers = get_default_linkers()
+
+        return try_link_with_linkers(
+            obj_files,
+            output_file,
+            shared=shared,
+            linkers=linkers,
+            link_objects=link_objects,
+            link_libraries=link_libraries,
+        )
 
 
 def build_archive_command(obj_files: List[str], output_file: str,
@@ -859,37 +850,34 @@ def archive_files(
     obj_files: List[str],
     output_file: str,
     archiver: Optional[str] = None,
+    lock_policy: str = 'internal',
 ) -> str:
     """Archive object files into a static library."""
     output_dir = os.path.dirname(output_file)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    lockfile_path = output_file + '.lock'
-    with file_lock(lockfile_path):
-        obj_locks = []
-        try:
+    if lock_policy not in ('internal', 'external'):
+        raise ValueError(f"Unknown lock_policy: {lock_policy}")
+
+    with ExitStack() as stack:
+        if lock_policy == 'internal':
+            stack.enter_context(file_lock(output_file + '.lock'))
             for obj_file in sorted(obj_files):
-                obj_lockfile = obj_file + '.lock'
-                lock = file_lock(obj_lockfile)
-                lock.__enter__()
-                obj_locks.append(lock)
+                stack.enter_context(file_lock(obj_file + '.lock'))
 
-            if os.path.exists(output_file):
-                output_mtime = os.path.getmtime(output_file)
-                obj_mtimes = [
-                    os.path.getmtime(obj) for obj in obj_files
-                    if os.path.exists(obj)
-                ]
-                if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
-                    return output_file
+        if os.path.exists(output_file):
+            output_mtime = os.path.getmtime(output_file)
+            obj_mtimes = [
+                os.path.getmtime(obj) for obj in obj_files
+                if os.path.exists(obj)
+            ]
+            if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
+                return output_file
 
-            if archiver:
-                archivers = [archiver] + [a for a in get_default_archivers() if a != archiver]
-            else:
-                archivers = get_default_archivers()
+        if archiver:
+            archivers = [archiver] + [a for a in get_default_archivers() if a != archiver]
+        else:
+            archivers = get_default_archivers()
 
-            return try_archive_with_archivers(obj_files, output_file, archivers)
-        finally:
-            for lock in reversed(obj_locks):
-                lock.__exit__(None, None, None)
+        return try_archive_with_archivers(obj_files, output_file, archivers)

@@ -822,21 +822,25 @@ class MultiSOExecutor:
             self._verified_deps.update(visited)
             return
 
-        # Run link jobs — parallel when there are multiple jobs to amortise
-        # subprocess startup overhead (especially zig on Windows).
-        if len(link_jobs) > 1:
-            import concurrent.futures
-            max_workers = min(len(link_jobs), os.cpu_count() or 4)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = {
-                    pool.submit(self.compile_source_to_so, obj, so, extra_link_libraries=libs): so
-                    for obj, so, libs in link_jobs
-                }
-                for fut in concurrent.futures.as_completed(futures):
-                    fut.result()  # propagate exceptions
-        else:
-            for obj, so, libs in link_jobs:
-                self.compile_source_to_so(obj, so, extra_link_libraries=libs)
+        # Run link jobs through the shared build scheduler.  The scheduler
+        # coordinates in-process parallelism while link_files keeps the
+        # cross-process artifact locks.
+        from .build.scheduler import BuildScheduler, BuildTask
+        max_workers = min(len(link_jobs), os.cpu_count() or 4)
+        tasks = []
+        for obj, so, libs in link_jobs:
+            tasks.append(BuildTask(
+                id=f"link-shared:{os.path.abspath(so)}",
+                kind='link_shared_library',
+                inputs=(obj,) + tuple(libs or []),
+                outputs=(so,),
+                run=lambda obj=obj, so=so, libs=libs: self.compile_source_to_so(
+                    obj,
+                    so,
+                    extra_link_libraries=libs,
+                ),
+            ))
+        BuildScheduler(max_workers=max_workers).run(tasks)
 
         # Linking happened — invalidate caches for the so_files that were
         # actually relinked, but keep verified status for unaffected DLLs.
@@ -894,19 +898,18 @@ class MultiSOExecutor:
         if not stub_jobs:
             return
 
-        if len(stub_jobs) > 1:
-            import concurrent.futures
-            max_workers = min(len(stub_jobs), os.cpu_count() or 4)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = [
-                    pool.submit(_generate_stub_implib, obj, dll, imp)
-                    for obj, dll, imp in stub_jobs
-                ]
-                for fut in concurrent.futures.as_completed(futures):
-                    fut.result()
-        else:
-            obj, dll, imp = stub_jobs[0]
-            _generate_stub_implib(obj, dll, imp)
+        from .build.scheduler import BuildScheduler, BuildTask
+        tasks = []
+        for obj, dll, imp in stub_jobs:
+            tasks.append(BuildTask(
+                id=f"stub-implib:{os.path.abspath(imp)}",
+                kind='generate_stub_import_library',
+                inputs=(obj,),
+                outputs=(imp, os.path.splitext(imp)[0] + '.exports.def'),
+                run=lambda obj=obj, dll=dll, imp=imp: _generate_stub_implib(obj, dll, imp),
+            ))
+        max_workers = min(len(tasks), os.cpu_count() or 4)
+        BuildScheduler(max_workers=max_workers).run(tasks)
     
     def _get_persisted_link_libraries(self, obj_file: str) -> List[str]:
         """Read link_libraries from the persisted .deps file for a group.

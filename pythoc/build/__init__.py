@@ -11,6 +11,12 @@ from .deps import (
     DependencyTracker,
     get_dependency_tracker,
 )
+from .scheduler import (
+    BuildScheduler,
+    BuildSchedulerError,
+    BuildTask,
+    TaskResult,
+)
 
 __all__ = [
     'BuildCache',
@@ -23,4 +29,8 @@ __all__ = [
     'GroupDeps',
     'DependencyTracker',
     'get_dependency_tracker',
+    'BuildScheduler',
+    'BuildSchedulerError',
+    'BuildTask',
+    'TaskResult',
 ]

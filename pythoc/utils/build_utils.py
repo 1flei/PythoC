@@ -303,14 +303,22 @@ def link_dynamic_library(
 ) -> str:
     """Link object files into a dynamic library."""
     from .link_utils import link_files
+    from ..build.scheduler import BuildScheduler, BuildTask
 
-    result = link_files(
-        obj_files,
-        output_path,
-        shared=True,
-        link_objects=[],
-        link_libraries=link_libraries or [],
+    task = BuildTask(
+        id=f"link-shared:{os.path.abspath(output_path)}",
+        kind='link_shared_library',
+        inputs=tuple(obj_files) + tuple(link_libraries or []),
+        outputs=(output_path,),
+        run=lambda: link_files(
+            obj_files,
+            output_path,
+            shared=True,
+            link_objects=[],
+            link_libraries=link_libraries or [],
+        ),
     )
+    result = BuildScheduler(max_workers=1).run([task])[task.id].value
     print(f"Successfully compiled to dynamic library: {output_path}")
     print(f"Linked {len(obj_files)} object file(s)")
     return result
@@ -319,8 +327,16 @@ def link_dynamic_library(
 def link_static_library(obj_files: List[str], output_path: str) -> str:
     """Archive object files into a static library."""
     from .link_utils import archive_files
+    from ..build.scheduler import BuildScheduler, BuildTask
 
-    result = archive_files(obj_files, output_path)
+    task = BuildTask(
+        id=f"archive-static:{os.path.abspath(output_path)}",
+        kind='archive_static_library',
+        inputs=tuple(obj_files),
+        outputs=(output_path,),
+        run=lambda: archive_files(obj_files, output_path),
+    )
+    result = BuildScheduler(max_workers=1).run([task])[task.id].value
     print(f"Successfully compiled to static library: {output_path}")
     print(f"Archived {len(obj_files)} object file(s)")
     return result

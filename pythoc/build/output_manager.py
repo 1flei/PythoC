@@ -1,6 +1,8 @@
 import os
 import sys
 import atexit
+from dataclasses import dataclass, field
+from typing import Any, List, Set, Tuple
 from ..utils.link_utils import file_lock
 from .deps import get_dependency_tracker, GroupKey
 
@@ -22,6 +24,22 @@ def _atomic_replace(src: str, dst: str):
             time.sleep(0.05 * (attempt + 1))
     # Last attempt — let it raise if it still fails.
     os.replace(src, dst)
+
+
+@dataclass
+class _CompileIteration:
+    """One scheduler-visible slice of group compilation work."""
+
+    items: List[Tuple[Any, Any]]
+    symbols: Set[str] = field(default_factory=set)
+
+
+@dataclass
+class _CompileResult:
+    """Result produced by compiling a group before artifact publication."""
+
+    compiled_count: int = 0
+    compiled_symbols: Set[str] = field(default_factory=set)
 
 
 class OutputManager:
@@ -432,95 +450,234 @@ class OutputManager:
         scratch.optimize_module(optimization_level=int(config.opt_level))
         return scratch.get_ir()
 
-    def _compile_pending_for_group(self, group_key, group):
+    def _drain_next_compile_iteration(self, group_key, compiled_funcs) -> _CompileIteration:
+        """Move one pending slice out of global queues for this group.
+
+        This is intentionally the only step in the group compile loop that
+        mutates ``_pending_compilations``.  Later refactors can make this a
+        scheduler commit step instead of doing it inside the worker.
         """
-        Compile all pending functions for a group using two-pass approach.
+        pending = self._pending_compilations.get(group_key, [])
+        if not pending:
+            return _CompileIteration(items=[])
 
-        Phase 1: Forward declare all functions
-        Phase 2: Compile all function bodies
+        # Clear pending to avoid re-processing.  Compiling this slice may enqueue
+        # more work for the same group; the outer loop will drain it next.
+        del self._pending_compilations[group_key]
 
-        Before compilation, injects group scope into each function's compilation_globals
-        to support self/mutual recursion without name-based registry lookup.
+        new_pending = []
+        symbols = set()
+        for callback, func_info in pending:
+            func_key = func_info.mangled_name or func_info.name
+            if func_key not in compiled_funcs:
+                new_pending.append((callback, func_info))
+                compiled_funcs.add(func_key)
+                symbols.add(func_key)
 
-        Supports transitive effect propagation: if compiling a function body
-        triggers generation of new suffix versions (e.g., b_get_value_mock),
-        those new functions are also compiled in subsequent iterations.
+        return _CompileIteration(items=new_pending, symbols=symbols)
 
-        Args:
-            group_key: Group identifier
-            group: Group info dict
+    def _build_group_scope(self, iteration: _CompileIteration):
+        """Build the in-group symbol scope used for self/mutual recursion."""
+        group_scope = {}
+        for _callback, func_info in iteration.items:
+            if func_info.wrapper is not None:
+                group_scope[func_info.name] = func_info.wrapper
+        return group_scope
 
-        Returns:
-            tuple[int, set[str]]: Number of newly compiled functions and the
-            symbol names compiled during this flush.
+    def _inject_group_scope(self, iteration: _CompileIteration, group_scope):
+        """Inject group-local function wrappers into compilation globals."""
+        for _callback, func_info in iteration.items:
+            if func_info.compilation_globals is not None:
+                # Existing entries take precedence for non-function entries.
+                for name, wrapper in group_scope.items():
+                    if name not in func_info.compilation_globals:
+                        func_info.compilation_globals[name] = wrapper
+
+    def _prepare_compile_iteration(self, compiler, iteration: _CompileIteration):
+        """Prepare one compile slice before function body lowering."""
+        from ..logger import logger
+
+        group_scope = self._build_group_scope(iteration)
+        self._inject_group_scope(iteration, group_scope)
+        logger.debug(
+            f"Injected group scope with {len(group_scope)} functions: {list(group_scope.keys())}"
+        )
+
+        # Phase 1: Forward declare all new functions.
+        for _callback, func_info in iteration.items:
+            self._forward_declare_function(compiler, func_info)
+
+    def _compile_iteration_bodies(self, compiler, iteration: _CompileIteration):
+        """Compile one slice of function bodies.
+
+        This is the part we ultimately want to make pure with respect to
+        PythoC global state. Today callbacks may still record deps or enqueue
+        effect specializations; the surrounding methods isolate that fact.
+        """
+        for callback, _func_info in iteration.items:
+            callback(compiler)
+
+    def _compile_pending_for_group(self, group_key, group) -> _CompileResult:
+        """
+        Compile all pending functions for a group using two-pass iterations.
+
+        The method is split into explicit phases so the scheduler can later
+        move queue mutation and dependency/effect commits out of object emission.
         """
         if not group:
-            return 0, set()
+            return _CompileResult()
 
         compiler = group['compiler']
         from ..logger import logger
-        logger.debug(f"_compile_pending_for_group: group_key={group_key}, pending={len(self._pending_compilations.get(group_key, []))}")
+        logger.debug(
+            f"_compile_pending_for_group: group_key={group_key}, "
+            f"pending={len(self._pending_compilations.get(group_key, []))}"
+        )
 
-        # Track all compiled func_infos to avoid re-compilation
         compiled_funcs = set()
-        total_compiled = 0
-        compiled_symbols = set()
+        result = _CompileResult()
 
-        # Loop until no more pending compilations for this group
-        # This handles transitive effect propagation where compiling one function
-        # may trigger generation of new suffix versions
+        # Loop until no more pending compilations for this group.  Compiling one
+        # slice can still enqueue effect/suffix specializations for the next one.
         while True:
-            pending = self._pending_compilations.get(group_key, [])
-            if not pending:
+            iteration = self._drain_next_compile_iteration(group_key, compiled_funcs)
+            if not iteration.items:
                 break
 
-            # Clear pending to avoid re-processing
-            del self._pending_compilations[group_key]
+            result.compiled_count += len(iteration.items)
+            result.compiled_symbols |= iteration.symbols
 
-            # Filter out already compiled functions
-            new_pending = []
-            for callback, func_info in pending:
-                func_key = func_info.mangled_name or func_info.name
-                if func_key not in compiled_funcs:
-                    new_pending.append((callback, func_info))
-                    compiled_funcs.add(func_key)
-                    compiled_symbols.add(func_key)
+            self._prepare_compile_iteration(compiler, iteration)
+            self._compile_iteration_bodies(compiler, iteration)
 
-            if not new_pending:
-                break
-
-            total_compiled += len(new_pending)
-
-            # Build group scope from all pending functions' wrappers
-            # This enables self/mutual recursion by making all group functions
-            # available in each function's compilation_globals
-            group_scope = {}
-            for callback, func_info in new_pending:
-                if func_info.wrapper is not None:
-                    group_scope[func_info.name] = func_info.wrapper
-
-            # Inject group scope into each function's compilation_globals
-            for callback, func_info in new_pending:
-                if func_info.compilation_globals is not None:
-                    # Update with group scope (existing entries take precedence
-                    # for non-function entries, but function wrappers are added)
-                    for name, wrapper in group_scope.items():
-                        if name not in func_info.compilation_globals:
-                            func_info.compilation_globals[name] = wrapper
-
-            logger.debug(f"Injected group scope with {len(group_scope)} functions: {list(group_scope.keys())}")
-
-            # Phase 1: Forward declare all new functions
-            for callback, func_info in new_pending:
-                self._forward_declare_function(compiler, func_info)
-
-            # Phase 2: Compile all new function bodies
-            # Note: This may add more pending compilations to this group
-            for callback, func_info in new_pending:
-                callback(compiler)
-
-        return total_compiled, compiled_symbols
+        return result
     
+    def _group_object_cache_hit(self, group_key, group) -> bool:
+        """Return whether the current object artifact covers pending work."""
+        from .cache import BuildCache
+
+        source_file = group.get('source_file')
+        obj_file = group['obj_file']
+        return (
+            bool(source_file)
+            and BuildCache.check_obj_uptodate(obj_file, source_file)
+            and self._cached_object_covers_pending_symbols(group_key, group)
+        )
+
+    def _commit_cached_group(self, group_key, group):
+        """Commit OutputManager state after a cache hit."""
+        from ..config import config
+
+        obj_file = group['obj_file']
+        ir_file = group.get('ir_file')
+        if config.save_ir and ir_file and not os.path.exists(ir_file):
+            from ..logger import logger
+            logger.debug(
+                f"save_ir=True but {ir_file} is absent on cache hit; "
+                f"keeping cached .o untouched. Remove {obj_file} to force "
+                f"a rebuild that writes the .ll."
+            )
+
+        self._restore_deps_from_cache(group_key, group)
+        self._flushed_groups.add(group_key)
+
+        if group_key in self._pending_compilations:
+            self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
+        group['wrappers'] = []
+
+        return 'cached'
+
+    def _commit_empty_group(self, group_key, group):
+        """Commit OutputManager state when no functions materialized."""
+        self._flushed_groups.add(group_key)
+        group['wrappers'] = []
+        return 'empty'
+
+    def _publish_group_object(self, group_key, group, compile_result: _CompileResult):
+        """Publish the compiled LLVM module as IR, object, and deps files."""
+        compiler = group['compiler']
+        obj_file = group['obj_file']
+
+        existing_symbols = set(group.get('compiled_symbols', set()))
+        compiled_symbols = existing_symbols | compile_result.compiled_symbols
+
+        if not compiler.verify_module():
+            raise RuntimeError(f"Module verification failed for group {group_key}")
+
+        from ..config import config
+
+        if config.save_unopt_ir:
+            unopt_ir_file = group['ir_file'].replace('.ll', '.unopt.ll')
+            with open(unopt_ir_file, 'w') as f:
+                f.write(str(compiler.module))
+
+        opt_level = int(config.opt_level)
+        compiler.optimize_module(optimization_level=opt_level)
+
+        # Write .o atomically so concurrent readers never see a half-written file.
+        # The .ll text is a debug artifact, controlled by config.save_ir.
+        tmp_obj = obj_file + '.tmp.' + str(os.getpid())
+        if config.save_ir:
+            compiler.save_ir_to_file(group['ir_file'])
+        compiler.compile_to_object(tmp_obj)
+        _atomic_replace(tmp_obj, obj_file)
+
+        group['compiled_symbols'] = compiled_symbols
+        self._save_group_deps(
+            group_key,
+            compiler,
+            obj_file,
+            group,
+            compiled_symbols=compiled_symbols,
+        )
+
+    def _commit_compiled_group(self, group_key, group):
+        """Commit OutputManager state after publishing a fresh object."""
+        self._flushed_groups.add(group_key)
+        group['wrappers'] = []
+        return 'compiled'
+
+    def _flush_group_object(self, group_key, group):
+        """Compile one pending group to its object/deps artifacts."""
+        # Skip if already flushed
+        if group_key in self._flushed_groups:
+            return None
+
+        # Skip if marked as failed
+        if group.get('compilation_failed', False):
+            return None
+
+        obj_file = group['obj_file']
+        # File lock covers the entire cache-check -> compile -> write cycle.
+        # This remains the cross-process guard; the scheduler handles only
+        # in-process task ordering.
+        lockfile_path = obj_file + '.lock'
+
+        with file_lock(lockfile_path):
+            # Check cache inside the lock so that waiting processes
+            # see the .o written by the winner and skip compilation.
+            if self._group_object_cache_hit(group_key, group):
+                return self._commit_cached_group(group_key, group)
+
+            # Cache miss -- this process is the first to compile this .o.
+            try:
+                compile_result = self._compile_pending_for_group(group_key, group)
+            except Exception:
+                group['compilation_failed'] = True
+                raise
+
+            # If no functions were actually compiled (all deferred),
+            # skip writing an empty .o file.
+            if compile_result.compiled_count == 0:
+                return self._commit_empty_group(group_key, group)
+
+            if not group.get('wrappers'):
+                return None
+
+            self._publish_group_object(group_key, group, compile_result)
+
+        return self._commit_compiled_group(group_key, group)
+
     def flush_all(self):
         """
         Flush all pending output files to disk.
@@ -538,8 +695,6 @@ class OutputManager:
         - Otherwise, compile and regenerate .o
         """
         from ..logger import logger
-        from .cache import BuildCache
-        
         # Check if any group has already loaded its library
         from ..native_executor import get_multi_so_executor
         executor = get_multi_so_executor()
@@ -561,120 +716,43 @@ class OutputManager:
         # New groups may be added during compilation (transitive effect propagation)
         logger.debug(f"flush_all: _pending_groups={list(self._pending_groups.keys())}")
         logger.debug(f"flush_all: _pending_compilations={[(k, len(v)) for k,v in self._pending_compilations.items()]}")
+        from .scheduler import BuildScheduler, BuildSchedulerError, BuildTask
+        object_workers = int(os.environ.get('PC_OBJECT_BUILD_WORKERS', '1') or '1')
         while self._pending_groups:
-            group_key = next(iter(self._pending_groups))
-            group = self._pending_groups.pop(group_key)
+            batch = list(self._pending_groups.items())
+            self._pending_groups.clear()
 
-            # Skip if already flushed
-            if group_key in self._flushed_groups:
-                continue
+            tasks = []
+            for group_key, group in batch:
+                task_id = f"compile-object:{repr(group_key)}"
+                tasks.append(BuildTask(
+                    id=task_id,
+                    kind='compile_group_to_object',
+                    inputs=(group.get('source_file'),),
+                    outputs=(group.get('ir_file'), group.get('obj_file'), group.get('obj_file', '')[:-2] + '.deps'),
+                    run=lambda group_key=group_key, group=group: self._flush_group_object(group_key, group),
+                ))
 
-            # Skip if marked as failed
-            if group.get('compilation_failed', False):
-                continue
-
-            obj_file = group['obj_file']
-            source_file = group.get('source_file')
-
-            # File lock covers the entire cache-check -> compile -> write cycle.
-            # This ensures that when multiple processes need the same .o on a
-            # clean build, only ONE actually compiles; the rest wait and then
-            # see a cache hit.
-            lockfile_path = obj_file + '.lock'
-
-            with file_lock(lockfile_path):
-                # Check cache inside the lock so that waiting processes
-                # see the .o written by the winner and skip compilation.
-                if source_file and BuildCache.check_obj_uptodate(obj_file, source_file):
-                    if self._cached_object_covers_pending_symbols(group_key, group):
-                        # The cached .o is authoritative.  We must NOT
-                        # rewrite it on a hit, because doing so bumps
-                        # its mtime and forces a relink of the
-                        # dependent .so/.dll -- on Windows that fails
-                        # with EACCES whenever the DLL is already
-                        # mapped into the running process (e.g. a
-                        # second compiled function in the same group
-                        # is being looked up).  The .ll is purely a
-                        # debug artefact: if save_ir was off when the
-                        # .o was produced, we accept that the .ll is
-                        # missing for this group rather than perturb
-                        # already-loaded native state.  Users who need
-                        # the .ll for an existing build should remove
-                        # the corresponding .o to trigger a rebuild.
-                        from ..config import config
-                        ir_file = group.get('ir_file')
-                        if (config.save_ir and ir_file
-                                and not os.path.exists(ir_file)):
-                            from ..logger import logger
-                            logger.debug(
-                                f"save_ir=True but {ir_file} is absent "
-                                f"on cache hit; keeping cached .o "
-                                f"untouched. Remove {obj_file} to "
-                                f"force a rebuild that writes the .ll."
-                            )
-
-                        self._restore_deps_from_cache(group_key, group)
-                        self._flushed_groups.add(group_key)
-
-                        if group_key in self._pending_compilations:
-                            self._cached_compilations[group_key] = self._pending_compilations.pop(group_key)
-                        group['wrappers'] = []
-
-                        continue
-
-                # Cache miss -- this process is the first to compile this .o.
-                try:
-                    compiled_count, compiled_symbols = self._compile_pending_for_group(group_key, group)
-                except Exception:
-                    group['compilation_failed'] = True
-                    raise
-
-                # If no functions were actually compiled (all deferred),
-                # skip writing an empty .o file.
-                if compiled_count == 0:
-                    self._flushed_groups.add(group_key)
-                    group['wrappers'] = []
-                    continue
-
-                if not group.get('wrappers'):
-                    continue
-
-                compiler = group['compiler']
-                existing_symbols = set(group.get('compiled_symbols', set()))
-                compiled_symbols = existing_symbols | compiled_symbols
-
-                if not compiler.verify_module():
-                    raise RuntimeError(f"Module verification failed for group {group_key}")
-
-                from ..config import config
-
-                if config.save_unopt_ir:
-                    unopt_ir_file = group['ir_file'].replace('.ll', '.unopt.ll')
-                    with open(unopt_ir_file, 'w') as f:
-                        f.write(str(compiler.module))
-
-                opt_level = int(config.opt_level)
-                compiler.optimize_module(optimization_level=opt_level)
-
-                # Write .o atomically so concurrent readers never see a
-                # half-written file.  The .ll text is a debug-only
-                # artefact: it is *not* an input to compile_to_object()
-                # (which uses the in-memory IR string directly) nor a
-                # cache layer (cache.py only tracks .o/.so).  Skip it by
-                # default to avoid filesystem churn, opt-in via
-                # config.save_ir = True when debugging.
-                tmp_obj = obj_file + '.tmp.' + str(os.getpid())
-                if config.save_ir:
-                    compiler.save_ir_to_file(group['ir_file'])
-                compiler.compile_to_object(tmp_obj)
-                _atomic_replace(tmp_obj, obj_file)
-
-                group['compiled_symbols'] = compiled_symbols
-                self._save_group_deps(group_key, compiler, obj_file, group, compiled_symbols=compiled_symbols)
-
-            # Mark this group as flushed
-            self._flushed_groups.add(group_key)
-            group['wrappers'] = []
+            try:
+                BuildScheduler(max_workers=object_workers).run(tasks)
+            except BuildSchedulerError as exc:
+                for group_key, group in batch:
+                    if (
+                        group_key not in self._flushed_groups
+                        and not group.get('compilation_failed', False)
+                    ):
+                        self._pending_groups[group_key] = group
+                if len(exc.failures) == 1:
+                    raise next(iter(exc.failures.values())) from None
+                raise
+            except Exception:
+                for group_key, group in batch:
+                    if (
+                        group_key not in self._flushed_groups
+                        and not group.get('compilation_failed', False)
+                    ):
+                        self._pending_groups[group_key] = group
+                raise
 
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
     
