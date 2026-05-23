@@ -42,7 +42,7 @@ Usage:
     from pythoc import compile, i32, ptr, void
     from pythoc.std.runtime.api import (
         Runtime, runtime_new, runtime_start,
-        runtime_spawn, runtime_join, runtime_join_and_free,
+        runtime_spawn, runtime_join,
         runtime_shutdown, runtime_free,
     )
     from pythoc.std.runtime.channel import Channel
@@ -66,8 +66,8 @@ Usage:
 
         ch: ptr[Ch.type] = Ch.create()
 
-        t1: ptr[Task] = runtime_spawn(rt, producer, ptr[void](ch), u64(0))
-        runtime_join_and_free(rt, t1)
+        t1: TaskHandle = runtime_spawn(rt, producer, ptr[void](ch), u64(0))
+        runtime_join(rt, t1)
 
         Ch.destroy(ch)
         runtime_shutdown(rt)
@@ -99,6 +99,7 @@ from .coroutine import (
 from .task import (
     Task, TaskHandle, TaskQueue,
     task_create, task_destroy, task_mark_finished, task_set_result,
+    task_handle_new, task_handle_consume,
     taskq_init, taskq_push, taskq_pop, taskq_is_empty,
     TASK_PENDING, TASK_RUNNING, TASK_BLOCKED, TASK_FINISHED,
 )
@@ -112,7 +113,8 @@ from .scheduler import (
 )
 from .api import (
     Runtime, runtime_new, runtime_start, runtime_shutdown, runtime_free,
-    runtime_spawn, runtime_join, runtime_join_and_free, runtime_detach,
+    runtime_spawn, runtime_join, runtime_detach,
+    runtime_spawn_raw, runtime_join_raw, runtime_detach_raw,
     runtime_current_worker, runtime_yield_now,
 )
 from .channel import Channel

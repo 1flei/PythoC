@@ -21,7 +21,7 @@ Usage:
         rt: ptr[Runtime] = runtime_new(i32(4))  # 4 worker threads
         runtime_start(rt)
 
-        h: ptr[Task] = runtime_spawn(rt, my_work, my_arg, u64(0))
+        h: TaskHandle = runtime_spawn(rt, my_work, my_arg, u64(0))
         result: ptr[void] = runtime_join(rt, h)
 
         runtime_shutdown(rt)
@@ -34,14 +34,15 @@ from .policy import bind_mem
 bind_mem()
 
 from pythoc import (
-    compile, effect, i32, i64, u64, u8, ptr, void, struct, nullptr, sizeof, linear,
-    consume, func,
+    compile, effect, i32, i64, u64, u8, ptr, void, struct, nullptr, sizeof,
+    func,
 )
 from pythoc.libc.string import memset
 
 from .platform import (
     thread_create, thread_join,
     atomic_store_i64, atomic_load_i32,
+    SpinLock, spinlock_lock, spinlock_unlock,
 )
 from .scheduler import (
     Scheduler, Worker,
@@ -49,7 +50,10 @@ from .scheduler import (
     sched_yield, sched_join, sched_current_worker,
     worker_loop,
 )
-from .task import Task, task_destroy, TASK_FINISHED
+from .task import (
+    Task, TaskHandle, task_destroy, task_handle_new, task_handle_consume,
+    TASK_FINISHED,
+)
 from .coroutine import DEFAULT_STACK_SIZE
 
 
@@ -149,31 +153,17 @@ def runtime_free(rt: ptr[Runtime]) -> void:
 
 
 # ============================================================
-# Public API: spawn / join / yield / detach
+# Raw task API: internal scheduler/runtime ownership
 # ============================================================
 
 @compile
-def runtime_spawn(
+def runtime_spawn_raw(
     rt: ptr[Runtime],
     entry: func[ptr[void], ptr[void]],
     arg: ptr[void],
     stack_size: u64
 ) -> ptr[Task]:
-    """Spawn a new task.
-
-    Creates a lightweight coroutine that will execute entry(arg).
-    If called from within a task (worker context), uses fast local-deque path.
-    Otherwise falls back to global queue.
-
-    Args:
-        rt: runtime instance
-        entry: function pointer - void* (*fn)(void*)
-        arg: argument passed to entry
-        stack_size: stack size for the coroutine (0 = 64KB default)
-
-    Returns:
-        Task pointer.  Caller MUST eventually join or detach.
-    """
+    """Spawn a task and return the raw scheduler pointer."""
     sched: ptr[Scheduler] = ptr[Scheduler](ptr[void](ptr(rt.sched)))
 
     # Fast path: if we're on a worker, spawn locally (no global lock)
@@ -186,14 +176,8 @@ def runtime_spawn(
 
 
 @compile
-def runtime_join(rt: ptr[Runtime], task: ptr[Task]) -> ptr[void]:
-    """Wait for a task to finish and return its result.
-
-    If called from within a task, blocks the caller task (not the OS thread).
-    If called from outside (main thread), spin-waits.
-
-    After join returns, the task can be destroyed.
-    """
+def runtime_join_raw(rt: ptr[Runtime], task: ptr[Task]) -> ptr[void]:
+    """Wait for a raw task to finish and return its result."""
     sched: ptr[Scheduler] = ptr[Scheduler](ptr[void](ptr(rt.sched)))
     worker: ptr[Worker] = sched_current_worker(sched)
     if worker != nullptr:
@@ -206,23 +190,46 @@ def runtime_join(rt: ptr[Runtime], task: ptr[Task]) -> ptr[void]:
 
 
 @compile
-def runtime_join_and_free(rt: ptr[Runtime], task: ptr[Task]) -> ptr[void]:
-    """Join task and free its resources.  Convenience function."""
-    result: ptr[void] = runtime_join(rt, task)
+def runtime_detach_raw(rt: ptr[Runtime], task: ptr[Task]) -> void:
+    """Detach raw task ownership without waiting."""
+    spinlock_lock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+    if atomic_load_i32(ptr[i32](ptr[void](ptr(task.state)))) == TASK_FINISHED:
+        spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+        task_destroy(task)
+        return
+    task.detached = i32(1)
+    spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+
+
+# ============================================================
+# Public API: spawn / join / yield / detach
+# ============================================================
+
+@compile
+def runtime_spawn(
+    rt: ptr[Runtime],
+    entry: func[ptr[void], ptr[void]],
+    arg: ptr[void],
+    stack_size: u64
+) -> TaskHandle:
+    """Spawn a new task and return a linear ownership handle."""
+    return task_handle_new(runtime_spawn_raw(rt, entry, arg, stack_size))
+
+
+@compile
+def runtime_join(rt: ptr[Runtime], handle: TaskHandle) -> ptr[void]:
+    """Consume a task handle, wait for completion, and free task resources."""
+    task: ptr[Task] = task_handle_consume(handle)
+    result: ptr[void] = runtime_join_raw(rt, task)
     task_destroy(task)
     return result
 
 
 @compile
-def runtime_detach(rt: ptr[Runtime], task: ptr[Task]) -> void:
-    """Detach a task: consume ownership without waiting.
-
-    The task continues to run but its result will be discarded.
-    Resources are freed automatically when it finishes.
-    """
-    task.detached = i32(1)
-    if atomic_load_i32(ptr[i32](ptr[void](ptr(task.state)))) == TASK_FINISHED:
-        task_destroy(task)
+def runtime_detach(rt: ptr[Runtime], handle: TaskHandle) -> void:
+    """Consume a task handle and let the scheduler free it on completion."""
+    task: ptr[Task] = task_handle_consume(handle)
+    runtime_detach_raw(rt, task)
 
 
 # ============================================================

@@ -29,10 +29,10 @@ from pythoc.libc.string import memset
 
 from .api import (
     Runtime, runtime_new, runtime_start, runtime_shutdown, runtime_free,
-    runtime_spawn, runtime_join, runtime_join_and_free, runtime_detach,
+    runtime_spawn, runtime_join, runtime_detach,
     runtime_yield_now,
 )
-from .task import Task
+from .task import TaskHandle
 
 
 # ============================================================
@@ -65,17 +65,17 @@ def executor_set_runtime(rt: ptr[Runtime]) -> void:
 # ============================================================
 
 @compile
-def _exec_spawn(entry: func[ptr[void], ptr[void]], arg: ptr[void]) -> ptr[Task]:
+def _exec_spawn(entry: func[ptr[void], ptr[void]], arg: ptr[void]) -> TaskHandle:
     """Spawn via the global runtime."""
     g: ptr[_GlobalState] = _global_rt()
     return runtime_spawn(g.rt, entry, arg, u64(0))
 
 
 @compile
-def _exec_join(task: ptr[Task]) -> ptr[void]:
+def _exec_join(handle: TaskHandle) -> ptr[void]:
     """Join via the global runtime."""
     g: ptr[_GlobalState] = _global_rt()
-    return runtime_join(g.rt, task)
+    return runtime_join(g.rt, handle)
 
 
 @compile
@@ -86,10 +86,10 @@ def _exec_yield() -> void:
 
 
 @compile
-def _exec_detach(task: ptr[Task]) -> void:
+def _exec_detach(handle: TaskHandle) -> void:
     """Detach via the global runtime."""
     g: ptr[_GlobalState] = _global_rt()
-    runtime_detach(g.rt, task)
+    runtime_detach(g.rt, handle)
 
 
 # ============================================================

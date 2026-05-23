@@ -31,11 +31,11 @@ from test.utils.test_utils import DeferredTestCase
 from pythoc.std.runtime.channel import Channel
 from pythoc.std.runtime.api import (
     Runtime, runtime_new, runtime_start, runtime_spawn,
-    runtime_join_and_free, runtime_shutdown, runtime_free,
+    runtime_join, runtime_shutdown, runtime_free,
     runtime_current_worker,
 )
 from pythoc.std.runtime.scheduler import Worker
-from pythoc.std.runtime.task import Task
+from pythoc.std.runtime.task import TaskHandle
 
 
 # ============================================================
@@ -276,15 +276,15 @@ def test_fn_ch_blocking_recv_then_send() -> i32:
     send_args.value = i32(314)
 
     runtime_start(rt)
-    recv_task: ptr[Task] = runtime_spawn(
+    recv_task: TaskHandle = runtime_spawn(
         rt, test_fn_ch_blocking_recv_entry, ptr[void](ptr(recv_args)), u64(0)
     )
-    send_task: ptr[Task] = runtime_spawn(
+    send_task: TaskHandle = runtime_spawn(
         rt, test_fn_ch_blocking_send_entry, ptr[void](ptr(send_args)), u64(0)
     )
 
-    runtime_join_and_free(rt, recv_task)
-    runtime_join_and_free(rt, send_task)
+    runtime_join(rt, recv_task)
+    runtime_join(rt, send_task)
     runtime_shutdown(rt)
     runtime_free(rt)
     Ch_i32_cap1.destroy(ch)
@@ -309,15 +309,15 @@ def test_fn_ch_blocking_send_then_recv() -> i32:
     send_args.value = i32(22)
 
     runtime_start(rt)
-    send_task: ptr[Task] = runtime_spawn(
+    send_task: TaskHandle = runtime_spawn(
         rt, test_fn_ch_blocking_send_entry, ptr[void](ptr(send_args)), u64(0)
     )
-    recv_task: ptr[Task] = runtime_spawn(
+    recv_task: TaskHandle = runtime_spawn(
         rt, test_fn_ch_blocking_recv_entry, ptr[void](ptr(recv_args)), u64(0)
     )
 
-    runtime_join_and_free(rt, send_task)
-    runtime_join_and_free(rt, recv_task)
+    runtime_join(rt, send_task)
+    runtime_join(rt, recv_task)
 
     final_out: i32 = 0
     Ch_i32_cap1.try_recv(ch, ptr[i32](ptr[void](ptr(final_out))))
@@ -366,15 +366,15 @@ def test_fn_ch_blocking_pipe_two_workers() -> i32:
     args.sum_out = ptr[i32](ptr[void](ptr(total)))
 
     runtime_start(rt)
-    consumer: ptr[Task] = runtime_spawn(
+    consumer: TaskHandle = runtime_spawn(
         rt, test_fn_ch_blocking_pipe_consumer, ptr[void](ptr(args)), u64(0)
     )
-    producer: ptr[Task] = runtime_spawn(
+    producer: TaskHandle = runtime_spawn(
         rt, test_fn_ch_blocking_pipe_producer, ptr[void](ptr(args)), u64(0)
     )
 
-    runtime_join_and_free(rt, producer)
-    runtime_join_and_free(rt, consumer)
+    runtime_join(rt, producer)
+    runtime_join(rt, consumer)
     runtime_shutdown(rt)
     runtime_free(rt)
     Ch_i32_cap1.destroy(ch)
@@ -425,6 +425,10 @@ class TestRuntimeChannel(DeferredTestCase):
 
     def test_blocking_pipe_two_workers(self):
         self.assertEqual(test_fn_ch_blocking_pipe_two_workers(), 45)
+
+    def test_blocking_pipe_two_workers_repeated(self):
+        for _ in range(16):
+            self.assertEqual(test_fn_ch_blocking_pipe_two_workers(), 45)
 
 
 if __name__ == '__main__':

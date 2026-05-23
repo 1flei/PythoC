@@ -23,7 +23,7 @@ bind_mem()
 
 from pythoc import (
     compile, effect, i32, i64, u64, ptr, void, struct, nullptr, sizeof, linear,
-    consume, func,
+    consume, func, refined, assume,
 )
 from pythoc.libc.string import memset
 
@@ -44,9 +44,10 @@ from .platform import (
 TASK_PENDING   = i32(0)   # Created, in the queue, not yet polled
 TASK_RUNNING   = i32(1)   # Currently executing on a worker
 TASK_BLOCKED   = i32(2)   # Waiting on something (channel, join, etc.)
-TASK_FINISHED  = i32(3)   # Entry function returned, result available
+TASK_FINISHED  = i32(3)   # Scheduler completed task cleanup, safe to join/free
 TASK_WOKEN     = i32(4)   # Wake requested before the task fully suspended
 TASK_BLOCKING  = i32(5)   # On a wait queue, switching back to scheduler
+TASK_FINISHING = i32(6)   # Entry returned, worker still owns completion cleanup
 
 
 # ============================================================
@@ -77,10 +78,28 @@ class Task:
 # Compiler enforces this at compile time — no leak possible.
 # ============================================================
 
+TaskProof = refined[linear, "runtime_task"]
+
+
 @compile
 class TaskHandle:
     task: ptr[Task]         # the task this handle refers to
-    _proof: linear          # linear token: must be consumed
+    _proof: TaskProof       # linear token: must be consumed
+
+
+@compile
+def task_handle_new(task: ptr[Task]) -> TaskHandle:
+    handle: TaskHandle
+    handle.task = task
+    handle._proof = assume(linear(), "runtime_task")
+    return handle
+
+
+@compile
+def task_handle_consume(handle: TaskHandle) -> ptr[Task]:
+    task: ptr[Task] = handle.task
+    consume(handle._proof)
+    return task
 
 
 # ============================================================
@@ -113,9 +132,9 @@ def task_set_result(task: ptr[Task], result: ptr[void]) -> void:
 
 @compile
 def task_mark_finished(task: ptr[Task]) -> void:
-    """Transition task to FINISHED state."""
+    """Mark that the entry returned; the worker publishes FINISHED later."""
     spinlock_lock(ptr[SpinLock](ptr[void](ptr(task.lock))))
-    atomic_store_i32(ptr[i32](ptr[void](ptr(task.state))), TASK_FINISHED)
+    atomic_store_i32(ptr[i32](ptr[void](ptr(task.state))), TASK_FINISHING)
     task.coro.state = CORO_DONE
     spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
 

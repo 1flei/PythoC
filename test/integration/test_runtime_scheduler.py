@@ -18,14 +18,14 @@ from pythoc.libc.stdlib import malloc, free
 from pythoc.libc.string import memset
 from pythoc.build.output_manager import flush_all_pending_outputs
 
-from test.utils.test_utils import DeferredTestCase
+from test.utils.test_utils import DeferredTestCase, expect_error
 
 from pythoc.std.runtime.platform import (
     SpinLock, spinlock_init, spinlock_lock, spinlock_unlock,
     atomic_load_i64, atomic_store_i64, atomic_fetch_add_i64, atomic_cas_i64,
 )
 from pythoc.std.runtime.task import (
-    Task, TaskQueue, TaskIdGen,
+    Task, TaskHandle, TaskQueue, TaskIdGen,
     task_create, task_destroy,
     taskq_init, taskq_push, taskq_pop, taskq_is_empty,
     TASK_PENDING, TASK_FINISHED,
@@ -34,7 +34,7 @@ from pythoc.std.runtime.deque import (
     WSDeque, wsdeque_init, wsdeque_push, wsdeque_pop, wsdeque_steal, wsdeque_size,
 )
 from pythoc.std.runtime.api import (
-    Runtime, runtime_new, runtime_start, runtime_spawn, runtime_join_and_free,
+    Runtime, runtime_new, runtime_start, runtime_spawn, runtime_join,
     runtime_shutdown, runtime_free, runtime_detach, runtime_yield_now,
 )
 from pythoc.std.runtime.executor_effect import (
@@ -374,15 +374,64 @@ def test_fn_runtime_entry(arg: ptr[void]) -> ptr[void]:
     return ptr[void](out)
 
 
+@expect_error(["not consumed"], suffix="bad_task_handle_not_consumed")
+def run_error_task_handle_not_consumed():
+    @compile(suffix="bad_task_handle_not_consumed")
+    def bad_task_handle_not_consumed() -> void:
+        rt: ptr[Runtime] = nullptr
+        task: TaskHandle = runtime_spawn(
+            rt, test_fn_runtime_entry, nullptr, u64(0)
+        )
+
+
+@expect_error(["consumed"], suffix="bad_task_handle_double_join")
+def run_error_task_handle_double_join():
+    @compile(suffix="bad_task_handle_double_join")
+    def bad_task_handle_double_join() -> void:
+        rt: ptr[Runtime] = nullptr
+        task: TaskHandle = runtime_spawn(
+            rt, test_fn_runtime_entry, nullptr, u64(0)
+        )
+        runtime_join(rt, task)
+        runtime_join(rt, task)
+
+
+@expect_error(["cannot assign linear token", "use move"], suffix="bad_task_handle_copy")
+def run_error_task_handle_copy():
+    @compile(suffix="bad_task_handle_copy")
+    def bad_task_handle_copy() -> void:
+        rt: ptr[Runtime] = nullptr
+        task: TaskHandle = runtime_spawn(
+            rt, test_fn_runtime_entry, nullptr, u64(0)
+        )
+        copied = task
+        runtime_detach(rt, copied)
+
+
+@expect_error(
+    ["not consumed", "inconsistent"],
+    suffix="bad_task_handle_branch",
+)
+def run_error_task_handle_branch():
+    @compile(suffix="bad_task_handle_branch")
+    def bad_task_handle_branch(flag: i32) -> void:
+        rt: ptr[Runtime] = nullptr
+        task: TaskHandle = runtime_spawn(
+            rt, test_fn_runtime_entry, nullptr, u64(0)
+        )
+        if flag != 0:
+            runtime_detach(rt, task)
+
+
 @compile(suffix="rt_spawn_join_basic")
 def test_fn_runtime_spawn_join() -> i64:
     rt = runtime_new(i32(1))
     runtime_start(rt)
 
-    task: ptr[Task] = runtime_spawn(
+    task: TaskHandle = runtime_spawn(
         rt, test_fn_runtime_entry, nullptr, u64(0)
     )
-    result: ptr[void] = runtime_join_and_free(rt, task)
+    result: ptr[void] = runtime_join(rt, task)
     out: ptr[i64] = ptr[i64](result)
     value: i64 = out[0]
     free(result)
@@ -390,6 +439,28 @@ def test_fn_runtime_spawn_join() -> i64:
     runtime_shutdown(rt)
     runtime_free(rt)
     return value
+
+
+@compile(suffix="rt_join_many")
+def test_fn_runtime_join_many() -> i64:
+    rt = runtime_new(i32(1))
+    runtime_start(rt)
+
+    total: i64 = 0
+    i: i32 = 0
+    while i < 128:
+        task: TaskHandle = runtime_spawn(
+            rt, test_fn_runtime_entry, nullptr, u64(0)
+        )
+        result: ptr[void] = runtime_join(rt, task)
+        out: ptr[i64] = ptr[i64](result)
+        total = total + out[0]
+        free(result)
+        i = i + 1
+
+    runtime_shutdown(rt)
+    runtime_free(rt)
+    return total
 
 
 @compile(suffix="rt_yield_entry")
@@ -405,10 +476,10 @@ def test_fn_runtime_yield_resume() -> i64:
     rt = runtime_new(i32(1))
     runtime_start(rt)
 
-    task: ptr[Task] = runtime_spawn(
+    task: TaskHandle = runtime_spawn(
         rt, test_fn_runtime_yield_entry, ptr[void](rt), u64(0)
     )
-    result: ptr[void] = runtime_join_and_free(rt, task)
+    result: ptr[void] = runtime_join(rt, task)
     out: ptr[i64] = ptr[i64](result)
     value: i64 = out[0]
     free(result)
@@ -431,7 +502,7 @@ def test_fn_runtime_detach_shutdown() -> i64:
     runtime_start(rt)
 
     value: i64 = 0
-    task: ptr[Task] = runtime_spawn(
+    task: TaskHandle = runtime_spawn(
         rt, test_fn_runtime_detach_entry, ptr[void](ptr(value)), u64(0)
     )
     runtime_detach(rt, task)
@@ -454,9 +525,8 @@ def test_fn_runtime_executor_global() -> i64:
     executor_set_runtime(rt)
     runtime_start(rt)
 
-    task: ptr[Task] = _exec_spawn(test_fn_runtime_executor_entry, nullptr)
+    task: TaskHandle = _exec_spawn(test_fn_runtime_executor_entry, nullptr)
     result: ptr[void] = _exec_join(task)
-    task_destroy(task)
     out: ptr[i64] = ptr[i64](result)
     value: i64 = out[0]
     free(result)
@@ -494,7 +564,7 @@ def test_fn_runtime_four_worker_shutdown_drain() -> i64:
 
     i: i32 = 0
     while i < 64:
-        task: ptr[Task] = runtime_spawn(
+        task: TaskHandle = runtime_spawn(
             rt, test_fn_runtime_stress_yield_entry, ptr[void](ptr(args)), u64(0)
         )
         runtime_detach(rt, task)
@@ -520,10 +590,10 @@ def test_fn_runtime_join_child_entry(arg: ptr[void]) -> ptr[void]:
 @compile(suffix="rt_join_parent_entry")
 def test_fn_runtime_join_parent_entry(arg: ptr[void]) -> ptr[void]:
     args: ptr[RuntimeJoinArgs] = ptr[RuntimeJoinArgs](arg)
-    child: ptr[Task] = runtime_spawn(
+    child: TaskHandle = runtime_spawn(
         args.rt, test_fn_runtime_join_child_entry, nullptr, u64(0)
     )
-    return runtime_join_and_free(args.rt, child)
+    return runtime_join(args.rt, child)
 
 
 @compile(suffix="rt_join_inside_task_multi_worker")
@@ -533,10 +603,10 @@ def test_fn_runtime_join_inside_task_multi_worker() -> i64:
     args.rt = rt
 
     runtime_start(rt)
-    parent: ptr[Task] = runtime_spawn(
+    parent: TaskHandle = runtime_spawn(
         rt, test_fn_runtime_join_parent_entry, ptr[void](ptr(args)), u64(0)
     )
-    result: ptr[void] = runtime_join_and_free(rt, parent)
+    result: ptr[void] = runtime_join(rt, parent)
     out: ptr[i64] = ptr[i64](result)
     value: i64 = out[0]
     free(result)
@@ -622,6 +692,9 @@ class TestRuntimeScheduler(DeferredTestCase):
     def test_runtime_spawn_join(self):
         self.assertEqual(test_fn_runtime_spawn_join(), 1234)
 
+    def test_runtime_join_many(self):
+        self.assertEqual(test_fn_runtime_join_many(), 157952)
+
     def test_runtime_yield_resume(self):
         self.assertEqual(test_fn_runtime_yield_resume(), 5678)
 
@@ -636,6 +709,22 @@ class TestRuntimeScheduler(DeferredTestCase):
 
     def test_runtime_join_inside_task_multi_worker(self):
         self.assertEqual(test_fn_runtime_join_inside_task_multi_worker(), 4321)
+
+    def test_task_handle_not_consumed_error(self):
+        passed, msg = run_error_task_handle_not_consumed()
+        self.assertTrue(passed, msg)
+
+    def test_task_handle_double_join_error(self):
+        passed, msg = run_error_task_handle_double_join()
+        self.assertTrue(passed, msg)
+
+    def test_task_handle_copy_error(self):
+        passed, msg = run_error_task_handle_copy()
+        self.assertTrue(passed, msg)
+
+    def test_task_handle_branch_error(self):
+        passed, msg = run_error_task_handle_branch()
+        self.assertTrue(passed, msg)
 
 
 if __name__ == '__main__':

@@ -48,7 +48,7 @@ from .task import (
     task_create, task_destroy, task_mark_finished,
     taskq_init, taskq_push, taskq_pop, taskq_is_empty,
     TASK_PENDING, TASK_RUNNING, TASK_BLOCKED, TASK_FINISHED, TASK_WOKEN,
-    TASK_BLOCKING,
+    TASK_BLOCKING, TASK_FINISHING,
     _next_task_id,
 )
 from .deque import (
@@ -444,8 +444,10 @@ def _handle_task_after_run(w: ptr[Worker], task: ptr[Task], sched: ptr[Scheduler
             # Local deque full → overflow to global queue
             taskq_push(ptr[TaskQueue](ptr[void](ptr(sched.global_queue))), task)
     elif state == TASK_WOKEN:
-        taskq_push(ptr[TaskQueue](ptr[void](ptr(sched.global_queue))), task)
-        sched_notify_one(sched)
+        atomic_store_i32(ptr[i32](ptr[void](ptr(task.state))), TASK_PENDING)
+        if wsdeque_push(ptr[WSDeque](ptr[void](ptr(w.local_deque))), task) == 0:
+            taskq_push(ptr[TaskQueue](ptr[void](ptr(sched.global_queue))), task)
+            sched_notify_one(sched)
     elif state == TASK_BLOCKING:
         spinlock_lock(ptr[SpinLock](ptr[void](ptr(task.lock))))
         latest: i32 = atomic_load_i32(ptr[i32](ptr[void](ptr(task.state))))
@@ -457,8 +459,9 @@ def _handle_task_after_run(w: ptr[Worker], task: ptr[Task], sched: ptr[Scheduler
             sched_notify_one(sched)
             return
         spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
-    elif state == TASK_FINISHED:
-        # Task finished: decrement active count
+    elif state == TASK_FINISHING:
+        # Task entry returned. Finish scheduler bookkeeping before publishing
+        # TASK_FINISHED so external joiners cannot free the stack too early.
         old_active: i64 = atomic_fetch_add_i64(
             ptr[i64](ptr[void](ptr(sched.active_tasks))),
             i64(-1)
@@ -468,16 +471,23 @@ def _handle_task_after_run(w: ptr[Worker], task: ptr[Task], sched: ptr[Scheduler
             and atomic_load_i64(ptr[i64](ptr[void](ptr(sched.shutdown)))) != i64(0)
         ):
             sched_notify_all(sched)
-        if task.detached != 0:
+
+        spinlock_lock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+        detached: i32 = task.detached
+        joiner: ptr[Task] = task.joiner
+        atomic_store_i32(ptr[i32](ptr[void](ptr(task.state))), TASK_FINISHED)
+        spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+
+        if detached != 0:
             task_destroy(task)
             return
+
         # Wake joiner if someone is waiting on this task
-        if task.joiner != nullptr:
+        if joiner != nullptr:
             # Fast path: push joiner to LOCAL deque (avoids global queue + condvar)
             # Safe because joiner is guaranteed BLOCKED at this point
             # (sched_join sets BLOCKING, _handle_task_after_run converts to BLOCKED
             #  before worker picks up child from deque)
-            joiner: ptr[Task] = task.joiner
             spinlock_lock(ptr[SpinLock](ptr[void](ptr(joiner.lock))))
             joiner_state: i32 = atomic_load_i32(ptr[i32](ptr[void](ptr(joiner.state))))
             if joiner_state == TASK_BLOCKED:
@@ -503,6 +513,25 @@ def sched_requeue_task(sched: ptr[Scheduler], task: ptr[Task]) -> void:
     spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
     taskq_push(ptr[TaskQueue](ptr[void](ptr(sched.global_queue))), task)
     sched_notify_one(sched)
+
+
+@compile
+def sched_requeue_task_local(
+    sched: ptr[Scheduler],
+    w: ptr[Worker],
+    task: ptr[Task],
+) -> void:
+    spinlock_lock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+    if atomic_load_i32(ptr[i32](ptr[void](ptr(task.state)))) == TASK_BLOCKING:
+        atomic_store_i32(ptr[i32](ptr[void](ptr(task.state))), TASK_WOKEN)
+        spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+        return
+    atomic_store_i32(ptr[i32](ptr[void](ptr(task.state))), TASK_PENDING)
+    task.queued = i32(0)
+    spinlock_unlock(ptr[SpinLock](ptr[void](ptr(task.lock))))
+    if wsdeque_push(ptr[WSDeque](ptr[void](ptr(w.local_deque))), task) == 0:
+        taskq_push(ptr[TaskQueue](ptr[void](ptr(sched.global_queue))), task)
+        sched_notify_one(sched)
 
 
 # ============================================================

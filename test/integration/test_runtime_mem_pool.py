@@ -21,10 +21,10 @@ from pythoc.std.mem_pool import PoolMem
 from test.utils.test_utils import DeferredTestCase
 
 from pythoc.std.runtime.api import (
-    runtime_new, runtime_start, runtime_spawn, runtime_join_and_free,
+    runtime_new, runtime_start, runtime_spawn, runtime_join,
     runtime_shutdown, runtime_free,
 )
-from pythoc.std.runtime.task import Task
+from pythoc.std.runtime.task import TaskHandle
 
 
 flush_all_pending_outputs()
@@ -62,10 +62,10 @@ def test_fn_runtime_pool_spawn() -> i64:
     rt = runtime_new(i32(2))
     runtime_start(rt)
     value: i64 = 0
-    task: ptr[Task] = runtime_spawn(
+    task: TaskHandle = runtime_spawn(
         rt, test_fn_runtime_pool_entry, ptr[void](ptr(value)), u64(0)
     )
-    runtime_join_and_free(rt, task)
+    runtime_join(rt, task)
     runtime_shutdown(rt)
     runtime_free(rt)
     return value
