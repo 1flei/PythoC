@@ -89,6 +89,97 @@ class TestMultiSOExecutor(unittest.TestCase):
         self.assertEqual(result, "fresh_wrapper")
         self.assertNotIn(f"{so_file}:stale_func", executor.function_cache)
 
+    def test_darwin_explicit_link_libraries_include_dependencies(self):
+        """Darwin links dependent DSOs directly to avoid system symbol clashes."""
+        executor = MultiSOExecutor()
+        dependencies = [
+            ("/tmp/dependency.py", "/tmp/dependency.so"),
+            ("/tmp/self.py", "/tmp/main.so"),
+        ]
+
+        with patch("pythoc.native_executor.sys.platform", "darwin"), patch.object(
+            executor,
+            "_get_persisted_link_libraries",
+            return_value=["pthread", "/tmp/dependency.so"],
+        ), patch(
+            "pythoc.native_executor.os.path.exists",
+            return_value=True,
+        ):
+            libs, task_deps = executor._dependency_link_plan(
+                "/tmp/main.o",
+                "/tmp/main.so",
+                dependencies,
+            )
+
+        self.assertEqual(libs, ["/tmp/dependency.so", "pthread"])
+        self.assertEqual(task_deps, ())
+
+    def test_darwin_link_plan_orders_pending_dependencies(self):
+        """Darwin waits for pending dependent DSOs before linking consumers."""
+        executor = MultiSOExecutor()
+
+        with patch("pythoc.native_executor.sys.platform", "darwin"), patch.object(
+            executor,
+            "_get_persisted_link_libraries",
+            return_value=[],
+        ):
+            libs, task_deps = executor._dependency_link_plan(
+                "/tmp/main.o",
+                "/tmp/main.so",
+                [("/tmp/dependency.py", "/tmp/dependency.so")],
+                pending_task_ids={
+                    "/tmp/main.so": "link-main",
+                    "/tmp/dependency.so": "link-dependency",
+                },
+                pending_dependency_graph={
+                    "/tmp/main.so": ["/tmp/dependency.so"],
+                    "/tmp/dependency.so": [],
+                },
+            )
+
+        self.assertEqual(libs, ["/tmp/dependency.so"])
+        self.assertEqual(task_deps, ("link-dependency",))
+
+    def test_darwin_link_plan_skips_cycle_edges(self):
+        """Darwin keeps dynamic lookup on cycle edges to bootstrap clean builds."""
+        executor = MultiSOExecutor()
+
+        with patch("pythoc.native_executor.sys.platform", "darwin"), patch.object(
+            executor,
+            "_get_persisted_link_libraries",
+            return_value=[],
+        ):
+            libs, task_deps = executor._dependency_link_plan(
+                "/tmp/a.o",
+                "/tmp/a.so",
+                [("/tmp/b.py", "/tmp/b.so")],
+                pending_task_ids={
+                    "/tmp/a.so": "link-a",
+                    "/tmp/b.so": "link-b",
+                },
+                pending_dependency_graph={
+                    "/tmp/a.so": ["/tmp/b.so"],
+                    "/tmp/b.so": ["/tmp/a.so"],
+                },
+            )
+
+        self.assertEqual(libs, [])
+        self.assertEqual(task_deps, ())
+
+    def test_linux_keeps_dynamic_dependency_loading(self):
+        """Linux keeps the existing runtime dependency loading behavior."""
+        executor = MultiSOExecutor()
+
+        with patch("pythoc.native_executor.sys.platform", "linux"):
+            libs, task_deps = executor._dependency_link_plan(
+                "/tmp/main.o",
+                "/tmp/main.so",
+                [("/tmp/dependency.py", "/tmp/dependency.so")],
+            )
+
+        self.assertIsNone(libs)
+        self.assertEqual(task_deps, ())
+
 
 if __name__ == "__main__":
     unittest.main()

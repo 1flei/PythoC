@@ -65,6 +65,73 @@ class MultiSOExecutor:
 
         result = link_files(all_objs, so_file, shared=True, link_libraries=extra_link_libraries)
         return result
+
+    def _shared_dependency_link_mode(self) -> str:
+        """Return how this platform binds cross-DSO group dependencies."""
+        if sys.platform == 'win32':
+            return 'stub'
+        if sys.platform == 'darwin':
+            return 'explicit'
+        return 'dynamic'
+
+    def _dependency_link_plan(
+        self,
+        obj_file: str,
+        so_file: str,
+        dependencies: List[Tuple[str, str]],
+        pending_task_ids: Optional[Dict[str, str]] = None,
+        pending_dependency_graph: Optional[Dict[str, List[str]]] = None,
+    ) -> Tuple[Optional[List[str]], Tuple[str, ...]]:
+        """Return linker inputs and scheduler deps for one shared object."""
+        link_mode = self._shared_dependency_link_mode()
+        if link_mode == 'dynamic':
+            return None, ()
+
+        dep_libs = [dep_so for _, dep_so in dependencies if dep_so != so_file]
+        persisted_libs = self._get_persisted_link_libraries(obj_file)
+
+        link_libs: List[str] = []
+        task_deps: List[str] = []
+        graph = pending_dependency_graph or {}
+        for dep_so in dep_libs:
+            dep_task_id = pending_task_ids.get(dep_so) if pending_task_ids else None
+            closes_cycle = (
+                bool(dep_task_id)
+                and self._dependency_path_exists(dep_so, so_file, graph)
+            )
+
+            if dep_task_id and not closes_cycle:
+                task_deps.append(dep_task_id)
+
+            if closes_cycle and link_mode != 'stub':
+                continue
+
+            if dep_task_id is None and link_mode != 'stub' and not os.path.exists(dep_so):
+                continue
+
+            link_libs.append(dep_so)
+
+        link_libs.extend(lib for lib in persisted_libs if lib not in link_libs)
+        return link_libs, tuple(sorted(set(task_deps)))
+
+    def _dependency_path_exists(
+        self,
+        start_so: str,
+        target_so: str,
+        dependency_graph: Dict[str, List[str]],
+    ) -> bool:
+        """Return whether dependency_graph has a path from start_so to target_so."""
+        pending = [start_so]
+        seen = set()
+        while pending:
+            current = pending.pop()
+            if current == target_so:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(dependency_graph.get(current, ()))
+        return False
     
     def load_library_with_dependencies(self, source_file: str, so_file: str, 
                                       dependencies: List[str]) -> ctypes.CDLL:
@@ -639,14 +706,11 @@ class MultiSOExecutor:
         # Ensure all dependencies are compiled first (all platforms).
         self._compile_dependencies_recursive(dependencies, set())
 
-        # On Windows (PE/COFF), the linker requires all imported symbols to be
-        # resolvable at link time via import libraries.  Collect dependency
-        # DLLs and persisted @extern(lib=...) libraries as explicit link inputs.
-        extra_link_libraries: Optional[List[str]] = None
-        if sys.platform == 'win32':
-            dep_libs = [dep_so for _, dep_so in dependencies if dep_so != so_file]
-            persisted_libs = self._get_persisted_link_libraries(obj_file)
-            extra_link_libraries = dep_libs + [l for l in persisted_libs if l not in dep_libs]
+        extra_link_libraries, _task_deps = self._dependency_link_plan(
+            obj_file,
+            so_file,
+            dependencies,
+        )
 
         # Check if .so/.dll needs re-linking.
         # Only check direct inputs: the group's own .o and .deps file.
@@ -781,7 +845,7 @@ class MultiSOExecutor:
             self._ensure_stub_implibs(dependencies, set())
 
         # Collect all link jobs via DFS, then execute (parallel when >1 job).
-        link_jobs: List[Tuple[str, str, Optional[List[str]]]] = []  # (obj, so, libs)
+        link_jobs: List[Tuple[str, str, List[Tuple[str, str]]]] = []
 
         def _collect_jobs(deps):
             for dep_source_file, dep_so_file in deps:
@@ -800,18 +864,13 @@ class MultiSOExecutor:
                 # Only check direct inputs (own .o + .deps); transitive
                 # dependency changes are handled by their own relink cycle.
                 if os.path.exists(dep_obj_file):
-                    # Windows PE: must pass dependency DLLs as link libraries
-                    dep_link_libraries: Optional[List[str]] = None
-                    if sys.platform == 'win32':
-                        dep_link_libraries = [d_so for _, d_so in dep_deps if d_so != dep_so_file]
-
                     relink_inputs = [dep_obj_file]
                     dep_deps_file = dep_obj_file.replace('.o', '.deps')
                     if os.path.exists(dep_deps_file):
                         relink_inputs.append(dep_deps_file)
 
                     if BuildCache.check_so_needs_relink(dep_so_file, relink_inputs):
-                        link_jobs.append((dep_obj_file, dep_so_file, dep_link_libraries))
+                        link_jobs.append((dep_obj_file, dep_so_file, dep_deps))
 
         _collect_jobs(dependencies)
 
@@ -827,11 +886,31 @@ class MultiSOExecutor:
         # cross-process artifact locks.
         from .build.scheduler import BuildScheduler, BuildTask
         max_workers = min(len(link_jobs), os.cpu_count() or 4)
+        task_ids_by_so = {
+            so: f"link-shared:{os.path.abspath(so)}"
+            for _obj, so, _deps in link_jobs
+        }
+        pending_dependency_graph = {
+            so: [
+                dep_so
+                for _dep_source, dep_so in deps
+                if dep_so in task_ids_by_so and dep_so != so
+            ]
+            for _obj, so, deps in link_jobs
+        }
         tasks = []
-        for obj, so, libs in link_jobs:
+        for obj, so, deps in link_jobs:
+            libs, task_deps = self._dependency_link_plan(
+                obj,
+                so,
+                deps,
+                pending_task_ids=task_ids_by_so,
+                pending_dependency_graph=pending_dependency_graph,
+            )
             tasks.append(BuildTask(
-                id=f"link-shared:{os.path.abspath(so)}",
+                id=task_ids_by_so[so],
                 kind='link_shared_library',
+                deps=task_deps,
                 inputs=(obj,) + tuple(libs or []),
                 outputs=(so,),
                 run=lambda obj=obj, so=so, libs=libs: self.compile_source_to_so(
@@ -844,7 +923,7 @@ class MultiSOExecutor:
 
         # Linking happened — invalidate caches for the so_files that were
         # actually relinked, but keep verified status for unaffected DLLs.
-        relinked_sos = {so for _, so, _ in link_jobs}
+        relinked_sos = {so for _, so, _deps in link_jobs}
         self._verified_deps -= relinked_sos
         # Clear transitive obj cache entries that may reference relinked DLLs.
         stale_keys = [k for k in self._transitive_obj_cache if k[1] in relinked_sos]
