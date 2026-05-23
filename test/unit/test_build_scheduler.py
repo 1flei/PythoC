@@ -116,6 +116,51 @@ class TestBuildScheduler(unittest.TestCase):
         self.assertFalse(did_run)
         self.assertTrue(result["cached"].skipped)
 
+    def test_success_callback_can_add_dynamic_tasks(self):
+        events = []
+
+        def commit(result):
+            events.append(f"commit:{result.task_id}")
+            return [
+                BuildTask(
+                    id="b",
+                    kind="test",
+                    deps=("a",),
+                    run=lambda: events.append("run:b"),
+                )
+            ]
+
+        BuildScheduler(max_workers=2).run([
+            BuildTask(
+                id="a",
+                kind="test",
+                run=lambda: events.append("run:a"),
+                on_success=commit,
+            )
+        ])
+
+        self.assertEqual(events, ["run:a", "commit:a", "run:b"])
+
+    def test_success_callback_failure_blocks_downstream_tasks(self):
+        def fail_commit(_result):
+            raise RuntimeError("commit boom")
+
+        tasks = [
+            BuildTask(
+                id="a",
+                kind="test",
+                run=lambda: None,
+                on_success=fail_commit,
+            ),
+            BuildTask(id="b", kind="test", deps=("a",), run=lambda: None),
+        ]
+
+        with self.assertRaises(BuildSchedulerError) as cm:
+            BuildScheduler(max_workers=1).run(tasks)
+
+        self.assertIn("a", cm.exception.failures)
+        self.assertIn("b", cm.exception.blocked)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -884,7 +884,8 @@ class MultiSOExecutor:
         # Run link jobs through the shared build scheduler.  The scheduler
         # coordinates in-process parallelism while link_files keeps the
         # cross-process artifact locks.
-        from .build.scheduler import BuildScheduler, BuildTask
+        from .build.scheduler import BuildScheduler
+        from .build.planner import plan_link_shared_tasks
         max_workers = min(len(link_jobs), os.cpu_count() or 4)
         task_ids_by_so = {
             so: f"link-shared:{os.path.abspath(so)}"
@@ -907,18 +908,15 @@ class MultiSOExecutor:
                 pending_task_ids=task_ids_by_so,
                 pending_dependency_graph=pending_dependency_graph,
             )
-            tasks.append(BuildTask(
-                id=task_ids_by_so[so],
-                kind='link_shared_library',
-                deps=task_deps,
-                inputs=(obj,) + tuple(libs or []),
-                outputs=(so,),
-                run=lambda obj=obj, so=so, libs=libs: self.compile_source_to_so(
-                    obj,
-                    so,
-                    extra_link_libraries=libs,
-                ),
-            ))
+            tasks.append((obj, so, libs, task_deps))
+        tasks = plan_link_shared_tasks(
+            tasks,
+            lambda obj, so, libs: self.compile_source_to_so(
+                obj,
+                so,
+                extra_link_libraries=libs,
+            ),
+        )
         BuildScheduler(max_workers=max_workers).run(tasks)
 
         # Linking happened — invalidate caches for the so_files that were
@@ -977,16 +975,9 @@ class MultiSOExecutor:
         if not stub_jobs:
             return
 
-        from .build.scheduler import BuildScheduler, BuildTask
-        tasks = []
-        for obj, dll, imp in stub_jobs:
-            tasks.append(BuildTask(
-                id=f"stub-implib:{os.path.abspath(imp)}",
-                kind='generate_stub_import_library',
-                inputs=(obj,),
-                outputs=(imp, os.path.splitext(imp)[0] + '.exports.def'),
-                run=lambda obj=obj, dll=dll, imp=imp: _generate_stub_implib(obj, dll, imp),
-            ))
+        from .build.scheduler import BuildScheduler
+        from .build.planner import plan_stub_import_library_tasks
+        tasks = plan_stub_import_library_tasks(stub_jobs, _generate_stub_implib)
         max_workers = min(len(tasks), os.cpu_count() or 4)
         BuildScheduler(max_workers=max_workers).run(tasks)
     

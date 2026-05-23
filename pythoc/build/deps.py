@@ -21,12 +21,13 @@ Benefits:
 
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 2  # Increment version for group-level format
+DEPS_VERSION = 3  # Increment when scheduler/cache semantics change
 
 
 @dataclass
@@ -309,6 +310,9 @@ class DependencyTracker:
         
         # Loaded deps from files: group_key -> GroupDeps
         self._loaded_deps: Dict[Tuple, GroupDeps] = {}
+
+        # Build tasks can record/load deps concurrently when object workers > 1.
+        self._lock = threading.RLock()
     
     def _get_transitive_cache(self) -> Dict[Tuple, Optional[bool]]:
         """Lazily initialize the transitive effects cache."""
@@ -325,10 +329,11 @@ class DependencyTracker:
 
     def get_or_create_group_deps(self, group_key: Tuple) -> GroupDeps:
         """Get or create GroupDeps for a group key."""
-        if group_key not in self._group_deps:
-            gk = GroupKey.from_tuple(group_key)
-            self._group_deps[group_key] = GroupDeps(group_key=gk)
-        return self._group_deps[group_key]
+        with self._lock:
+            if group_key not in self._group_deps:
+                gk = GroupKey.from_tuple(group_key)
+                self._group_deps[group_key] = GroupDeps(group_key=gk)
+            return self._group_deps[group_key]
     
     def record_group_dependency(self, caller_group_key: Tuple, target_group_key: Tuple, 
                                dependency_type: str = "function_call"):
@@ -340,27 +345,31 @@ class DependencyTracker:
             target_group_key: Group key of the target
             dependency_type: Type of dependency ("function_call", "effect", "import")
         """
-        caller_deps = self.get_or_create_group_deps(caller_group_key)
-        target_group = GroupKey.from_tuple(target_group_key)
-        caller_deps.add_group_dependency(target_group, dependency_type)
+        with self._lock:
+            caller_deps = self.get_or_create_group_deps(caller_group_key)
+            target_group = GroupKey.from_tuple(target_group_key)
+            caller_deps.add_group_dependency(target_group, dependency_type)
     
     def record_extern_dependency(self, group_key: Tuple, libraries: List[str]):
         """Record dependency on external libraries."""
-        group_deps = self.get_or_create_group_deps(group_key)
-        for lib in libraries:
-            group_deps.add_link_library(lib)
+        with self._lock:
+            group_deps = self.get_or_create_group_deps(group_key)
+            for lib in libraries:
+                group_deps.add_link_library(lib)
     
     def record_cimport_dependency(self, group_key: Tuple, obj_files: List[str]):
         """Record dependency on cimport object files."""
-        group_deps = self.get_or_create_group_deps(group_key)
-        for obj in obj_files:
-            group_deps.add_link_object(obj)
+        with self._lock:
+            group_deps = self.get_or_create_group_deps(group_key)
+            for obj in obj_files:
+                group_deps.add_link_object(obj)
     
     def record_effect_usage(self, group_key: Tuple, effect_name: str):
         """Record that a group uses an effect."""
-        group_deps = self.get_or_create_group_deps(group_key)
-        group_deps.add_effect(effect_name)
-        self._clear_transitive_cache()
+        with self._lock:
+            group_deps = self.get_or_create_group_deps(group_key)
+            group_deps.add_effect(effect_name)
+            self._clear_transitive_cache()
     
     def get_deps_file_path(self, obj_file: str) -> str:
         """Get .deps file path corresponding to an .o file."""
@@ -374,18 +383,19 @@ class DependencyTracker:
             group_key: Group key
             obj_file: Path to .o file (deps file will be derived from this)
         """
-        if group_key not in self._group_deps:
-            return
-        
-        deps = self._group_deps[group_key]
-        deps_file = self.get_deps_file_path(obj_file)
-        
-        try:
-            with open(deps_file, 'w') as f:
-                json.dump(deps.to_dict(), f, indent=2)
-            logger.debug(f"Saved group-level deps to {deps_file}")
-        except Exception as e:
-            logger.debug(f"Failed to save deps to {deps_file}: {e}")
+        with self._lock:
+            if group_key not in self._group_deps:
+                return
+            
+            deps = self._group_deps[group_key]
+            deps_file = self.get_deps_file_path(obj_file)
+            
+            try:
+                with open(deps_file, 'w') as f:
+                    json.dump(deps.to_dict(), f, indent=2)
+                logger.debug(f"Saved group-level deps to {deps_file}")
+            except Exception as e:
+                logger.debug(f"Failed to save deps to {deps_file}: {e}")
     
     def load_deps(self, obj_file: str) -> Optional[GroupDeps]:
         """
@@ -405,12 +415,20 @@ class DependencyTracker:
         try:
             with open(deps_file, 'r') as f:
                 data = json.load(f)
+
+            if data.get('version') != DEPS_VERSION:
+                logger.debug(
+                    f"Ignoring stale deps format in {deps_file}: "
+                    f"version={data.get('version')} expected={DEPS_VERSION}"
+                )
+                return None
             
             deps = GroupDeps.from_dict(data)
             
             # Cache loaded deps
-            if deps.group_key:
-                self._loaded_deps[deps.group_key.to_tuple()] = deps
+            with self._lock:
+                if deps.group_key:
+                    self._loaded_deps[deps.group_key.to_tuple()] = deps
             
             logger.debug(f"Loaded group-level deps from {deps_file}")
             return deps
@@ -429,13 +447,14 @@ class DependencyTracker:
         Returns:
             GroupDeps or None
         """
-        # First check in-memory
-        if group_key in self._group_deps:
-            return self._group_deps[group_key]
-        
-        # Then check loaded cache
-        if group_key in self._loaded_deps:
-            return self._loaded_deps[group_key]
+        with self._lock:
+            # First check in-memory
+            if group_key in self._group_deps:
+                return self._group_deps[group_key]
+            
+            # Then check loaded cache
+            if group_key in self._loaded_deps:
+                return self._loaded_deps[group_key]
         
         # Try loading from file
         if obj_file:

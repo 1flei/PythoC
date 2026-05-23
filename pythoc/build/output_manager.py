@@ -1,8 +1,9 @@
 import os
 import sys
 import atexit
+import threading
 from dataclasses import dataclass, field
-from typing import Any, List, Set, Tuple
+from typing import Any, List, Optional, Set, Tuple
 from ..utils.link_utils import file_lock
 from .deps import get_dependency_tracker, GroupKey
 
@@ -42,6 +43,16 @@ class _CompileResult:
     compiled_symbols: Set[str] = field(default_factory=set)
 
 
+@dataclass
+class _GroupObjectTaskResult:
+    """Worker result for one group-object build task."""
+
+    group_key: Tuple
+    group: dict
+    status: Optional[str]
+    compiled_symbols: Set[str] = field(default_factory=set)
+
+
 class OutputManager:
     """
     Manages compilation groups and output file generation.
@@ -73,7 +84,26 @@ class OutputManager:
 
         # Track if flush has been called (to avoid double compilation)
         self._flushed_groups = set()
+
+        # Protects scheduler-visible mutable state while object build tasks run.
+        self._state_lock = threading.RLock()
+
+        # Dynamic scheduling may need multiple tasks for the same group when
+        # compilation enqueues more work while an earlier group task is running.
+        self._group_object_task_seq = 0
+
+        # Diagnostic strict mode: when enabled, fail if codegen queues new work
+        # during object build.  This identifies dependencies/specializations that
+        # should eventually move into a build planning phase.
+        self._active_build_groups = set()
     
+    def _next_group_object_task_id(self, group_key):
+        """Return a unique scheduler task id for one group-object attempt."""
+        with self._state_lock:
+            self._group_object_task_seq += 1
+            seq = self._group_object_task_seq
+        return f"compile-object:{repr(group_key)}:{seq}"
+
     def get_or_create_group(self, group_key, compiler, ir_file, obj_file, so_file, 
                            source_file):
         """
@@ -90,66 +120,67 @@ class OutputManager:
         Returns:
             dict: Group info with keys: compiler, wrappers, ir_file, obj_file, so_file, source_file
         """
-        # Check if already in _all_groups (including completed groups)
-        if group_key in self._all_groups:
-            group = self._all_groups[group_key]
-            in_flushed = group_key in self._flushed_groups
+        with self._state_lock:
+            # Check if already in _all_groups (including completed groups)
+            if group_key in self._all_groups:
+                group = self._all_groups[group_key]
+                in_flushed = group_key in self._flushed_groups
 
-            # If the group was already flushed, it may still be safe to add more
-            # functions as long as the corresponding shared library has NOT been
-            # loaded yet. This is important for flows where internal native
-            # execution (e.g. bindgen) triggers a flush mid-import, but the user
-            # module continues to define more @compile functions afterwards.
-            if in_flushed:
-                from ..native_executor import get_multi_so_executor
-                executor = get_multi_so_executor()
+                # If the group was already flushed, it may still be safe to add more
+                # functions as long as the corresponding shared library has NOT been
+                # loaded yet. This is important for flows where internal native
+                # execution (e.g. bindgen) triggers a flush mid-import, but the user
+                # module continues to define more @compile functions afterwards.
+                if in_flushed:
+                    from ..native_executor import get_multi_so_executor
+                    executor = get_multi_so_executor()
 
-                existing_so_file = group.get('so_file')
-                if existing_so_file and existing_so_file in executor.loaded_libs:
-                    source_file_path = group_key[0] if group_key else 'unknown'
-                    from ..logger import logger
-                    logger.error(
-                        f"Cannot define new compiled function after native execution has started. "
-                        f"File '{source_file_path}' was already compiled and loaded. "
-                        f"Move all @compile decorated functions before any code that triggers execution."
-                    )
-                    raise RuntimeError(
-                        f"Cannot define new @compile function after module '{source_file_path}' "
-                        f"has started native execution. All @compile functions must be defined "
-                        f"before any compiled function is called."
-                    )
+                    existing_so_file = group.get('so_file')
+                    if existing_so_file and existing_so_file in executor.loaded_libs:
+                        source_file_path = group_key[0] if group_key else 'unknown'
+                        from ..logger import logger
+                        logger.error(
+                            f"Cannot define new compiled function after native execution has started. "
+                            f"File '{source_file_path}' was already compiled and loaded. "
+                            f"Move all @compile decorated functions before any code that triggers execution."
+                        )
+                        raise RuntimeError(
+                            f"Cannot define new @compile function after module '{source_file_path}' "
+                            f"has started native execution. All @compile functions must be defined "
+                            f"before any compiled function is called."
+                        )
 
-                # Re-open the group for further compilation. We must also ensure
-                # it is considered pending again, otherwise wrappers won't be
-                # added.
-                if group_key in self._flushed_groups:
-                    self._flushed_groups.remove(group_key)
+                    # Re-open the group for further compilation. We must also ensure
+                    # it is considered pending again, otherwise wrappers won't be
+                    # added.
+                    if group_key in self._flushed_groups:
+                        self._flushed_groups.remove(group_key)
+                    self._pending_groups[group_key] = group
+
+                    # Restore cached compilations back to pending. These are functions
+                    # that were skipped due to cache hit but now need to be recompiled
+                    # together with the new functions to create a complete .o file.
+                    if group_key in self._cached_compilations:
+                        cached = self._cached_compilations.pop(group_key)
+                        if group_key not in self._pending_compilations:
+                            self._pending_compilations[group_key] = []
+                        self._pending_compilations[group_key].extend(cached)
+
+                return group
+            
+            if group_key not in self._pending_groups:
+                group = {
+                    'compiler': compiler,
+                    'wrappers': [],
+                    'source_file': source_file,
+                    'ir_file': ir_file,
+                    'obj_file': obj_file,
+                    'so_file': so_file,
+                }
                 self._pending_groups[group_key] = group
-
-                # Restore cached compilations back to pending. These are functions
-                # that were skipped due to cache hit but now need to be recompiled
-                # together with the new functions to create a complete .o file.
-                if group_key in self._cached_compilations:
-                    cached = self._cached_compilations.pop(group_key)
-                    if group_key not in self._pending_compilations:
-                        self._pending_compilations[group_key] = []
-                    self._pending_compilations[group_key].extend(cached)
-
-            return group
-        
-        if group_key not in self._pending_groups:
-            group = {
-                'compiler': compiler,
-                'wrappers': [],
-                'source_file': source_file,
-                'ir_file': ir_file,
-                'obj_file': obj_file,
-                'so_file': so_file,
-            }
-            self._pending_groups[group_key] = group
-            self._all_groups[group_key] = group
-        
-        return self._pending_groups[group_key]
+                self._all_groups[group_key] = group
+            
+            return self._pending_groups[group_key]
     
     def add_wrapper_to_group(self, group_key, wrapper):
         """
@@ -159,9 +190,10 @@ class OutputManager:
             group_key: Group identifier
             wrapper: Function wrapper to add
         """
-        if group_key in self._pending_groups:
-            group = self._pending_groups[group_key]
-            group['wrappers'].append(wrapper)
+        with self._state_lock:
+            if group_key in self._pending_groups:
+                group = self._pending_groups[group_key]
+                group['wrappers'].append(wrapper)
     
     def queue_compilation(self, group_key, callback, func_info):
         """
@@ -172,46 +204,58 @@ class OutputManager:
             callback: Callable (compiler) -> None that compiles the function
             func_info: FunctionInfo for forward declaration
         """
-        if group_key not in self._pending_compilations:
-            self._pending_compilations[group_key] = []
-        self._pending_compilations[group_key].append((callback, func_info))
-
-        # If this group already exists but was previously flushed, it might not
-        # currently be in `_pending_groups`. In that case, pending compilations
-        # would never be processed. Ensure the group is marked pending again.
-        if group_key in self._all_groups and group_key not in self._pending_groups:
-            group = self._all_groups[group_key]
-
-            # If the group's shared library has already been loaded, we must not
-            # allow new compilations into it (same rule as in `get_or_create_group`).
-            from ..native_executor import get_multi_so_executor
-            executor = get_multi_so_executor()
-            so_file = group.get('so_file')
-            if so_file and so_file in executor.loaded_libs:
-                source_file_path = group_key[0] if group_key else 'unknown'
+        with self._state_lock:
+            if os.environ.get('PC_FAIL_ON_BUILD_TIME_QUEUE') and self._active_build_groups:
+                func_name = getattr(func_info, 'mangled_name', None) or getattr(func_info, 'name', '<unknown>')
                 raise RuntimeError(
-                    f"Cannot define new @compile function after module '{source_file_path}' "
-                    f"has started native execution. All @compile functions must be defined "
-                    f"before any compiled function is called."
+                    "queue_compilation called during object build; "
+                    f"func={func_name}, group={group_key}, "
+                    f"active_build_groups={sorted(map(repr, self._active_build_groups))}"
                 )
 
-            if group_key in self._flushed_groups:
-                self._flushed_groups.remove(group_key)
+            if group_key not in self._pending_compilations:
+                self._pending_compilations[group_key] = []
+            self._pending_compilations[group_key].append((callback, func_info))
 
-            self._pending_groups[group_key] = group
+            # If this group already exists but was previously flushed, it might not
+            # currently be in `_pending_groups`. In that case, pending compilations
+            # would never be processed. Ensure the group is marked pending again.
+            if group_key in self._all_groups and group_key not in self._pending_groups:
+                group = self._all_groups[group_key]
 
-            # If we previously cached skipped compilations for this group (cache hit),
-            # restore them so we rebuild a complete object file.
-            if group_key in self._cached_compilations:
-                cached = self._cached_compilations.pop(group_key)
-                self._pending_compilations[group_key].extend(cached)
+                # If the group's shared library has already been loaded, we must not
+                # allow new compilations into it (same rule as in `get_or_create_group`).
+                from ..native_executor import get_multi_so_executor
+                executor = get_multi_so_executor()
+                so_file = group.get('so_file')
+                if so_file and so_file in executor.loaded_libs:
+                    source_file_path = group_key[0] if group_key else 'unknown'
+                    raise RuntimeError(
+                        f"Cannot define new @compile function after module '{source_file_path}' "
+                        f"has started native execution. All @compile functions must be defined "
+                        f"before any compiled function is called."
+                    )
+
+                if group_key in self._flushed_groups:
+                    self._flushed_groups.remove(group_key)
+
+                self._pending_groups[group_key] = group
+
+                # If we previously cached skipped compilations for this group (cache hit),
+                # restore them so we rebuild a complete object file.
+                if group_key in self._cached_compilations:
+                    cached = self._cached_compilations.pop(group_key)
+                    self._pending_compilations[group_key].extend(cached)
+
+            pending_count = len(self._pending_compilations[group_key])
 
         from ..logger import logger
-        logger.debug(f"queue_compilation: {func_info.name}, group_key={group_key}, total_pending={len(self._pending_compilations[group_key])}")
+        logger.debug(f"queue_compilation: {func_info.name}, group_key={group_key}, total_pending={pending_count}")
 
     def _get_pending_symbols(self, group_key):
         """Return symbol names currently expected to be materialized for a group."""
-        pending = self._pending_compilations.get(group_key, [])
+        with self._state_lock:
+            pending = list(self._pending_compilations.get(group_key, []))
         return {
             func_info.mangled_name or func_info.name
             for _, func_info in pending
@@ -457,13 +501,18 @@ class OutputManager:
         mutates ``_pending_compilations``.  Later refactors can make this a
         scheduler commit step instead of doing it inside the worker.
         """
-        pending = self._pending_compilations.get(group_key, [])
-        if not pending:
-            return _CompileIteration(items=[])
+        with self._state_lock:
+            pending = list(self._pending_compilations.get(group_key, []))
+            if not pending:
+                return _CompileIteration(items=[])
 
-        # Clear pending to avoid re-processing.  Compiling this slice may enqueue
-        # more work for the same group; the outer loop will drain it next.
-        del self._pending_compilations[group_key]
+            # Clear pending to avoid re-processing.  Compiling this slice may enqueue
+            # more work for the same group; the outer loop will drain it next.
+            del self._pending_compilations[group_key]
+            # If queue_compilation re-marked this same group as pending while this
+            # task is active, keep that work inside this task instead of creating
+            # a duplicate dynamic scheduler task with the same id.
+            self._pending_groups.pop(group_key, None)
 
         new_pending = []
         symbols = set()
@@ -637,46 +686,121 @@ class OutputManager:
         group['wrappers'] = []
         return 'compiled'
 
+    def _build_group_object_task(self, group_key, group):
+        """Worker phase for compiling one pending group to object/deps artifacts."""
+        with self._state_lock:
+            if group_key in self._flushed_groups or group.get('compilation_failed', False):
+                return _GroupObjectTaskResult(group_key, group, None)
+            self._active_build_groups.add(group_key)
+
+        try:
+            obj_file = group['obj_file']
+            # File lock covers the entire cache-check -> compile -> write cycle.
+            # This remains the cross-process guard; the scheduler handles only
+            # in-process task ordering.
+            lockfile_path = obj_file + '.lock'
+
+            with file_lock(lockfile_path):
+                # Check cache inside the lock so that waiting processes
+                # see the .o written by the winner and skip compilation.
+                if self._group_object_cache_hit(group_key, group):
+                    return _GroupObjectTaskResult(group_key, group, 'cached')
+
+                # Cache miss -- this process is the first to compile this .o.
+                try:
+                    compile_result = self._compile_pending_for_group(group_key, group)
+                except Exception:
+                    with self._state_lock:
+                        group['compilation_failed'] = True
+                    raise
+
+                # If no functions were actually compiled (all deferred),
+                # skip writing an empty .o file.
+                if compile_result.compiled_count == 0:
+                    return _GroupObjectTaskResult(group_key, group, 'empty')
+
+                if not group.get('wrappers'):
+                    return _GroupObjectTaskResult(group_key, group, None)
+
+                self._publish_group_object(group_key, group, compile_result)
+
+            return _GroupObjectTaskResult(
+                group_key,
+                group,
+                'compiled',
+                compiled_symbols=set(compile_result.compiled_symbols),
+            )
+        finally:
+            with self._state_lock:
+                self._active_build_groups.discard(group_key)
+
+    def _commit_group_object_task_result(self, task_result):
+        """Scheduler-thread commit phase for a group-object task."""
+        result = task_result.value
+        if not isinstance(result, _GroupObjectTaskResult):
+            return self._plan_pending_group_tasks()
+
+        group_key = result.group_key
+        group = result.group
+        with self._state_lock:
+            if result.status == 'cached':
+                self._commit_cached_group(group_key, group)
+            elif result.status == 'empty':
+                self._commit_empty_group(group_key, group)
+            elif result.status == 'compiled':
+                if result.compiled_symbols:
+                    existing = set(group.get('compiled_symbols', set()))
+                    group['compiled_symbols'] = existing | result.compiled_symbols
+                self._commit_compiled_group(group_key, group)
+
+        return self._plan_pending_group_tasks()
+
     def _flush_group_object(self, group_key, group):
-        """Compile one pending group to its object/deps artifacts."""
-        # Skip if already flushed
-        if group_key in self._flushed_groups:
-            return None
+        """Compile and commit one group immediately (legacy helper)."""
+        task_result = type('_ImmediateTaskResult', (), {})()
+        task_result.value = self._build_group_object_task(group_key, group)
+        self._commit_group_object_task_result(task_result)
+        return task_result.value.status
 
-        # Skip if marked as failed
-        if group.get('compilation_failed', False):
-            return None
+    def _take_pending_groups(self):
+        """Atomically take the current pending group batch for scheduling."""
+        with self._state_lock:
+            batch = list(self._pending_groups.items())
+            self._pending_groups.clear()
+        return batch
 
-        obj_file = group['obj_file']
-        # File lock covers the entire cache-check -> compile -> write cycle.
-        # This remains the cross-process guard; the scheduler handles only
-        # in-process task ordering.
-        lockfile_path = obj_file + '.lock'
+    def _group_needs_effect_context_resource(self, group_key) -> bool:
+        """Return whether compiling this group touches the global effect context."""
+        with self._state_lock:
+            pending = list(self._pending_compilations.get(group_key, []))
+        for _callback, func_info in pending:
+            binding = getattr(func_info, 'binding_state', None)
+            if binding is None:
+                continue
+            if getattr(binding, 'effect_suffix', None):
+                return True
+            captured = getattr(binding, 'captured_effect_context', None)
+            if captured:
+                return True
+        return False
 
-        with file_lock(lockfile_path):
-            # Check cache inside the lock so that waiting processes
-            # see the .o written by the winner and skip compilation.
-            if self._group_object_cache_hit(group_key, group):
-                return self._commit_cached_group(group_key, group)
+    def _plan_pending_group_tasks(self):
+        """Create scheduler tasks for groups queued during compilation."""
+        batch = self._take_pending_groups()
+        if not batch:
+            return []
+        from .planner import plan_group_object_tasks
+        return plan_group_object_tasks(self, batch)
 
-            # Cache miss -- this process is the first to compile this .o.
-            try:
-                compile_result = self._compile_pending_for_group(group_key, group)
-            except Exception:
-                group['compilation_failed'] = True
-                raise
-
-            # If no functions were actually compiled (all deferred),
-            # skip writing an empty .o file.
-            if compile_result.compiled_count == 0:
-                return self._commit_empty_group(group_key, group)
-
-            if not group.get('wrappers'):
-                return None
-
-            self._publish_group_object(group_key, group, compile_result)
-
-        return self._commit_compiled_group(group_key, group)
+    def _requeue_unfinished_groups(self):
+        """Restore unfinished groups after scheduler failure."""
+        with self._state_lock:
+            for group_key, group in self._all_groups.items():
+                if (
+                    group_key not in self._flushed_groups
+                    and not group.get('compilation_failed', False)
+                ):
+                    self._pending_groups.setdefault(group_key, group)
 
     def flush_all(self):
         """
@@ -699,59 +823,44 @@ class OutputManager:
         from ..native_executor import get_multi_so_executor
         executor = get_multi_so_executor()
         
-        for group_key, group in self._pending_groups.items():
+        with self._state_lock:
+            pending_groups = list(self._pending_groups.items())
+            pending_compilations = [
+                (k, len(v)) for k, v in self._pending_compilations.items()
+            ]
+
+        for group_key, group in pending_groups:
             so_file = group.get('so_file')
             # Check if THIS SPECIFIC so_file is already loaded
             # (not just any library from the same source file)
             if so_file and so_file in executor.loaded_libs:
                 # Check if this group has new pending compilations
-                if group_key in self._pending_compilations and self._pending_compilations[group_key]:
+                with self._state_lock:
+                    has_pending = bool(self._pending_compilations.get(group_key))
+                if has_pending:
                     source_file = group.get('source_file', so_file)
                     raise RuntimeError(
                         f"Cannot compile new functions in '{source_file}' after native execution has started. "
                         f"All @compile decorators must be executed before calling any compiled functions."
                     )
         
-        # Process groups iteratively until stable
-        # New groups may be added during compilation (transitive effect propagation)
-        logger.debug(f"flush_all: _pending_groups={list(self._pending_groups.keys())}")
-        logger.debug(f"flush_all: _pending_compilations={[(k, len(v)) for k,v in self._pending_compilations.items()]}")
-        from .scheduler import BuildScheduler, BuildSchedulerError, BuildTask
+        # Process groups through the scheduler.  New groups may be added during
+        # compilation; task commit callbacks feed them back into the same run.
+        logger.debug(f"flush_all: _pending_groups={[k for k, _ in pending_groups]}")
+        logger.debug(f"flush_all: _pending_compilations={pending_compilations}")
+        from .scheduler import BuildScheduler, BuildSchedulerError
         object_workers = int(os.environ.get('PC_OBJECT_BUILD_WORKERS', '1') or '1')
-        while self._pending_groups:
-            batch = list(self._pending_groups.items())
-            self._pending_groups.clear()
-
-            tasks = []
-            for group_key, group in batch:
-                task_id = f"compile-object:{repr(group_key)}"
-                tasks.append(BuildTask(
-                    id=task_id,
-                    kind='compile_group_to_object',
-                    inputs=(group.get('source_file'),),
-                    outputs=(group.get('ir_file'), group.get('obj_file'), group.get('obj_file', '')[:-2] + '.deps'),
-                    run=lambda group_key=group_key, group=group: self._flush_group_object(group_key, group),
-                ))
-
+        tasks = self._plan_pending_group_tasks()
+        if tasks:
             try:
                 BuildScheduler(max_workers=object_workers).run(tasks)
             except BuildSchedulerError as exc:
-                for group_key, group in batch:
-                    if (
-                        group_key not in self._flushed_groups
-                        and not group.get('compilation_failed', False)
-                    ):
-                        self._pending_groups[group_key] = group
+                self._requeue_unfinished_groups()
                 if len(exc.failures) == 1:
                     raise next(iter(exc.failures.values())) from None
                 raise
             except Exception:
-                for group_key, group in batch:
-                    if (
-                        group_key not in self._flushed_groups
-                        and not group.get('compilation_failed', False)
-                    ):
-                        self._pending_groups[group_key] = group
+                self._requeue_unfinished_groups()
                 raise
 
         # Don't clear pending groups - they serve as metadata cache for subsequent runs
@@ -816,47 +925,47 @@ class OutputManager:
         from .deps import get_dependency_tracker
 
         dep_tracker = get_dependency_tracker()
-        
-        # Get or create deps for this group
-        group_deps = dep_tracker.get_or_create_group_deps(group_key)
-        
-        # Set source mtime
-        if group is None:
-            group = self._all_groups.get(group_key)
-        if group and group.get('source_file'):
-            source_file = group['source_file']
-            if os.path.exists(source_file):
-                group_deps.source_mtime = os.path.getmtime(source_file)
-        
-        # Link libraries and objects are recorded incrementally during
-        # compilation (via callable_lowering.record_extern_dependency and
-        # cimport).  We do NOT dump the global registry here — that would
-        # pollute every group's .deps with unrelated libraries from other
-        # groups compiled in the same process.
-        
-        if compiled_symbols is not None:
-            group_deps.compiled_symbols = sorted(compiled_symbols)
+        with dep_tracker._lock:
+            # Get or create deps for this group
+            group_deps = dep_tracker.get_or_create_group_deps(group_key)
+            
+            # Set source mtime
+            if group is None:
+                group = self._all_groups.get(group_key)
+            if group and group.get('source_file'):
+                source_file = group['source_file']
+                if os.path.exists(source_file):
+                    group_deps.source_mtime = os.path.getmtime(source_file)
+            
+            # Link libraries and objects are recorded incrementally during
+            # compilation (via callable_lowering.record_extern_dependency and
+            # cimport).  We do NOT dump the global registry here — that would
+            # pollute every group's .deps with unrelated libraries from other
+            # groups compiled in the same process.
+            
+            if compiled_symbols is not None:
+                group_deps.compiled_symbols = sorted(compiled_symbols)
 
-        # #1/#9: Persist AST content hash for meta-generated code invalidation.
-        if group and group.get('_ast_content_hashes'):
-            import hashlib
-            combined = '|'.join(sorted(group['_ast_content_hashes']))
-            group_deps.ast_content_hash = hashlib.sha256(
-                combined.encode('utf-8')
-            ).hexdigest()[:16]
+            # Persist AST content hash for meta-generated code invalidation.
+            if group and group.get('_ast_content_hashes'):
+                import hashlib
+                combined = '|'.join(sorted(group['_ast_content_hashes']))
+                group_deps.ast_content_hash = hashlib.sha256(
+                    combined.encode('utf-8')
+                ).hexdigest()[:16]
 
-        # Propagate transitive effects from dependent groups.
-        # If this group calls functions in groups that use effects (e.g., c_ast uses
-        # effect.mem), those effects should be reflected in this group's effects_used
-        # so that the effect specialization check in type_converter.py works correctly
-        # for callers that reference this group.
-        for dep in group_deps.group_dependencies:
-            dep_group_deps = dep_tracker.get_deps(dep.target_group.to_tuple())
-            if dep_group_deps and dep_group_deps.effects_used:
-                group_deps.effects_used |= dep_group_deps.effects_used
-        
-        # Save to file
-        dep_tracker.save_deps(group_key, obj_file)
+            # Propagate transitive effects from dependent groups.
+            # If this group calls functions in groups that use effects (e.g., c_ast uses
+            # effect.mem), those effects should be reflected in this group's effects_used
+            # so that the effect specialization check in type_converter.py works correctly
+            # for callers that reference this group.
+            for dep in group_deps.group_dependencies:
+                dep_group_deps = dep_tracker.get_deps(dep.target_group.to_tuple())
+                if dep_group_deps and dep_group_deps.effects_used:
+                    group_deps.effects_used |= dep_group_deps.effects_used
+            
+            # Save to file
+            dep_tracker.save_deps(group_key, obj_file)
     
     def get_group(self, group_key):
         """
@@ -886,6 +995,8 @@ class OutputManager:
         self._pending_compilations.clear()
         self._cached_compilations.clear()
         self._flushed_groups.clear()
+        self._group_object_task_seq = 0
+        self._active_build_groups.clear()
     
     def clear_failed_group(self, group_key):
         """

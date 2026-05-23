@@ -15,24 +15,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tupl
 
 TaskFn = Callable[[], object]
 CacheFn = Callable[[], bool]
-
-
-@dataclass(frozen=True)
-class BuildTask:
-    """A single artifact-producing task in the build DAG.
-
-    ``outputs`` serialize artifact publication for shared paths. ``resources``
-    serialize named non-file side effects such as global registries or queues.
-    """
-
-    id: str
-    kind: str
-    run: TaskFn
-    deps: Sequence[str] = field(default_factory=tuple)
-    inputs: Sequence[str] = field(default_factory=tuple)
-    outputs: Sequence[str] = field(default_factory=tuple)
-    resources: Sequence[str] = field(default_factory=tuple)
-    cache_check: Optional[CacheFn] = None
+CommitFn = Callable[["TaskResult"], Optional[Iterable["BuildTask"]]]
 
 
 @dataclass
@@ -43,6 +26,28 @@ class TaskResult:
     kind: str
     skipped: bool = False
     value: object = None
+
+
+@dataclass(frozen=True)
+class BuildTask:
+    """A single artifact-producing task in the build DAG.
+
+    ``outputs`` serialize artifact publication for shared paths. ``resources``
+    serialize named non-file side effects such as global registries or queues.
+    ``on_success`` runs on the scheduler thread after ``run`` completes and may
+    return more tasks, allowing dynamic build graph expansion with serialized
+    state commits.
+    """
+
+    id: str
+    kind: str
+    run: TaskFn
+    deps: Sequence[str] = field(default_factory=tuple)
+    inputs: Sequence[str] = field(default_factory=tuple)
+    outputs: Sequence[str] = field(default_factory=tuple)
+    resources: Sequence[str] = field(default_factory=tuple)
+    cache_check: Optional[CacheFn] = None
+    on_success: Optional[CommitFn] = None
 
 
 class BuildSchedulerError(RuntimeError):
@@ -70,30 +75,67 @@ class BuildScheduler:
         self._output_locks_guard = threading.Lock()
 
     def run(self, tasks: Sequence[BuildTask]) -> Dict[str, TaskResult]:
-        if not tasks:
-            return {}
-
-        task_map = self._validate_tasks(tasks)
-        remaining_deps: Dict[str, Set[str]] = {
-            task_id: set(task.deps) for task_id, task in task_map.items()
-        }
-        dependents: Dict[str, Set[str]] = {task_id: set() for task_id in task_map}
-        for task in task_map.values():
-            for dep in task.deps:
-                dependents[dep].add(task.id)
-
-        ready: List[str] = [
-            task_id for task_id, deps in remaining_deps.items() if not deps
-        ]
+        task_map: Dict[str, BuildTask] = {}
+        remaining_deps: Dict[str, Set[str]] = {}
+        dependents: Dict[str, Set[str]] = {}
+        ready: List[str] = []
         running = {}
         completed: Set[str] = set()
         failed: Dict[str, BaseException] = {}
         results: Dict[str, TaskResult] = {}
 
+        def add_tasks(new_tasks: Iterable[BuildTask]):
+            batch = list(new_tasks or ())
+            if not batch:
+                return
+
+            for task in batch:
+                if task.id in task_map:
+                    raise ValueError(f"Duplicate build task id: {task.id}")
+                task_map[task.id] = task
+                dependents.setdefault(task.id, set())
+
+            known_ids = set(task_map)
+            for task in batch:
+                missing = [dep for dep in task.deps if dep not in known_ids]
+                if missing:
+                    raise ValueError(
+                        f"Task {task.id} depends on unknown task {missing[0]}"
+                    )
+
+                deps = {
+                    dep
+                    for dep in task.deps
+                    if dep not in completed and dep not in failed
+                }
+                remaining_deps[task.id] = deps
+                for dep in task.deps:
+                    if dep not in completed and dep not in failed:
+                        dependents.setdefault(dep, set()).add(task.id)
+
+                if not deps and not any(dep in failed for dep in task.deps):
+                    ready.append(task.id)
+
+        def release_dependents(task_id: str):
+            for dependent in dependents.get(task_id, ()):
+                if dependent in completed or dependent in failed:
+                    continue
+                remaining_deps[dependent].discard(task_id)
+                if not remaining_deps[dependent]:
+                    if any(dep in failed for dep in task_map[dependent].deps):
+                        continue
+                    ready.append(dependent)
+
+        add_tasks(tasks)
+        if not task_map:
+            return {}
+
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             while ready or running:
                 while ready and len(running) < self.max_workers:
                     task_id = ready.pop()
+                    if task_id in completed or task_id in failed:
+                        continue
                     task = task_map[task_id]
                     future = pool.submit(self._run_task, task)
                     running[future] = task_id
@@ -104,21 +146,20 @@ class BuildScheduler:
                 done, _ = wait(running.keys(), return_when=FIRST_COMPLETED)
                 for future in done:
                     task_id = running.pop(future)
+                    task = task_map[task_id]
                     try:
-                        results[task_id] = future.result()
+                        result = future.result()
+                        extra_tasks = ()
+                        if task.on_success is not None:
+                            extra_tasks = task.on_success(result) or ()
+                        results[task_id] = result
                         completed.add(task_id)
+                        add_tasks(extra_tasks)
                     except BaseException as exc:  # pragma: no cover - re-raised below
                         failed[task_id] = exc
                         completed.add(task_id)
 
-                    for dependent in dependents[task_id]:
-                        if dependent in completed or dependent in failed:
-                            continue
-                        remaining_deps[dependent].discard(task_id)
-                        if not remaining_deps[dependent]:
-                            if any(dep in failed for dep in task_map[dependent].deps):
-                                continue
-                            ready.append(dependent)
+                    release_dependents(task_id)
 
                 if failed:
                     for future in running:
