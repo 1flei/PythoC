@@ -23,6 +23,7 @@ from test.utils.test_utils import DeferredTestCase, expect_error
 from pythoc.std.runtime.platform import (
     SpinLock, spinlock_init, spinlock_lock, spinlock_unlock,
     atomic_load_i64, atomic_store_i64, atomic_fetch_add_i64, atomic_cas_i64,
+    MiniCtx, MINI_CTX_SIZE, IS_X86_64, IS_WINDOWS, IS_AARCH64,
 )
 from pythoc.std.runtime.task import (
     Task, TaskHandle, TaskQueue, TaskIdGen,
@@ -627,6 +628,28 @@ class TestRuntimeScheduler(DeferredTestCase):
     def setUpClass(cls):
         super().setUpClass()
         flush_all_pending_outputs()
+
+    # --- Platform / context sizing ---
+
+    def test_mini_ctx_size_matches_asm_layout(self):
+        """MiniCtx must be large enough for the asm context-switch layout.
+
+        Regression: Win64 ABI saves rdi/rsi (and xmm6-xmm15) in addition to
+        the System V callee-saved set. AArch64 also needs d8-d15. If MiniCtx
+        is undersized, ctx_swap writes past the struct, corrupting adjacent
+        Coroutine fields (heap corruption / access violation at runtime).
+        """
+        if IS_X86_64 and IS_WINDOWS:
+            # GP: rsp, rbp, rbx, r12-r15, rdi, rsi, rip = 80 bytes
+            # XMM: xmm6..xmm15 = 10 * 16 = 160 bytes (offset 80..240)
+            self.assertGreaterEqual(MINI_CTX_SIZE, 240)
+        elif IS_X86_64:
+            # rsp, rbp, rbx, r12-r15, rip = 8 u64
+            self.assertGreaterEqual(MINI_CTX_SIZE, 64)
+        elif IS_AARCH64:
+            # GP: sp, x19-x28, x29, x30 = 13 u64 (104 bytes)
+            # SIMD: d8..d15 = 8 u64 (64 bytes), total 168 bytes
+            self.assertGreaterEqual(MINI_CTX_SIZE, 168)
 
     # --- Atomics ---
 

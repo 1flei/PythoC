@@ -1,7 +1,7 @@
 """
 Platform Abstractions: Cross-platform primitives for the N:M runtime.
 
-Supports: Linux / macOS / Windows × x86_64 / AArch64
+Supports: Linux / macOS / Windows x x86_64 / AArch64
 
 Strategy:
     Context switch:  Hand-written assembly per (OS, arch) pair.
@@ -205,19 +205,43 @@ def spinlock_unlock(lock: ptr[SpinLock]) -> void:
 # It saves current state into `from`, loads state from `to`, and jumps.
 # ============================================================
 
-if IS_X86_64:
-    MINI_CTX_SIZE = 64  # 8 slots × 8 bytes
+if IS_X86_64 and IS_WINDOWS:
+    # Win64 ABI callee-saved set is wider than System V:
+    #   rsp, rbp, rbx, r12-r15, rdi, rsi (9 GP regs) + rip
+    #   xmm6-xmm15 (10 SIMD regs, 128-bit each)
+    # Layout (must match asm/ctx_x86_64_win.S):
+    #   [0..72]   GP regs + rip   (10 u64 slots)
+    #   [80..240) xmm6..xmm15     (10 * 16 bytes, movups)
+    #   [240..256) pad
+    # Total: 32 u64 slots = 256 bytes.
+    MINI_CTX_SIZE = 256
 
     @compile
     class MiniCtx:
-        regs: array[u64, 8]   # [rsp, rbp, rbx, r12, r13, r14, r15, rip]
+        regs: array[u64, 32]
+
+elif IS_X86_64:
+    # System V ABI: rsp, rbp, rbx, r12-r15, rip
+    MINI_CTX_SIZE = 64  # 8 slots x 8 bytes
+
+    @compile
+    class MiniCtx:
+        regs: array[u64, 8]
 
 elif IS_AARCH64:
-    MINI_CTX_SIZE = 112  # 14 slots × 8 bytes
+    # AAPCS64 callee-saved set:
+    #   sp, x19-x28, x29(fp), x30(lr)  (13 GP slots)
+    #   d8-d15 (8 SIMD slots, lower 64 bits)
+    # Layout (must match asm/ctx_aarch64.S):
+    #   [0..104)  GP regs              (13 u64 slots)
+    #   [104..168) d8..d15             (8 u64 slots)
+    #   [168..176) pad                 (1 u64 slot)
+    # Total: 22 u64 slots = 176 bytes.
+    MINI_CTX_SIZE = 176
 
     @compile
     class MiniCtx:
-        regs: array[u64, 14]  # [sp, x19-x28, x29(fp), x30(lr), filler]
+        regs: array[u64, 22]
 
 else:
     # Fallback: large context (will use C setjmp/longjmp)

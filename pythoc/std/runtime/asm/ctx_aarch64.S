@@ -9,7 +9,7 @@
 //   sp (stack pointer)
 //   d8-d15 (SIMD - lower 64 bits of v8-v15)
 //
-// MiniCtx layout (14 × u64 = 112 bytes, integer only):
+// MiniCtx layout (must match platform.py: 22 x u64 = 176 bytes):
 //   [0]   sp
 //   [8]   x19
 //   [16]  x20
@@ -23,7 +23,15 @@
 //   [80]  x28
 //   [88]  x29 (fp)
 //   [96]  x30 (lr)  -- "return address"
-//   [104] padding / reserved
+//   [104] d8
+//   [112] d9
+//   [120] d10
+//   [128] d11
+//   [136] d12
+//   [144] d13
+//   [152] d14
+//   [160] d15
+//   [168] padding / reserved
 //
 // Parameters: x0, x1, x2, x3
 // ============================================================
@@ -50,6 +58,12 @@ ctx_swap:
     str     x29, [x0, #88]      // fp
     str     x30, [x0, #96]      // lr (return address)
 
+    // Save callee-saved SIMD regs (lower 64 bits of v8-v15)
+    stp     d8,  d9,  [x0, #104]
+    stp     d10, d11, [x0, #120]
+    stp     d12, d13, [x0, #136]
+    stp     d14, d15, [x0, #152]
+
     // Restore from to_ctx (x1)
     ldr     x2,  [x1, #0]
     mov     sp, x2              // restore sp
@@ -60,6 +74,12 @@ ctx_swap:
     ldp     x27, x28, [x1, #72]
     ldr     x29, [x1, #88]      // restore fp
     ldr     x30, [x1, #96]      // restore lr
+
+    ldp     d8,  d9,  [x1, #104]
+    ldp     d10, d11, [x1, #120]
+    ldp     d12, d13, [x1, #136]
+    ldp     d14, d15, [x1, #152]
+
     ret                          // branch to x30
 
 
@@ -80,7 +100,7 @@ ctx_make:
     str     x3,  [x0, #8]       // x19 = arg (preserved across call)
     str     x2,  [x0, #16]      // x20 = entry (preserved across call)
 
-    // Zero out remaining callee-saved
+    // Zero out remaining callee-saved GP regs
     stp     xzr, xzr, [x0, #24]  // x21, x22
     stp     xzr, xzr, [x0, #40]  // x23, x24
     stp     xzr, xzr, [x0, #56]  // x25, x26
@@ -90,6 +110,12 @@ ctx_make:
     // lr = trampoline address
     adr     x4, .Lctx_entry_aarch64
     str     x4, [x0, #96]        // x30 (lr) = trampoline
+
+    // Zero d8-d15 slots (8 u64 starting at offset 104)
+    stp     xzr, xzr, [x0, #104]
+    stp     xzr, xzr, [x0, #120]
+    stp     xzr, xzr, [x0, #136]
+    stp     xzr, xzr, [x0, #152]
 
     ret
 
@@ -106,3 +132,4 @@ ctx_make:
 #if defined(__linux__)
 .section .note.GNU-stack,"",%progbits
 #endif
+

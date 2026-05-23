@@ -3,11 +3,11 @@
 //
 // Win64 differences from System V:
 //   - More callee-saved registers: rbx, rbp, rdi, rsi, r12-r15
-//   - XMM6-XMM15 are callee-saved (we save them for completeness)
+//   - XMM6-XMM15 are callee-saved (saved/restored here in full 128-bit)
 //   - Parameters in: rcx, rdx, r8, r9 (not rdi, rsi, rdx, rcx)
 //   - Shadow space: 32 bytes reserved by caller above return addr
 //
-// MiniCtx layout (16 × u64 = 128 bytes, for Win64 extended set):
+// MiniCtx layout (must match platform.py: 32 x u64 = 256 bytes):
 //   [0]   rsp
 //   [8]   rbp
 //   [16]  rbx
@@ -15,19 +15,20 @@
 //   [32]  r13
 //   [40]  r14
 //   [48]  r15
-//   [56]  rdi     (callee-saved on Win64!)
-//   [64]  rsi     (callee-saved on Win64!)
+//   [56]  rdi     (callee-saved on Win64)
+//   [64]  rsi     (callee-saved on Win64)
 //   [72]  rip
-//   [80]  xmm6   (low 64 bits - simplified)
-//   [88]  xmm7
-//   [96]  xmm8
-//   [104] xmm9
-//   [112] xmm10
-//   [120] xmm11
-//
-// Note: Full Win64 compliance requires saving xmm6-xmm15 (10 regs × 128 bit).
-// For integer-only workloads, skipping XMM is fine.
-// Here we save only the first 6 as 64-bit (lossy but covers most cases).
+//   [80]  xmm6   (16 bytes, full 128-bit, movups - no alignment assumption)
+//   [96]  xmm7
+//   [112] xmm8
+//   [128] xmm9
+//   [144] xmm10
+//   [160] xmm11
+//   [176] xmm12
+//   [192] xmm13
+//   [208] xmm14
+//   [224] xmm15
+//   [240] pad (16 bytes, unused)
 // ============================================================
 
 .text
@@ -37,7 +38,7 @@
 
 .globl ctx_swap
 ctx_swap:
-    // Save callee-saved into from_ctx (rcx)
+    // Save callee-saved integer regs into from_ctx (rcx)
     mov     %rsp,   0(%rcx)
     mov     %rbp,   8(%rcx)
     mov     %rbx,  16(%rcx)
@@ -50,6 +51,18 @@ ctx_swap:
     lea     .Lret_from_win(%rip), %rax
     mov     %rax,  72(%rcx)
 
+    // Save callee-saved xmm regs (full 128-bit each)
+    movups  %xmm6,   80(%rcx)
+    movups  %xmm7,   96(%rcx)
+    movups  %xmm8,  112(%rcx)
+    movups  %xmm9,  128(%rcx)
+    movups  %xmm10, 144(%rcx)
+    movups  %xmm11, 160(%rcx)
+    movups  %xmm12, 176(%rcx)
+    movups  %xmm13, 192(%rcx)
+    movups  %xmm14, 208(%rcx)
+    movups  %xmm15, 224(%rcx)
+
     // Restore from to_ctx (rdx)
     mov      0(%rdx), %rsp
     mov      8(%rdx), %rbp
@@ -60,6 +73,18 @@ ctx_swap:
     mov     48(%rdx), %r15
     mov     56(%rdx), %rdi
     mov     64(%rdx), %rsi
+
+    movups   80(%rdx), %xmm6
+    movups   96(%rdx), %xmm7
+    movups  112(%rdx), %xmm8
+    movups  128(%rdx), %xmm9
+    movups  144(%rdx), %xmm10
+    movups  160(%rdx), %xmm11
+    movups  176(%rdx), %xmm12
+    movups  192(%rdx), %xmm13
+    movups  208(%rdx), %xmm14
+    movups  224(%rdx), %xmm15
+
     jmp    *72(%rdx)
 
 .Lret_from_win:
@@ -78,12 +103,12 @@ ctx_make:
     lea     .Lctx_entry_win(%rip), %rax
     mov     %rax, (%rdx)      // fake return address
 
-    // Setup MiniCtx
+    // Setup integer slots in MiniCtx
     mov     %rdx,  0(%rcx)    // rsp
     xor     %rax, %rax
     mov     %rax,  8(%rcx)    // rbp = 0
-    mov     %r9,  16(%rcx)    // rbx = arg (preserved)
-    mov     %r8,  24(%rcx)    // r12 = entry (preserved)
+    mov     %r9,  16(%rcx)    // rbx = arg (preserved across call)
+    mov     %r8,  24(%rcx)    // r12 = entry (preserved across call)
     mov     %rax, 32(%rcx)    // r13 = 0
     mov     %rax, 40(%rcx)    // r14 = 0
     mov     %rax, 48(%rcx)    // r15 = 0
@@ -91,6 +116,30 @@ ctx_make:
     mov     %rax, 64(%rcx)    // rsi = 0
     lea     .Lctx_entry_win(%rip), %rax
     mov     %rax, 72(%rcx)    // rip = trampoline
+
+    // Zero xmm6-xmm15 slots (10 * 16 = 160 bytes starting at offset 80)
+    // Use two GP stores per slot to avoid touching xmm regs here.
+    xor     %rax, %rax
+    mov     %rax,  80(%rcx)
+    mov     %rax,  88(%rcx)
+    mov     %rax,  96(%rcx)
+    mov     %rax, 104(%rcx)
+    mov     %rax, 112(%rcx)
+    mov     %rax, 120(%rcx)
+    mov     %rax, 128(%rcx)
+    mov     %rax, 136(%rcx)
+    mov     %rax, 144(%rcx)
+    mov     %rax, 152(%rcx)
+    mov     %rax, 160(%rcx)
+    mov     %rax, 168(%rcx)
+    mov     %rax, 176(%rcx)
+    mov     %rax, 184(%rcx)
+    mov     %rax, 192(%rcx)
+    mov     %rax, 200(%rcx)
+    mov     %rax, 208(%rcx)
+    mov     %rax, 216(%rcx)
+    mov     %rax, 224(%rcx)
+    mov     %rax, 232(%rcx)
     ret
 
 // Trampoline for Win64:
@@ -100,3 +149,4 @@ ctx_make:
     mov     %rbx, %rcx        // arg -> first parameter (Win64: rcx)
     call    *%r12             // call entry(arg)
     ud2                       // should not return
+
