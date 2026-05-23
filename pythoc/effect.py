@@ -106,44 +106,23 @@ def get_current_compilation_context() -> Optional[Dict[str, Any]]:
 
 def resolve_effect_wrapper(wrapper, caller_group_key=None,
                            suffix=None, effect_overrides=None):
-    """Unified effect specialization entry point.
+    """Explicit effect-specialization entry point.
 
-    This is the single authority for "should this wrapper be effect-specialized?"
-    Used in two phases:
-
-    Phase 1 (import time): EffectImportHook passes explicit suffix + overrides
-        for each @compile function in the fromlist.  These are root-set entries.
-    Phase 2 (compile time): callable_lowering calls with no explicit args;
-        suffix and overrides are read from the current compilation_context.
-        These are transitive (propagation along the call graph).
-
-    The decision logic is shared:
-    - Already specialized for the target suffix -> return as-is
-    - Marked as effect implementation (_pc_effect_impl) -> return as-is
-    - Group-level effects_used has no overlap with overrides (and deps info
-      is available) -> return as-is
+    Import/planning code passes ``suffix`` and ``effect_overrides`` explicitly to
+    obtain a specialized binding. Codegen/lowering must not infer effect
+    specialization from the current compilation context; ordinary wrapper calls
+    use their lexical binding. Direct ``effect.xxx`` access still uses the
+    captured effect context of the function being compiled.
 
     Args:
         wrapper: The @compile wrapper to potentially specialize.
-        caller_group_key: Caller's group key for dependency recording.
-        suffix: Explicit effect suffix (phase 1). If None, read from
-                compilation_context (phase 2).
-        effect_overrides: Explicit effect overrides dict (phase 1). If None,
-                read from compilation_context (phase 2).
+        caller_group_key: Optional caller group for dependency recording.
+        suffix: Explicit effect suffix. If omitted, no specialization happens.
+        effect_overrides: Explicit effect implementation bindings.
 
     Returns:
-        The (possibly specialized) wrapper.  Returns the original wrapper
-        unchanged when specialization is not needed or not possible.
+        The specialized wrapper for explicit requests, otherwise ``wrapper``.
     """
-    # --- Determine suffix and overrides ---
-    if suffix is None or effect_overrides is None:
-        compilation_ctx = get_current_compilation_context()
-        if compilation_ctx:
-            if suffix is None:
-                suffix = compilation_ctx.get('effect_suffix')
-            if effect_overrides is None:
-                effect_overrides = compilation_ctx.get('effect_overrides', {})
-
     if not suffix or not effect_overrides:
         return wrapper
 
@@ -247,12 +226,13 @@ class EffectImportHook:
 
     def __call__(self, name, globals=None, locals=None, fromlist=(), level=0):
         """Custom __import__ that wraps @compile functions with effect context."""
-        # Import with effect suffix suppressed so that if this is the first
-        # import of the module, its body runs in the default context.
-        # Otherwise all module-level @compile functions would pick up the
-        # effect suffix and contaminate the module bindings permanently.
-        with suppress_effect_suffix():
-            module = _original_import(name, globals, locals, fromlist, level)
+        # Import with caller effect context suppressed so that if this is the
+        # first import of the module, its body defines/captures its own defaults.
+        # The explicit import specialization below still uses the caller's
+        # active effect bindings.
+        with self._effect_context._suppress_for_module_import():
+            with suppress_effect_suffix():
+                module = _original_import(name, globals, locals, fromlist, level)
 
         suffix = self._effect_context._suffix
         if suffix is None or not fromlist:
@@ -270,8 +250,11 @@ class EffectImportHook:
             except AttributeError:
                 continue
 
-            # Check if this is a @compile decorated function
-            if not callable(attr) or not getattr(attr, '_is_compiled', False):
+            # Check if this is a @compile decorated function or a yield-inline
+            # placeholder produced by @compile on a generator function.
+            is_compiled = callable(attr) and getattr(attr, '_is_compiled', False)
+            is_yield_generated = callable(attr) and getattr(attr, '_is_yield_generated', False)
+            if not is_compiled and not is_yield_generated:
                 continue
 
             # Skip private/internal functions
@@ -289,10 +272,16 @@ class EffectImportHook:
             if cache_key in self._wrapped_attrs:
                 wrapped = self._wrapped_attrs[cache_key]
             else:
-                # Use the unified specialization entry point (phase 1: explicit args)
-                wrapped = resolve_effect_wrapper(
-                    attr, suffix=suffix, effect_overrides=effect_overrides,
-                )
+                if is_yield_generated:
+                    from .ast_visitor.yield_transform import specialize_yield_wrapper
+                    wrapped = specialize_yield_wrapper(
+                        attr, suffix=suffix, effect_overrides=effect_overrides,
+                    )
+                else:
+                    # Use the unified specialization entry point (phase 1: explicit args)
+                    wrapped = resolve_effect_wrapper(
+                        attr, suffix=suffix, effect_overrides=effect_overrides,
+                    )
                 # resolve_effect_wrapper returns the original when not needed
                 if wrapped is attr:
                     wrapped = None
@@ -477,6 +466,46 @@ class EffectContext:
         self._saved_modules: Dict[str, Dict[str, Any]] = {}  # module_name -> {attr_name -> original_func}
         self._saved_import = None  # The __import__ that was active when we entered
 
+    @contextmanager
+    def _suppress_for_module_import(self):
+        """Temporarily hide this context's caller overrides during import."""
+        restored_effects = {}
+        saved_suffix_stack = None
+        with self._effect._lock:
+            saved_suffix_stack = list(self._effect._suffix_stack)
+            self._effect._suffix_stack.clear()
+
+            for name in self._overrides:
+                ns = self._effect._effects.get(name)
+                restored_effects[name] = ns._get_impl() if ns is not None else None
+                previous_impl = self._saved.get(name)
+                if previous_impl is None:
+                    if ns is not None:
+                        ns._set_impl(None)
+                else:
+                    self._effect._set_effect(name, previous_impl)
+
+        try:
+            yield
+        finally:
+            with self._effect._lock:
+                for name, active_impl in restored_effects.items():
+                    # If the module import established a default while this
+                    # effect had no previous implementation, remember it so
+                    # __exit__ restores that default instead of deleting it.
+                    if self._saved.get(name) is None:
+                        ns = self._effect._effects.get(name)
+                        imported_default = ns._get_impl() if ns is not None else None
+                        if imported_default is not None:
+                            self._saved[name] = imported_default
+
+                    if name not in self._effect._effects:
+                        self._effect._effects[name] = EffectNamespace(name, active_impl)
+                    else:
+                        self._effect._effects[name]._set_impl(active_impl)
+
+                self._effect._suffix_stack[:] = saved_suffix_stack
+
     def __enter__(self) -> 'EffectContext':
         # Save current state and apply overrides
         for name, impl in self._overrides.items():
@@ -643,6 +672,22 @@ class Effect:
             for name, impl in kwargs.items():
                 # Store as module default
                 self._defaults[caller_module][name] = impl
+
+                # Mark default effect implementations too. They should not be
+                # transitively specialized as callees when compiling an effect
+                # context; the effect resolver chooses the right implementation.
+                def _mark_impl(obj):
+                    if obj is None:
+                        return
+                    if callable(obj) and getattr(obj, '_is_compiled', False):
+                        setattr(obj, '_pc_effect_impl', True)
+                    d = getattr(obj, '__dict__', None)
+                    if isinstance(d, dict):
+                        for v in d.values():
+                            if callable(v) and getattr(v, '_is_compiled', False):
+                                setattr(v, '_pc_effect_impl', True)
+
+                _mark_impl(impl)
 
                 # Also set as current effect if not already set by:
                 # 1. Direct assignment (effect.xxx = impl)

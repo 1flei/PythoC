@@ -48,6 +48,11 @@ class num:
     I32: i32 = 0
     F64: f64
 
+# Dynamic dispatch wrappers are build targets and must be registered before
+# codegen starts.
+add.prepare_dynamic_dispatch(num, i32)
+add.prepare_dynamic_dispatch(num, num)
+
 @compile
 def mannual_dispatch(n1: num, n2: num) -> i32:
     ret: i32 = 0

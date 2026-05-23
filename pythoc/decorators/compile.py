@@ -51,20 +51,8 @@ from ..logger import logger, set_source_context
 DEFAULT_EFFECT_KEY = "__default__"
 
 
-def materialize_specialization(template_wrapper, effect_key, effect_bindings):
-    """Materialize a specialization from a template wrapper.
-
-    Single entry point for producing executable code from a template.
-    Both default (DEFAULT_EFFECT_KEY) and non-default go through this path.
-
-    Args:
-        template_wrapper: A wrapper with _is_template=True
-        effect_key: DEFAULT_EFFECT_KEY for default, or an effect suffix string
-        effect_bindings: Dict of effect name -> implementation (empty for default)
-
-    Returns:
-        Materialized wrapper with compilation queued
-    """
+def _materialize_single_specialization(template_wrapper, effect_key, effect_bindings):
+    """Materialize one wrapper specialization and queue its compilation."""
     state = getattr(template_wrapper, '_binding', template_wrapper._state)
     func_info = getattr(template_wrapper, '_func_info', None)
     if effect_key in state.effect_specialized_cache:
@@ -82,31 +70,286 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
         state.effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
         logger.debug(f"Materialized default specialization: {state.original_name}")
         return template_wrapper
+    # Non-default: call _compile_impl with effect_suffix
+    from ..effect import capture_effect_override_names, restore_effect_context
+    from ..effect import get_current_compilation_context
+    original_scope = state.group_key[1] if state.group_key else None
+    compilation_ctx = get_current_compilation_context()
+    if compilation_ctx:
+        effect_override_names = compilation_ctx.get('effect_override_names', set())
     else:
-        # Non-default: call _compile_impl with effect_suffix
-        from ..effect import capture_effect_override_names, restore_effect_context
-        from ..effect import get_current_compilation_context
-        original_scope = state.group_key[1] if state.group_key else None
-        compilation_ctx = get_current_compilation_context()
-        if compilation_ctx:
-            effect_override_names = compilation_ctx.get('effect_override_names', set())
-        else:
-            effect_override_names = capture_effect_override_names()
+        effect_override_names = capture_effect_override_names()
 
-        logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
+    logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
 
-        with restore_effect_context(effect_bindings):
-            specialized_wrapper = _compile_impl(
-                template_wrapper.__wrapped__,
-                compile_suffix=state.compile_suffix,
-                effect_suffix=effect_key,
-                captured_symbols=state.captured_symbols,
-                effect_scope=original_scope,
-                effect_override_names=effect_override_names,
+    with restore_effect_context(effect_bindings):
+        specialized_wrapper = _compile_impl(
+            template_wrapper.__wrapped__,
+            compile_suffix=state.compile_suffix,
+            effect_suffix=effect_key,
+            captured_symbols=state.captured_symbols,
+            effect_scope=original_scope,
+            effect_override_names=effect_override_names,
+        )
+
+    state.effect_specialized_cache[effect_key] = specialized_wrapper
+    return specialized_wrapper
+
+
+def _iter_global_compiled_wrappers(group_wrappers):
+    """Yield compiled wrappers referenced by group wrapper global namespaces."""
+    seen = set()
+    for wrapper in group_wrappers:
+        binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+        globals_dict = getattr(binding, 'compilation_globals', None) if binding else None
+        if not isinstance(globals_dict, dict):
+            continue
+        for value in globals_dict.values():
+            candidates = [value]
+            value_dict = getattr(value, '__dict__', None)
+            if isinstance(value_dict, dict):
+                candidates.extend(value_dict.values())
+            for candidate in candidates:
+                if not callable(candidate) or not getattr(candidate, '_is_compiled', False):
+                    continue
+                if id(candidate) in seen:
+                    continue
+                seen.add(id(candidate))
+                yield candidate
+
+
+def _effect_specialized_equivalent(value, effect_key):
+    """Return value's already-materialized specialization for effect_key."""
+    if not callable(value) or not getattr(value, '_is_compiled', False):
+        return None
+    binding = getattr(value, '_binding', getattr(value, '_state', None))
+    if binding is None:
+        return None
+    if binding.effect_suffix == effect_key:
+        return value
+    if binding.effect_suffix is not None:
+        return None
+    return binding.effect_specialized_cache.get(effect_key)
+
+
+def _copy_with_effect_specialized_attrs(value, effect_key):
+    """Return a shallow namespace/copy with compiled attrs specialized."""
+    from types import ModuleType
+    if isinstance(value, ModuleType):
+        return None
+
+    value_dict = getattr(value, '__dict__', None)
+    if value_dict is None or not hasattr(value_dict, 'items'):
+        return None
+
+    # Do not turn PythoC types/enums into namespaces; those are semantic types,
+    # not import namespace carriers.
+    if isinstance(value, type) and (
+        hasattr(value, 'get_llvm_type')
+        or hasattr(value, '_field_types')
+        or hasattr(value, '_enum_info')
+    ):
+        return None
+
+    replacements = {}
+    for attr_name in value_dict:
+        if attr_name.startswith('__'):
+            continue
+        try:
+            attr_value = getattr(value, attr_name)
+        except Exception:
+            continue
+        replacement = _effect_specialized_equivalent(attr_value, effect_key)
+        if replacement is not None and replacement is not attr_value:
+            replacements[attr_name] = replacement
+
+    if not replacements:
+        return None
+
+    from types import SimpleNamespace
+
+    if isinstance(value, type):
+        attrs = {}
+        for attr_name in value_dict:
+            if attr_name.startswith('__'):
+                continue
+            try:
+                attrs[attr_name] = getattr(value, attr_name)
+            except Exception:
+                pass
+        attrs.update(replacements)
+        return SimpleNamespace(**attrs)
+
+    import copy
+    try:
+        cloned = copy.copy(value)
+        for attr_name, replacement in replacements.items():
+            setattr(cloned, attr_name, replacement)
+        return cloned
+    except Exception:
+        attrs = {}
+        for attr_name in value_dict:
+            if attr_name.startswith('__'):
+                continue
+            try:
+                attrs[attr_name] = getattr(value, attr_name)
+            except Exception:
+                pass
+        attrs.update(replacements)
+        return SimpleNamespace(**attrs)
+
+
+def _rewrite_globals_to_effect_specializations(wrappers, effect_key, by_name=None):
+    """Point specialized wrappers' captured globals at specialized imports."""
+    replacement_cache = {}
+
+    def get_replacement(value):
+        cache_key = id(value)
+        if cache_key in replacement_cache:
+            return replacement_cache[cache_key]
+
+        replacement = _effect_specialized_equivalent(value, effect_key)
+        if replacement is None:
+            replacement = _copy_with_effect_specialized_attrs(value, effect_key)
+        replacement_cache[cache_key] = replacement
+        return replacement
+
+    for wrapper in wrappers:
+        binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+        globals_dict = getattr(binding, 'compilation_globals', None) if binding else None
+        if not isinstance(globals_dict, dict):
+            continue
+
+        if by_name:
+            globals_dict.update(by_name)
+
+        for name, value in list(globals_dict.items()):
+            replacement = get_replacement(value)
+            if replacement is not None and replacement is not value:
+                globals_dict[name] = replacement
+
+
+def materialize_group_specialization(template_wrapper, effect_key, effect_bindings, _visited=None):
+    """Materialize a whole compilation group for one effect suffix.
+
+    Effect specialization is group-level for build planning: once any symbol in
+    a group is required under an effect suffix, all non-effect-implementation
+    wrappers from the corresponding base group are materialized before object
+    build starts.  Imported compiled wrappers referenced from the group's global
+    namespace are conservatively expanded too; this is group/import based and
+    does not require call-site visitation.
+    """
+    if effect_key == DEFAULT_EFFECT_KEY:
+        return _materialize_single_specialization(
+            template_wrapper, effect_key, effect_bindings,
+        )
+
+    state = getattr(template_wrapper, '_binding', template_wrapper._state)
+    group_key = state.group_key
+    if not group_key or len(group_key) != 4:
+        return _materialize_single_specialization(
+            template_wrapper, effect_key, effect_bindings,
+        )
+
+    base_group_key = (group_key[0], group_key[1], group_key[2], None)
+    if _visited is None:
+        _visited = set()
+    if base_group_key in _visited:
+        return state.effect_specialized_cache.get(effect_key) or template_wrapper
+    _visited.add(base_group_key)
+
+    om = get_output_manager()
+    group_wrappers = om.get_group_wrappers(base_group_key)
+    if not group_wrappers:
+        return _materialize_single_specialization(
+            template_wrapper, effect_key, effect_bindings,
+        )
+
+    eligible_wrappers = []
+    for wrapper in group_wrappers:
+        binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+        if binding is None or binding.effect_suffix is not None:
+            continue
+        if getattr(wrapper, '_pc_effect_impl', False):
+            continue
+        eligible_wrappers.append(wrapper)
+
+    wrapper_ids = tuple(id(wrapper) for wrapper in eligible_wrappers)
+    if om.get_group_effect_specialization(base_group_key, effect_key, wrapper_ids):
+        return state.effect_specialized_cache.get(effect_key) or template_wrapper
+
+    selected = None
+    specialized_by_name = {}
+    specialized_wrappers = []
+    for wrapper in eligible_wrappers:
+        binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+        specialized = _materialize_single_specialization(
+            wrapper, effect_key, effect_bindings,
+        )
+        spec_binding = getattr(specialized, '_binding', getattr(specialized, '_state', None))
+        if spec_binding is not None:
+            spec_binding.is_group_specialization = True
+            specialized_wrappers.append(specialized)
+            specialized_by_name[binding.original_name] = specialized
+        if wrapper is template_wrapper:
+            selected = specialized
+
+    # Keep same-group lexical calls inside the specialized group.  Without this,
+    # a specialized function whose body calls another function from the same
+    # source file would still see the default wrapper in its captured globals.
+    _rewrite_globals_to_effect_specializations(
+        specialized_wrappers, effect_key, specialized_by_name,
+    )
+
+    for imported_wrapper in _iter_global_compiled_wrappers(group_wrappers):
+        binding = getattr(imported_wrapper, '_binding', getattr(imported_wrapper, '_state', None))
+        if binding is None:
+            continue
+        if getattr(imported_wrapper, '_pc_effect_impl', False):
+            continue
+        if binding.effect_suffix is not None:
+            if binding.effect_suffix != effect_key or not binding.group_key or len(binding.group_key) != 4:
+                continue
+            imported_base_key = (
+                binding.group_key[0], binding.group_key[1], binding.group_key[2], None
             )
+            imported_base_wrappers = om.get_group_wrappers(imported_base_key)
+            if not imported_base_wrappers:
+                continue
+            imported_wrapper = imported_base_wrappers[0]
+        materialize_group_specialization(
+            imported_wrapper, effect_key, effect_bindings, _visited,
+        )
 
-        state.effect_specialized_cache[effect_key] = specialized_wrapper
-        return specialized_wrapper
+    # Imported wrappers and factory-captured wrappers have now been materialized
+    # recursively.  Rewrite closure/global references such as linearize's
+    # ``acquire_func`` and cross-module imports (e.g. c_parser -> c_ast) to the
+    # matching effect-specialized bindings before object compilation starts.
+    _rewrite_globals_to_effect_specializations(
+        specialized_wrappers, effect_key, specialized_by_name,
+    )
+
+    om.record_group_effect_specialization(
+        base_group_key, effect_key, wrapper_ids, specialized_by_name,
+    )
+
+    return selected or state.effect_specialized_cache.get(effect_key) or template_wrapper
+
+
+def materialize_specialization(template_wrapper, effect_key, effect_bindings):
+    """Materialize a specialization from a wrapper.
+
+    Non-default effect specialization is intentionally group-level so object
+    build sees a frozen symbol set instead of discovering extra functions during
+    codegen.
+    """
+    if effect_key == DEFAULT_EFFECT_KEY:
+        return _materialize_single_specialization(
+            template_wrapper, effect_key, effect_bindings,
+        )
+    return materialize_group_specialization(
+        template_wrapper, effect_key, effect_bindings,
+    )
 
 
 def _get_registry():
@@ -503,6 +746,9 @@ def _compile_impl(func_or_class,
     wrapper._signature = func_info
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
+    output_manager.record_group_planning_deps_from_globals(
+        group_key, binding_state.compilation_globals,
+    )
 
     # Always queue compilation callback - cache check is done at flush time
     # These closure locals are needed because they are AST/source artifacts

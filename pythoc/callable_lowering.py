@@ -54,9 +54,9 @@ def lower_compile_wrapper(
     Returns:
         ValueRef(kind='pointer', type_hint=func[param_types..., return_type])
     """
-    # --- Step 1: Let effect system resolve transitive propagation ---
-    from .effect import resolve_effect_wrapper
-    wrapper = resolve_effect_wrapper(wrapper, caller_group_key)
+    # --- Step 1: Use the wrapper's lexical binding as-is.  Effect-specialized
+    # imports are already specialized during planning/import; codegen must not
+    # create new effect groups from the current compilation context.
 
     # --- Step 2: Read wrapper metadata ---
     binding_state = _get_binding(wrapper)

@@ -96,6 +96,10 @@ class OutputManager:
         # during object build.  This identifies dependencies/specializations that
         # should eventually move into a build planning phase.
         self._active_build_groups = set()
+
+        # Planning-time group dependencies discovered from import/registration
+        # metadata, not from codegen visitors.
+        self._planning_group_deps = {}
     
     def _next_group_object_task_id(self, group_key):
         """Return a unique scheduler task id for one group-object attempt."""
@@ -172,6 +176,7 @@ class OutputManager:
                 group = {
                     'compiler': compiler,
                     'wrappers': [],
+                    'all_wrappers': [],
                     'source_file': source_file,
                     'ir_file': ir_file,
                     'obj_file': obj_file,
@@ -191,9 +196,108 @@ class OutputManager:
             wrapper: Function wrapper to add
         """
         with self._state_lock:
+            group = self._all_groups.get(group_key)
+            if group is not None:
+                all_wrappers = group.setdefault('all_wrappers', [])
+                if wrapper not in all_wrappers:
+                    all_wrappers.append(wrapper)
             if group_key in self._pending_groups:
                 group = self._pending_groups[group_key]
-                group['wrappers'].append(wrapper)
+                if wrapper not in group['wrappers']:
+                    group['wrappers'].append(wrapper)
+
+    def get_group_wrappers(self, group_key):
+        """Return persistent wrapper inventory for a group."""
+        with self._state_lock:
+            group = self._all_groups.get(group_key)
+            if not group:
+                return []
+            return list(group.get('all_wrappers') or group.get('wrappers') or [])
+
+    def get_group_effect_specialization(self, group_key, effect_key, wrapper_ids):
+        """Return a completed group-level effect specialization if current."""
+        with self._state_lock:
+            group = self._all_groups.get(group_key)
+            if not group:
+                return None
+            cache = group.get('effect_specialization_cache') or {}
+            cached = cache.get(effect_key)
+            if not cached or cached.get('wrapper_ids') != wrapper_ids:
+                return None
+            return cached
+
+    def record_group_effect_specialization(
+        self,
+        group_key,
+        effect_key,
+        wrapper_ids,
+        specialized_by_name,
+    ):
+        """Record that one base group has been specialized for an effect."""
+        with self._state_lock:
+            group = self._all_groups.get(group_key)
+            if not group:
+                return
+            cache = group.setdefault('effect_specialization_cache', {})
+            cache[effect_key] = {
+                'wrapper_ids': wrapper_ids,
+                'specialized_by_name': dict(specialized_by_name),
+            }
+
+    def _iter_compiled_values(self, root):
+        """Yield compiled wrappers reachable from simple import-time values."""
+        seen = set()
+        stack = [root]
+        while stack:
+            value = stack.pop()
+            value_id = id(value)
+            if value_id in seen:
+                continue
+            seen.add(value_id)
+
+            if callable(value) and getattr(value, '_is_compiled', False):
+                yield value
+                continue
+
+            if isinstance(value, dict):
+                stack.extend(value.values())
+                continue
+
+            if isinstance(value, (list, tuple, set, frozenset)):
+                stack.extend(value)
+                continue
+
+            value_dict = getattr(value, '__dict__', None)
+            if isinstance(value_dict, dict):
+                stack.extend(value_dict.values())
+
+    def record_group_planning_dependency(self, group_key, target_group_key):
+        """Record a registration-time group dependency for build planning."""
+        if not group_key or not target_group_key or group_key == target_group_key:
+            return
+        # Module globals contain all previously defined functions from the same
+        # source file.  Those are not import/factory dependencies and treating
+        # them as such would over-specialize the whole module under unrelated
+        # effect suffixes.
+        if len(group_key) >= 1 and len(target_group_key) >= 1 and group_key[0] == target_group_key[0]:
+            return
+        with self._state_lock:
+            self._planning_group_deps.setdefault(group_key, set()).add(target_group_key)
+
+    def record_group_planning_deps_from_globals(self, group_key, globals_dict):
+        """Record compiled-wrapper group deps visible from a function's globals."""
+        if not isinstance(globals_dict, dict):
+            return
+        for value in globals_dict.values():
+            for wrapper in self._iter_compiled_values(value):
+                binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+                target_group_key = getattr(binding, 'group_key', None)
+                self.record_group_planning_dependency(group_key, target_group_key)
+
+    def get_group_planning_dependencies(self, group_key):
+        """Return registration-time group dependencies for build planning."""
+        with self._state_lock:
+            return set(self._planning_group_deps.get(group_key, set()))
     
     def queue_compilation(self, group_key, callback, func_info):
         """
@@ -769,6 +873,147 @@ class OutputManager:
             self._pending_groups.clear()
         return batch
 
+    def _effect_bindings_for_group(self, group_key):
+        """Return captured effect bindings for an effect-specialized group."""
+        with self._state_lock:
+            pending = list(self._pending_compilations.get(group_key, []))
+            group = self._all_groups.get(group_key, {})
+            wrappers = list(group.get('all_wrappers') or group.get('wrappers') or [])
+        for _callback, func_info in pending:
+            binding = getattr(func_info, 'binding_state', None)
+            captured = getattr(binding, 'captured_effect_context', None)
+            if captured:
+                return captured
+        for wrapper in wrappers:
+            binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+            captured = getattr(binding, 'captured_effect_context', None)
+            if captured:
+                return captured
+        return None
+
+    def _iter_compiled_global_refs(self, wrappers):
+        """Yield compiled wrappers referenced by wrapper global namespaces."""
+        seen = set()
+        for wrapper in wrappers:
+            binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+            globals_dict = getattr(binding, 'compilation_globals', None) if binding else None
+            if not isinstance(globals_dict, dict):
+                continue
+            for value in globals_dict.values():
+                candidates = [value]
+                value_dict = getattr(value, '__dict__', None)
+                if isinstance(value_dict, dict):
+                    candidates.extend(value_dict.values())
+                for candidate in candidates:
+                    if not callable(candidate) or not getattr(candidate, '_is_compiled', False):
+                        continue
+                    if id(candidate) in seen:
+                        continue
+                    seen.add(id(candidate))
+                    yield candidate
+
+    def _pre_materialize_referenced_default_templates(self):
+        """Materialize default template wrappers referenced by pending groups."""
+        from ..decorators.compile import materialize_specialization, DEFAULT_EFFECT_KEY
+
+        while True:
+            with self._state_lock:
+                groups = list(self._pending_groups)
+            changed = False
+            for group_key in groups:
+                wrappers = self.get_group_wrappers(group_key)
+                candidates = list(self._iter_compiled_global_refs(wrappers))
+                for dep_group_key in self.get_group_planning_dependencies(group_key):
+                    candidates.extend(self.get_group_wrappers(dep_group_key))
+                for candidate in candidates:
+                    binding = getattr(candidate, '_binding', getattr(candidate, '_state', None))
+                    if not binding or not getattr(binding, 'is_template', False):
+                        continue
+                    before = len(self._pending_compilations.get(binding.group_key, []))
+                    materialize_specialization(candidate, DEFAULT_EFFECT_KEY, {})
+                    after = len(self._pending_compilations.get(binding.group_key, []))
+                    changed = changed or after > before
+            if not changed:
+                break
+
+    def _pre_materialize_effect_groups(self):
+        """Eagerly materialize whole base groups for pending effect groups."""
+        from ..decorators.compile import materialize_group_specialization
+
+        while True:
+            with self._state_lock:
+                effect_groups = []
+                for group_key in self._pending_groups:
+                    if len(group_key) != 4 or group_key[3] is None:
+                        continue
+                    wrappers = self.get_group_wrappers(group_key)
+                    if any(
+                        getattr(
+                            getattr(wrapper, '_binding', getattr(wrapper, '_state', None)),
+                            'is_group_specialization',
+                            False,
+                        )
+                        for wrapper in wrappers
+                    ):
+                        effect_groups.append(group_key)
+
+            expanded = False
+            for group_key in effect_groups:
+                effect_suffix = group_key[3]
+                base_group_key = (group_key[0], group_key[1], group_key[2], None)
+                base_wrappers = self.get_group_wrappers(base_group_key)
+                if not base_wrappers:
+                    continue
+                effect_bindings = self._effect_bindings_for_group(group_key)
+                if not effect_bindings:
+                    continue
+
+                before = sum(len(v) for v in self._pending_compilations.values())
+                materialize_group_specialization(
+                    base_wrappers[0], effect_suffix, effect_bindings,
+                )
+
+                scan_wrappers = base_wrappers + self.get_group_wrappers(group_key)
+                for candidate in self._iter_compiled_global_refs(scan_wrappers):
+                    binding = getattr(candidate, '_binding', getattr(candidate, '_state', None))
+                    if binding is None or getattr(candidate, '_pc_effect_impl', False):
+                        continue
+                    if binding.effect_suffix == effect_suffix and binding.group_key and len(binding.group_key) == 4:
+                        candidate_base_key = (
+                            binding.group_key[0], binding.group_key[1], binding.group_key[2], None
+                        )
+                        candidate_base_wrappers = self.get_group_wrappers(candidate_base_key)
+                        if candidate_base_wrappers:
+                            materialize_group_specialization(
+                                candidate_base_wrappers[0], effect_suffix, effect_bindings,
+                            )
+                    elif binding.effect_suffix is None:
+                        materialize_group_specialization(
+                            candidate, effect_suffix, effect_bindings,
+                        )
+
+                planning_deps = (
+                    self.get_group_planning_dependencies(base_group_key)
+                    | self.get_group_planning_dependencies(group_key)
+                )
+                for dep_group_key in planning_deps:
+                    if len(dep_group_key) != 4:
+                        continue
+                    dep_base_key = (
+                        dep_group_key[0], dep_group_key[1], dep_group_key[2], None
+                    )
+                    dep_base_wrappers = self.get_group_wrappers(dep_base_key)
+                    if dep_base_wrappers:
+                        materialize_group_specialization(
+                            dep_base_wrappers[0], effect_suffix, effect_bindings,
+                        )
+
+                after = sum(len(v) for v in self._pending_compilations.values())
+                expanded = expanded or after > before
+
+            if not expanded:
+                break
+
     def _group_needs_effect_context_resource(self, group_key) -> bool:
         """Return whether compiling this group touches the global effect context."""
         with self._state_lock:
@@ -848,6 +1093,8 @@ class OutputManager:
         # compilation; task commit callbacks feed them back into the same run.
         logger.debug(f"flush_all: _pending_groups={[k for k, _ in pending_groups]}")
         logger.debug(f"flush_all: _pending_compilations={pending_compilations}")
+        self._pre_materialize_effect_groups()
+        self._pre_materialize_referenced_default_templates()
         from .scheduler import BuildScheduler, BuildSchedulerError
         object_workers = int(os.environ.get('PC_OBJECT_BUILD_WORKERS', '1') or '1')
         tasks = self._plan_pending_group_tasks()
@@ -997,6 +1244,7 @@ class OutputManager:
         self._flushed_groups.clear()
         self._group_object_task_seq = 0
         self._active_build_groups.clear()
+        self._planning_group_deps.clear()
     
     def clear_failed_group(self, group_key):
         """

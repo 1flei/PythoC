@@ -118,10 +118,22 @@ class Poly:
                 node
             )
         
-        # Generate dynamic dispatch for enum arguments
-        return self._generate_dynamic_dispatch(visitor, args, arg_types, enum_indices, node)
+        # Generate or reuse dynamic dispatch for enum arguments.  In strict build
+        # planning mode this should have been prepared before codegen.
+        dynamic_dispatch = self._get_dynamic_dispatch_func(arg_types, enum_indices, node)
+        return dynamic_dispatch.handle_call(visitor, dynamic_dispatch, args, node)
+
+    def prepare_dynamic_dispatch(self, *arg_types):
+        """Pre-generate a dynamic dispatch wrapper for the given argument types."""
+        enum_indices = []
+        for i, arg_type in enumerate(arg_types):
+            if isinstance(arg_type, type) and getattr(arg_type, '_is_enum', False):
+                enum_indices.append((i, arg_type))
+        if not enum_indices:
+            raise TypeError("Poly.prepare_dynamic_dispatch requires at least one enum argument type")
+        return self._get_dynamic_dispatch_func(tuple(arg_types), enum_indices, None)
     
-    def _generate_dynamic_dispatch(self, visitor, args, arg_types, enum_indices, node):
+    def _get_dynamic_dispatch_func(self, arg_types, enum_indices, node):
         """Generate dynamic dispatch logic for enum arguments
         
         Strategy:
@@ -132,7 +144,12 @@ class Poly:
         """
         import itertools
 
-        logger.debug(f"Poly _generate_dynamic_dispatch: args={args}, arg_types={arg_types}, enum_indices={enum_indices}")
+        logger.debug(f"Poly _get_dynamic_dispatch_func: arg_types={arg_types}, enum_indices={enum_indices}")
+        from ..type_id import get_type_id
+        cache_key = tuple(get_type_id(t) for t in arg_types)
+        cached = self._dynamic_dispatch_cache.get(cache_key)
+        if cached is not None:
+            return cached
         
         # Step 1: Validate all combinations are covered
         enum_classes = [enum_cls for _, enum_cls in enum_indices]
@@ -257,7 +274,6 @@ class Poly:
         
         # Generate deterministic suffix based on argument types and enum classes
         # This ensures cache hit works correctly across process restarts
-        from ..type_id import get_type_id
         suffix_parts = ['dispatch']
         for t in arg_types:
             suffix_parts.append(str(get_type_id(t)).replace(' ', '').replace(',', '_'))
@@ -290,5 +306,6 @@ class Poly:
                     
                     return tag_to_func[tags](*params)
 
-        return dynamic_dispatch.handle_call(visitor, dynamic_dispatch, args, node)
+        self._dynamic_dispatch_cache[cache_key] = dynamic_dispatch
+        return dynamic_dispatch
         

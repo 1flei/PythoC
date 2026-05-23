@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 3  # Increment when scheduler/cache semantics change
+DEPS_VERSION = 8  # Increment when scheduler/cache/effect planning semantics change
 
 
 @dataclass
