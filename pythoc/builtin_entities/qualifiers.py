@@ -10,7 +10,7 @@ class TypeQualifierMeta(BuiltinEntityMeta):
     _LOCAL_METHODS = frozenset({
         'qualified_type', '_qualifier_flags', 'get_qualifier_name',
         'get_qualifier_flags', 'handle_type_subscript', '__class_getitem__',
-        'is_const', 'is_static', 'is_volatile', 'get_name',
+        'is_const', 'is_static', 'is_thread_local', 'is_volatile', 'get_name',
         '_normalize_qualifiers', '__init__', '__new__', '__init_subclass__',
         '__mro__', '__bases__', '__dict__', '__module__', '__qualname__',
     })
@@ -158,7 +158,12 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
 
 
 class const(TypeQualifier):
-    _qualifier_flags = {'const': True, 'static': False, 'volatile': False}
+    _qualifier_flags = {
+        'const': True,
+        'static': False,
+        'thread_local': False,
+        'volatile': False,
+    }
     
     @classmethod
     def get_qualifier_name(cls) -> str:
@@ -169,7 +174,12 @@ class const(TypeQualifier):
         return True
 
 class static(TypeQualifier):
-    _qualifier_flags = {'const': False, 'static': True, 'volatile': False}
+    _qualifier_flags = {
+        'const': False,
+        'static': True,
+        'thread_local': False,
+        'volatile': False,
+    }
     
     @classmethod
     def get_qualifier_name(cls) -> str:
@@ -179,8 +189,31 @@ class static(TypeQualifier):
     def is_static(cls) -> bool:
         return True
 
+
+class thread_local(TypeQualifier):
+    _qualifier_flags = {
+        'const': False,
+        'static': False,
+        'thread_local': True,
+        'volatile': False,
+    }
+
+    @classmethod
+    def get_qualifier_name(cls) -> str:
+        return 'thread_local'
+
+    @classmethod
+    def is_thread_local(cls) -> bool:
+        return True
+
+
 class volatile(TypeQualifier):
-    _qualifier_flags = {'const': False, 'static': False, 'volatile': True}
+    _qualifier_flags = {
+        'const': False,
+        'static': False,
+        'thread_local': False,
+        'volatile': True,
+    }
     
     @classmethod
     def get_qualifier_name(cls) -> str:

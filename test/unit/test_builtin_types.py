@@ -9,7 +9,7 @@ from pythoc.builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
     f32, f64,
-    ptr, array,
+    ptr, array, thread_local,
     get_builtin_entity
 )
 
@@ -158,6 +158,19 @@ class TestArrayType(unittest.TestCase):
         self.assertIsInstance(llvm_type.element, ir.ArrayType)
         self.assertEqual(llvm_type.element.count, 20)
         self.assertEqual(llvm_type.element.element, ir.IntType(32))
+
+
+class TestTypeQualifiers(unittest.TestCase):
+    """Test builtin type qualifiers"""
+
+    def test_thread_local_properties(self):
+        """Test thread_local type qualifier properties"""
+        tls_i32 = thread_local[i32]
+
+        self.assertEqual(tls_i32.get_name(), "thread_local[i32]")
+        self.assertTrue(tls_i32.is_thread_local())
+        self.assertTrue(tls_i32.get_qualifier_flags()['thread_local'])
+        self.assertEqual(tls_i32.get_llvm_type(), ir.IntType(32))
 
 
 class TestBuiltinEntityRegistry(unittest.TestCase):

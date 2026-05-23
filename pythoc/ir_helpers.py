@@ -41,7 +41,7 @@ def propagate_qualifiers(from_type: Any, to_type: Any) -> Any:
         return to_type
     
     # Import here to avoid circular dependency
-    from .builtin_entities.qualifiers import const, volatile, static
+    from .builtin_entities.qualifiers import const, volatile, static, thread_local
     
     # Collect qualifiers from source type (in order from outer to inner)
     qualifiers = []
@@ -59,6 +59,7 @@ def propagate_qualifiers(from_type: Any, to_type: Any) -> Any:
                     qualifiers.append(volatile)
                 # Note: static is not propagated to members
                 # static applies to storage duration, not to the object itself
+                # thread_local is also storage duration, not object type.
                 
                 # Move to inner type
                 if current.qualified_type is not None:
@@ -110,6 +111,11 @@ def is_volatile(pc_type: Any) -> bool:
 def is_static(pc_type: Any) -> bool:
     """Check if type is static qualified"""
     return is_qualifier_type(pc_type, 'static')
+
+
+def is_thread_local(pc_type: Any) -> bool:
+    """Check if type is thread_local qualified"""
+    return is_qualifier_type(pc_type, 'thread_local')
 
 
 def make_load_volatile(load_inst: ir.LoadInstr) -> ir.LoadInstr:

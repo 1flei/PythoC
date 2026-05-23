@@ -55,6 +55,7 @@ class FunctionBindingState:
     so_file: Optional[str] = None
     is_template: bool = False
     captured_effect_context: Optional[Any] = None
+    effect_override_names: Optional[Any] = None
     captured_symbols: Optional[Any] = None
     effect_specialized_cache: Dict[str, Any] = field(default_factory=dict)
     template_compile_callback: Optional[Any] = None

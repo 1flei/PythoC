@@ -67,7 +67,8 @@ def record_effect_usage(effect_name: str):
 
 
 def push_compilation_context(compile_suffix: Optional[str], effect_suffix: Optional[str],
-                            effect_overrides: Dict[str, Any], group_key: Optional[tuple] = None):
+                            effect_overrides: Dict[str, Any], group_key: Optional[tuple] = None,
+                            effect_override_names: Optional[Set[str]] = None):
     """Push a compilation context onto the stack.
 
     Called when starting to compile a function that has effect overrides.
@@ -86,6 +87,7 @@ def push_compilation_context(compile_suffix: Optional[str], effect_suffix: Optio
         'effect_suffix': effect_suffix,
         'effect_overrides': effect_overrides,
         'group_key': group_key,
+        'effect_override_names': effect_override_names or set(),
     })
 
 
@@ -332,6 +334,13 @@ def _module_default_impl(effect_name: str, caller_module: Optional[str]) -> Any:
         return module_defaults.get(effect_name)
 
 
+def _compile_context_has_override(effect_name: str) -> bool:
+    compilation_ctx = get_current_compilation_context()
+    if not compilation_ctx:
+        return False
+    return effect_name in compilation_ctx.get('effect_override_names', set())
+
+
 class EffectNamespace:
     """
     A namespace object that represents an effect category (e.g., rng, allocator).
@@ -405,10 +414,13 @@ class EffectNamespace:
         # This tracks that the current function being compiled uses this effect
         record_effect_usage(name)
 
-        caller_module = _caller_module_from_visitor(visitor)
-        impl = _module_default_impl(name, caller_module)
-        if impl is None:
+        if _compile_context_has_override(name):
             impl = object.__getattribute__(self, '_impl')
+        else:
+            caller_module = _caller_module_from_visitor(visitor)
+            impl = _module_default_impl(name, caller_module)
+            if impl is None:
+                impl = object.__getattribute__(self, '_impl')
 
         if impl is None:
             from .logger import logger
@@ -501,6 +513,7 @@ class EffectContext:
         # Push suffix to stack
         if self._suffix is not None:
             self._effect._suffix_stack.append(self._suffix)
+        self._effect._override_stack.append(set(self._overrides.keys()))
 
         # Install builtins.__import__ hook to intercept all imports
         # Save whatever __import__ is currently active (may be an outer hook)
@@ -542,6 +555,7 @@ class EffectContext:
         # Pop suffix from stack
         if self._suffix is not None:
             self._effect._suffix_stack.pop()
+        self._effect._override_stack.pop()
 
         return False  # Don't suppress exceptions
 
@@ -562,6 +576,7 @@ class Effect:
     # Reserved attribute names that should not be treated as effects
     _RESERVED = frozenset({
         '_effects', '_defaults', '_direct_assignments', '_lock',
+        '_override_stack',
         '_suffix_stack', 'default', '_set_effect', '_get_effect',
         '_resolve_effect', '_get_current_suffix', '_RESERVED',
         'get_effect_impl', 'has_effect', 'list_effects',
@@ -575,6 +590,7 @@ class Effect:
         object.__setattr__(self, '_direct_assignments', set())  # names with direct assignment
         object.__setattr__(self, '_lock', threading.RLock())
         object.__setattr__(self, '_suffix_stack', [])  # Stack of active suffixes
+        object.__setattr__(self, '_override_stack', [])  # Stack of active override names
 
     def __call__(self, suffix: Optional[str] = None, **overrides) -> EffectContext:
         """
@@ -919,6 +935,15 @@ def capture_effect_context() -> Dict[str, Any]:
             for name, ns in effect._effects.items()
             if ns._get_impl() is not None
         }
+
+
+def capture_effect_override_names() -> Set[str]:
+    """Return the active caller override names from nested effect contexts."""
+    with effect._lock:
+        names = set()
+        for overrides in effect._override_stack:
+            names.update(overrides)
+        return names
 
 
 @contextmanager

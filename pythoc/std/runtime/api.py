@@ -45,7 +45,7 @@ from .platform import (
 )
 from .scheduler import (
     Scheduler, Worker,
-    sched_init, sched_destroy, sched_spawn, sched_notify_all,
+    sched_init, sched_destroy, sched_spawn, sched_spawn_local, sched_notify_all,
     sched_yield, sched_join, sched_current_worker,
     worker_loop,
 )
@@ -162,7 +162,8 @@ def runtime_spawn(
     """Spawn a new task.
 
     Creates a lightweight coroutine that will execute entry(arg).
-    The task is immediately submitted to the scheduler.
+    If called from within a task (worker context), uses fast local-deque path.
+    Otherwise falls back to global queue.
 
     Args:
         rt: runtime instance
@@ -173,12 +174,15 @@ def runtime_spawn(
     Returns:
         Task pointer.  Caller MUST eventually join or detach.
     """
-    return sched_spawn(
-        ptr[Scheduler](ptr[void](ptr(rt.sched))),
-        entry,
-        arg,
-        stack_size
-    )
+    sched: ptr[Scheduler] = ptr[Scheduler](ptr[void](ptr(rt.sched)))
+
+    # Fast path: if we're on a worker, spawn locally (no global lock)
+    worker: ptr[Worker] = sched_current_worker(sched)
+    if worker != nullptr:
+        return sched_spawn_local(sched, worker, entry, arg, stack_size)
+
+    # Slow path: external spawn (goes to global queue)
+    return sched_spawn(sched, entry, arg, stack_size)
 
 
 @compile

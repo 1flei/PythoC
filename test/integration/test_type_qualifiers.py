@@ -1,5 +1,8 @@
 import os
-from pythoc import i32, i64, f64, ptr, array, compile, const, static, volatile, nullptr, u32
+from pythoc import (
+    i32, i64, f64, ptr, array, compile, const, static, thread_local,
+    volatile, nullptr, u32,
+)
 from pythoc.libc.stdio import printf
 from pythoc.logger import set_raise_on_error
 from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
@@ -117,6 +120,24 @@ def test_static_persistence() -> i32:
     test_static_counter()
     test_static_counter()
     return 0
+
+
+@compile
+def test_thread_local_counter() -> i32:
+    """Test thread-local storage syntax and same-thread persistence"""
+    counter: thread_local[i32] = 0
+    counter = counter + 1
+    return counter
+
+
+@compile
+def test_thread_local_basic() -> i32:
+    first: i32 = test_thread_local_counter()
+    second: i32 = test_thread_local_counter()
+    printf("Thread-local counter: %d, %d\n", first, second)
+    if first == i32(1) and second == i32(2):
+        return i32(0)
+    return i32(1)
 
 @compile
 def test_const_pointer() -> i32:
@@ -349,6 +370,11 @@ def main() -> i32:
     
     printf("--- Static persistence ---\n")
     test_static_persistence()
+    printf("\n")
+
+    printf("--- Thread-local basic ---\n")
+    if test_thread_local_basic() != i32(0):
+        return i32(1)
     printf("\n")
     
     printf("--- Const pointer ---\n")

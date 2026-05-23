@@ -49,7 +49,7 @@ from .enum import enum
 from .refined import refined, RefinedType
 
 # Type qualifiers migrated
-from .qualifiers import const, static, volatile
+from .qualifiers import const, static, thread_local, volatile
 
 # Built-in functions
 from .intrinsics import sizeof, nullptr, seq, consume, assume, refine, typeof, char, defer
@@ -149,6 +149,7 @@ __all__ = [
     # Type qualifiers
     'const',
     'static',
+    'thread_local',
     'volatile',
     
     # Built-in functions

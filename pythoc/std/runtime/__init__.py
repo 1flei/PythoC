@@ -107,7 +107,7 @@ from .deque import (
 )
 from .scheduler import (
     Scheduler, Worker,
-    sched_init, sched_destroy, sched_spawn,
+    sched_init, sched_destroy, sched_spawn, sched_spawn_local,
     sched_yield, sched_join,
 )
 from .api import (

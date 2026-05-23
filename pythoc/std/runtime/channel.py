@@ -38,6 +38,7 @@ from .scheduler import (
     Worker, Scheduler, sched_current_worker, sched_suspend_current,
     sched_requeue_task,
 )
+from .deque import WSDeque, wsdeque_push, wsdeque_size
 
 
 # ============================================================
@@ -237,8 +238,18 @@ def Channel(element_type, capacity=64):
                 )
                 spinlock_unlock(ptr[SpinLock](ptr[void](ptr(ch.lock))))
 
+                # Wake receiver: use local deque for cap=1 (SPSC), global for larger (MPMC)
                 if waiter != nullptr:
-                    sched_requeue_task(sched, waiter)
+                    if ch.cap == u64(1):
+                        # SPSC fast path: push to local deque (no lock, no condvar)
+                        spinlock_lock(ptr[SpinLock](ptr[void](ptr(waiter.lock))))
+                        atomic_store_i32(ptr[i32](ptr[void](ptr(waiter.state))), TASK_PENDING)
+                        waiter.queued = i32(0)
+                        spinlock_unlock(ptr[SpinLock](ptr[void](ptr(waiter.lock))))
+                        wsdeque_push(ptr[WSDeque](ptr[void](ptr(w.local_deque))), waiter)
+                    else:
+                        # MPMC: use global queue for load distribution
+                        sched_requeue_task(sched, waiter)
                 return i32(1)
 
             current: ptr[Task] = w.current_task
@@ -280,8 +291,16 @@ def Channel(element_type, capacity=64):
                 )
                 spinlock_unlock(ptr[SpinLock](ptr[void](ptr(ch.lock))))
 
+                # Wake sender: use local deque for cap=1 (SPSC), global for larger (MPMC)
                 if waiter != nullptr:
-                    sched_requeue_task(sched, waiter)
+                    if ch.cap == u64(1):
+                        spinlock_lock(ptr[SpinLock](ptr[void](ptr(waiter.lock))))
+                        atomic_store_i32(ptr[i32](ptr[void](ptr(waiter.state))), TASK_PENDING)
+                        waiter.queued = i32(0)
+                        spinlock_unlock(ptr[SpinLock](ptr[void](ptr(waiter.lock))))
+                        wsdeque_push(ptr[WSDeque](ptr[void](ptr(w.local_deque))), waiter)
+                    else:
+                        sched_requeue_task(sched, waiter)
                 return i32(1)
 
             if ch.closed != i32(0):

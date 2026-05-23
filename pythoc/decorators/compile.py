@@ -84,8 +84,14 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
         return template_wrapper
     else:
         # Non-default: call _compile_impl with effect_suffix
-        from ..effect import restore_effect_context
+        from ..effect import capture_effect_override_names, restore_effect_context
+        from ..effect import get_current_compilation_context
         original_scope = state.group_key[1] if state.group_key else None
+        compilation_ctx = get_current_compilation_context()
+        if compilation_ctx:
+            effect_override_names = compilation_ctx.get('effect_override_names', set())
+        else:
+            effect_override_names = capture_effect_override_names()
 
         logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
 
@@ -96,6 +102,7 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
                 effect_suffix=effect_key,
                 captured_symbols=state.captured_symbols,
                 effect_scope=original_scope,
+                effect_override_names=effect_override_names,
             )
 
         state.effect_specialized_cache[effect_key] = specialized_wrapper
@@ -199,6 +206,7 @@ def _compile_impl(func_or_class,
                   effect_suffix: Optional[str] = None,
                   captured_symbols=None,
                   effect_scope=_SCOPE_NOT_PROVIDED,
+                  effect_override_names=None,
                   fn_attrs=None):
     """Internal implementation of compile decorator.
     
@@ -463,10 +471,16 @@ def _compile_impl(func_or_class,
     compiler = group['compiler']
     logger.debug(f"@compile {func.__name__}: group_key={group_key}")
     
-    from ..effect import capture_effect_context, restore_effect_context
+    from ..effect import capture_effect_context, capture_effect_override_names
+    from ..effect import restore_effect_context
     from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
     _captured_effect_context = capture_effect_context()
+    _effect_override_names = (
+        set(effect_override_names)
+        if effect_override_names is not None
+        else capture_effect_override_names()
+    )
 
     binding_state = FunctionBindingState(
         compiler=compiler,
@@ -479,6 +493,7 @@ def _compile_impl(func_or_class,
         compile_suffix=compile_suffix,
         effect_suffix=effect_suffix,
         captured_effect_context=_captured_effect_context,
+        effect_override_names=_effect_override_names,
         captured_symbols=captured_symbols,
         compilation_globals=dict(user_globals),
         wrapper=wrapper,
@@ -510,7 +525,8 @@ def _compile_impl(func_or_class,
 
         if st.effect_suffix:
             push_compilation_context(st.compile_suffix, st.effect_suffix,
-                                     st.captured_effect_context, st.group_key)
+                                     st.captured_effect_context, st.group_key,
+                                     st.effect_override_names)
 
         try:
             with restore_effect_context(st.captured_effect_context):

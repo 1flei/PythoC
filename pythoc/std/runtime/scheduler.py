@@ -89,6 +89,7 @@ class Scheduler:
     # Parking lot: workers park here when idle
     park_mutex: Mutex
     park_cond: CondVar
+    parked_workers: i64          # atomic count of workers currently parked
 
     # Shutdown flag
     shutdown: i64                # atomic: 0 = running, 1 = shutting down
@@ -189,8 +190,86 @@ def sched_spawn(
 
 
 @compile
+def sched_spawn_batch(
+    sched: ptr[Scheduler],
+    entry: func[ptr[void], ptr[void]],
+    arg: ptr[void],
+    stack_size: u64
+) -> ptr[Task]:
+    """Spawn without notify — for bulk spawning. Caller must call
+    sched_notify_all() after batch is complete."""
+    sz: u64 = stack_size
+    if sz == u64(0):
+        sz = DEFAULT_STACK_SIZE
+
+    task: ptr[Task] = task_create(
+        ptr[TaskIdGen](ptr[void](ptr(sched.id_gen))),
+        entry, arg, sz
+    )
+
+    atomic_fetch_add_i64(
+        ptr[i64](ptr[void](ptr(sched.active_tasks))),
+        i64(1)
+    )
+
+    taskq_push(
+        ptr[TaskQueue](ptr[void](ptr(sched.global_queue))),
+        task
+    )
+
+    # NO notify — caller will broadcast after batch
+    return task
+
+
+@compile
+def sched_spawn_local(
+    sched: ptr[Scheduler],
+    w: ptr[Worker],
+    entry: func[ptr[void], ptr[void]],
+    arg: ptr[void],
+    stack_size: u64
+) -> ptr[Task]:
+    """Spawn a task onto the current worker's local deque (fast path).
+
+    Avoids the global queue spinlock and condvar signal.
+    If local deque is full, falls back to global queue.
+    Only wakes other workers if global queue was used.
+    """
+    sz: u64 = stack_size
+    if sz == u64(0):
+        sz = DEFAULT_STACK_SIZE
+
+    task: ptr[Task] = task_create(
+        ptr[TaskIdGen](ptr[void](ptr(sched.id_gen))),
+        entry, arg, sz
+    )
+
+    # Count active tasks
+    atomic_fetch_add_i64(
+        ptr[i64](ptr[void](ptr(sched.active_tasks))),
+        i64(1)
+    )
+
+    # Try local deque first (no lock, no condvar)
+    pushed: i32 = wsdeque_push(ptr[WSDeque](ptr[void](ptr(w.local_deque))), task)
+    if pushed != 0:
+        return task
+
+    # Overflow: push to global queue and notify
+    taskq_push(
+        ptr[TaskQueue](ptr[void](ptr(sched.global_queue))),
+        task
+    )
+    sched_notify_one(sched)
+
+    return task
+
+
+@compile
 def sched_notify_one(sched: ptr[Scheduler]) -> void:
     """Wake one parked worker."""
+    if atomic_load_i64(ptr[i64](ptr[void](ptr(sched.parked_workers)))) == i64(0):
+        return
     mutex_lock(ptr[Mutex](ptr[void](ptr(sched.park_mutex))))
     condvar_signal(ptr[CondVar](ptr[void](ptr(sched.park_cond))))
     mutex_unlock(ptr[Mutex](ptr[void](ptr(sched.park_mutex))))
@@ -291,6 +370,10 @@ def worker_park(w: ptr[Worker]) -> void:
 
     mutex_lock(ptr[Mutex](ptr[void](ptr(sched.park_mutex))))
     w.is_parked = i32(1)
+    atomic_fetch_add_i64(
+        ptr[i64](ptr[void](ptr(sched.parked_workers))),
+        i64(1)
+    )
 
     while (
         taskq_is_empty(ptr[TaskQueue](ptr[void](ptr(sched.global_queue)))) != 0
@@ -301,6 +384,10 @@ def worker_park(w: ptr[Worker]) -> void:
             ptr[Mutex](ptr[void](ptr(sched.park_mutex)))
         )
 
+    atomic_fetch_add_i64(
+        ptr[i64](ptr[void](ptr(sched.parked_workers))),
+        i64(-1)
+    )
     w.is_parked = i32(0)
     mutex_unlock(ptr[Mutex](ptr[void](ptr(sched.park_mutex))))
 
@@ -386,7 +473,23 @@ def _handle_task_after_run(w: ptr[Worker], task: ptr[Task], sched: ptr[Scheduler
             return
         # Wake joiner if someone is waiting on this task
         if task.joiner != nullptr:
-            sched_requeue_task(sched, task.joiner)
+            # Fast path: push joiner to LOCAL deque (avoids global queue + condvar)
+            # Safe because joiner is guaranteed BLOCKED at this point
+            # (sched_join sets BLOCKING, _handle_task_after_run converts to BLOCKED
+            #  before worker picks up child from deque)
+            joiner: ptr[Task] = task.joiner
+            spinlock_lock(ptr[SpinLock](ptr[void](ptr(joiner.lock))))
+            joiner_state: i32 = atomic_load_i32(ptr[i32](ptr[void](ptr(joiner.state))))
+            if joiner_state == TASK_BLOCKED:
+                # Normal case: joiner is fully blocked, safe to requeue locally
+                atomic_store_i32(ptr[i32](ptr[void](ptr(joiner.state))), TASK_PENDING)
+                joiner.queued = i32(0)
+                spinlock_unlock(ptr[SpinLock](ptr[void](ptr(joiner.lock))))
+                wsdeque_push(ptr[WSDeque](ptr[void](ptr(w.local_deque))), joiner)
+            else:
+                # Race: joiner still transitioning (BLOCKING) — use safe global path
+                spinlock_unlock(ptr[SpinLock](ptr[void](ptr(joiner.lock))))
+                sched_requeue_task(sched, joiner)
 
 
 @compile

@@ -96,6 +96,13 @@ with effect(rng=RNG_V2, suffix="v2"):
         return effect.rng.next()
 
 
+with effect(rng=RNG_V2, suffix="ctx_only"):
+    @compile
+    def test_effect_override_context_only() -> u64:
+        """Effect context alone should override the module default"""
+        return effect.rng.next()
+
+
 # Define function with override to RNG_V3
 with effect(rng=RNG_V3, suffix="v3"):
     @compile(suffix="v3")
@@ -277,6 +284,10 @@ if __name__ == "__main__":
     print("\n--- Effect Override ---")
     result = test_effect_override_v2()
     print(f"test_effect_override_v2: {result} (expected: 999)")
+    assert result == 999, f"Expected 999, got {result}"
+
+    result = test_effect_override_context_only()
+    print(f"test_effect_override_context_only: {result} (expected: 999)")
     assert result == 999, f"Expected 999, got {result}"
     
     result = test_effect_override_v3()

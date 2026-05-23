@@ -241,8 +241,10 @@ class AssignmentsMixin:
         llvm_type = pc_type.get_llvm_type(self.module.context)
         rvalue_ir = ensure_ir(rvalue)
         
-        # Check if this is a static variable
-        if is_static(pc_type):
+        # Check if this is a static or thread-local variable.
+        from ..ir_helpers import is_thread_local
+        is_static_storage = is_static(pc_type) or is_thread_local(pc_type)
+        if is_static_storage:
             # Create unique global variable name based on function name and variable name
             func_name = self.current_function.name if self.current_function else "global"
             global_name = f"{func_name}.{var_name}"
@@ -257,6 +259,8 @@ class AssignmentsMixin:
             
             global_var = ir.GlobalVariable(self.module, llvm_type, global_name)
             global_var.linkage = 'internal'  # Internal linkage = static in C
+            if is_thread_local(pc_type):
+                global_var.storage_class = 'thread_local'
             global_var.initializer = rvalue_ir
             global_var.global_constant = False
             

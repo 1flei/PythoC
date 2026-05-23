@@ -1,48 +1,36 @@
-"""
-Segregated pool allocator for effect.mem.
-
-Provides PoolMem: a malloc/free implementation suitable as the runtime
-memory policy (via effect.default(mem=PoolMem) in pythoc.std.runtime).
-
-Global std/mem.py keeps LibcMem as the project-wide default.  Runtime modules
-call effect.mem.malloc/free and register PoolMem per module at import time.
-
-Design:
-- Small allocations (<= POOL_SMALL_USABLE) use a fixed-size free list.
-- Large allocations (<= POOL_LARGE_USABLE) use a second free list (stacks).
-- Oversized requests fall through to libc malloc/free.
-- Each pooled block has a 16-byte header (magic + size) before user pointer.
-"""
+"""Size-class pool allocator for effect.mem."""
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from pythoc import compile, i32, i64, u64, u8, ptr, void, struct, nullptr, sizeof, static
+from pythoc import (
+    compile, i64, u64, u8, ptr, void, struct, nullptr, sizeof,
+    array, static, thread_local,
+)
 from pythoc.builtin_entities import atomic_cas_i64, atomic_store_i64
 from pythoc.libc.stdlib import malloc as libc_malloc, free as libc_free
 from pythoc.libc.string import memset
 
 POOL_HEADER_SIZE = u64(16)
-POOL_SMALL_USABLE = u64(1024)
-POOL_LARGE_USABLE = u64(69632)
-POOL_SMALL_BLOCK = POOL_HEADER_SIZE + POOL_SMALL_USABLE
-POOL_LARGE_BLOCK = POOL_HEADER_SIZE + POOL_LARGE_USABLE
+POOL_CLASS_COUNT = 11
+POOL_MAGIC_LIBC = u64(255)
 
-POOL_MAGIC_SMALL = u64(1)
-POOL_MAGIC_LARGE = u64(2)
-POOL_MAGIC_LIBC = u64(3)
-
-POOL_SMALL_CACHE_MAX = u64(512)
-POOL_LARGE_CACHE_MAX = u64(64)
+POOL_LOCAL_CACHE_MAX = u64(8192)
+POOL_GLOBAL_CACHE_MAX = u64(8192)
+POOL_HUGE_CACHE_MAX = u64(512)
 
 
 @compile
 class MemPoolState:
     lock: i64
-    small_freelist: ptr[void]
-    large_freelist: ptr[void]
-    small_cached: u64
-    large_cached: u64
+    freelists: array[ptr[void], POOL_CLASS_COUNT]
+    cached: array[u64, POOL_CLASS_COUNT]
+
+
+@compile
+class MemPoolLocalState:
+    freelists: array[ptr[void], POOL_CLASS_COUNT]
+    cached: array[u64, POOL_CLASS_COUNT]
 
 
 @compile
@@ -51,6 +39,15 @@ def _pool_state() -> ptr[MemPoolState]:
     if state == nullptr:
         state = ptr[MemPoolState](libc_malloc(i64(sizeof(MemPoolState))))
         memset(ptr[void](state), 0, i64(sizeof(MemPoolState)))
+    return state
+
+
+@compile
+def _pool_local_state() -> ptr[MemPoolLocalState]:
+    state: thread_local[ptr[MemPoolLocalState]] = nullptr
+    if state == nullptr:
+        state = ptr[MemPoolLocalState](libc_malloc(i64(sizeof(MemPoolLocalState))))
+        memset(ptr[void](state), 0, i64(sizeof(MemPoolLocalState)))
     return state
 
 
@@ -96,25 +93,107 @@ def _pool_unlock(state: ptr[MemPoolState]) -> void:
 
 
 @compile
-def _pool_malloc_small(state: ptr[MemPoolState], size: u64) -> ptr[void]:
-    block: ptr[void] = state.small_freelist
-    if block != nullptr:
-        state.small_freelist = ptr[ptr[void]](block)[0]
-        state.small_cached = state.small_cached - u64(1)
-    else:
-        block = _pool_raw_alloc(POOL_SMALL_BLOCK)
-    return _pool_write_header(block, POOL_MAGIC_SMALL, size)
+def _pool_class_index(size: u64) -> i64:
+    if size <= u64(64):
+        return i64(0)
+    if size <= u64(128):
+        return i64(1)
+    if size <= u64(256):
+        return i64(2)
+    if size <= u64(512):
+        return i64(3)
+    if size <= u64(1024):
+        return i64(4)
+    if size <= u64(2048):
+        return i64(5)
+    if size <= u64(4096):
+        return i64(6)
+    if size <= u64(8192):
+        return i64(7)
+    if size <= u64(16384):
+        return i64(8)
+    if size <= u64(32768):
+        return i64(9)
+    if size <= u64(65536):
+        return i64(10)
+    return i64(-1)
 
 
 @compile
-def _pool_malloc_large(state: ptr[MemPoolState], size: u64) -> ptr[void]:
-    block: ptr[void] = state.large_freelist
+def _pool_class_size(index: i64) -> u64:
+    if index == i64(0):
+        return u64(64)
+    if index == i64(1):
+        return u64(128)
+    if index == i64(2):
+        return u64(256)
+    if index == i64(3):
+        return u64(512)
+    if index == i64(4):
+        return u64(1024)
+    if index == i64(5):
+        return u64(2048)
+    if index == i64(6):
+        return u64(4096)
+    if index == i64(7):
+        return u64(8192)
+    if index == i64(8):
+        return u64(16384)
+    if index == i64(9):
+        return u64(32768)
+    return u64(65536)
+
+
+@compile
+def _pool_cache_max(index: i64) -> u64:
+    if index >= i64(10):
+        return POOL_HUGE_CACHE_MAX
+    return POOL_LOCAL_CACHE_MAX
+
+
+@compile
+def _pool_global_cache_max(index: i64) -> u64:
+    if index >= i64(10):
+        return POOL_HUGE_CACHE_MAX
+    return POOL_GLOBAL_CACHE_MAX
+
+
+@compile
+def _pool_pop_local(local: ptr[MemPoolLocalState], index: i64) -> ptr[void]:
+    block: ptr[void] = local.freelists[index]
     if block != nullptr:
-        state.large_freelist = ptr[ptr[void]](block)[0]
-        state.large_cached = state.large_cached - u64(1)
-    else:
-        block = _pool_raw_alloc(POOL_LARGE_BLOCK)
-    return _pool_write_header(block, POOL_MAGIC_LARGE, size)
+        local.freelists[index] = ptr[ptr[void]](block)[0]
+        local.cached[index] = local.cached[index] - u64(1)
+    return block
+
+
+@compile
+def _pool_pop_global(state: ptr[MemPoolState], index: i64) -> ptr[void]:
+    block: ptr[void] = state.freelists[index]
+    if block != nullptr:
+        state.freelists[index] = ptr[ptr[void]](block)[0]
+        state.cached[index] = state.cached[index] - u64(1)
+    return block
+
+
+@compile
+def _pool_push_local(local: ptr[MemPoolLocalState], index: i64, block: ptr[void]) -> i64:
+    if local.cached[index] >= _pool_cache_max(index):
+        return i64(0)
+    ptr[ptr[void]](block)[0] = local.freelists[index]
+    local.freelists[index] = block
+    local.cached[index] = local.cached[index] + u64(1)
+    return i64(1)
+
+
+@compile
+def _pool_push_global(state: ptr[MemPoolState], index: i64, block: ptr[void]) -> i64:
+    if state.cached[index] >= _pool_global_cache_max(index):
+        return i64(0)
+    ptr[ptr[void]](block)[0] = state.freelists[index]
+    state.freelists[index] = block
+    state.cached[index] = state.cached[index] + u64(1)
+    return i64(1)
 
 
 @compile
@@ -127,37 +206,22 @@ def _pool_malloc_libc(size: u64) -> ptr[void]:
 def _pool_malloc(size: u64) -> ptr[void]:
     if size == u64(0):
         return nullptr
-    if size > POOL_LARGE_USABLE:
+    index: i64 = _pool_class_index(size)
+    if index < i64(0):
         return _pool_malloc_libc(size)
+
+    local: ptr[MemPoolLocalState] = _pool_local_state()
+    block: ptr[void] = _pool_pop_local(local, index)
+    if block != nullptr:
+        return _pool_write_header(block, u64(index) + u64(1), size)
+
     state: ptr[MemPoolState] = _pool_state()
     _pool_lock(state)
-    result: ptr[void] = nullptr
-    if size <= POOL_SMALL_USABLE:
-        result = _pool_malloc_small(state, size)
-    else:
-        result = _pool_malloc_large(state, size)
+    block = _pool_pop_global(state, index)
     _pool_unlock(state)
-    return result
-
-
-@compile
-def _pool_free_small(state: ptr[MemPoolState], block: ptr[void]) -> void:
-    if state.small_cached >= POOL_SMALL_CACHE_MAX:
-        _pool_raw_free(block)
-        return
-    ptr[ptr[void]](block)[0] = state.small_freelist
-    state.small_freelist = block
-    state.small_cached = state.small_cached + u64(1)
-
-
-@compile
-def _pool_free_large(state: ptr[MemPoolState], block: ptr[void]) -> void:
-    if state.large_cached >= POOL_LARGE_CACHE_MAX:
-        _pool_raw_free(block)
-        return
-    ptr[ptr[void]](block)[0] = state.large_freelist
-    state.large_freelist = block
-    state.large_cached = state.large_cached + u64(1)
+    if block == nullptr:
+        block = _pool_raw_alloc(POOL_HEADER_SIZE + _pool_class_size(index))
+    return _pool_write_header(block, u64(index) + u64(1), size)
 
 
 @compile
@@ -170,14 +234,21 @@ def _pool_free(p: ptr[void]) -> void:
     if magic == POOL_MAGIC_LIBC:
         _pool_raw_free(block)
         return
+    index: i64 = i64(magic - u64(1))
+    if index < i64(0) or index >= i64(POOL_CLASS_COUNT):
+        _pool_raw_free(block)
+        return
+
+    local: ptr[MemPoolLocalState] = _pool_local_state()
+    if _pool_push_local(local, index, block) != i64(0):
+        return
+
     state: ptr[MemPoolState] = _pool_state()
     _pool_lock(state)
-    if magic == POOL_MAGIC_SMALL:
-        _pool_free_small(state, block)
-    elif magic == POOL_MAGIC_LARGE:
-        _pool_free_large(state, block)
-    else:
+    if _pool_push_global(state, index, block) == i64(0):
+        _pool_unlock(state)
         _pool_raw_free(block)
+        return
     _pool_unlock(state)
 
 

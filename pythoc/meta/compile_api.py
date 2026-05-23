@@ -259,10 +259,12 @@ def compile_ast(
     logger.debug("meta.compile_ast {}: group_key={}".format(func_name, group_key))
 
     # Capture effect context
-    from ..effect import capture_effect_context, restore_effect_context
+    from ..effect import capture_effect_context, capture_effect_override_names
+    from ..effect import restore_effect_context
     from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
     captured_effect_ctx = capture_effect_context()
+    effect_override_names = capture_effect_override_names()
 
     binding_state = FunctionBindingState(
         compiler=compiler,
@@ -275,6 +277,7 @@ def compile_ast(
         compile_suffix=compile_suffix,
         effect_suffix=effect_suffix,
         captured_effect_context=captured_effect_ctx,
+        effect_override_names=effect_override_names,
         compilation_globals=dict(user_globals),
         wrapper=wrapper,
     )
@@ -299,6 +302,7 @@ def compile_ast(
             push_compilation_context(
                 st.compile_suffix, st.effect_suffix,
                 st.captured_effect_context, st.group_key,
+                st.effect_override_names,
             )
 
         try:

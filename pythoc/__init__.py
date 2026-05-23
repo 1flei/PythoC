@@ -13,7 +13,7 @@ from .builtin_entities import (
     u8, u16, u32, u64,
     f16, bf16, f32, f64, f128, bool,
     ptr, array, struct, union, func, enum,
-    const, static, volatile,
+    const, static, thread_local, volatile,
     TYPE_MAP,
     sizeof, nullptr, typeof, char,
     seq, linear, consume, move, void,
@@ -69,7 +69,7 @@ __all__ = [
     # Refined types
     'refined', 'assume', 'refine',
     # Type qualifiers
-    'const', 'static', 'volatile',
+    'const', 'static', 'thread_local', 'volatile',
     # Type utilities
     'TYPE_MAP',
     'sizeof',
