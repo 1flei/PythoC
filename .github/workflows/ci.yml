@@ -122,7 +122,6 @@ jobs:
   test-arm64:
     name: Test on ARM64 (AArch64)
     runs-on: ubuntu-24.04-arm
-    continue-on-error: true  # ARM64 runner may not be available
     steps:
       - uses: actions/checkout@v4
 
