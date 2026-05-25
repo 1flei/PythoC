@@ -73,15 +73,11 @@ _ctx_make:
 ctx_make:
     # rdi = ctx, rsi = stack_top, rdx = entry, rcx = arg
 
-    # Align stack_top to 16 bytes (ABI requirement) then subtract 8
-    # for the fake return address (so on entry, rsp % 16 == 8, which
-    # is the state after a CALL instruction).
+    # Align stack_top to 16 bytes.  ctx_swap jumps to the trampoline rather
+    # than calling it, so the trampoline must start with rsp % 16 == 0 before
+    # it calls entry(arg).  The call then gives entry the ABI-required
+    # rsp % 16 == 8 state.
     and     $-16, %rsi
-    sub     $8,   %rsi
-
-    # Place a "return address" that points to ctx_entry_trampoline
-    lea     .Lctx_entry_trampoline(%rip), %rax
-    mov     %rax, (%rsi)
 
     # Setup MiniCtx fields
     mov     %rsi,  0(%rdi)    # rsp = adjusted stack_top

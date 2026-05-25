@@ -13,7 +13,7 @@ Usage (override):
     from pythoc.std.mem_pool import PoolMem
 
     with effect(mem=LibcMem, suffix="libc_rt"):
-        from pythoc.std.runtime.api import runtime_new
+        from pythoc.std.runtime import runtime_start
 """
 from __future__ import annotations
 

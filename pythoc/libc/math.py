@@ -128,3 +128,34 @@ def log1p(x: f64) -> f64: pass
 
 @extern(lib='m')
 def expm1(x: f64) -> f64: pass
+
+# C99 additions
+@extern(lib='m')
+def log2(x: f64) -> f64: pass
+
+@extern(lib='m')
+def copysign(x: f64, y: f64) -> f64: pass
+
+@extern(lib='m')
+def acosh(x: f64) -> f64: pass
+
+@extern(lib='m')
+def asinh(x: f64) -> f64: pass
+
+@extern(lib='m')
+def atanh(x: f64) -> f64: pass
+
+@extern(lib='m')
+def erf(x: f64) -> f64: pass
+
+@extern(lib='m')
+def erfc(x: f64) -> f64: pass
+
+@extern(lib='m')
+def lgamma(x: f64) -> f64: pass
+
+@extern(lib='m')
+def tgamma(x: f64) -> f64: pass
+
+@extern(lib='m')
+def cbrt(x: f64) -> f64: pass

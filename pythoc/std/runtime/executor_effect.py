@@ -1,8 +1,8 @@
 """
 Effect-based executor integration.
 
-Registers `effect.executor` so user code can:
-    effect.executor.spawn(fn, arg)
+Registers `effect.executor` so async/Future code can:
+    effect.executor.spawn(fn, arg, stack_size)
     effect.executor.yield_now()
     effect.executor.join(task)
 
@@ -23,41 +23,46 @@ bind_mem()
 
 from types import SimpleNamespace
 from pythoc import (
-    compile, effect, i32, i64, u64, ptr, void, nullptr, static, func, sizeof,
+    compile, effect, u64, ptr, void, func, linear, refined, assume, consume,
 )
-from pythoc.libc.string import memset
 
 from .api import (
-    Runtime, runtime_new, runtime_start, runtime_shutdown, runtime_free,
-    runtime_spawn, runtime_join, runtime_detach,
-    runtime_yield_now,
+    Runtime,
+    runtime_yield_now, runtime_set_current_executor, runtime_current_executor,
 )
-from .task import TaskHandle
+from .raw import (
+    Task, task_destroy,
+    runtime_spawn_raw, runtime_join_raw, runtime_detach_raw,
+)
 
 
-# ============================================================
-# Global runtime pointer (set by init_default_runtime)
-# ============================================================
-
-@compile
-class _GlobalState:
-    rt: ptr[Runtime]
+ExecutorProof = refined[linear, "executor_handle"]
 
 
 @compile
-def _global_rt() -> ptr[_GlobalState]:
-    """Return pointer to global state (static allocation)."""
-    g: static[ptr[_GlobalState]] = nullptr
-    if g == nullptr:
-        g = ptr[_GlobalState](effect.mem.malloc(u64(sizeof(_GlobalState))))
-        memset(ptr[void](g), 0, i64(sizeof(_GlobalState)))
-    return g
+class ExecutorHandle:
+    token: ptr[void]
+    _proof: ExecutorProof
+
+
+@compile
+def executor_handle_new(token: ptr[void]) -> ExecutorHandle:
+    handle: ExecutorHandle
+    handle.token = token
+    handle._proof = assume(linear(), "executor_handle")
+    return handle
+
+
+@compile
+def executor_handle_consume(handle: ExecutorHandle) -> ptr[void]:
+    token: ptr[void] = handle.token
+    consume(handle._proof)
+    return token
 
 
 @compile
 def executor_set_runtime(rt: ptr[Runtime]) -> void:
-    g: ptr[_GlobalState] = _global_rt()
-    g.rt = rt
+    runtime_set_current_executor(rt)
 
 
 # ============================================================
@@ -65,31 +70,36 @@ def executor_set_runtime(rt: ptr[Runtime]) -> void:
 # ============================================================
 
 @compile
-def _exec_spawn(entry: func[ptr[void], ptr[void]], arg: ptr[void]) -> TaskHandle:
+def _exec_spawn(
+    entry: func[ptr[void], ptr[void]],
+    arg: ptr[void],
+    stack_size: u64,
+) -> ExecutorHandle:
     """Spawn via the global runtime."""
-    g: ptr[_GlobalState] = _global_rt()
-    return runtime_spawn(g.rt, entry, arg, u64(0))
+    task = runtime_spawn_raw(runtime_current_executor(), entry, arg, stack_size)
+    return executor_handle_new(ptr[void](task))
 
 
 @compile
-def _exec_join(handle: TaskHandle) -> ptr[void]:
+def _exec_join(handle: ExecutorHandle) -> ptr[void]:
     """Join via the global runtime."""
-    g: ptr[_GlobalState] = _global_rt()
-    return runtime_join(g.rt, handle)
+    task = ptr[Task](executor_handle_consume(handle))
+    result: ptr[void] = runtime_join_raw(runtime_current_executor(), task)
+    task_destroy(task)
+    return result
 
 
 @compile
 def _exec_yield() -> void:
     """Yield current task via the global runtime."""
-    g: ptr[_GlobalState] = _global_rt()
-    runtime_yield_now(g.rt)
+    runtime_yield_now(runtime_current_executor())
 
 
 @compile
-def _exec_detach(handle: TaskHandle) -> void:
+def _exec_detach(handle: ExecutorHandle) -> void:
     """Detach via the global runtime."""
-    g: ptr[_GlobalState] = _global_rt()
-    runtime_detach(g.rt, handle)
+    task = ptr[Task](executor_handle_consume(handle))
+    runtime_detach_raw(runtime_current_executor(), task)
 
 
 # ============================================================

@@ -96,12 +96,12 @@ ctx_swap:
 
 .globl ctx_make
 ctx_make:
-    // Align stack to 16, subtract 8 for fake return + 32 for shadow space
+    // Align stack to 16, then reserve the Win64 caller shadow space for
+    // the trampoline's call to entry(arg).  ctx_swap jumps to the trampoline
+    // rather than calling it, so the trampoline itself must start in caller
+    // state: rsp % 16 == 0 with 32 bytes of home space available.
     and     $-16, %rdx
-    sub     $40,  %rdx        // 8 (ret addr) + 32 (shadow space)
-
-    lea     .Lctx_entry_win(%rip), %rax
-    mov     %rax, (%rdx)      // fake return address
+    sub     $32,  %rdx        // 32-byte shadow space for entry(arg)
 
     // Setup integer slots in MiniCtx
     mov     %rdx,  0(%rcx)    // rsp

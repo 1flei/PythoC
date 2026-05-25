@@ -35,11 +35,16 @@ from pythoc.std.runtime.deque import (
     WSDeque, wsdeque_init, wsdeque_push, wsdeque_pop, wsdeque_steal, wsdeque_size,
 )
 from pythoc.std.runtime.api import (
-    Runtime, runtime_new, runtime_start, runtime_spawn, runtime_join,
-    runtime_shutdown, runtime_free, runtime_detach, runtime_yield_now,
+    Runtime, runtime_spawn, runtime_join, runtime_detach, runtime_yield_now,
+)
+from pythoc.std.runtime.raw import (
+    runtime_new_raw as runtime_new,
+    runtime_start_raw as runtime_start,
+    runtime_shutdown_raw as runtime_shutdown,
+    runtime_free_raw as runtime_free,
 )
 from pythoc.std.runtime.executor_effect import (
-    executor_set_runtime, _exec_spawn, _exec_join,
+    ExecutorHandle, executor_set_runtime, _exec_spawn, _exec_join,
 )
 
 
@@ -526,7 +531,11 @@ def test_fn_runtime_executor_global() -> i64:
     executor_set_runtime(rt)
     runtime_start(rt)
 
-    task: TaskHandle = _exec_spawn(test_fn_runtime_executor_entry, nullptr)
+    task: ExecutorHandle = _exec_spawn(
+        test_fn_runtime_executor_entry,
+        nullptr,
+        u64(0),
+    )
     result: ptr[void] = _exec_join(task)
     out: ptr[i64] = ptr[i64](result)
     value: i64 = out[0]

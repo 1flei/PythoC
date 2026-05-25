@@ -21,8 +21,13 @@ from pythoc.std.mem_pool import PoolMem
 from test.utils.test_utils import DeferredTestCase
 
 from pythoc.std.runtime.api import (
-    runtime_new, runtime_start, runtime_spawn, runtime_join,
-    runtime_shutdown, runtime_free,
+    runtime_spawn, runtime_join,
+)
+from pythoc.std.runtime.raw import (
+    runtime_new_raw as runtime_new,
+    runtime_start_raw as runtime_start,
+    runtime_shutdown_raw as runtime_shutdown,
+    runtime_free_raw as runtime_free,
 )
 from pythoc.std.runtime.task import TaskHandle
 
