@@ -8,19 +8,14 @@ It is intentionally not a user-facing task API.  User code should use
 pythoc.std.runtime.Future, or pythoc.std.runtime.raw for direct C ABI work.
 """
 from __future__ import annotations
-
-import ast
 from .policy import bind_mem
 bind_mem()
 
 from types import SimpleNamespace
-from typing import Any, Tuple
 
 from pythoc import (
-    compile, effect, i32, i64, u64, u8, ptr, void, struct, nullptr, sizeof,
-    func, meta, move,
+    compile, effect, u64, u8, ptr, void, nullptr, sizeof, meta, move,
 )
-from pythoc.libc.string import memset
 
 from .api import (
     Runtime, runtime_spawn, runtime_join, runtime_detach,
@@ -30,6 +25,11 @@ from .task import Task, TaskHandle, task_destroy
 
 
 _SPAWN_TYPED_ABI_VERSION = "spawn_typed_target_group_v1"
+_SPAWN_TYPED_TRAMPOLINE_SOURCE = "spawn_typed_trampoline.py"
+_SPAWN_TYPED_SPAWN_SOURCE = "spawn_typed_spawn.py"
+_SPAWN_TYPED_SPAWN_RAW_SOURCE = "spawn_typed_spawn_raw.py"
+_SPAWN_TYPED_JOIN_SOURCE = "spawn_typed_join.py"
+_SPAWN_TYPED_JOIN_RAW_SOURCE = "spawn_typed_join_raw.py"
 
 
 def _target_suffix_key(target_fn):
@@ -217,6 +217,156 @@ def _make_args_struct(param_info, suffix):
     return meta.struct_type(fields)
 
 
+@meta.quote(debug_source=False)
+def _tpl_seq(first, second, third, fourth, fifth):
+    first
+    second
+    third
+    fourth
+    fifth
+
+
+@meta.quote(debug_source=False)
+def _tpl_empty():
+    pass
+
+
+@meta.quote(debug_source=False)
+def _tpl_cast_arg(args_name, args_ptr_type):
+    args_name: args_ptr_type = args_ptr_type(raw_arg)
+
+
+@meta.quote(debug_source=False)
+def _tpl_pack_one_arg(args_name, index, value_name):
+    args_name[0][index] = move(value_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_assign_target_result(target_name):
+    target_name = _target_fn(*_args[0])
+
+
+@meta.quote(debug_source=False)
+def _tpl_assign_target_result_no_args(target_name):
+    target_name = _target_fn()
+
+
+@meta.quote(debug_source=False)
+def _tpl_call_target_unpacked():
+    _target_fn(*_args[0])
+
+
+@meta.quote(debug_source=False)
+def _tpl_call_target_no_args():
+    _target_fn()
+
+
+@meta.quote(debug_source=False)
+def _tpl_box_result(cell_name, cell_type, ret_type, value_name):
+    cell_name: cell_type = cell_type(
+        effect.mem.malloc(u64(sizeof(ret_type)))
+    )
+    cell_name[0] = value_name
+
+
+@meta.quote(debug_source=False)
+def _tpl_free_raw_arg():
+    effect.mem.free(ptr_void_cast(raw_arg))
+
+
+@meta.quote(debug_source=False)
+def _tpl_return_ptr(value_name):
+    return ptr_void_cast(value_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_return_null():
+    return nullptr
+
+
+@meta.quote(debug_source=False)
+def _tpl_alloc_args(args_name, args_ptr_type, args_type):
+    args_name: args_ptr_type = args_ptr_type(
+        effect.mem.malloc(u64(sizeof(args_type)))
+    )
+
+
+@meta.quote(debug_source=False)
+def _tpl_return_spawn(spawn_fn, args_name):
+    return spawn_fn(rt, ptr_void_cast(args_name))
+
+
+@meta.quote(debug_source=False)
+def _tpl_runtime_join(raw_name, join_fn, token_name):
+    raw_name: ptr_void_type = join_fn(rt, token_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_cast_result(cell_name, cell_type, raw_name):
+    cell_name: cell_type = cell_type(raw_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_load_result(value_name, cell_name):
+    value_name = cell_name[0]
+
+
+@meta.quote(debug_source=False)
+def _tpl_free_raw(raw_name):
+    effect.mem.free(raw_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_destroy_task(task_name):
+    task_destroy(task_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_return_value(value_name):
+    return value_name
+
+
+def _fragment_globals(*items):
+    merged = {}
+
+    def visit(item):
+        if item is None:
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+            return
+        merged.update(getattr(item, '_user_globals', {}))
+
+    visit(items)
+    return merged
+
+
+def _make_spawn_body(param_info, spawn_fn):
+    alloc = _tpl_alloc_args('_a', '_PtrArgs', '_ArgsType')
+    pack = [
+        _tpl_pack_one_arg('_a', i, name)
+        for i, (name, _) in enumerate(param_info)
+    ]
+    finish = _tpl_return_spawn(spawn_fn, '_a')
+    return _tpl_seq(alloc, pack, finish, _tpl_empty(), _tpl_empty())
+
+
+def _compile_generated(name, params, return_type, body, required_globals,
+                       source_file, suffix):
+    merged_globals = dict(required_globals)
+    merged_globals.update(_fragment_globals(body))
+    gf = meta.func(
+        name=name,
+        params=params,
+        return_type=return_type,
+        body=body,
+        required_globals=merged_globals,
+        source_file=source_file,
+    )
+    return meta.compile_generated(gf, suffix=suffix)
+
+
 def _make_trampoline(target_fn, param_info, ret_type, args_struct, suffix):
     """Generate the trampoline: func[ptr[void], ptr[void]].
 
@@ -230,188 +380,55 @@ def _make_trampoline(target_fn, param_info, ret_type, args_struct, suffix):
     """
     has_return = ret_type is not void and ret_type is not None
 
-    if not param_info and not has_return:
-        # Simplest case: no args, no return
-        @compile(suffix=("tramp_void_void", suffix))
-        def _trampoline(arg: ptr[void]) -> ptr[void]:
-            target_fn(arg)  # will be dead code eliminated; just call it
-            effect.mem.free(arg)
-            return nullptr
-        # Actually, for no-args we still need to handle it properly.
-        # Let's fall through to the general case.
+    setup = _tpl_cast_arg('_args', '_PtrArgs')
+    call_args = bool(param_info)
 
-    # General case: use dynamic code generation via meta.func
-    # Build the trampoline body as AST statements
-    import ast
-
-    body_stmts = []
-
-    # Step 1: Cast arg to args struct pointer
-    # args_p: ptr[ArgsStruct] = ptr[ArgsStruct](raw_arg)
-    body_stmts.append(ast.AnnAssign(
-        target=ast.Name(id='_args', ctx=ast.Store()),
-        annotation=_type_annotation_node('ptr', args_struct),
-        value=ast.Call(
-            func=_type_annotation_node('ptr', args_struct),
-            args=[ast.Name(id='raw_arg', ctx=ast.Load())],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    # Step 2: Load each field into a local variable
-    for i, (name, param_type) in enumerate(param_info):
-        body_stmts.append(ast.AnnAssign(
-            target=ast.Name(id=f'_p{i}', ctx=ast.Store()),
-            annotation=ast.Name(id=f'_ParamType{i}', ctx=ast.Load()),
-            value=ast.Subscript(
-                value=ast.Subscript(
-                    value=ast.Name(id='_args', ctx=ast.Load()),
-                    slice=ast.Constant(value=0),
-                    ctx=ast.Load(),
-                ),
-                slice=ast.Constant(value=i),
-                ctx=ast.Load(),
-            ),
-            simple=1,
-        ))
-
-    # Step 3: Call target function
-    call_args = [ast.Name(id=f'_p{i}', ctx=ast.Load()) for i in range(len(param_info))]
-    call_expr = ast.Call(
-        func=ast.Name(id='_target_fn', ctx=ast.Load()),
-        args=call_args,
-        keywords=[],
-    )
-    
     if has_return:
-        # _result_val = target_fn(_p0, _p1, ...)
-        body_stmts.append(ast.Assign(
-            targets=[ast.Name(id='_result_val', ctx=ast.Store())],
-            value=call_expr,
-        ))
-        
-        # Step 4: Allocate result cell and store
-        # _result_cell: ptr[RetType] = ptr[RetType](effect.mem.malloc(u64(sizeof(RetType))))
-        body_stmts.append(ast.AnnAssign(
-            target=ast.Name(id='_result_cell', ctx=ast.Store()),
-            annotation=_type_annotation_node('ptr', 'ret'),
-            value=ast.Call(
-                func=_type_annotation_node('ptr', 'ret'),
-                args=[ast.Call(
-                    func=ast.Attribute(
-                        value=ast.Attribute(
-                            value=ast.Name(id='effect', ctx=ast.Load()),
-                            attr='mem',
-                            ctx=ast.Load(),
-                        ),
-                        attr='malloc',
-                        ctx=ast.Load(),
-                    ),
-                    args=[ast.Call(
-                        func=ast.Name(id='u64', ctx=ast.Load()),
-                        args=[ast.Call(
-                            func=ast.Name(id='sizeof', ctx=ast.Load()),
-                            args=[ast.Name(id='_RetType', ctx=ast.Load())],
-                            keywords=[],
-                        )],
-                        keywords=[],
-                    )],
-                    keywords=[],
-                )],
-                keywords=[],
+        invoke = (
+            _tpl_assign_target_result('_result_val')
+            if call_args
+            else _tpl_assign_target_result_no_args('_result_val')
+        )
+        result_body = [
+            _tpl_box_result(
+                '_result_cell', '_PtrRet', '_RetType', '_result_val'
             ),
-            simple=1,
-        ))
-        
-        # _result_cell[0] = _result_val
-        body_stmts.append(ast.Assign(
-            targets=[ast.Subscript(
-                value=ast.Name(id='_result_cell', ctx=ast.Load()),
-                slice=ast.Constant(value=0),
-                ctx=ast.Store(),
-            )],
-            value=ast.Name(id='_result_val', ctx=ast.Load()),
-        ))
+            _tpl_free_raw_arg(),
+        ]
+        finish = _tpl_return_ptr('_result_cell')
     else:
-        # void return: just call
-        body_stmts.append(ast.Expr(value=call_expr))
+        invoke = (
+            _tpl_call_target_unpacked()
+            if call_args
+            else _tpl_call_target_no_args()
+        )
+        result_body = [_tpl_free_raw_arg()]
+        finish = _tpl_return_null()
 
-    # Step 5: Free args struct
-    body_stmts.append(ast.Expr(value=ast.Call(
-        func=ast.Attribute(
-            value=ast.Attribute(
-                value=ast.Name(id='effect', ctx=ast.Load()),
-                attr='mem',
-                ctx=ast.Load(),
-            ),
-            attr='free',
-            ctx=ast.Load(),
-        ),
-        args=[ast.Call(
-            func=ast.Name(id='ptr_void_cast', ctx=ast.Load()),
-            args=[ast.Name(id='raw_arg', ctx=ast.Load())],
-            keywords=[],
-        )],
-        keywords=[],
-    )))
-
-    # Step 6: Return
-    if has_return:
-        body_stmts.append(ast.Return(value=ast.Call(
-            func=ast.Name(id='ptr_void_cast', ctx=ast.Load()),
-            args=[ast.Name(id='_result_cell', ctx=ast.Load())],
-            keywords=[],
-        )))
-    else:
-        body_stmts.append(ast.Return(value=ast.Name(id='nullptr', ctx=ast.Load())))
-
-    ast.fix_missing_locations(ast.Module(body=body_stmts, type_ignores=[]))
-
-    # Build required_globals for the trampoline
+    body = _tpl_seq(setup, _tpl_empty(), invoke, result_body, finish)
     required_globals = {
         '__name__': __name__,
         'effect': effect,
-        'ptr': ptr,
-        'void': void,
         'u64': u64,
         'sizeof': sizeof,
         'nullptr': nullptr,
         '_target_fn': target_fn,
-        '_ArgsStruct': args_struct,
+        '_PtrArgs': ptr[args_struct],
         'ptr_void_cast': ptr[void],
     }
     if has_return:
         required_globals['_RetType'] = ret_type
-    for i, (_, param_type) in enumerate(param_info):
-        required_globals[f'_ParamType{i}'] = param_type
+        required_globals['_PtrRet'] = ptr[ret_type]
 
-    # Use meta.func to build the GeneratedFunction
-    gf = meta.func(
+    return _compile_generated(
         name=f'_trampoline_{getattr(target_fn, "__name__", "fn")}',
         params=[('raw_arg', ptr[void])],
         return_type=ptr[void],
-        body=body_stmts,
+        body=body,
         required_globals=required_globals,
-        source_file=f'<spawn_typed:{getattr(target_fn, "__name__", "fn")}>',
+        source_file=_SPAWN_TYPED_TRAMPOLINE_SOURCE,
+        suffix=suffix,
     )
-
-    # Compile it
-    compiled = meta.compile_generated(gf, suffix=suffix)
-    return compiled
-
-
-def _type_annotation_node(wrapper, inner_type):
-    """Build AST node for ptr[T] type expression."""
-    # This generates: ptr[_ArgsStruct] or ptr[_RetType]
-    # In the required_globals context, these resolve correctly
-    if wrapper == 'ptr':
-        return ast.Subscript(
-            value=ast.Name(id='ptr', ctx=ast.Load()),
-            slice=ast.Name(id='_ArgsStruct' if inner_type != 'ret' else '_RetType', ctx=ast.Load()),
-            ctx=ast.Load(),
-        )
-    return ast.Name(id=str(inner_type), ctx=ast.Load())
 
 
 def _make_spawn_wrapper(param_info, args_struct, typed_spawn_fn, suffix):
@@ -424,82 +441,12 @@ def _make_spawn_wrapper(param_info, args_struct, typed_spawn_fn, suffix):
             args.y = y
             return _typed_spawn(rt, ptr[void](args))
     """
-    import ast as _ast
-
-    params_list = [('rt', ptr[Runtime])] + list(param_info)
-    body_stmts = []
-
-    # Allocate args struct
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_a', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_PtrArgs', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_PtrArgs', ctx=_ast.Load()),
-            args=[_ast.Call(
-                func=_ast.Attribute(
-                    value=_ast.Attribute(
-                        value=_ast.Name(id='effect', ctx=_ast.Load()),
-                        attr='mem', ctx=_ast.Load(),
-                    ),
-                    attr='malloc', ctx=_ast.Load(),
-                ),
-                args=[_ast.Call(
-                    func=_ast.Name(id='u64', ctx=_ast.Load()),
-                    args=[_ast.Call(
-                        func=_ast.Name(id='sizeof', ctx=_ast.Load()),
-                        args=[_ast.Name(id='_ArgsType', ctx=_ast.Load())],
-                        keywords=[],
-                    )],
-                    keywords=[],
-                )],
-                keywords=[],
-            )],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    if param_info:
-        body_stmts.append(_ast.Assign(
-            targets=[_ast.Subscript(
-                value=_ast.Name(id='_a', ctx=_ast.Load()),
-                slice=_ast.Constant(value=0),
-                ctx=_ast.Store(),
-            )],
-            value=_ast.Tuple(
-                elts=[
-                    _ast.Call(
-                        func=_ast.Name(id='move', ctx=_ast.Load()),
-                        args=[_ast.Name(id=name, ctx=_ast.Load())],
-                        keywords=[],
-                    )
-                    for name, _ in param_info
-                ],
-                ctx=_ast.Load(),
-            ),
-        ))
-
-    # Call _typed_spawn(rt, ptr[void](_a))
-    body_stmts.append(_ast.Return(value=_ast.Call(
-        func=_ast.Name(id='_typed_spawn', ctx=_ast.Load()),
-        args=[
-            _ast.Name(id='rt', ctx=_ast.Load()),
-            _ast.Call(
-                func=_ast.Name(id='_ptr_void', ctx=_ast.Load()),
-                args=[_ast.Name(id='_a', ctx=_ast.Load())],
-                keywords=[],
-            ),
-        ],
-        keywords=[],
-    )))
-
-    _ast.fix_missing_locations(_ast.Module(body=body_stmts, type_ignores=[]))
-
-    gf = meta.func(
+    body = _make_spawn_body(param_info, typed_spawn_fn)
+    return _compile_generated(
         name=f'_spawn_{getattr(typed_spawn_fn, "__name__", "fn")}',
-        params=params_list,
+        params=[('rt', ptr[Runtime])] + list(param_info),
         return_type=TaskHandle,
-        body=body_stmts,
+        body=body,
         required_globals={
             '__name__': __name__,
             'effect': effect,
@@ -508,92 +455,23 @@ def _make_spawn_wrapper(param_info, args_struct, typed_spawn_fn, suffix):
             'sizeof': sizeof,
             '_ArgsType': args_struct,
             '_PtrArgs': ptr[args_struct],
-            '_ptr_void': ptr[void],
-            '_typed_spawn': typed_spawn_fn,
+            'ptr_void_cast': ptr[void],
+            typed_spawn_fn.__name__: typed_spawn_fn,
             'TaskHandle': TaskHandle,
         },
-        source_file=f'<spawn_typed:spawn>',
+        source_file=_SPAWN_TYPED_SPAWN_SOURCE,
+        suffix=("spawn", suffix),
     )
-
-    return meta.compile_generated(gf, suffix=("spawn", suffix))
 
 
 def _make_spawn_raw_wrapper(param_info, args_struct, typed_spawn_raw_fn, suffix):
     """Same as spawn wrapper but returns ptr[Task] instead of TaskHandle."""
-    import ast as _ast
-
-    params_list = [('rt', ptr[Runtime])] + list(param_info)
-    body_stmts = []
-
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_a', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_PtrArgs', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_PtrArgs', ctx=_ast.Load()),
-            args=[_ast.Call(
-                func=_ast.Attribute(
-                    value=_ast.Attribute(
-                        value=_ast.Name(id='effect', ctx=_ast.Load()),
-                        attr='mem', ctx=_ast.Load(),
-                    ),
-                    attr='malloc', ctx=_ast.Load(),
-                ),
-                args=[_ast.Call(
-                    func=_ast.Name(id='u64', ctx=_ast.Load()),
-                    args=[_ast.Call(
-                        func=_ast.Name(id='sizeof', ctx=_ast.Load()),
-                        args=[_ast.Name(id='_ArgsType', ctx=_ast.Load())],
-                        keywords=[],
-                    )],
-                    keywords=[],
-                )],
-                keywords=[],
-            )],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    if param_info:
-        body_stmts.append(_ast.Assign(
-            targets=[_ast.Subscript(
-                value=_ast.Name(id='_a', ctx=_ast.Load()),
-                slice=_ast.Constant(value=0),
-                ctx=_ast.Store(),
-            )],
-            value=_ast.Tuple(
-                elts=[
-                    _ast.Call(
-                        func=_ast.Name(id='move', ctx=_ast.Load()),
-                        args=[_ast.Name(id=name, ctx=_ast.Load())],
-                        keywords=[],
-                    )
-                    for name, _ in param_info
-                ],
-                ctx=_ast.Load(),
-            ),
-        ))
-
-    body_stmts.append(_ast.Return(value=_ast.Call(
-        func=_ast.Name(id='_typed_spawn_raw', ctx=_ast.Load()),
-        args=[
-            _ast.Name(id='rt', ctx=_ast.Load()),
-            _ast.Call(
-                func=_ast.Name(id='_ptr_void', ctx=_ast.Load()),
-                args=[_ast.Name(id='_a', ctx=_ast.Load())],
-                keywords=[],
-            ),
-        ],
-        keywords=[],
-    )))
-
-    _ast.fix_missing_locations(_ast.Module(body=body_stmts, type_ignores=[]))
-
-    gf = meta.func(
+    body = _make_spawn_body(param_info, typed_spawn_raw_fn)
+    return _compile_generated(
         name=f'_spawn_raw_{getattr(typed_spawn_raw_fn, "__name__", "fn")}',
-        params=params_list,
+        params=[('rt', ptr[Runtime])] + list(param_info),
         return_type=ptr[Task],
-        body=body_stmts,
+        body=body,
         required_globals={
             '__name__': __name__,
             'effect': effect,
@@ -602,13 +480,28 @@ def _make_spawn_raw_wrapper(param_info, args_struct, typed_spawn_raw_fn, suffix)
             'sizeof': sizeof,
             '_ArgsType': args_struct,
             '_PtrArgs': ptr[args_struct],
-            '_ptr_void': ptr[void],
-            '_typed_spawn_raw': typed_spawn_raw_fn,
+            'ptr_void_cast': ptr[void],
+            typed_spawn_raw_fn.__name__: typed_spawn_raw_fn,
         },
-        source_file=f'<spawn_typed:spawn_raw>',
+        source_file=_SPAWN_TYPED_SPAWN_RAW_SOURCE,
+        suffix=("spawn_raw", suffix),
     )
 
-    return meta.compile_generated(gf, suffix=("spawn_raw", suffix))
+
+def _make_join_body(join_fn, token_name, destroy_task=False):
+    read_raw = _tpl_runtime_join('_raw', join_fn, token_name)
+    cast_cell = _tpl_cast_result('_cell', '_PtrRet', '_raw')
+    load_value = _tpl_load_result('_val', '_cell')
+    cleanup = [_tpl_free_raw('_raw')]
+    if destroy_task:
+        cleanup.append(_tpl_destroy_task(token_name))
+    return _tpl_seq(
+        read_raw,
+        cast_cell,
+        load_value,
+        cleanup,
+        _tpl_return_value('_val'),
+    )
 
 
 def _make_typed_join(ret_type, suffix):
@@ -621,165 +514,44 @@ def _make_typed_join(ret_type, suffix):
         effect.mem.free(raw)
         return val
     """
-    import ast as _ast
-
-    body_stmts = []
-
-    # raw: ptr[void] = runtime_join(rt, handle)
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_raw', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_ptr_void', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_runtime_join', ctx=_ast.Load()),
-            args=[
-                _ast.Name(id='rt', ctx=_ast.Load()),
-                _ast.Name(id='handle', ctx=_ast.Load()),
-            ],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    # cell: ptr[RetType] = ptr[RetType](_raw)
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_cell', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_PtrRet', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_PtrRet', ctx=_ast.Load()),
-            args=[_ast.Name(id='_raw', ctx=_ast.Load())],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    # val = _cell[0]
-    body_stmts.append(_ast.Assign(
-        targets=[_ast.Name(id='_val', ctx=_ast.Store())],
-        value=_ast.Subscript(
-            value=_ast.Name(id='_cell', ctx=_ast.Load()),
-            slice=_ast.Constant(value=0),
-            ctx=_ast.Load(),
-        ),
-    ))
-
-    # effect.mem.free(_raw)
-    body_stmts.append(_ast.Expr(value=_ast.Call(
-        func=_ast.Attribute(
-            value=_ast.Attribute(
-                value=_ast.Name(id='effect', ctx=_ast.Load()),
-                attr='mem', ctx=_ast.Load(),
-            ),
-            attr='free', ctx=_ast.Load(),
-        ),
-        args=[_ast.Name(id='_raw', ctx=_ast.Load())],
-        keywords=[],
-    )))
-
-    # return _val
-    body_stmts.append(_ast.Return(value=_ast.Name(id='_val', ctx=_ast.Load())))
-
-    _ast.fix_missing_locations(_ast.Module(body=body_stmts, type_ignores=[]))
-
-    gf = meta.func(
+    body = _make_join_body(runtime_join, 'handle')
+    return _compile_generated(
         name='_typed_join',
         params=[('rt', ptr[Runtime]), ('handle', TaskHandle)],
         return_type=ret_type,
-        body=body_stmts,
+        body=body,
         required_globals={
             '__name__': __name__,
             'effect': effect,
-            '_ptr_void': ptr[void],
+            'ptr_void_type': ptr[void],
             '_PtrRet': ptr[ret_type],
-            '_runtime_join': runtime_join,
+            runtime_join.__name__: runtime_join,
             'TaskHandle': TaskHandle,
         },
-        source_file='<spawn_typed:join>',
+        source_file=_SPAWN_TYPED_JOIN_SOURCE,
+        suffix=("join", suffix),
     )
-
-    return meta.compile_generated(gf, suffix=("join", suffix))
 
 
 def _make_typed_join_raw(ret_type, suffix):
     """Generate join_raw that takes ptr[Task] directly (no linear handle)."""
-    import ast as _ast
-
-    body_stmts = []
-
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_raw', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_ptr_void', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_runtime_join_raw', ctx=_ast.Load()),
-            args=[
-                _ast.Name(id='rt', ctx=_ast.Load()),
-                _ast.Name(id='task', ctx=_ast.Load()),
-            ],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_cell', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_PtrRet', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_PtrRet', ctx=_ast.Load()),
-            args=[_ast.Name(id='_raw', ctx=_ast.Load())],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    body_stmts.append(_ast.Assign(
-        targets=[_ast.Name(id='_val', ctx=_ast.Store())],
-        value=_ast.Subscript(
-            value=_ast.Name(id='_cell', ctx=_ast.Load()),
-            slice=_ast.Constant(value=0),
-            ctx=_ast.Load(),
-        ),
-    ))
-
-    # Free result cell
-    body_stmts.append(_ast.Expr(value=_ast.Call(
-        func=_ast.Attribute(
-            value=_ast.Attribute(
-                value=_ast.Name(id='effect', ctx=_ast.Load()),
-                attr='mem', ctx=_ast.Load(),
-            ),
-            attr='free', ctx=_ast.Load(),
-        ),
-        args=[_ast.Name(id='_raw', ctx=_ast.Load())],
-        keywords=[],
-    )))
-
-    # Destroy the task
-    body_stmts.append(_ast.Expr(value=_ast.Call(
-        func=_ast.Name(id='_task_destroy', ctx=_ast.Load()),
-        args=[_ast.Name(id='task', ctx=_ast.Load())],
-        keywords=[],
-    )))
-
-    body_stmts.append(_ast.Return(value=_ast.Name(id='_val', ctx=_ast.Load())))
-
-    _ast.fix_missing_locations(_ast.Module(body=body_stmts, type_ignores=[]))
-
-    gf = meta.func(
+    body = _make_join_body(runtime_join_raw, 'task', destroy_task=True)
+    return _compile_generated(
         name='_typed_join_raw',
         params=[('rt', ptr[Runtime]), ('task', ptr[Task])],
         return_type=ret_type,
-        body=body_stmts,
+        body=body,
         required_globals={
             '__name__': __name__,
             'effect': effect,
-            '_ptr_void': ptr[void],
+            'ptr_void_type': ptr[void],
             '_PtrRet': ptr[ret_type],
-            '_runtime_join_raw': runtime_join_raw,
-            '_task_destroy': task_destroy,
+            runtime_join_raw.__name__: runtime_join_raw,
+            'task_destroy': task_destroy,
         },
-        source_file='<spawn_typed:join_raw>',
+        source_file=_SPAWN_TYPED_JOIN_RAW_SOURCE,
+        suffix=("join_raw", suffix),
     )
-
-    return meta.compile_generated(gf, suffix=("join_raw", suffix))
 
 
 def _make_void_join(suffix):

@@ -28,7 +28,9 @@ effect.default(executor=DefaultExecutor)
 _FUTURE_REGISTRY = {}
 _FUTURE_TASK_CACHE = {}
 _FUTURE_DO_TASK_CACHE = {}
-_FUTURE_ABI_VERSION = "future_do_returns_future_v4"
+_FUTURE_ABI_VERSION = "future_do_returns_future_v5"
+_FUTURE_DO_SOURCE = "runtime_future_do.py"
+_FUTURE_SPAWN_SOURCE = "runtime_future_spawn.py"
 
 
 def _current_executor_binding(suffix):
@@ -207,6 +209,90 @@ def _is_future_view_call(node):
     )
 
 
+@meta.quote(debug_source=False)
+def _tpl_future_do_return(genexp):
+    return _future_do_value(genexp)
+
+
+@meta.quote(debug_source=False)
+def _tpl_future_seq(first, second, third, fourth):
+    first
+    second
+    third
+    fourth
+
+
+@meta.quote(debug_source=False)
+def _tpl_future_alloc_args(args_name, args_ptr_type, args_type):
+    args_name: args_ptr_type = args_ptr_type(
+        effect.mem.malloc(u64(sizeof(args_type)))
+    )
+
+
+@meta.quote(debug_source=False)
+def _tpl_future_pack_one_arg(args_name, index, value_name):
+    args_name[0][index] = move(value_name)
+
+
+@meta.quote(debug_source=False)
+def _tpl_future_spawn_handle(handle_name, executor_spawn_fn, args_name):
+    handle_name: ExecutorHandle = executor_spawn_fn(
+        _trampoline,
+        ptr_void_cast(args_name),
+        _stack_size,
+    )
+
+
+@meta.quote(debug_source=False)
+def _tpl_future_return_new(handle_name):
+    return _future_new(handle_name)
+
+
+def _fragment_globals(*items):
+    merged = {}
+
+    def visit(item):
+        if item is None:
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+            return
+        merged.update(getattr(item, '_user_globals', {}))
+
+    visit(items)
+    return merged
+
+
+def _name_expr(name):
+    return ast.Name(id=name, ctx=ast.Load())
+
+
+def _bind_future_view_sources(genexp_node):
+    genexp = copy.deepcopy(genexp_node)
+    view_idx = 0
+    for gen in genexp.generators:
+        if _is_future_view_call(gen.iter):
+            gen.iter.args[0] = _name_expr(f'_future_{view_idx}')
+            view_idx = view_idx + 1
+    return genexp
+
+
+def _compile_generated(name, params, return_type, body, required_globals,
+                       source_file, suffix):
+    merged_globals = dict(required_globals)
+    merged_globals.update(_fragment_globals(body))
+    gf = meta.func(
+        name=name,
+        params=params,
+        return_type=return_type,
+        body=body,
+        required_globals=merged_globals,
+        source_file=source_file,
+    )
+    return meta.compile_generated(gf, suffix=suffix), gf
+
+
 def _make_future_do_task(genexp_node, output_harness, view_harnesses, future_types):
     key = (
         _FUTURE_ABI_VERSION,
@@ -218,46 +304,27 @@ def _make_future_do_task(genexp_node, output_harness, view_harnesses, future_typ
     if cached is not None:
         return cached
 
-    genexp = copy.deepcopy(genexp_node)
-    view_idx = 0
-    for gen in genexp.generators:
-        if _is_future_view_call(gen.iter):
-            gen.iter = ast.Call(
-                func=ast.Name(id=f'_future_view_{view_idx}', ctx=ast.Load()),
-                args=[ast.Name(id=f'_future_{view_idx}', ctx=ast.Load())],
-                keywords=[],
-            )
-            view_idx = view_idx + 1
-
-    body_stmts = [
-        ast.Return(value=ast.Call(
-            func=ast.Name(id='_future_do_value', ctx=ast.Load()),
-            args=[genexp],
-            keywords=[],
-        ))
-    ]
-    ast.fix_missing_locations(ast.Module(body=body_stmts, type_ignores=[]))
-
+    genexp = _bind_future_view_sources(genexp_node)
+    body = _tpl_future_do_return(genexp)
     required_globals = {
         '__name__': __name__,
+        'Future': Future,
         '_future_do_value': output_harness.do,
     }
-    for i, harness in enumerate(view_harnesses):
-        required_globals[f'_future_view_{i}'] = harness.view
 
-    gf = meta.func(
+    compiled, gf = _compile_generated(
         name='_future_do_task',
         params=[
             (f'_future_{i}', future_type)
             for i, future_type in enumerate(future_types)
         ],
         return_type=output_harness.ret_type,
-        body=body_stmts,
+        body=body,
         required_globals=required_globals,
-        source_file='<runtime_future:do>',
+        source_file=_FUTURE_DO_SOURCE,
+        suffix=("future_do", key),
     )
 
-    compiled = meta.compile_generated(gf, suffix=("future_do", key))
     compiled._pc_param_names = [name for name, _ in gf.params]
     compiled._pc_param_types = [param_type for _, param_type in gf.params]
     compiled._pc_return_type = output_harness.ret_type
@@ -372,94 +439,20 @@ def _make_future_spawn_wrapper(
     suffix,
 ):
     """Generate spawn(args...) -> FutureType."""
-    import ast as _ast
+    alloc = _tpl_future_alloc_args('_a', '_PtrArgs', '_ArgsType')
+    pack = [
+        _tpl_future_pack_one_arg('_a', i, name)
+        for i, (name, _) in enumerate(param_info)
+    ]
+    spawn = _tpl_future_spawn_handle('_handle', executor_spawn_fn, '_a')
+    finish = _tpl_future_return_new('_handle')
+    body = _tpl_future_seq(alloc, pack, spawn, finish)
 
-    params_list = list(param_info)
-    body_stmts = []
-
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_a', ctx=_ast.Store()),
-        annotation=_ast.Name(id='_PtrArgs', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_PtrArgs', ctx=_ast.Load()),
-            args=[_ast.Call(
-                func=_ast.Attribute(
-                    value=_ast.Attribute(
-                        value=_ast.Name(id='effect', ctx=_ast.Load()),
-                        attr='mem', ctx=_ast.Load(),
-                    ),
-                    attr='malloc', ctx=_ast.Load(),
-                ),
-                args=[_ast.Call(
-                    func=_ast.Name(id='u64', ctx=_ast.Load()),
-                    args=[_ast.Call(
-                        func=_ast.Name(id='sizeof', ctx=_ast.Load()),
-                        args=[_ast.Name(id='_ArgsType', ctx=_ast.Load())],
-                        keywords=[],
-                    )],
-                    keywords=[],
-                )],
-                keywords=[],
-            )],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    if param_info:
-        body_stmts.append(_ast.Assign(
-            targets=[_ast.Subscript(
-                value=_ast.Name(id='_a', ctx=_ast.Load()),
-                slice=_ast.Constant(value=0),
-                ctx=_ast.Store(),
-            )],
-            value=_ast.Tuple(
-                elts=[
-                    _ast.Call(
-                        func=_ast.Name(id='move', ctx=_ast.Load()),
-                        args=[_ast.Name(id=name, ctx=_ast.Load())],
-                        keywords=[],
-                    )
-                    for name, _ in param_info
-                ],
-                ctx=_ast.Load(),
-            ),
-        ))
-
-    body_stmts.append(_ast.AnnAssign(
-        target=_ast.Name(id='_handle', ctx=_ast.Store()),
-        annotation=_ast.Name(id='ExecutorHandle', ctx=_ast.Load()),
-        value=_ast.Call(
-            func=_ast.Name(id='_executor_spawn', ctx=_ast.Load()),
-            args=[
-                _ast.Name(id='_trampoline', ctx=_ast.Load()),
-                _ast.Call(
-                    func=_ast.Name(id='_ptr_void', ctx=_ast.Load()),
-                    args=[_ast.Name(id='_a', ctx=_ast.Load())],
-                    keywords=[],
-                ),
-                _ast.Name(id='_stack_size', ctx=_ast.Load()),
-            ],
-            keywords=[],
-        ),
-        simple=1,
-    ))
-
-    body_stmts.append(_ast.Return(value=_ast.Call(
-        func=_ast.Name(id='_future_new', ctx=_ast.Load()),
-        args=[
-            _ast.Name(id='_handle', ctx=_ast.Load()),
-        ],
-        keywords=[],
-    )))
-
-    _ast.fix_missing_locations(_ast.Module(body=body_stmts, type_ignores=[]))
-
-    gf = meta.func(
+    compiled, _gf = _compile_generated(
         name=f'_future_spawn_{getattr(trampoline, "__name__", "fn")}',
-        params=params_list,
+        params=list(param_info),
         return_type=future_type,
-        body=body_stmts,
+        body=body,
         required_globals={
             '__name__': __name__,
             'effect': effect,
@@ -468,17 +461,18 @@ def _make_future_spawn_wrapper(
             'sizeof': sizeof,
             '_ArgsType': args_struct,
             '_PtrArgs': ptr[args_struct],
-            '_ptr_void': ptr[void],
+            'ptr_void_cast': ptr[void],
             '_trampoline': trampoline,
             '_stack_size': stack_size,
-            '_executor_spawn': executor_spawn_fn,
+            executor_spawn_fn.__name__: executor_spawn_fn,
             '_future_new': future_new_fn,
             'ExecutorHandle': ExecutorHandle,
         },
-        source_file='<runtime_future:spawn>',
+        source_file=_FUTURE_SPAWN_SOURCE,
+        suffix=("future_spawn", suffix),
     )
 
-    return meta.compile_generated(gf, suffix=("future_spawn", suffix))
+    return compiled
 
 
 Future = _FutureFacade()

@@ -3,7 +3,6 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-import pytest
 from pythoc import compile, effect, i32, i64, u64, ptr, void, nullptr, sizeof
 from pythoc.std.mem_pool import PoolMem
 from pythoc.std.runtime.raw import (
