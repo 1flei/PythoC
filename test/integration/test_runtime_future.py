@@ -6,7 +6,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import unittest
-from pythoc import compile, effect, i32, i64, ptr, void, nullptr
+from pythoc import compile, effect, i32, i64, ptr, void, u8, nullptr
 from pythoc.build.output_manager import flush_all_pending_outputs
 from test.utils.test_utils import DeferredTestCase, expect_error
 
@@ -14,7 +14,7 @@ import pythoc.std.runtime as runtime_facade
 from pythoc.std.runtime import (
     runtime_start, runtime_shutdown, Future, ThreadPoolExecutor,
 )
-from pythoc.std.runtime.thread_pool_executor import thread_pool_shutdown
+from pythoc.std.runtime.thread_pool_executor import _ThreadJob, thread_pool_shutdown
 
 
 @compile
@@ -124,6 +124,19 @@ with effect(executor=ThreadPoolExecutor, suffix="thread_pool_do"):
             for y in Future.view(fy)
         )
         return Future.join(fz)
+
+
+@compile(suffix="thread_pool_job_alignment")
+def test_fn_thread_pool_job_alignment() -> i64:
+    job: _ThreadJob
+    base: ptr[u8] = ptr[u8](ptr[void](ptr(job)))
+    lock_offset: i64 = ptr[u8](ptr[void](ptr(job.lock))) - base
+    cv_offset: i64 = ptr[u8](ptr[void](ptr(job.done_cv))) - base
+    if lock_offset % i64(8) != i64(0):
+        return i64(0)
+    if cv_offset % i64(8) != i64(0):
+        return i64(0)
+    return i64(1)
 
 
 @expect_error(["not consumed"], suffix="bad_future_not_consumed")
@@ -266,6 +279,9 @@ class TestRuntimeFuture(DeferredTestCase):
             self.assertEqual(test_fn_future_thread_pool_join(), 77)
         finally:
             thread_pool_shutdown()
+
+    def test_thread_pool_job_alignment(self):
+        self.assertEqual(test_fn_thread_pool_job_alignment(), 1)
 
 
 if __name__ == '__main__':

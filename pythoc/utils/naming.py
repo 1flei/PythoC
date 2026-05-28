@@ -1,4 +1,27 @@
+import hashlib
+import re
+
 from .id_generator import get_next_id
+
+
+_SYMBOL_SAFE_RE = re.compile(r'[^0-9A-Za-z_]+')
+_UNDERSCORE_RE = re.compile(r'_+')
+
+
+def _symbol_safe_suffix(value):
+    text = str(value)
+    safe = _SYMBOL_SAFE_RE.sub('_', text)
+    safe = _UNDERSCORE_RE.sub('_', safe).strip('_')
+    if not safe:
+        safe = "suffix"
+    if safe == text and len(safe) <= 80:
+        return safe
+
+    digest = hashlib.md5(text.encode('utf-8')).hexdigest()[:8]
+    prefix = safe[:64].rstrip('_')
+    if not prefix:
+        return f"hash_{digest}"
+    return f"{prefix}_hash_{digest}"
 
 
 def get_anonymous_suffix():
@@ -29,7 +52,7 @@ def normalize_suffix(suffix):
         return None
     
     if isinstance(suffix, str):
-        return suffix
+        return _symbol_safe_suffix(suffix)
     
     if isinstance(suffix, (tuple, list)):
         # Convert type parameters to string
@@ -49,20 +72,15 @@ def normalize_suffix(suffix):
                 name = str(item)
             parts.append(name)
         
-        # Join with underscore and sanitize
-        result = '_'.join(parts)
-        # Remove special characters that might cause issues in symbol names
-        result = result.replace('[', '_').replace(']', '_').replace(',', '_')
-        result = result.replace(' ', '').replace('(', '_').replace(')', '_')
-        return result
+        return _symbol_safe_suffix('_'.join(parts))
     
     # Handle single type object (PC type or Python type)
     if hasattr(suffix, 'get_name'):
         # PC type with get_name method (i32, f64, etc.)
-        return suffix.get_name()
+        return _symbol_safe_suffix(suffix.get_name())
     elif isinstance(suffix, type):
         # Python type
-        return suffix.__name__
+        return _symbol_safe_suffix(suffix.__name__)
     
     # Fallback: convert to string
-    return str(suffix)
+    return _symbol_safe_suffix(suffix)

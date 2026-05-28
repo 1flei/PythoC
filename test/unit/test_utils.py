@@ -7,7 +7,7 @@ from llvmlite import ir, binding
 
 from pythoc.utils import (
     analyze_function, get_llvm_version, validate_ir,
-    create_build_info
+    create_build_info, normalize_suffix
 )
 
 
@@ -110,6 +110,24 @@ class TestLLVMUtilities(unittest.TestCase):
         
         self.assertIsNotNone(info['llvm_version'])
         self.assertIsNotNone(info['target_triple'])
+
+
+class TestNamingUtilities(unittest.TestCase):
+    def test_normalize_suffix_removes_def_alias_characters(self):
+        suffix = normalize_suffix((
+            "future_do",
+            "GeneratorExp(elt=BinOp(left=Name(id='x', ctx=Load())))",
+        ))
+
+        self.assertNotIn("=", suffix)
+        self.assertNotIn("'", suffix)
+        self.assertRegex(suffix, r'^[0-9A-Za-z_]+$')
+
+    def test_normalize_suffix_hashes_long_values(self):
+        suffix = normalize_suffix("x" * 120)
+
+        self.assertLessEqual(len(suffix), 85)
+        self.assertIn("_hash_", suffix)
 
 
 if __name__ == '__main__':

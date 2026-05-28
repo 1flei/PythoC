@@ -290,11 +290,11 @@ if IS_WINDOWS:
 
     @compile
     class Mutex:
-        _opaque: array[u8, 40]   # CRITICAL_SECTION (40 bytes on Win64)
+        _opaque: array[u64, 5]   # CRITICAL_SECTION (40 bytes on Win64)
 
     @compile
     class CondVar:
-        _opaque: array[u8, 8]    # CONDITION_VARIABLE (8 bytes)
+        _opaque: array[u64, 1]   # CONDITION_VARIABLE (8 bytes)
 
     @extern(lib='kernel32')
     def CreateThread(
@@ -431,13 +431,13 @@ else:
 
     @compile
     class Mutex:
-        _opaque: array[u8, 64]  # use max size for portability
+        _opaque: array[u64, 8]  # use max size for portability
 
     # pthread_cond_t sizes:
     #   Linux: 48 bytes, macOS: 48 bytes
     @compile
     class CondVar:
-        _opaque: array[u8, 48]
+        _opaque: array[u64, 6]
 
     @extern(lib='pthread')
     def pthread_create(
