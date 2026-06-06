@@ -8,18 +8,18 @@ This module provides the cimport() function to:
 4. Optionally compile C sources and register for linking
 
 Architecture:
-- Uses libclang to read C declarations and layout-aware types
-- For a native (no libclang) backend, use the separate `pcc` package
+- Uses libclang (required) to read C declarations and layout-aware types
+- For a pure-pythoc backend (no libclang), use the separate `pcc` package
 
 Usage:
     from pythoc.cimport import cimport
-    
+
     # Header-only import with library
     libc = cimport('stdio.h', lib='c')
-    
+
     # Import with source compilation
     mylib = cimport('mylib.h', sources=['mylib.c'], compile_sources=True)
-    
+
     # Direct C source import
     mod = cimport('helper.c', lib='helper', compile_sources=True)
 """
@@ -45,31 +45,10 @@ def _normalize_cimport_backend(backend: Optional[str]) -> str:
     """Resolve backend request from API/env into auto|clang."""
     from .config import config
     requested = backend or config.cimport_backend
-
-    # Compatibility knob for experiments: enable_clang_cimport=True forces clang
-    # unless an explicit backend is requested via API or config.
-    if requested is None:
-        if config.enable_clang_cimport:
-            requested = "clang"
-
     requested = (requested or "auto").strip().lower()
     if requested not in _VALID_CIMPORT_BACKENDS:
         valid = ", ".join(sorted(_VALID_CIMPORT_BACKENDS))
         raise ValueError(f"Invalid cimport backend '{requested}'. Expected one of: {valid}")
-    return requested
-
-
-def _clang_backend_available() -> bool:
-    try:
-        from .cimport_clang import is_clang_backend_available
-    except Exception:
-        return False
-    return is_clang_backend_available()
-
-
-def _select_cimport_backend(requested: str) -> str:
-    if requested == "auto":
-        return "clang"  # Only clang backend is now supported
     return requested
 
 
@@ -370,7 +349,8 @@ def cimport(path: str, *,
         module_name = f"_cimport_{basename}"
 
     backend_request = _normalize_cimport_backend(backend)
-    selected_backend = _select_cimport_backend(backend_request)
+    # clang is the only backend; 'auto' resolves to 'clang'
+    selected_backend = "clang" if backend_request == "auto" else backend_request
     bindings_path = _bindings_path_for_backend(cache_dir, basename, selected_backend)
     needs_regen = _bindings_need_regen(path, bindings_path)
     

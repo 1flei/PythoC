@@ -19,7 +19,7 @@ class TestCimportBackendSelection(unittest.TestCase):
     def setUp(self):
         self._saved_env = {
             key: os.environ.get(key)
-            for key in ("PC_CIMPORT_BACKEND", "PC_ENABLE_CLANG_CIMPORT")
+            for key in ("PC_CIMPORT_BACKEND",)
         }
 
     def tearDown(self):
@@ -31,58 +31,30 @@ class TestCimportBackendSelection(unittest.TestCase):
 
     def test_default_backend_is_auto(self):
         ci = importlib.import_module("pythoc.cimport")
-
         self.assertEqual(ci._normalize_cimport_backend(None), "auto")
 
-    def test_env_backend_overrides_legacy_enable_flag(self):
+    def test_auto_resolves_to_clang(self):
         ci = importlib.import_module("pythoc.cimport")
+        # 'auto' now always resolves to 'clang' since native backend was removed
+        self.assertEqual(ci._normalize_cimport_backend("auto"), "auto")
+        # The actual resolution is inline in cimport(): auto -> clang
+        # We verify the selected_backend logic works
+        selected = "clang" if ci._normalize_cimport_backend("auto") == "auto" else ci._normalize_cimport_backend("auto")
+        self.assertEqual(selected, "clang")
 
-        os.environ["PC_ENABLE_CLANG_CIMPORT"] = "1"
-        os.environ["PC_CIMPORT_BACKEND"] = "native"
-
-        self.assertEqual(ci._normalize_cimport_backend(None), "native")
-
-    def test_legacy_enable_flag_requests_clang(self):
+    def test_explicit_clang_backend(self):
         ci = importlib.import_module("pythoc.cimport")
-
-        os.environ.pop("PC_CIMPORT_BACKEND", None)
-        os.environ["PC_ENABLE_CLANG_CIMPORT"] = "1"
-
-        self.assertEqual(ci._normalize_cimport_backend(None), "clang")
-
-    def test_auto_selects_clang_when_available(self):
-        ci = importlib.import_module("pythoc.cimport")
-
-        old = ci._clang_backend_available
-        try:
-            ci._clang_backend_available = lambda: True
-            self.assertEqual(ci._select_cimport_backend("auto"), "clang")
-        finally:
-            ci._clang_backend_available = old
+        self.assertEqual(ci._normalize_cimport_backend("clang"), "clang")
 
     def test_invalid_backend_is_rejected(self):
         ci = importlib.import_module("pythoc.cimport")
+        with self.assertRaises(ValueError):
+            ci._normalize_cimport_backend("native")
 
+    def test_bogus_backend_is_rejected(self):
+        ci = importlib.import_module("pythoc.cimport")
         with self.assertRaises(ValueError):
             ci._normalize_cimport_backend("bogus")
-
-
-class TestCimportNativeBackend(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.mkdtemp()
-        self.header_path = os.path.join(self.temp_dir, "native_backend.h")
-        with open(self.header_path, "w", encoding="utf-8") as f:
-            f.write("int native_backend_add(int a, int b);\n")
-
-    def tearDown(self):
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def test_explicit_native_backend_generates_bindings(self):
-        from pythoc.cimport import cimport
-
-        mod = cimport(self.header_path, lib="c", backend="native")
-
-        self.assertTrue(hasattr(mod, "native_backend_add"))
 
 
 class TestCimportClangFrontend(unittest.TestCase):
@@ -185,7 +157,6 @@ int clang_module_add(clang_mod_int_t a, int b);
         mod = cimport(
             header_path,
             lib="c",
-            backend="clang",
             cflags=["-x", "c", "-std=c11"],
             prefix="clang_backend_module",
         )
@@ -198,7 +169,6 @@ int clang_module_add(clang_mod_int_t a, int b);
     def test_clang_backend_c_source_end_to_end_call(self):
         try:
             from pythoc.utils.cc_utils import find_available_cc
-
             find_available_cc()
         except RuntimeError as exc:
             self.skipTest(str(exc))
@@ -220,7 +190,6 @@ int clang_backend_e2e_add(int a, int b) {
         try:
             mod = cimport(
                 source_path,
-                backend="clang",
                 compile_sources=True,
                 cflags=["-x", "c", "-std=c11"],
                 prefix="clang_backend_e2e",

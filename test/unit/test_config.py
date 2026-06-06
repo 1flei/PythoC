@@ -16,7 +16,7 @@ class TestConfigSchema(unittest.TestCase):
             'log_level', 'log_modules', 'raise_on_error',
             'debug_ast', 'debug_ast_format', 'debug_ast_diff',
             'save_ir', 'save_unopt_ir', 'opt_level',
-            'cimport_backend', 'enable_clang_cimport',
+            'cimport_backend',
             'cimport_target', 'cimport_sysroot', 'libclang_path',
             'cimport_clang_args',
         }

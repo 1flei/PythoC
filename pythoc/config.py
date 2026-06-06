@@ -195,13 +195,7 @@ _register(
     'cimport_backend', 'PC_CIMPORT_BACKEND', None,
     lambda s: s.strip().lower() or None,
     'Preferred cimport backend: "auto" or "clang".  None '
-    'lets pythoc decide.',
-    'Read on every cimport call.',
-)
-_register(
-    'enable_clang_cimport', 'PC_ENABLE_CLANG_CIMPORT', False, _to_bool,
-    'Legacy switch: forces the clang cimport backend when truthy and '
-    'no explicit backend is requested.',
+    'defaults to "auto" (resolves to clang).',
     'Read on every cimport call.',
 )
 _register(

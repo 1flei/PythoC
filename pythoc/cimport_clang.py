@@ -1,4 +1,4 @@
-"""Optional libclang-backed C import frontend."""
+"""libclang-backed C import frontend."""
 
 from __future__ import annotations
 
@@ -25,8 +25,9 @@ def _load_cindex():
         from clang import cindex
     except ImportError as exc:
         raise ClangCImportError(
-            "clang Python bindings are not installed; install optional "
-            "packages 'clang' and 'libclang' to use PC_CIMPORT_BACKEND=clang"
+            "clang Python bindings are not installed; pythoc requires "
+            "the 'libclang' package for cimport. Install it with: "
+            "pip install libclang"
         ) from exc
 
     from .config import config
