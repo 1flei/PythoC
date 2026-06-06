@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779979462185,
+  "lastUpdate": 1780745440690,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2140,6 +2140,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.735,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "c032b19ada01fc27d5f0d85a67c082247f5e5391",
+          "message": "Import libclang by default after seperating pcc",
+          "timestamp": "2026-06-06T19:13:47+08:00",
+          "tree_id": "d1c7ff705c5c7619642a4e041e3761e7ed7d1417",
+          "url": "https://github.com/1flei/PythoC/commit/c032b19ada01fc27d5f0d85a67c082247f5e5391"
+        },
+        "date": 1780745440391,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.71,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.02,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.961,
             "unit": "seconds/test"
           }
         ]
