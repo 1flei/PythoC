@@ -10,6 +10,7 @@ from .consume import consume
 from .assume import assume
 from .refine import refine
 from .defer import defer
+from .instantiate import instantiate
 from .scoped_label import label, goto, goto_begin, goto_end
 from .va_builtins import va_start, va_arg, va_end
 
@@ -25,6 +26,7 @@ __all__ = [
     'refine',
     'nullptr',
     'defer',
+    'instantiate',
     # Scoped goto/label
     'label',
     'goto',

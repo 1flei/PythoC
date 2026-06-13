@@ -3,9 +3,24 @@ Loop statement visitor mixin (for, while)
 """
 
 import ast
-import copy
 from ..logger import logger
 from ..scope_manager import ScopeType
+
+
+def _check_const_condition(test):
+    """Detect compile-time constant conditions without generating IR.
+
+    Uses AST-level analysis to detect ``while True``, ``while False``,
+    ``while not True``, etc.  This avoids calling ``visit_expression``
+    which would generate IR (and trigger side effects) for function-call
+    conditions like ``while sealed.next(ptr(it)):``.
+    """
+    if isinstance(test, ast.Constant):
+        return True, bool(test.value)
+    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+            and isinstance(test.operand, ast.Constant)):
+        return True, not bool(test.operand.value)
+    return False, None
 
 
 def _has_break_in_body(body: list) -> bool:
@@ -76,10 +91,10 @@ class LoopsMixin:
         # may contain label definitions that need to be registered for forward
         # goto resolution.
         
-        # Check for compile-time constant condition
-        condition_val = self.visit_expression(node.test)
-        is_constant_condition = condition_val.is_python_value()
-        constant_value = condition_val.get_python_value() if is_constant_condition else None
+        # Check for compile-time constant condition via AST analysis (not via
+        # visit_expression, which would generate IR and trigger side effects
+        # for function-call conditions like sealed.next(ptr(it))).
+        is_constant_condition, constant_value = _check_const_condition(node.test)
         
         # while False - never executes
         if is_constant_condition and not constant_value:
@@ -92,9 +107,9 @@ class LoopsMixin:
             return
 
         # Normal while loop with runtime condition
-        self._visit_while_impl(node, cf, is_constant_true=False, condition_val=condition_val)
+        self._visit_while_impl(node, cf, is_constant_true=False)
     
-    def _visit_while_impl(self, node: ast.While, cf, is_constant_true: bool, condition_val=None):
+    def _visit_while_impl(self, node: ast.While, cf, is_constant_true: bool):
         """Unified while loop implementation.
 
         Handles both ``while True`` and ``while <cond>`` with the same
@@ -113,7 +128,6 @@ class LoopsMixin:
             node: The While AST node.
             cf: ControlFlowBuilder.
             is_constant_true: True for ``while True``, False for runtime cond.
-            condition_val: The already-evaluated condition (only for runtime).
         """
         has_else = not is_constant_true and node.orelse and len(node.orelse) > 0
 
@@ -225,9 +239,11 @@ class LoopsMixin:
     def _attach_genexp_yield_inline_info(self, for_node: ast.For, iter_val, genexp_ast: ast.GeneratorExp):
         """Attach replay-by-expansion yield-inline metadata for generator expressions."""
         from ..utils import get_next_id
+        from ..inline.genexpr_builder import build_genexpr_yield_function_ast
 
         func_name = f"__pc_genexp_inline_{get_next_id()}"
-        func_ast = self._build_genexp_inline_function_ast(genexp_ast, func_name, for_node)
+        func_ast = build_genexpr_yield_function_ast(
+            genexp_ast, func_name, for_node)
 
         call_node = ast.Call(
             func=ast.Name(id=func_name, ctx=ast.Load()),
@@ -243,57 +259,6 @@ class LoopsMixin:
             'call_node': call_node,
             'call_args': []
         }
-
-    def _build_genexp_inline_function_ast(
-        self,
-        genexp_ast: ast.GeneratorExp,
-        func_name: str,
-        for_node: ast.For
-    ) -> ast.FunctionDef:
-        """Build a synthetic yield function AST from a GeneratorExp AST."""
-        if not genexp_ast.generators:
-            logger.error("Generator expression must contain at least one generator clause", node=for_node, exc_type=TypeError)
-
-        for comp in genexp_ast.generators:
-            if getattr(comp, 'is_async', 0):
-                logger.error("Async generator expression is not supported", node=for_node, exc_type=TypeError)
-
-        current_body = [
-            ast.Expr(value=ast.Yield(value=copy.deepcopy(genexp_ast.elt)))
-        ]
-
-        for comp in reversed(genexp_ast.generators):
-            body = current_body
-            for cond in reversed(comp.ifs):
-                body = [ast.If(test=copy.deepcopy(cond), body=body, orelse=[])]
-
-            loop_stmt = ast.For(
-                target=copy.deepcopy(comp.target),
-                iter=copy.deepcopy(comp.iter),
-                body=body,
-                orelse=[],
-                type_comment=None
-            )
-            current_body = [loop_stmt]
-
-        func_ast = ast.FunctionDef(
-            name=func_name,
-            args=ast.arguments(
-                posonlyargs=[],
-                args=[],
-                kwonlyargs=[],
-                kw_defaults=[],
-                defaults=[],
-                vararg=None,
-                kwarg=None,
-            ),
-            body=current_body,
-            decorator_list=[],
-            returns=None,
-        )
-        ast.copy_location(func_ast, for_node)
-        ast.fix_missing_locations(func_ast)
-        return func_ast
     
     def _visit_for_with_yield_inline(self, node: ast.For, iter_val):
         """Handle for loop with yield inline, including else clause

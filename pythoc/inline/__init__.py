@@ -15,6 +15,10 @@ from .transformers import InlineBodyTransformer
 from .yield_adapter import YieldInlineAdapter
 from .inline_adapter import InlineAdapter
 from .closure_adapter import ClosureAdapter
+from .genexpr_builder import build_genexpr_yield_function_ast
+from .yield_state_machine import (
+    YieldStateMachineRequest, lower_yield_state_machine,
+)
 
 __all__ = [
     'InlineResult',
@@ -32,4 +36,7 @@ __all__ = [
     'YieldInlineAdapter',
     'InlineAdapter',
     'ClosureAdapter',
+    'build_genexpr_yield_function_ast',
+    'YieldStateMachineRequest',
+    'lower_yield_state_machine',
 ]
