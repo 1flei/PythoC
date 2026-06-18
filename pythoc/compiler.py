@@ -480,17 +480,6 @@ class LLVMCompiler:
         # This must happen after all CFG analysis and scope checking.
         visitor.builder.emit_ir()
 
-        # Debug hook - capture all inlined statements accumulated during compilation
-        from .utils.ast_debug import ast_debugger
-        if visitor._all_inlined_stmts:
-            ast_debugger.capture(
-                "function_all_inlines",
-                visitor._all_inlined_stmts,
-                func_name=ast_node.name,
-                inline_count=len([s for s in visitor._all_inlined_stmts if isinstance(s, ast.While)]),
-                total_stmts=len(visitor._all_inlined_stmts)
-            )
-
         if getattr(func_state, 'wrapper', None) is not None:
             func_info = getattr(func_state.wrapper, '_func_info', None)
             if func_info is not None:
@@ -498,12 +487,6 @@ class LLVMCompiler:
                 func_info.is_compiled = True
 
         self.compiled_functions.append(llvm_function)
-        # DEBUG: dump IR for closure-related functions
-        if 'run_' in llvm_function.name or '_y_closure_' in llvm_function.name:
-            import os
-            os.makedirs('debug_ir', exist_ok=True)
-            with open(f'debug_ir/{llvm_function.name}.ll', 'w') as f:
-                f.write(str(self.module))
         return llvm_function
     
     def _parse_type_annotation(self, annotation):

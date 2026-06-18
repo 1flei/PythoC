@@ -139,12 +139,6 @@ class InlineAdapter:
         for stmt in inline_result.stmts:
             ast.fix_missing_locations(stmt)
 
-        # Debug hook - accumulate inlined statements at function level.
-        # Useful for both inline and closure expansion.
-        if not hasattr(self.visitor, '_all_inlined_stmts'):
-            self.visitor._all_inlined_stmts = []
-        self.visitor._all_inlined_stmts.extend(inline_result.stmts)
-
         for i, stmt in enumerate(inline_result.stmts):
             stmt_str = ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)
             logger.debug(f"{tag}: visiting stmt[{i}]: {stmt_str}")
