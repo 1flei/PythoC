@@ -310,28 +310,19 @@ class TestComplexGenExpr(unittest.TestCase):
 class TestForUnroll(unittest.TestCase):
     def test_all(self): self.assertEqual(run_for_unroll(), 21)
 
-class TestClosureSlot(unittest.TestCase):
-    def test_closure_source_is_reserved(self):
-        class FakeClosure:
-            func_ast = ast.FunctionDef(
-                name="fake_closure",
-                args=ast.arguments(
-                    posonlyargs=[],
-                    args=[],
-                    kwonlyargs=[],
-                    kw_defaults=[],
-                    defaults=[],
-                    vararg=None,
-                    kwarg=None,
-                ),
-                body=[ast.Return(value=ast.Constant(value=0))],
-                decorator_list=[],
-                returns=ast.Name(id="i32", ctx=ast.Load()),
-            )
-            func_globals = {}
+@compile
+def run_closure_basic() -> i32:
+    def inner(x: i32) -> i32:
+        return 7 + x
+    api = instantiate(inner)
+    o: api.Obj
+    return api.call(ptr(o), i32(3))
 
-        with self.assertRaises(NotImplementedError):
-            instantiate(FakeClosure())
+
+class TestClosureSlot(unittest.TestCase):
+    def test_closure_source_basic(self):
+        """A bare closure (no capture) can be instantiated and called."""
+        self.assertEqual(run_closure_basic(), 10)
 
 
 if __name__ == '__main__':

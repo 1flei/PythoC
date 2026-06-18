@@ -41,21 +41,51 @@ class FunctionsMixin:
         the closure body when called.
         """
         from ..inline import ClosureAdapter
-        from ..valueref import ValueRef
+        from ..valueref import ValueRef, wrap_value
         from ..registry import VariableInfo
-        
+        from ..inline.scope_analyzer import ScopeAnalyzer, ScopeContext
+        from ..inline.closure_capture import build_closure_capture_plan
+
         func_name = node.name
         
         # Capture the current user_globals at closure definition time
         # This is the caller's globals context
         closure_globals = self.ctx.user_globals
         
+        # Analyze captured variables for this closure
+        analyzer = ScopeAnalyzer(
+            caller_context=ScopeContext.from_var_list(
+                list(self.scope_manager.get_all_visible().keys())
+            )
+        )
+        captured_vars, _, _ = analyzer.analyze(node.body, node.args.args)
+        
+        visible = self.scope_manager.get_all_visible()
+        nested_refs = {
+            name_node.id
+            for name_node in ast.walk(node)
+            if isinstance(name_node, ast.Name) and isinstance(name_node.ctx, ast.Load)
+        }
+        capture_plan = build_closure_capture_plan(
+            captured_vars | nested_refs,
+            visible,
+        )
+        
         # Create a closure wrapper with handle_call
         class ClosureWrapper:
-            def __init__(self, func_ast, visitor, func_globals):
+            def __init__(
+                self,
+                func_ast,
+                visitor,
+                func_globals,
+                capture_bindings,
+                capture_runtime,
+            ):
                 self.func_ast = func_ast
                 self.visitor = visitor
                 self.func_globals = func_globals
+                self._capture_bindings = capture_bindings
+                self._capture_runtime = capture_runtime
             
             def handle_call(self, visitor, func_ref, args, call_node):
                 """Execute closure inline using ClosureAdapter"""
@@ -74,8 +104,14 @@ class FunctionsMixin:
                 adapter = ClosureAdapter(visitor, param_bindings, func_globals=self.func_globals)
                 return adapter.execute_closure(self.func_ast)
         
-        # Create wrapper instance with captured globals
-        wrapper = ClosureWrapper(node, self, closure_globals)
+        # Create wrapper instance with captured globals and capture bindings
+        wrapper = ClosureWrapper(
+            node,
+            self,
+            closure_globals,
+            capture_plan.bindings,
+            capture_plan.runtime,
+        )
         
         # Register as a variable in current scope
         var_info = VariableInfo(

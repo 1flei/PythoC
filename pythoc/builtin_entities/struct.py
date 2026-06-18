@@ -264,8 +264,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                 llvm_struct_type = cls._llvm_struct_type
             
             # Set body if not already set (avoid infinite recursion for self-referential types)
-            # Check if elements is None or empty (opaque type) AND not currently setting body
-            if not llvm_struct_type.elements and not cls._setting_body:
+            # Check if elements is None (opaque type) AND not currently setting body
+            if llvm_struct_type.elements is None and not cls._setting_body:
                 # Mark that we're setting body to prevent recursion
                 cls._setting_body = True
                 try:

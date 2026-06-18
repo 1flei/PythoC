@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from ..meta.template import quote, const as meta_const
+from .state_field_rewriter import StateFieldRewriter, StateFieldRewritePolicy
 
 _DONE_LABEL = "_done"
 
@@ -56,60 +57,13 @@ def lower_yield_state_machine(
             raise RuntimeError(f"state {name!r} already exists")
         states[name] = list(stmts) if stmts else [ast.Pass()]
 
-    class _StateFieldRewriter(ast.NodeTransformer):
-        def visit_Name(self, node: ast.Name) -> ast.AST:
-            if node.id in protect_set or node.id not in locals_set:
-                return node
-            return ast.Attribute(
-                value=ast.Name(id=state_arg, ctx=ast.Load()),
-                attr=node.id,
-                ctx=node.ctx,
-            )
-
-        def visit_Assign(self, node: ast.Assign) -> ast.stmt:
-            self.generic_visit(node)
-            node.targets = [self._rewrite_target(t) for t in node.targets]
-            return node
-
-        def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt:
-            node = copy.deepcopy(node)
-            if node.value:
-                node.value = self.visit(node.value)
-            if isinstance(node.target, ast.Name):
-                assign = ast.Assign(
-                    targets=[self._rewrite_target(node.target)],
-                    value=node.value if node.value else ast.Constant(value=0),
-                )
-                ast.copy_location(assign, node)
-                return assign
-            return self.generic_visit(node)
-
-        def visit_AugAssign(self, node: ast.AugAssign) -> ast.stmt:
-            node.value = self.visit(node.value)
-            node.target = self._rewrite_target(node.target)
-            return node
-
-        def visit_Expr(self, node: ast.Expr) -> Optional[ast.stmt]:
-            if isinstance(node.value, ast.Yield):
-                return None
-            self.generic_visit(node)
-            return node
-
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> Optional[ast.stmt]:
-            return None
-
-        def _rewrite_target(self, target: ast.AST) -> ast.AST:
-            if isinstance(target, ast.Name):
-                if target.id in protect_set or target.id not in locals_set:
-                    return target
-                return ast.Attribute(
-                    value=ast.Name(id=state_arg, ctx=ast.Load()),
-                    attr=target.id,
-                    ctx=ast.Store(),
-                )
-            return target
-
-    rewriter = _StateFieldRewriter()
+    rewriter = StateFieldRewriter(StateFieldRewritePolicy(
+        field_names=locals_set,
+        protect_names=protect_set,
+        state_arg=state_arg,
+        strip_yield_expr=True,
+        preserve_nested_functions=False,
+    ))
 
     def rewrite_expr(expr: ast.expr) -> ast.expr:
         return rewriter.visit(expr)

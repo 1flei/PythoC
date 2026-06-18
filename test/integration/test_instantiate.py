@@ -111,6 +111,16 @@ def run_n_partial() -> i32:
     return api.value(ptr(it))  # 1
 
 
+@compile
+def run_n_init_return() -> i32:
+    api = instantiate(yield_n(4))
+    it = api.init()
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total = total + api.value(ptr(it))
+    return total  # 0+1+2+3 = 6
+
+
 # ====================================================================
 # Case 2: generator expression
 # ====================================================================
@@ -146,6 +156,15 @@ def run_const_all() -> i32:
     return v1 + v2 + v3  # 60
 
 
+@compile
+def run_const_init_return() -> i32:
+    it = sealed_list.init()
+    total: i32 = 0
+    while sealed_list.next(ptr(it)):
+        total = total + sealed_list.value(ptr(it))
+    return total
+
+
 # ====================================================================
 # Edge cases: constant iterable
 # ====================================================================
@@ -173,6 +192,7 @@ class TestYieldLoop(unittest.TestCase):
 class TestYieldN(unittest.TestCase):
     def test_all(self):    self.assertEqual(run_n_all(), 3)
     def test_partial(self): self.assertEqual(run_n_partial(), 1)
+    def test_init_return(self): self.assertEqual(run_n_init_return(), 6)
 
 class TestGenExpr(unittest.TestCase):
     def test_all(self):    self.assertEqual(run_genexpr_all(), 20)
@@ -180,6 +200,7 @@ class TestGenExpr(unittest.TestCase):
 
 class TestConst(unittest.TestCase):
     def test_all(self): self.assertEqual(run_const_all(), 60)
+    def test_init_return(self): self.assertEqual(run_const_init_return(), 60)
 
 class TestEdgeCases(unittest.TestCase):
     def test_empty_const(self):

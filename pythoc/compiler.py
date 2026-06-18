@@ -498,6 +498,12 @@ class LLVMCompiler:
                 func_info.is_compiled = True
 
         self.compiled_functions.append(llvm_function)
+        # DEBUG: dump IR for closure-related functions
+        if 'run_' in llvm_function.name or '_y_closure_' in llvm_function.name:
+            import os
+            os.makedirs('debug_ir', exist_ok=True)
+            with open(f'debug_ir/{llvm_function.name}.ll', 'w') as f:
+                f.write(str(self.module))
         return llvm_function
     
     def _parse_type_annotation(self, annotation):

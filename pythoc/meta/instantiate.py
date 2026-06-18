@@ -29,13 +29,22 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..meta.template import quote
 from ..meta.compile_api import compile_ast as meta_compile_ast
-from ..builtin_entities.types import i32
+from ..builtin_entities.types import i32, void
 from ..builtin_entities.types import bool as pc_bool
 from ..builtin_entities import ptr as pc_ptr
 
 from ..inline.scope_analyzer import ScopeAnalyzer, ScopeContext
 from ..inline._intrinsics import _PC_INTRINSICS
 from ..inline.genexpr_builder import build_genexpr_yield_function_ast
+from ..inline.closure_capture import (
+    RuntimeCapture,
+    extract_value_from_vref,
+    normalize_runtime_captures,
+)
+from ..inline.state_field_rewriter import (
+    StateFieldRewriter,
+    StateFieldRewritePolicy,
+)
 from ..inline.yield_state_machine import (
     YieldStateMachineRequest, lower_yield_state_machine,
 )
@@ -50,31 +59,113 @@ _INTRINSICS = frozenset({
     'f32', 'f64',
     'bool', 'ptr',
     'range', 'len', 'list', 'tuple',
+    'array', 'struct', 'union', 'enum',
 })
+
+_RETURN_SENTINEL_PC = -1
+
+
+@dataclass
+class _InstantiateSource:
+    """Normalized source descriptor for all instantiate() cases."""
+    source_kind: str  # "yield_call", "generator_expression", "closure", "const_iterable"
+    func_ast: Optional[ast.FunctionDef]
+    capture_bindings: Optional[Dict[str, Any]]
+    source_object_id: int
+    func_name_hint: str
+    callee_globals: Optional[Dict[str, Any]] = None
+    call_args: Tuple[Any, ...] = ()
+    capture_mode: Optional[str] = None
+    capture_runtime: Optional[List[Tuple[str, type]]] = None
 
 
 @dataclass(frozen=True)
-class _InstantiateSource:
-    """Normalized input to the instantiate lowering pipeline."""
+class _CapturePlan:
+    compiletime_bindings: Dict[str, Any]
+    runtime_captures: List[RuntimeCapture]
 
-    source_kind: str
-    func_ast: Optional[ast.FunctionDef] = None
-    call_args: Tuple[Any, ...] = ()
-    capture_bindings: Optional[Dict[str, Any]] = None
-    callee_globals: Optional[Dict[str, Any]] = None
-    source_object_id: int = 0
-    func_name_hint: str = "instantiate"
-    capture_mode: str = "yield"
+
+@dataclass(frozen=True)
+class _StatePlan:
+    fields: Dict[str, type]
+    suffix: Tuple
+
+
+@dataclass(frozen=True)
+class _CompiledApiParts:
+    State: type
+    init: Any
+    next: Optional[Any] = None
+    value: Optional[Any] = None
+    call: Optional[Any] = None
+
+
+class _InitDispatcher:
+    def __init__(
+        self,
+        init_into_fn=None,
+        bound_args=None,
+        required_bound_arg_count: Optional[int] = None,
+        state_type: Optional[type] = None,
+        runtime_captures: Optional[List[RuntimeCapture]] = None,
+        set_pc: bool = False,
+    ):
+        self._init_into_fn = init_into_fn
+        self._bound_args = list(bound_args or [])
+        self._required_bound_arg_count = (
+            len(self._bound_args)
+            if required_bound_arg_count is None
+            else required_bound_arg_count
+        )
+        self._state_type = state_type
+        self._runtime_captures = list(runtime_captures or [])
+        self._set_pc = set_pc
+
+    def handle_call(self, visitor, func_ref, args, node):
+        if not args:
+            if len(self._bound_args) != self._required_bound_arg_count:
+                from ..logger import logger
+                logger.error(
+                    "instantiate init cannot bind runtime captures at this "
+                    "call site",
+                    node=node,
+                    exc_type=TypeError,
+                )
+            bound_args = [
+                _capture_value_as_rvalue(visitor, arg)
+                for arg in self._bound_args
+            ]
+            return _materialize_state_value(
+                visitor,
+                self._state_type,
+                self._runtime_captures,
+                bound_args,
+                set_pc=self._set_pc,
+            )
+        if self._init_into_fn is None:
+            from ..logger import logger
+            logger.error(
+                "instantiate init does not accept explicit state arguments",
+                node=node,
+                exc_type=TypeError,
+            )
+        return self._init_into_fn.handle_call(visitor, func_ref, args, node)
 
 
 def _compile_normalized_source(source: _InstantiateSource) -> Any:
     """Dispatch a normalized instantiate source to the right lowerer."""
-    if source.source_kind == "closure":
-        raise NotImplementedError(
-            "instantiate: closure sources are reserved but not supported yet")
-
     if source.func_ast is None:
         raise TypeError("instantiate: normalized source has no function AST")
+
+    if source.source_kind == "closure":
+        return _compile_closure_fn_pipeline(
+            source.func_ast,
+            capture_bindings=source.capture_bindings,
+            source_object_id=source.source_object_id,
+            func_name_hint=source.func_name_hint,
+            callee_globals=source.callee_globals,
+            capture_runtime=source.capture_runtime,
+        )
 
     return _compile_yield_fn_pipeline(
         source.func_ast,
@@ -154,14 +245,31 @@ def _instantiate_genexpr(source) -> Any:
 def _instantiate_closure(source) -> Any:
     """Reserve the architecture slot for closure-backed instantiate."""
     func_ast = getattr(source, "func_ast", None)
+    callee_globals = dict(getattr(source, "func_globals", None) or {})
+    # Ensure builtin PC types are available for type annotation resolution
+    # ( FakeClosure tests or closures defined with empty globals need this )
+    from ..builtin_entities import (
+        i8, i16, i32, i64, u8, u16, u32, u64, f32, f64,
+        bool as pc_bool_b, ptr as pc_ptr_b, array, struct, union, enum,
+    )
+    _builtins = {
+        "i8": i8, "i16": i16, "i32": i32, "i64": i64,
+        "u8": u8, "u16": u16, "u32": u32, "u64": u64,
+        "f32": f32, "f64": f64, "bool": pc_bool_b, "ptr": pc_ptr_b,
+        "array": array, "struct": struct, "union": union, "enum": enum,
+    }
+    for _name, _val in _builtins.items():
+        if _name not in callee_globals:
+            callee_globals[_name] = _val
     return _compile_normalized_source(_InstantiateSource(
         source_kind="closure",
         func_ast=func_ast,
-        capture_bindings=None,
+        capture_bindings=getattr(source, "_capture_bindings", None),
         source_object_id=id(source),
         func_name_hint=getattr(func_ast, "name", "closure"),
-        callee_globals=getattr(source, "func_globals", None) or {},
+        callee_globals=callee_globals,
         capture_mode="closure",
+        capture_runtime=getattr(source, "_capture_runtime", None),
     ))
 
 
@@ -208,10 +316,10 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
                 f"{elem_type.__name__} vs {vt.__name__}")
 
     suffix = ("_c", "const", id(values) % 10007)
-    _Iter = _build_state_struct({"_pc": i32}, suffix)
-    ip = pc_ptr[_Iter]
+    _State = _build_state_struct({"_pc": i32}, suffix)
+    ip = pc_ptr[_State]
     sfx = "_".join(str(p) for p in suffix)
-    gv = {"i32": i32, "bool": pc_bool, "ptr": pc_ptr, "_Iter": _Iter}
+    gv = {"i32": i32, "bool": pc_bool, "ptr": pc_ptr, "_State": _State}
     elem_type_name = getattr(elem_type, "__name__", None)
     if elem_type_name:
         gv[elem_type_name] = elem_type
@@ -219,7 +327,7 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
     nf = _cq(
         _next_tmpl.instantiate(N=len(values)),
         sfx + "_n", {"s": ip}, pc_bool, gv)
-    inf = _cq(
+    init_into_fn = _cq(
         _init_tmpl.instantiate(),
         sfx + "_i", {"s": ip}, None, gv)
 
@@ -237,10 +345,15 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
         sfx + "_v", {"s": ip}, elem_type, gv)
 
     class _Api:
-        Iter = _Iter
+        State = _State
+        Iter = _State
         next = nf
         value = vf
-        init = inf
+        init = _InitDispatcher(
+            init_into_fn,
+            state_type=_State,
+            set_pc=True,
+        )
     return _Api()
 
 
@@ -330,15 +443,15 @@ def _compile_yield_fn_pipeline(
         lt = _local_type_hint(name, fa, type_resolver)
         fields[name] = lt if lt is not None else i32
 
-    _Iter = _build_state_struct(fields, suffix)
-    ip = pc_ptr[_Iter]
+    _State = _build_state_struct(fields, suffix)
+    ip = pc_ptr[_State]
 
     # -- 7. compile next / init / value --
     gv = {
         "i32": i32,
         "bool": pc_bool,
         "ptr": pc_ptr,
-        "_Iter": _Iter,
+        "_State": _State,
         "__pc_intrinsics": _PC_INTRINSICS,
     }
 
@@ -348,6 +461,12 @@ def _compile_yield_fn_pipeline(
         if val is not None:
             protect_set.add(ext_name)
             gv[ext_name] = val
+    # Also expose all callee globals so builtins (f64, etc.) are available
+    # to the compiled state-machine functions.
+    if callee_globals:
+        for cg_name, cg_val in callee_globals.items():
+            if cg_name not in gv and not cg_name.startswith('_'):
+                gv[cg_name] = cg_val
 
     nf = meta_compile_ast(
         sm_ast,
@@ -357,15 +476,446 @@ def _compile_yield_fn_pipeline(
         user_globals=gv,
         source_file=_SOURCE_FILE,
     )
-    inf = _cq(_init_tmpl.instantiate(), sfx + "_i", {"s": ip}, None, gv)
+    init_into_fn = _cq(_init_tmpl.instantiate(), sfx + "_i", {"s": ip}, None, gv)
     vf = _cq(_yld_value.instantiate(), sfx + "_v", {"s": ip}, yield_type, gv)
 
     class _Api:
-        Iter = _Iter
+        State = _State
+        Iter = _State
         next = nf
         value = vf
-        init = inf
+        init = _InitDispatcher(
+            init_into_fn,
+            state_type=_State,
+            set_pc=True,
+        )
     return _Api()
+
+
+def _compile_closure_fn_pipeline(
+    func_ast: ast.FunctionDef,
+    *,
+    capture_bindings: Optional[Dict[str, Any]],
+    source_object_id: int,
+    func_name_hint: str,
+    callee_globals: Optional[Dict[str, Any]] = None,
+    capture_runtime: Optional[List[Tuple[str, type]]] = None,
+) -> Any:
+    """Compile a closure into a callable first-class object.
+
+    Supports both compile-time constant capture (via capture_bindings)
+    and runtime capture (via capture_runtime + api.init()).
+
+    The compiled API exposes::
+
+        api.State – state struct type (holds runtime capture variables)
+        api.init  – init function ``init() -> State``
+        api.call  – compiled wrapper function ``call(s, *args) -> ret``
+    """
+    fa = copy.deepcopy(func_ast)
+    runtime_captures = normalize_runtime_captures(capture_runtime)
+    if _contains_yield(fa):
+        from ..logger import logger
+        logger.error(
+            "instantiate: closure sources containing yield are not supported",
+            node=func_ast,
+            exc_type=TypeError,
+        )
+
+    # -- 1. splice compile-time capture initialisers at body top --
+    if capture_bindings:
+        pre = [
+            ast.Assign(
+                targets=[ast.Name(id=name, ctx=ast.Store())],
+                value=_python_value_to_ast(val))
+            for name, val in capture_bindings.items()
+        ]
+        fa.body = pre + fa.body
+
+    # -- 2. scope analysis --
+    analyzer = ScopeAnalyzer(caller_context=ScopeContext.empty())
+    captured_vars, local_vars, param_vars = analyzer.analyze(fa.body, fa.args.args)
+    # For closures:
+    #   - captured_vars -> state struct fields (persist across calls)
+    #   - local_vars    -> ordinary stack locals (reset each call)
+    #   - param_vars    -> real function parameters (passed each call)
+    # Only captured variables need to be rewritten to s.xxx.
+    state_vars: Set[str] = captured_vars
+    protect_set: Set[str] = set(_INTRINSICS) | {"s"}
+    type_resolver = _build_type_resolver(callee_globals)
+
+    # -- 2b. add runtime captures to state --
+    for capture in runtime_captures:
+        state_vars.add(capture.name)
+
+    # -- 3. infer return type from function annotation --
+    return_type = (
+        _annotation_ast_to_type(fa.returns, type_resolver)
+        if fa.returns is not None
+        else None
+    )
+    if return_type is None:
+        return_type = i32  # default for backward compat
+
+    # -- 4. rewrite body: captured vars -> s.xxx --
+    rewriter = StateFieldRewriter(StateFieldRewritePolicy(
+        field_names=state_vars,
+        protect_names=protect_set,
+        state_arg="s",
+        strip_yield_expr=False,
+        preserve_nested_functions=True,
+    ))
+    rewritten_body: List[ast.stmt] = []
+    for stmt in fa.body:
+        rewritten = rewriter.visit(stmt)
+        if rewritten is not None:
+            if isinstance(rewritten, (list, tuple)):
+                rewritten_body.extend(rewritten)
+            else:
+                rewritten_body.append(rewritten)
+
+    # Ensure the wrapper body always ends with a return (compile_ast needs
+    # a concrete return type; if the original closure lacked one we emit
+    # a zero of the inferred return type).
+    if not rewritten_body or not isinstance(rewritten_body[-1], ast.Return):
+        rewritten_body.append(ast.Return(value=_typed_zero(return_type)))
+
+    # -- 5. build wrapper AST: def _call(s, arg1, arg2, ...) --
+    wrapper_args = ast.arguments(
+        posonlyargs=[],
+        args=[ast.arg(arg="s", annotation=None)] + list(fa.args.args),
+        kwonlyargs=[],
+        kw_defaults=[],
+        defaults=list(fa.args.defaults),
+        vararg=fa.args.vararg,
+        kwarg=fa.args.kwarg,
+    )
+    wrapper_ast = ast.FunctionDef(
+        name="_call",
+        args=wrapper_args,
+        body=rewritten_body,
+        decorator_list=[],
+        returns=ast.Name(id="_Ret", ctx=ast.Load()),
+        lineno=1,
+        col_offset=0,
+    )
+    ast.fix_missing_locations(wrapper_ast)
+
+    # -- 6. suffix / naming --
+    binding_parts = []
+    if capture_bindings:
+        binding_parts.append(
+            hash(tuple(sorted(capture_bindings.items(), key=lambda kv: kv[0]))) % 1000003
+        )
+    if runtime_captures:
+        binding_parts.append(
+            hash(tuple(capture.name for capture in runtime_captures)) % 1000003
+        )
+    if binding_parts:
+        suffix = ("_cl", func_name_hint, source_object_id % 10007, *binding_parts)
+    else:
+        suffix = ("_cl", func_name_hint, source_object_id % 10007)
+    sfx = "_".join(str(p) for p in suffix)
+
+    # -- 7. state struct fields (captured vars + runtime captures) --
+    fields: Dict[str, type] = {}
+    for name in captured_vars:
+        lt = _local_type_hint(name, fa, type_resolver)
+        fields[name] = lt if lt is not None else i32
+    for capture in runtime_captures:
+        fields[capture.name] = capture.pc_type
+
+    _State = _build_state_struct(fields, suffix)
+    ip = pc_ptr[_State]
+
+    # -- 8. param types (s + original params) --
+    param_types: Dict[str, type] = {"s": ip}
+    for arg in fa.args.args:
+        at = (
+            _annotation_ast_to_type(arg.annotation, type_resolver)
+            if arg.annotation
+            else None
+        )
+        if at is not None:
+            param_types[arg.arg] = at
+
+    # -- 9. compile call function --
+    gv = {
+        "i32": i32,
+        "bool": pc_bool,
+        "ptr": pc_ptr,
+        "_State": _State,
+        "_Ret": return_type,
+    }
+    for ext_name in _find_external_names(
+        wrapper_ast, state_vars | param_vars, protect_set
+    ):
+        val = callee_globals.get(ext_name) if callee_globals else None
+        if val is not None:
+            protect_set.add(ext_name)
+            gv[ext_name] = val
+    if callee_globals:
+        for cg_name, cg_val in callee_globals.items():
+            if cg_name not in gv and not cg_name.startswith("_"):
+                gv[cg_name] = cg_val
+
+    cf = meta_compile_ast(
+        wrapper_ast,
+        param_types=param_types,
+        return_type=return_type,
+        suffix=sfx,
+        user_globals=gv,
+        source_file=_SOURCE_FILE,
+    )
+
+    # -- 10. build init functions --
+    init_into_fn = None
+    if not any(_is_array_type(capture.pc_type) for capture in runtime_captures):
+        init_body: List[ast.stmt] = []
+        init_args_list = [ast.arg(arg="s", annotation=None)]
+        init_param_types: Dict[str, type] = {"s": ip}
+        for capture in runtime_captures:
+            init_arg_name = f"_{capture.name}_in"
+            init_args_list.append(ast.arg(arg=init_arg_name, annotation=None))
+            init_param_types[init_arg_name] = capture.pc_type
+            init_body.append(ast.Assign(
+                targets=[ast.Attribute(
+                    value=ast.Name(id="s", ctx=ast.Load()),
+                    attr=capture.name,
+                    ctx=ast.Store(),
+                )],
+                value=ast.Name(id=init_arg_name, ctx=ast.Load()),
+            ))
+        if not init_body:
+            init_body.append(ast.Pass())
+        init_ast = ast.FunctionDef(
+            name="_init_into",
+            args=ast.arguments(
+                posonlyargs=[],
+                args=init_args_list,
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+                vararg=None,
+                kwarg=None,
+            ),
+            body=init_body,
+            decorator_list=[],
+            returns=ast.Constant(value=None),
+            lineno=1,
+            col_offset=0,
+        )
+        ast.fix_missing_locations(init_ast)
+        init_into_fn = meta_compile_ast(
+            init_ast,
+            param_types=init_param_types,
+            return_type=void,
+            suffix=sfx + "_ii",
+            user_globals=gv,
+            source_file=_SOURCE_FILE,
+        )
+
+    class _Api:
+        State = _State
+        Obj = _State
+        call = cf
+        init = _InitDispatcher(
+            init_into_fn,
+            _runtime_capture_values(runtime_captures),
+            len(runtime_captures),
+            state_type=_State,
+            runtime_captures=runtime_captures,
+        )
+
+    return _Api()
+
+
+# ---------------------------------------------------------------------------
+# API helpers
+# ---------------------------------------------------------------------------
+
+def _compile_state_init_return(
+    *,
+    state_type: type,
+    suffix: str,
+    gv: Dict[str, Any],
+    runtime_captures: Optional[List[RuntimeCapture]] = None,
+    set_pc: bool = False,
+) -> Any:
+    runtime_captures = list(runtime_captures or [])
+    init_args = []
+    param_types: Dict[str, type] = {}
+    body: List[ast.stmt] = [
+        ast.AnnAssign(
+            target=ast.Name(id="s", ctx=ast.Store()),
+            annotation=ast.Name(id="_State", ctx=ast.Load()),
+            value=ast.Call(
+                func=ast.Name(id="_State", ctx=ast.Load()),
+                args=[],
+                keywords=[],
+            ),
+            simple=1,
+        )
+    ]
+
+    if set_pc:
+        body.append(ast.Assign(
+            targets=[ast.Attribute(
+                value=ast.Name(id="s", ctx=ast.Load()),
+                attr="_pc",
+                ctx=ast.Store(),
+            )],
+            value=ast.Call(
+                func=ast.Name(id="i32", ctx=ast.Load()),
+                args=[ast.Constant(value=0)],
+                keywords=[],
+            ),
+        ))
+
+    for capture in runtime_captures:
+        arg_name = f"_{capture.name}_in"
+        init_args.append(ast.arg(arg=arg_name, annotation=None))
+        param_types[arg_name] = capture.pc_type
+        body.append(ast.Assign(
+            targets=[ast.Attribute(
+                value=ast.Name(id="s", ctx=ast.Load()),
+                attr=capture.name,
+                ctx=ast.Store(),
+            )],
+            value=ast.Name(id=arg_name, ctx=ast.Load()),
+        ))
+
+    body.append(ast.Return(value=ast.Name(id="s", ctx=ast.Load())))
+
+    init_ast = ast.FunctionDef(
+        name="_init",
+        args=ast.arguments(
+            posonlyargs=[],
+            args=init_args,
+            kwonlyargs=[],
+            kw_defaults=[],
+            defaults=[],
+            vararg=None,
+            kwarg=None,
+        ),
+        body=body,
+        decorator_list=[],
+        returns=ast.Name(id="_State", ctx=ast.Load()),
+        lineno=1,
+        col_offset=0,
+    )
+    ast.fix_missing_locations(init_ast)
+    init_gv = dict(gv)
+    init_gv["_State"] = state_type
+    return meta_compile_ast(
+        init_ast,
+        param_types=param_types,
+        return_type=state_type,
+        suffix=suffix,
+        user_globals=init_gv,
+        source_file=_SOURCE_FILE,
+    )
+
+
+def _runtime_capture_values(captures: List[RuntimeCapture]) -> List[Any]:
+    values = []
+    for capture in captures:
+        if capture.value_ref is not None:
+            values.append(capture.value_ref)
+    return values
+
+
+def _capture_value_as_rvalue(visitor, value_ref):
+    if not hasattr(value_ref, "has_place") or not value_ref.has_place():
+        return value_ref
+    from ..valueref import wrap_value
+    loaded = visitor.builder.load(value_ref.require_place())
+    return wrap_value(loaded, kind="value", type_hint=value_ref.type_hint)
+
+
+def _materialize_state_value(
+    visitor,
+    state_type: type,
+    runtime_captures: List[RuntimeCapture],
+    bound_values: List[Any],
+    *,
+    set_pc: bool,
+):
+    from ..valueref import wrap_value
+
+    llvm_type = state_type.get_llvm_type(visitor.module.context)
+    storage = visitor._create_alloca_in_entry(llvm_type, "instantiate_state")
+    zero_value = visitor.type_converter.create_zero_constant(llvm_type)
+    visitor.builder.store(zero_value, storage)
+
+    state_ref = wrap_value(
+        visitor.builder.load(storage),
+        kind="address",
+        type_hint=state_type,
+        address=storage,
+    )
+
+    if set_pc and state_type.has_field("_pc"):
+        from ..valueref import wrap_value
+        pc_field = state_type.handle_attribute(
+            visitor,
+            state_ref,
+            "_pc",
+            None,
+        )
+        _store_capture_field(
+            visitor,
+            pc_field,
+            wrap_value(_i32_const_ir(), kind="value", type_hint=i32),
+        )
+
+    for capture, value in zip(runtime_captures, bound_values):
+        field_ref = state_type.handle_attribute(
+            visitor,
+            state_ref,
+            capture.name,
+            None,
+        )
+        _store_capture_field(visitor, field_ref, value)
+
+    return wrap_value(
+        visitor.builder.load(storage),
+        kind="address",
+        type_hint=state_type,
+        address=storage,
+    )
+
+
+def _store_capture_field(visitor, field_ref, value_ref):
+    from ..valueref import ensure_ir
+    from ..ir_helpers import safe_store
+
+    target_type = field_ref.get_pc_type()
+    value_ref = visitor.implicit_coercer.coerce(value_ref, target_type, None)
+    safe_store(
+        visitor.builder,
+        ensure_ir(value_ref),
+        field_ref.require_place(),
+        target_type,
+        node=None,
+    )
+
+
+def _i32_const_ir(value: int = 0):
+    from llvmlite import ir
+    return ir.Constant(ir.IntType(32), value)
+
+
+def _contains_yield(func_ast: ast.FunctionDef) -> bool:
+    for node in ast.walk(func_ast):
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            return True
+    return False
+
+
+def _is_array_type(pc_type: type) -> bool:
+    return hasattr(pc_type, "get_decay_pointer_type")
+
 
 # ---------------------------------------------------------------------------
 # Templates (quote)
@@ -418,13 +968,7 @@ def _python_constant_pc_type(value: Any) -> type:
 
 def _extract_value_from_vref(vref) -> Any:
     """Extract a Python compile-time constant from a ValueRef."""
-    th = getattr(vref, 'type_hint', None)
-    if th is not None:
-        if hasattr(th, 'is_constant') and th.is_constant():
-            return th.get_constant_value()
-        if hasattr(th, 'get_python_object'):
-            return th.get_python_object()
-    return vref.get_python_value()
+    return extract_value_from_vref(vref)
 
 
 def _build_type_resolver(callee_globals: Optional[Dict[str, Any]]):
@@ -504,10 +1048,10 @@ def _python_value_to_ast(v: Any) -> ast.expr:
 
 def _build_state_struct(fields_dict: Dict[str, type], suffix: Tuple) -> type:
     from ..decorators.structs import compile_dynamic_class
-    class _Iter:
+    class _State:
         __annotations__ = fields_dict
-    _Iter.__name__ = 'Iter'
-    return compile_dynamic_class(_Iter, suffix=suffix)
+    _State.__name__ = 'State'
+    return compile_dynamic_class(_State, suffix=suffix)
 
 
 def _cq(frag, sfx, pt, rt, gv):
