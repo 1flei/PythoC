@@ -174,22 +174,15 @@ def lower_yield_state_machine(
         body.append(_label_block(label_name, states[label_name]))
     body.append(_label_block(_DONE_LABEL, [_return_false()]))
 
-    fn_ast = ast.FunctionDef(
-        name="_next",
-        args=ast.arguments(
-            posonlyargs=[],
-            args=[ast.arg(arg=state_arg)],
-            kwonlyargs=[],
-            kw_defaults=[],
-            defaults=[],
-            vararg=None,
-            kwarg=None,
-        ),
-        body=body,
-        decorator_list=[],
-        returns=None,
-        lineno=1,
-        col_offset=0,
+    fn_ast = _yield_next_template(body).stmts[0]
+    fn_ast.args = ast.arguments(
+        posonlyargs=[],
+        args=[ast.arg(arg=state_arg)],
+        kwonlyargs=[],
+        kw_defaults=[],
+        defaults=[],
+        vararg=None,
+        kwarg=None,
     )
     ast.fix_missing_locations(fn_ast)
     return fn_ast
@@ -347,6 +340,12 @@ def _yield_state_tmpl(value_expr, resume_pc):
     s._yield_value = value_expr
     s._pc = resume_pc
     return bool(1)
+
+
+@quote
+def _yield_next_template(body):
+    def _next(s):
+        body
 
 
 def _goto_stmt(label_name: str) -> ast.stmt:

@@ -43,7 +43,7 @@ class FunctionsMixin:
         from ..inline import ClosureAdapter
         from ..valueref import ValueRef, wrap_value
         from ..registry import VariableInfo
-        from ..inline.scope_analyzer import ScopeAnalyzer, ScopeContext
+        from ..inline.scope_analyzer import analyze_function_scope, build_caller_context
         from ..inline.closure_capture import build_closure_capture_plan
 
         func_name = node.name
@@ -53,13 +53,13 @@ class FunctionsMixin:
         closure_globals = self.ctx.user_globals
         
         # Analyze captured variables for this closure
-        analyzer = ScopeAnalyzer(
-            caller_context=ScopeContext.from_var_list(
-                list(self.scope_manager.get_all_visible().keys())
-            )
+        caller_context = build_caller_context(
+            self.scope_manager, visibility="all_visible"
         )
-        captured_vars, _, _ = analyzer.analyze(node.body, node.args.args)
-        
+        captured_vars, _, _ = analyze_function_scope(
+            node, caller_context=caller_context
+        )
+
         visible = self.scope_manager.get_all_visible()
         nested_refs = {
             name_node.id

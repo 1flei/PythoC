@@ -24,7 +24,8 @@ The two modes differ only in:
 import ast
 from typing import Dict, Optional, Any, TYPE_CHECKING
 from .exit_rules import ReturnExitRule
-from .scope_analyzer import ScopeContext
+from .scope_analyzer import ScopeContext, build_caller_context
+from .kernel import ReturnValueChecker
 from ..valueref import ValueRef, wrap_value
 from ..context import VariableInfo
 from ..logger import logger
@@ -116,35 +117,24 @@ class InlineAdapter:
         )
 
         from .kernel import (
-            MetaInlineRequest, expand_inline,
-            merge_inline_globals, restore_globals,
+            expand_inline_or_raise,
+            inline_globals_scope,
         )
-        request = MetaInlineRequest(
+        inline_result = expand_inline_or_raise(
             callee_ast=func_ast,
-            callee_globals=self.func_globals or {},
+            callee_globals=self.func_globals,
             call_args=arg_exprs,
             call_site=call_site,
             caller_context=caller_context,
             exit_rule=exit_rule,
+            tag=tag,
         )
 
-        try:
-            inline_result = expand_inline(request)
-        except Exception as e:
-            logger.error(f"{tag}: meta inline expansion failed: {e}")
-            raise
-
-        old_user_globals = merge_inline_globals(self.visitor, inline_result)
-
-        for stmt in inline_result.stmts:
-            ast.fix_missing_locations(stmt)
-
-        for i, stmt in enumerate(inline_result.stmts):
-            stmt_str = ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)
-            logger.debug(f"{tag}: visiting stmt[{i}]: {stmt_str}")
-            self.visitor.visit(stmt)
-
-        restore_globals(self.visitor, old_user_globals)
+        with inline_globals_scope(self.visitor, inline_result):
+            for i, stmt in enumerate(inline_result.stmts):
+                stmt_str = ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)
+                logger.debug(f"{tag}: visiting stmt[{i}]: {stmt_str}")
+                self.visitor.visit(stmt)
 
         if self._has_return_value(func_ast):
             return self._lookup_result_var(result_var)
@@ -219,19 +209,9 @@ class InlineAdapter:
           are available, which is essential for by-reference capture when
           a closure is defined inside a nested scope (e.g. a loop body).
         """
-        available_vars = set()
         scope_manager = getattr(self.visitor, 'scope_manager', None)
-        if scope_manager is None:
-            return ScopeContext(available_vars=available_vars)
-
-        if self.kind == "closure":
-            for var_name in scope_manager.get_all_visible().keys():
-                available_vars.add(var_name)
-        else:
-            for var_info in scope_manager.get_all_in_current_scope():
-                available_vars.add(var_info.name)
-
-        return ScopeContext(available_vars=available_vars)
+        visibility = "all_visible" if self.kind == "closure" else "current"
+        return build_caller_context(scope_manager, visibility=visibility)
 
     def _has_return_value(self, func_ast: ast.FunctionDef) -> bool:
         """True if ``func_ast`` can return a non-void value."""
@@ -239,10 +219,9 @@ class InlineAdapter:
             if isinstance(func_ast.returns, ast.Name) and func_ast.returns.id == 'void':
                 return False
             return True
-        for node in ast.walk(func_ast):
-            if isinstance(node, ast.Return) and node.value is not None:
-                return True
-        return False
+        checker = ReturnValueChecker()
+        checker.visit(func_ast)
+        return checker.has_return_value
 
     def _lookup_result_var(self, var_name: str) -> Optional[ValueRef]:
         """Resolve the generated result variable and load its value.

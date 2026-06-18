@@ -13,7 +13,7 @@ By-ref capture semantics:
 """
 
 import ast
-from typing import Set, Tuple, List
+from typing import Set, Tuple, List, Optional, Any, Dict
 from dataclasses import dataclass
 
 
@@ -39,6 +39,55 @@ class ScopeContext:
     def empty(cls) -> 'ScopeContext':
         """Create empty context (no variables available)"""
         return cls(available_vars=set())
+
+
+def build_caller_context(
+    scope_manager,
+    *,
+    local_vars: Optional[Dict[str, Any]] = None,
+    visibility: str = "current",
+) -> ScopeContext:
+    """Build a caller ``ScopeContext`` from a visitor's scope manager.
+
+    Args:
+        scope_manager: The visitor's ``scope_manager`` (may be ``None``).
+        local_vars: Optional extra local-variable mapping to include
+            (used by yield inlining).
+        visibility: ``"current"`` to include only the current scope,
+            ``"all_visible"`` to include every enclosing scope.
+    """
+    available_vars: Set[str] = set()
+    if scope_manager is None:
+        return ScopeContext(available_vars=available_vars)
+
+    if visibility == "all_visible":
+        for var_name in scope_manager.get_all_visible().keys():
+            available_vars.add(var_name)
+    else:
+        for var_info in scope_manager.get_all_in_current_scope():
+            available_vars.add(var_info.name)
+
+    if local_vars:
+        available_vars.update(local_vars.keys())
+
+    return ScopeContext(available_vars=available_vars)
+
+
+def analyze_function_scope(
+    fa: ast.FunctionDef,
+    caller_context: Optional[ScopeContext] = None,
+):
+    """Run scope analysis on ``fa`` and return ``(captured, local, param)`` sets.
+
+    Args:
+        fa: Function AST to analyze.
+        caller_context: Caller scope context for capture detection.
+            Defaults to an empty context.
+    """
+    if caller_context is None:
+        caller_context = ScopeContext.empty()
+    analyzer = ScopeAnalyzer(caller_context=caller_context)
+    return analyzer.analyze(fa.body, fa.args.args)
 
 
 class ScopeAnalyzer:

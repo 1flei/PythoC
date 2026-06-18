@@ -11,8 +11,9 @@ import ast
 import copy
 from typing import List, Optional, Dict, Any
 
-from .scope_analyzer import ScopeContext
+from .scope_analyzer import ScopeContext, build_caller_context
 from .exit_rules import YieldExitRule, _has_break_or_continue
+from .kernel import ReturnValueChecker
 
 
 class YieldInlineAdapter:
@@ -103,29 +104,20 @@ class YieldInlineAdapter:
                 merged.update(callee_globals_override)
                 callee_globals = merged
 
-        try:
-            # Build MetaInlineRequest and delegate to expand_inline
-            try:
-                from .kernel import MetaInlineRequest, expand_inline
-                request = MetaInlineRequest(
-                    callee_ast=func_ast,
-                    callee_globals=callee_globals or {},
-                    call_args=call_args,
-                    call_site=for_node.iter,  # The call expression
-                    caller_context=caller_context,
-                    exit_rule=exit_rule,
-                )
-                inline_result = expand_inline(request)
-            except Exception as e:
-                # If expansion fails, cannot inline
-                from ..logger import logger
-                logger.debug(f"Meta inline expansion rejected yield inline: {e}")
-                return (None, None)
+        from .kernel import try_expand_inline
+        inline_result = try_expand_inline(
+            callee_ast=func_ast,
+            callee_globals=callee_globals,
+            call_args=call_args,
+            call_site=for_node.iter,
+            caller_context=caller_context,
+            exit_rule=exit_rule,
+        )
+        if inline_result is None:
+            return (None, None)
 
-            # Return InlineResult and after_else_label for caller to own lifecycle
-            return (inline_result, after_else_label)
-        except Exception as e:
-            raise
+        # Return InlineResult and after_else_label for caller to own lifecycle
+        return (inline_result, after_else_label)
     
     def _extract_loop_var(self, for_node: ast.For) -> Optional[ast.AST]:
         """Extract loop variable target from for node
@@ -153,20 +145,13 @@ class YieldInlineAdapter:
         
         Returns all variables available in current scope
         """
-        available_vars = set()
-        
-        # Get variables from visitor's scope manager
-        if hasattr(self.visitor, 'scope_manager'):
-            registry = self.visitor.scope_manager
-            # Get all variables in current scope
-            for var_info in registry.get_all_in_current_scope():
-                available_vars.add(var_info.name)
-        
-        # Also check visitor's locals if available
-        if hasattr(self.visitor, 'local_vars'):
-            available_vars.update(self.visitor.local_vars.keys())
-        
-        return ScopeContext(available_vars=available_vars)
+        scope_manager = getattr(self.visitor, 'scope_manager', None)
+        local_vars = getattr(self.visitor, 'local_vars', None)
+        return build_caller_context(
+            scope_manager,
+            local_vars=local_vars,
+            visibility="current",
+        )
     
     def _is_inlinable(self, func_ast: ast.FunctionDef) -> bool:
         """
@@ -188,42 +173,14 @@ class YieldInlineAdapter:
         )
 
 
-class _YieldInlinabilityChecker(ast.NodeVisitor):
+class _YieldInlinabilityChecker(ReturnValueChecker):
     """Simple checker for yield function inlinability"""
-    
+
     def __init__(self):
+        super().__init__()
         self.has_yield = False
-        self.has_return_value = False
-        self.has_nested_function = False
-        self.depth = 0
-    
-    def visit_FunctionDef(self, node):
-        """Track nested functions"""
-        if self.depth > 0:
-            self.has_nested_function = True
-        self.depth += 1
-        self.generic_visit(node)
-        self.depth -= 1
-    
-    def visit_AsyncFunctionDef(self, node):
-        """Track nested async functions"""
-        if self.depth > 0:
-            self.has_nested_function = True
-        self.depth += 1
-        self.generic_visit(node)
-        self.depth -= 1
-    
-    def visit_Lambda(self, node):
-        """Lambdas are ok, don't count as nested functions"""
-        self.generic_visit(node)
-    
+
     def visit_Yield(self, node):
         """Record yield"""
         self.has_yield = True
-        self.generic_visit(node)
-    
-    def visit_Return(self, node):
-        """Check for return with value"""
-        if node.value is not None:
-            self.has_return_value = True
         self.generic_visit(node)

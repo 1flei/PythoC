@@ -28,6 +28,7 @@ templates. The call site picks the right frame and feeds all params.
 
 import ast
 import copy
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -283,6 +284,129 @@ def merge_inline_globals(visitor, inline_result):
 def restore_globals(visitor, old_globals):
     """Restore previously saved user_globals."""
     visitor.ctx.user_globals = old_globals
+
+
+@contextmanager
+def inline_globals_scope(visitor, inline_result):
+    """Merge inline globals, run the wrapped block, then restore them.
+
+    This is the shared lifecycle for visiting statements produced by
+    ``expand_inline``.  Missing source locations are filled in before the
+    block runs; adapters and visitors should put the actual
+    statement-visiting logic inside the ``with`` block.
+
+    Example::
+
+        with inline_globals_scope(visitor, inline_result):
+            for stmt in inline_result.stmts:
+                visitor.visit(stmt)
+    """
+    for stmt in inline_result.stmts:
+        ast.fix_missing_locations(stmt)
+
+    old_user_globals = merge_inline_globals(visitor, inline_result)
+    try:
+        yield
+    finally:
+        restore_globals(visitor, old_user_globals)
+
+
+def _build_inline_request(
+    *,
+    callee_ast,
+    callee_globals,
+    call_args,
+    call_site,
+    caller_context,
+    exit_rule,
+) -> MetaInlineRequest:
+    """Build a ``MetaInlineRequest`` from the standard adapter inputs."""
+    return MetaInlineRequest(
+        callee_ast=callee_ast,
+        callee_globals=callee_globals or {},
+        call_args=call_args,
+        call_site=call_site,
+        caller_context=caller_context,
+        exit_rule=exit_rule,
+    )
+
+
+def expand_inline_or_raise(
+    *,
+    callee_ast,
+    callee_globals,
+    call_args,
+    call_site,
+    caller_context,
+    exit_rule,
+    tag: str = "InlineAdapter",
+) -> InlineResult:
+    """Build a request, expand it, and raise on failure.
+
+    This is the shared expansion path for adapters that cannot fall back
+    (``@inline`` / closure inlining).
+    """
+    request = _build_inline_request(
+        callee_ast=callee_ast,
+        callee_globals=callee_globals,
+        call_args=call_args,
+        call_site=call_site,
+        caller_context=caller_context,
+        exit_rule=exit_rule,
+    )
+    try:
+        return expand_inline(request)
+    except Exception as e:
+        from ..logger import logger
+        logger.error(f"{tag}: meta inline expansion failed: {e}")
+        raise
+
+
+def try_expand_inline(
+    *,
+    callee_ast,
+    callee_globals,
+    call_args,
+    call_site,
+    caller_context,
+    exit_rule,
+    tag: str = "YieldInlineAdapter",
+) -> Optional[InlineResult]:
+    """Build a request, expand it, and return ``None`` on failure.
+
+    This is the shared expansion path for adapters that want to attempt
+    inlining but allow the caller to fall back (yield-for-loop inlining).
+    """
+    request = _build_inline_request(
+        callee_ast=callee_ast,
+        callee_globals=callee_globals,
+        call_args=call_args,
+        call_site=call_site,
+        caller_context=caller_context,
+        exit_rule=exit_rule,
+    )
+    try:
+        return expand_inline(request)
+    except Exception as e:
+        from ..logger import logger
+        logger.debug(f"{tag}: meta inline expansion rejected: {e}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# AST checkers shared by adapters
+# ---------------------------------------------------------------------------
+
+class ReturnValueChecker(ast.NodeVisitor):
+    """Detect whether a function AST contains a ``return <value>`` statement."""
+
+    def __init__(self):
+        self.has_return_value = False
+
+    def visit_Return(self, node: ast.Return):
+        if node.value is not None:
+            self.has_return_value = True
+        self.generic_visit(node)
 
 
 # ---------------------------------------------------------------------------

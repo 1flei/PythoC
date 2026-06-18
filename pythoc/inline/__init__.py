@@ -7,7 +7,7 @@ Supports @inline, closures, yield, and future extensions.
 
 from .kernel import (
     InlineResult, MetaInlineRequest, expand_inline,
-    merge_inline_globals, restore_globals,
+    merge_inline_globals, restore_globals, inline_globals_scope,
 )
 from .exit_rules import ExitPointRule, ReturnExitRule, YieldExitRule, MacroExitRule
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
@@ -26,6 +26,7 @@ __all__ = [
     'expand_inline',
     'merge_inline_globals',
     'restore_globals',
+    'inline_globals_scope',
     'ExitPointRule',
     'ReturnExitRule',
     'YieldExitRule',

@@ -283,7 +283,7 @@ class LoopsMixin:
         - After all yields and else, place with label("_for_after_else_{id}"): pass
         """
         from ..inline.yield_adapter import YieldInlineAdapter
-        from ..inline.kernel import merge_inline_globals, restore_globals
+        from ..inline.kernel import inline_globals_scope
 
         cf = self._get_cf_builder()
         adapter = YieldInlineAdapter(self)
@@ -311,12 +311,7 @@ class LoopsMixin:
                 node=node, exc_type=TypeError
             )
 
-        old_user_globals = merge_inline_globals(self, inline_result)
-        try:
-            # Fix all missing locations in inlined statements
-            for stmt in inline_result.stmts:
-                ast.fix_missing_locations(stmt)
-
+        with inline_globals_scope(self, inline_result):
             # Visit each inlined statement
             self._visit_stmt_list(inline_result.stmts, add_to_cfg=True)
 
@@ -335,9 +330,6 @@ class LoopsMixin:
                 if not cf.is_terminated():
                     cf.add_stmt(label_stmt)
                     self.visit(label_stmt)
-        finally:
-            # CRITICAL: Restore globals after visiting all inlined statements
-            restore_globals(self, old_user_globals)
 
     def _visit_for_with_constant_unroll(self, node: ast.For, py_iterable):
         """Unroll for loop at compile time for constant iterables
@@ -375,7 +367,7 @@ class LoopsMixin:
         - continue transforms to goto_end(iter_label)
         """
         from ..inline.constant_loop_adapter import ConstantLoopAdapter
-        from ..inline.kernel import InlineResult, merge_inline_globals, restore_globals
+        from ..inline.kernel import InlineResult, inline_globals_scope
 
         cf = self._get_cf_builder()
 
@@ -397,12 +389,8 @@ class LoopsMixin:
             ast.copy_location(stmt, node)
             ast.fix_missing_locations(stmt)
 
-        # Use shared merge/restore helpers
+        # Use shared merge/restore lifecycle via inline_globals_scope
         inline_result = InlineResult(stmts=result.stmts, required_globals=result.required_globals)
-        old_user_globals = merge_inline_globals(self, inline_result)
-        try:
+        with inline_globals_scope(self, inline_result):
             # Visit the transformed statements
             self._visit_stmt_list(result.stmts, add_to_cfg=True)
-        finally:
-            # Restore user_globals
-            restore_globals(self, old_user_globals)
