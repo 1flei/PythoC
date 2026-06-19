@@ -47,6 +47,7 @@ from ..inline.state_field_rewriter import (
 )
 from ..inline.yield_state_machine import (
     YieldStateMachineRequest, lower_yield_state_machine,
+    inline_yield_function_iterators,
 )
 
 _SOURCE_FILE = os.path.abspath(__file__)
@@ -218,6 +219,7 @@ def _instantiate_genexpr(source) -> Any:
         capture_bindings=None,          # genexpr captures handled below
         source_object_id=id(source),
         func_name_hint="genexpr",
+        callee_globals=info.get("globals", {}),
     ))
 
 
@@ -440,6 +442,73 @@ def _compile_ast_function(
     )
 
 
+def _build_init_into_fn(
+    runtime_captures: List[RuntimeCapture],
+    ip: type,
+    suffix: str,
+    gv: Dict[str, Any],
+    *,
+    set_pc: bool = False,
+) -> Optional[Any]:
+    """Build and compile the state materialisation function.
+
+    The generated function takes the state pointer ``s`` followed by one
+    argument per runtime capture, sets ``s._pc`` when ``set_pc`` is true,
+    and stores each capture in its state field.
+    """
+    if any(_is_array_type(capture.pc_type) for capture in runtime_captures):
+        return None
+
+    init_body: List[ast.stmt] = []
+    init_args_list = [ast.arg(arg="s", annotation=None)]
+    init_param_types: Dict[str, type] = {"s": ip}
+
+    if set_pc:
+        init_body.append(ast.Assign(
+            targets=[ast.Attribute(
+                value=ast.Name(id="s", ctx=ast.Load()),
+                attr="_pc",
+                ctx=ast.Store(),
+            )],
+            value=ast.Call(
+                func=ast.Name(id="i32", ctx=ast.Load()),
+                args=[ast.Constant(value=0)],
+                keywords=[],
+            ),
+        ))
+
+    for capture in runtime_captures:
+        init_arg_name = f"_{capture.name}_in"
+        init_args_list.append(ast.arg(arg=init_arg_name, annotation=None))
+        init_param_types[init_arg_name] = capture.pc_type
+        assign = _closure_capture_assign(init_arg_name).stmts[0]
+        assign.targets[0].attr = capture.name
+        init_body.append(assign)
+
+    if not init_body:
+        init_body.append(ast.Pass())
+
+    init_ast = _closure_init_template(init_body).stmts[0]
+    init_ast.args = ast.arguments(
+        posonlyargs=[],
+        args=init_args_list,
+        kwonlyargs=[],
+        kw_defaults=[],
+        defaults=[],
+        vararg=None,
+        kwarg=None,
+    )
+    ast.fix_missing_locations(init_ast)
+
+    return _compile_ast_function(
+        init_ast,
+        param_types=init_param_types,
+        return_type=void,
+        suffix=suffix,
+        gv=gv,
+    )
+
+
 def _build_yield_api(next_fn, value_fn, init_dispatcher, state_type) -> Any:
     """Build the public API object for a compiled yield iterator."""
     class _Api:
@@ -472,6 +541,7 @@ def _compile_yield_fn_pipeline(
     source_object_id: int,
     func_name_hint: str,
     callee_globals: Optional[Dict[str, Any]] = None,
+    capture_runtime: Optional[List[Tuple[str, type]]] = None,
 ) -> Any:
     """
     Shared pipeline.
@@ -484,8 +554,11 @@ def _compile_yield_fn_pipeline(
         func_name_hint: Human-readable name fragment for suffix.
         callee_globals: Mapping ``name -> compile_time_value`` for
             external symbols that need to be bound at instantiate-time.
+        capture_runtime: Optional list of ``(name, pc_type)`` runtime captures
+            that must be stored in the state struct and passed to ``init``.
     """
     fa = copy.deepcopy(func_ast)
+    runtime_captures = normalize_runtime_captures(capture_runtime)
 
     _splice_capture_bindings(fa, capture_bindings)
 
@@ -494,6 +567,9 @@ def _compile_yield_fn_pipeline(
     # control flow breaks normal lexical scoping – a variable assigned in one
     # state block is not visible in another unless it lives on the state object.
     locals_set: Set[str] = local_vars | captured_vars | param_vars
+    # Runtime captures are also stored on the state struct and must be rewritten
+    # to state-field accesses inside the state-machine function.
+    locals_set.update(capture.name for capture in runtime_captures)
     # Intrinsics + struct param ('s') should never be rewritten
     protect_set: Set[str] = set(_INTRINSICS) | {'s'}
     type_resolver = _build_type_resolver(callee_globals)
@@ -503,6 +579,9 @@ def _compile_yield_fn_pipeline(
     compiletime_globals = dict(callee_globals or {})
     if capture_bindings:
         compiletime_globals.update(capture_bindings)
+
+    fa = inline_yield_function_iterators(fa, compiletime_globals)
+
     sm_ast = lower_yield_state_machine(YieldStateMachineRequest(
         func_ast=fa,
         locals_set=locals_set,
@@ -517,6 +596,10 @@ def _compile_yield_fn_pipeline(
                 tuple(sorted(capture_bindings.items(), key=lambda kv: kv[0]))
             ) % 1000003
         )
+    if runtime_captures:
+        binding_parts.append(
+            hash(tuple(capture.name for capture in runtime_captures)) % 1000003
+        )
     suffix = _compute_instantiate_suffix(
         "_y", func_name_hint, source_object_id, *binding_parts
     )
@@ -526,16 +609,19 @@ def _compile_yield_fn_pipeline(
     for name in locals_set:
         lt = _local_type_hint(name, fa, type_resolver)
         fields[name] = lt if lt is not None else i32
+    for capture in runtime_captures:
+        fields[capture.name] = capture.pc_type
 
     _State = _build_state_struct(fields, suffix)
     ip = pc_ptr[_State]
 
+    from pythoc import move
     gv = _build_callee_globals(
         callee_globals,
         locals_set,
         protect_set,
         fa,
-        extra_globals={"_State": _State},
+        extra_globals={"_State": _State, "move": move},
         include_intrinsics=True,
     )
 
@@ -546,12 +632,21 @@ def _compile_yield_fn_pipeline(
         suffix=sfx + "_n",
         gv=gv,
     )
-    init_into_fn = _cq(_init_tmpl.instantiate(), sfx + "_i", {"s": ip}, None, gv)
+    init_into_fn = _build_init_into_fn(
+        runtime_captures, ip, sfx + "_i", gv, set_pc=True
+    )
     vf = _cq(_yld_value.instantiate(), sfx + "_v", {"s": ip}, yield_type, gv)
 
     return _build_yield_api(
         nf, vf,
-        _InitDispatcher(init_into_fn, state_type=_State, set_pc=True),
+        _InitDispatcher(
+            init_into_fn,
+            _runtime_capture_values(runtime_captures),
+            len(runtime_captures),
+            state_type=_State,
+            runtime_captures=runtime_captures,
+            set_pc=True,
+        ),
         _State,
     )
 
@@ -672,12 +767,13 @@ def _compile_closure_fn_pipeline(
         if at is not None:
             param_types[arg.arg] = at
 
+    from pythoc import move
     gv = _build_callee_globals(
         callee_globals,
         state_vars | param_vars,
         protect_set,
         wrapper_ast,
-        extra_globals={"_State": _State, "_Ret": return_type},
+        extra_globals={"_State": _State, "_Ret": return_type, "move": move},
         include_intrinsics=False,
     )
 
@@ -689,38 +785,9 @@ def _compile_closure_fn_pipeline(
         gv=gv,
     )
 
-    init_into_fn = None
-    if not any(_is_array_type(capture.pc_type) for capture in runtime_captures):
-        init_body: List[ast.stmt] = []
-        init_args_list = [ast.arg(arg="s", annotation=None)]
-        init_param_types: Dict[str, type] = {"s": ip}
-        for capture in runtime_captures:
-            init_arg_name = f"_{capture.name}_in"
-            init_args_list.append(ast.arg(arg=init_arg_name, annotation=None))
-            init_param_types[init_arg_name] = capture.pc_type
-            assign = _closure_capture_assign(init_arg_name).stmts[0]
-            assign.targets[0].attr = capture.name
-            init_body.append(assign)
-        if not init_body:
-            init_body.append(ast.Pass())
-        init_ast = _closure_init_template(init_body).stmts[0]
-        init_ast.args = ast.arguments(
-            posonlyargs=[],
-            args=init_args_list,
-            kwonlyargs=[],
-            kw_defaults=[],
-            defaults=[],
-            vararg=None,
-            kwarg=None,
-        )
-        ast.fix_missing_locations(init_ast)
-        init_into_fn = _compile_ast_function(
-            init_ast,
-            param_types=init_param_types,
-            return_type=void,
-            suffix=sfx + "_ii",
-            gv=gv,
-        )
+    init_into_fn = _build_init_into_fn(
+        runtime_captures, ip, sfx + "_ii", gv, set_pc=False
+    )
 
     return _build_closure_api(
         cf,
@@ -892,7 +959,7 @@ def _closure_init_template(body):
 
 @quote
 def _closure_capture_assign(arg_name):
-    s._placeholder = arg_name
+    s._placeholder = move(arg_name)
 
 
 # ---------------------------------------------------------------------------

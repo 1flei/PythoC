@@ -17,6 +17,170 @@ from .state_field_rewriter import StateFieldRewriter, StateFieldRewritePolicy
 _DONE_LABEL = "_done"
 
 
+def inline_yield_function_iterators(
+    func_ast: ast.FunctionDef,
+    compiletime_globals: Optional[Dict[str, Any]] = None,
+) -> ast.FunctionDef:
+    """Pre-inline for-loops whose iterator is a call to a yield function.
+
+    Generator expressions such as ``(x for x in view_three())`` produce a
+    synthetic yield function containing a ``for x in view_three()`` loop.  The
+    state-machine lowerer does not handle arbitrary runtime iterators, so we
+    flatten those loops here by inlining the callee yield function using the
+    same expansion kernel that the AST visitor uses for yield-for-loop
+    inlining.
+
+    Constant iterables are expected to have been expanded already by
+    ``_expand_compiletime_fors``.  This pass handles the remaining dynamic
+    yield-function iterators.
+    """
+    from .kernel import try_expand_inline
+    from .exit_rules import YieldExitRule
+    from .scope_analyzer import ScopeContext
+    from ..utils import get_next_id
+
+    compiletime_globals = compiletime_globals or {}
+
+    def _is_yield_function_call(expr: ast.expr) -> Optional[Any]:
+        if not isinstance(expr, ast.Call):
+            return None
+        func_obj = _resolve_expr_object(expr.func, compiletime_globals)
+        if func_obj is None:
+            return None
+        if not hasattr(func_obj, "_original_ast"):
+            return None
+        fa = getattr(func_obj, "_original_ast")
+        if not isinstance(fa, ast.FunctionDef):
+            return None
+        # Quick check: must contain at least one yield and no return-with-value.
+        checker = _YieldInlinabilityChecker()
+        checker.visit(fa)
+        if not checker.has_yield or checker.has_return_value:
+            return None
+        return func_obj
+
+    def _transform_body(stmts: List[ast.stmt]) -> List[ast.stmt]:
+        changed = False
+        result: List[ast.stmt] = []
+        for stmt in stmts:
+            if isinstance(stmt, ast.For):
+                callee = _is_yield_function_call(stmt.iter)
+                if callee is not None:
+                    inlined = _inline_for_loop(stmt, callee)
+                    if inlined is not None:
+                        result.extend(_transform_body(inlined))
+                        changed = True
+                        continue
+                # Not a yield-function iterator: keep the loop but recurse into
+                # its body in case nested loops are yield-function iterators.
+                stmt.body = _transform_body(stmt.body)
+                stmt.orelse = _transform_body(stmt.orelse)
+                result.append(stmt)
+                continue
+            # Recurse into other compound statements.
+            new_stmt = _transform_substatements(stmt)
+            result.append(new_stmt)
+        return result
+
+    def _transform_substatements(stmt: ast.stmt) -> ast.stmt:
+        stmt = copy.deepcopy(stmt)
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stmt.body = _transform_body(stmt.body)
+        elif isinstance(stmt, ast.If):
+            stmt.body = _transform_body(stmt.body)
+            stmt.orelse = _transform_body(stmt.orelse)
+        elif isinstance(stmt, ast.While):
+            stmt.body = _transform_body(stmt.body)
+            stmt.orelse = _transform_body(stmt.orelse)
+        elif isinstance(stmt, ast.For):
+            stmt.body = _transform_body(stmt.body)
+            stmt.orelse = _transform_body(stmt.orelse)
+        elif isinstance(stmt, ast.With):
+            stmt.body = _transform_body(stmt.body)
+        elif isinstance(stmt, ast.Try):
+            stmt.body = _transform_body(stmt.body)
+            stmt.orelse = _transform_body(stmt.orelse)
+            stmt.finalbody = _transform_body(stmt.finalbody)
+            for handler in stmt.handlers:
+                handler.body = _transform_body(handler.body)
+        elif isinstance(stmt, ast.Match):
+            for case in stmt.cases:
+                case.body = _transform_body(case.body)
+        return stmt
+
+    def _inline_for_loop(
+        for_node: ast.For,
+        callee: Any,
+    ) -> Optional[List[ast.stmt]]:
+        fa = getattr(callee, "_original_ast")
+        callee_globals = dict(getattr(callee, "__globals__", None) or {})
+        callee_globals.update(compiletime_globals)
+
+        loop_var = for_node.target
+        if not isinstance(loop_var, ast.Name):
+            # Tuple unpacking not supported yet.
+            return None
+
+        loop_body = copy.deepcopy(for_node.body)
+        return_type_annotation = (
+            copy.deepcopy(fa.returns) if hasattr(fa, "returns") and fa.returns
+            else None
+        )
+
+        exit_rule = YieldExitRule(
+            loop_var=loop_var,
+            loop_body=loop_body,
+            return_type_annotation=return_type_annotation,
+        )
+
+        caller_context = ScopeContext(available_vars=set())
+        result = try_expand_inline(
+            callee_ast=fa,
+            callee_globals=callee_globals,
+            call_args=copy.deepcopy(for_node.iter.args),
+            call_site=for_node.iter,
+            caller_context=caller_context,
+            exit_rule=exit_rule,
+            tag="instantiate_yield_iter",
+        )
+        if result is None:
+            return None
+        return result.stmts
+
+    transformed = copy.deepcopy(func_ast)
+    transformed.body = _transform_body(transformed.body)
+    return transformed
+
+
+class _YieldInlinabilityChecker(ast.NodeVisitor):
+    """Simple checker for yield function inlinability."""
+
+    def __init__(self):
+        self.has_yield = False
+        self.has_return_value = False
+
+    def visit_Yield(self, node):
+        self.has_yield = True
+        self.generic_visit(node)
+
+    def visit_Return(self, node):
+        if node.value is not None:
+            self.has_return_value = True
+        self.generic_visit(node)
+
+
+def _resolve_expr_object(expr: ast.expr, globs: Dict[str, Any]) -> Optional[Any]:
+    """Resolve a simple expression to a Python object using globals."""
+    if isinstance(expr, ast.Name):
+        return globs.get(expr.id)
+    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
+        obj = globs.get(expr.value.id)
+        if obj is None:
+            return None
+        return getattr(obj, expr.attr, None)
+    return None
+
+
 @dataclass(frozen=True)
 class YieldStateMachineRequest:
     """Input to the yield-to-state-machine transform."""
@@ -232,10 +396,11 @@ def _expand_compiletime_for(
 ) -> List[ast.stmt]:
     elements = _constant_iterable_elements(stmt.iter, constexpr)
     if elements is None:
-        iter_src = ast.unparse(stmt.iter) if hasattr(ast, "unparse") else "<iter>"
-        raise NotImplementedError(
-            f"instantiate: for-loop iterator '{iter_src}' is not a "
-            "compile-time constant iterable.")
+        # Leave dynamic iterators untouched; a later pass may inline
+        # yield-function iterators before the state machine lowerer runs.
+        stmt.body = _expand_compiletime_fors(stmt.body, constexpr)
+        stmt.orelse = _expand_compiletime_fors(stmt.orelse, constexpr)
+        return [stmt]
 
     expanded: List[ast.stmt] = []
     for element in elements:

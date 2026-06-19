@@ -207,5 +207,58 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(run_empty(), 0)
 
 
+# ====================================================================
+# Dynamic yield-function iterators (generator expressions)
+# ====================================================================
+
+@compile
+def view_three() -> i32:
+    yield 1
+    yield 2
+    yield 3
+
+
+@compile
+def view_xs() -> i32:
+    yield 1
+    yield 2
+
+
+@compile
+def view_ys() -> i32:
+    yield 10
+    yield 20
+
+
+@compile
+def run_dynamic_genexpr() -> i32:
+    api = instantiate(x * 2 for x in view_three())
+    it: api.Iter
+    api.init(ptr(it))
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total = total + api.value(ptr(it))
+    return total
+
+
+@compile
+def run_dynamic_nested() -> i32:
+    api = instantiate(x + y for x in view_xs() for y in view_ys())
+    it: api.Iter
+    api.init(ptr(it))
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total = total + api.value(ptr(it))
+    return total
+
+
+class TestDynamicIterator(unittest.TestCase):
+    def test_simple(self):
+        self.assertEqual(run_dynamic_genexpr(), 12)
+
+    def test_nested(self):
+        self.assertEqual(run_dynamic_nested(), 66)
+
+
 if __name__ == '__main__':
     unittest.main()

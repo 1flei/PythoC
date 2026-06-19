@@ -281,6 +281,7 @@ class ExpressionsMixin:
         result._pc_generator_expr_info = {
             "ast": copy.deepcopy(node),
             "kind": "generator_expression",
+            "globals": getattr(self.ctx, "user_globals", None) or {},
         }
         return result
     
