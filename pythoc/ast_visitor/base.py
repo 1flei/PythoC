@@ -93,10 +93,24 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self.func_state = None  # ActiveCompileFrame, set by compiler.py
         self.binding_state = None  # FunctionBindingState, set by compiler.py
         self._current_function = None
+        self._current_node: Optional[ast.AST] = None
         self.label_counter = 0
         self.compiler = compiler
         self._python_global_cache: dict = {}  # Cache for _lookup_python_global_binding
     
+    def visit(self, node):
+        """Walk an AST node and make it available as the current debug node.
+
+        Builder calls that happen while a node is being visited can use
+        ``self._current_node`` to attach DWARF source locations.
+        """
+        old_node = self._current_node
+        self._current_node = node
+        try:
+            return super().visit(node)
+        finally:
+            self._current_node = old_node
+
     @property
     def struct_types(self):
         return self.ctx.struct_types

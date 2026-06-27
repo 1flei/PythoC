@@ -188,6 +188,12 @@ _register(
     'LLVM optimisation level (0..3) applied before object emission.',
     'Sampled when each compile group is flushed.',
 )
+_register(
+    'debug_info', 'PC_DEBUG_INFO', False, _to_bool,
+    'Emit DWARF debug info (line tables for functions/source lines) into '
+    'object files and linked binaries.',
+    'Sampled when each compile group is flushed.',
+)
 
 
 # --- cimport / external toolchain ----------------------------------------

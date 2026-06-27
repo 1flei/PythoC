@@ -12,6 +12,8 @@ from .ast_visitor import LLVMIRVisitor
 from .registry import get_unified_registry
 from .type_resolver import TypeResolver
 from .logger import logger
+from .config import config
+from .debug_info import DebugInfoBuilder
 
 # Initialize LLVM
 # llvmlite 0.45+ auto-initializes core; calling initialize() raises RuntimeError.
@@ -50,6 +52,7 @@ class LLVMCompiler:
         self.compiled_functions = []
         # Optimized IR text cache, invalidated whenever a new body is added.
         self._optimized_ir = None
+        self._debug_info = None
 
         self.user_globals = user_globals or {}  # User code's global namespace
         self.create_module()
@@ -74,6 +77,14 @@ class LLVMCompiler:
         return self.module
     
     
+    def _get_debug_info(self, source_file: str):
+        """Return the DebugInfoBuilder for the current module, if enabled."""
+        if not config.debug_info:
+            return None
+        if self._debug_info is None or self._debug_info.module is not self.module:
+            self._debug_info = DebugInfoBuilder(self.module, source_file)
+        return self._debug_info
+
     def _recreate_type_in_context(self, pc_type):
         """Recreate a PC type's LLVM representation in current module's context"""
         # Handle None
@@ -176,20 +187,36 @@ class LLVMCompiler:
             kwargs=resolved_kwargs,
         )
 
-    def compile_function_from_ast(self, ast_node: ast.FunctionDef, source_code: str = None, reset_module: bool = False, param_type_hints: dict = None, return_type_hint = None, user_globals: dict = None, group_key = None, func_state = None) -> ir.Function:
+    def compile_function_from_ast(
+        self,
+        ast_node: ast.FunctionDef,
+        source_code: str = None,
+        reset_module: bool = False,
+        param_type_hints: dict = None,
+        return_type_hint = None,
+        user_globals: dict = None,
+        group_key = None,
+        func_state = None,
+        source_start_line: int = 1,
+        original_name: str = None,
+    ) -> ir.Function:
         """
         Compile a function directly from an AST node (meta-programming support)
-        
+
         This is used for runtime-generated functions where we have the AST
         but not necessarily the original source file.
-        
+
         Args:
             ast_node: The AST FunctionDef node to compile
             source_code: Optional source code string (for debugging/context)
             reset_module: If True, create a fresh module; if False, add to existing module
             param_type_hints: Optional dict mapping parameter names to PC types (for meta-programming)
             return_type_hint: Optional return type hint (for meta-programming)
-        
+            source_start_line: 1-based line number of the first line of ``source_code``
+                in the original source file.  Used to map AST line numbers to
+                absolute file lines for debug info.
+            original_name: Original (unmangled) function name for debug display.
+
         Returns:
             The compiled LLVM function
         """
@@ -303,12 +330,36 @@ class LLVMCompiler:
         # This must happen before parameter initialization which uses visitor.builder
         from .ast_visitor.control_flow_builder import ControlFlowBuilder
         visitor.builder = ControlFlowBuilder(real_builder, visitor, ast_node.name)
-        
+
+        # Attach DWARF debug metadata when requested.
+        debug_builder = None
+        subprogram = None
+        line_offset = 0
+        if config.debug_info:
+            source_file = (
+                func_state.source_file
+                if func_state is not None
+                else (group_key[0] if group_key else '<unknown>')
+            )
+            debug_builder = self._get_debug_info(source_file)
+            if debug_builder is not None:
+                line_offset = source_start_line - 1
+                func_line = line_offset + ast_node.lineno
+                display_name = original_name or ast_node.name
+                subprogram = debug_builder.get_subprogram(
+                    display_name, llvm_function, func_line
+                )
+                visitor.builder.set_debug_info(subprogram, line_offset)
+
         # Initialize parameters - they will be registered in variable registry
         # For struct varargs, we also initialize the expanded parameters AND create a struct
         normal_param_count = len(ast_node.args.args)
         from .context import VariableInfo
         from .valueref import wrap_value
+
+        # Collect parameter VariableInfos in LLVM argument order so that the
+        # DISubroutineType can be finalized with real PC types.
+        param_var_infos: List[VariableInfo] = []
         
         # First, register all normal parameters
         # Use func_wrapper.get_user_arg_unpacked() to handle ABI coercion transparently
@@ -342,9 +393,13 @@ class LLVMCompiler:
                 alloca=alloca,
                 source="parameter",
                 is_parameter=True,
-                is_mutable=True
+                is_mutable=True,
+                line_number=arg.lineno,
+                column=getattr(arg, 'col_offset', None),
+                parameter_index=i + 1,
             )
             visitor.scope_manager.declare_variable(var_info, allow_shadow=True)
+            param_var_infos.append(var_info)
             
             # Initialize linear states for parameters (active = ownership transferred)
             if type_hint and visitor._is_linear_type(type_hint):
@@ -376,8 +431,12 @@ class LLVMCompiler:
                 source="parameter",
                 is_parameter=True,
                 is_mutable=False,
+                line_number=ast_node.lineno,
+                column=0,
+                parameter_index=normal_param_count + 1,
             )
             visitor.scope_manager.declare_variable(varargs_var_info, allow_shadow=True)
+            param_var_infos.append(varargs_var_info)
         
         # For typed **kwargs (**kwargs: T), register the kwargs parameter.
         # It is the last LLVM parameter (after normal params and varargs).
@@ -408,8 +467,20 @@ class LLVMCompiler:
                 source="parameter",
                 is_parameter=True,
                 is_mutable=False,
+                line_number=ast_node.lineno,
+                column=0,
+                parameter_index=normal_param_count + vararg_count + 1,
             )
             visitor.scope_manager.declare_variable(kwargs_var_info, allow_shadow=True)
+            param_var_infos.append(kwargs_var_info)
+
+        # Finalize the subroutine type now that parameter types are known.
+        if config.debug_info and debug_builder is not None and subprogram is not None:
+            debug_builder.finalize_subprogram_type(
+                subprogram,
+                resolved_decl.return_type_hint,
+                param_var_infos,
+            )
 
         # Initialize list to accumulate all inlined statements (via func_state)
         visitor._all_inlined_stmts = compile_frame.all_inlined_stmts
@@ -479,6 +550,32 @@ class LLVMCompiler:
         # Replay PCIR -> actual LLVM IR
         # This must happen after all CFG analysis and scope checking.
         visitor.builder.emit_ir()
+
+        # Emit DWARF local variable descriptors now that allocas are real values.
+        if config.debug_info and debug_builder is not None and subprogram is not None:
+            entry_block = llvm_function.entry_basic_block
+            visitor.builder.position_at_start(entry_block)
+            for var_info in visitor.scope_manager.get_function_variables():
+                if var_info.alloca is None:
+                    continue
+                alloca = var_info.alloca
+                if hasattr(alloca, 'resolve'):
+                    alloca = alloca.resolve()
+                var_line = (var_info.line_number or ast_node.lineno) + line_offset
+                var_col = (var_info.column or 0) + 1
+                location = debug_builder.get_location(subprogram, var_line, var_col)
+                dilocal_var = debug_builder.declare_local(
+                    subprogram,
+                    var_info.name,
+                    var_info.type_hint,
+                    var_line,
+                    var_col,
+                    is_parameter=var_info.is_parameter,
+                    arg_index=var_info.parameter_index,
+                )
+                debug_builder.emit_local_declare(
+                    visitor.builder, alloca, dilocal_var, location
+                )
 
         if getattr(func_state, 'wrapper', None) is not None:
             func_info = getattr(func_state.wrapper, '_func_info', None)

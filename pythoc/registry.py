@@ -59,6 +59,7 @@ class VariableInfo:
     is_global: bool = False
     scope_level: int = 0
     column: Optional[int] = None
+    parameter_index: Optional[int] = None  # 1-based parameter position for DWARF
     
     # Unique ID for CFG linear tracking (distinguishes shadowed variables)
     var_id: int = field(default_factory=_get_next_var_id)

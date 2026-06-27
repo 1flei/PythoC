@@ -150,6 +150,32 @@ class ControlFlowBuilder:
         # new instructions go after the watermark (not at index 0).
         self._start_watermark: Dict[int, int] = {}
 
+        # DWARF debug info state for replay.
+        self._debug_subprogram = None
+        self._debug_line_offset = 0
+
+    def set_debug_info(self, subprogram, line_offset: int = 0):
+        """Set the DISubprogram and source line offset for DILocation replay."""
+        self._debug_subprogram = subprogram
+        self._debug_line_offset = line_offset
+
+    def _make_debug_location(self, node: Optional[ast.AST]):
+        """Create a DILocation for an AST node, or None if not applicable."""
+        if self._debug_subprogram is None or node is None:
+            return None
+        line = getattr(node, 'lineno', None)
+        if line is None:
+            return None
+        col = getattr(node, 'col_offset', 0) or 0
+        return self._real_builder.ir_builder.module.add_debug_info(
+            'DILocation',
+            {
+                'line': line + self._debug_line_offset,
+                'column': col + 1,
+                'scope': self._debug_subprogram,
+            },
+        )
+
     def __getattr__(self, name):
         """Record PCIR instruction instead of delegating to real builder.
 
@@ -186,6 +212,9 @@ class ControlFlowBuilder:
         Tracks per-block watermark so subsequent position_at_start calls
         insert after previously-inserted-at-start instructions.
         """
+        if inst.node is None and self._visitor is not None:
+            inst.node = getattr(self._visitor, '_current_node', None)
+
         cfg_block = self._cfg.blocks[self._current_block_id]
         if self._insert_at_start:
             cfg_block.pcir.insert(self._insert_idx, inst)
@@ -783,6 +812,11 @@ class ControlFlowBuilder:
                      phi_nodes: list, switch_nodes: list):
         """Replay a single PCIR instruction on the real builder."""
         op = inst.op
+
+        # Attach the current source location to the next emitted instruction.
+        if self._debug_subprogram is not None:
+            loc = self._make_debug_location(inst.node)
+            self._real_builder.ir_builder.debug_metadata = loc
 
         # Resolve all args
         resolved_args = tuple(resolve_arg(a, block_map) for a in inst.args)

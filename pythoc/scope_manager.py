@@ -120,10 +120,15 @@ class ScopeManager:
     
     def __init__(self):
         """Initialize scope manager with its own internal variable registry."""
-        from .registry import _InternalVariableRegistry
+        from .registry import VariableInfo, _InternalVariableRegistry
         self._var_registry = _InternalVariableRegistry()
         self._scopes: List[Scope] = []
         self._visitor: Optional[Any] = None  # Set by visitor
+
+        # All variables declared during the current function compilation.
+        # Nested scopes are popped before IR emission, so this list preserves
+        # the variables needed for DWARF local variable descriptors.
+        self._function_variables: List[VariableInfo] = []
 
         # Label tracking state (single source of truth)
         # These persist after scope exit for sibling/uncle goto visibility
@@ -345,6 +350,8 @@ class ScopeManager:
         self._var_registry.declare(var_info, allow_shadow=allow_shadow)
         if self._scopes:
             self._scopes[-1].variables[var_info.name] = var_info
+        # Preserve for DWARF local variable emission after IR generation.
+        self._function_variables.append(var_info)
         # Record hazard for sibling crossing check
         depth = self.current_depth
         lineno = getattr(var_info, 'line_number', None)
@@ -364,6 +371,10 @@ class ScopeManager:
     def get_all_in_current_scope(self) -> List[Any]:
         """Get all variables in the current scope"""
         return self._var_registry.get_all_in_current_scope()
+
+    def get_function_variables(self) -> List[Any]:
+        """Get all variables declared during the current function compilation."""
+        return list(self._function_variables)
 
     @property
     def scopes(self):
@@ -405,6 +416,7 @@ class ScopeManager:
         self._scope_labels = {}
         self._all_labels = {}
         self._scope_hazards = {}
+        self._function_variables = []
         # Pending gotos are owned by ControlFlowBuilder (fresh per function)
 
     def register_label(self, ctx: Any):

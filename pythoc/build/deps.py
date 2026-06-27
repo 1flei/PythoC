@@ -177,6 +177,10 @@ class GroupDeps:
     # the generated AST changes (common in meta-generated code).
     ast_content_hash: Optional[str] = None
 
+    # Whether this object was built with debug info enabled.  Changing the
+    # flag must invalidate the cached object.
+    debug_info: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization with compressed group keys."""
         # Collect all unique group keys
@@ -213,6 +217,9 @@ class GroupDeps:
 
         if self.ast_content_hash:
             result['ast_content_hash'] = self.ast_content_hash
+
+        if self.debug_info:
+            result['debug_info'] = True
 
         # Add group keys table if we have any
         if unique_group_keys:
@@ -254,6 +261,7 @@ class GroupDeps:
         effects_used = set(d.get('effects_used', []))
         compiled_symbols = d.get('compiled_symbols', [])
         ast_content_hash = d.get('ast_content_hash')
+        debug_info = d.get('debug_info', False)
 
         return cls(
             version=d.get('version', DEPS_VERSION),
@@ -265,6 +273,7 @@ class GroupDeps:
             effects_used=effects_used,
             compiled_symbols=compiled_symbols,
             ast_content_hash=ast_content_hash,
+            debug_info=debug_info,
         )
 
     

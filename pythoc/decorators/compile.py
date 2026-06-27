@@ -786,6 +786,8 @@ def _compile_impl(func_or_class,
                     user_globals=st.compilation_globals,
                     group_key=st.group_key,
                     func_state=st,
+                    source_start_line=_start_line,
+                    original_name=st.original_name,
                 )
         finally:
             if st.effect_suffix:

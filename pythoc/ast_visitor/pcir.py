@@ -12,6 +12,7 @@ Key classes:
 """
 
 from __future__ import annotations
+import ast
 from dataclasses import dataclass, field
 from typing import Optional, Any, Tuple, List
 from llvmlite import ir
@@ -191,11 +192,13 @@ class PCIRInst:
         args: Positional args (may contain VRegs, ir.Type, ir.Constant, etc.)
         kwargs: Keyword args
         result: Output VReg (None for void ops: store, branch, ret, etc.)
+        node: Optional AST node used for debug location.
     """
     op: str
     args: tuple
     kwargs: dict = field(default_factory=dict)
     result: Any = None  # VReg, VRegPhi, VRegSwitch, or None
+    node: Optional[ast.AST] = None
 
     def __repr__(self):
         result_str = f" -> {self.result}" if self.result is not None else ""

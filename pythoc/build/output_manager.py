@@ -425,6 +425,23 @@ class OutputManager:
                         )
                         return False
 
+        # Changing debug_info settings must invalidate cached objects, otherwise
+        # a previously-built object without DWARF would be reused after enabling
+        # PC_DEBUG_INFO (and vice versa).
+        obj_file = group.get('obj_file')
+        if obj_file:
+            from .deps import get_dependency_tracker
+            from ..config import config
+            dep_tracker = get_dependency_tracker()
+            cached_deps = dep_tracker.load_deps(obj_file)
+            if cached_deps and cached_deps.debug_info != bool(config.debug_info):
+                from ..logger import logger
+                logger.debug(
+                    f"Cache miss for {group_key}: debug_info changed "
+                    f"({cached_deps.debug_info} -> {config.debug_info})"
+                )
+                return False
+
         if not self._cached_dependency_outputs_exist(group):
             return False
 
@@ -1200,6 +1217,11 @@ class OutputManager:
                 group_deps.ast_content_hash = hashlib.sha256(
                     combined.encode('utf-8')
                 ).hexdigest()[:16]
+
+            # Record whether debug info was enabled for this object, so that
+            # toggling PC_DEBUG_INFO invalidates the cache.
+            from ..config import config
+            group_deps.debug_info = bool(config.debug_info)
 
             # Propagate transitive effects from dependent groups.
             # If this group calls functions in groups that use effects (e.g., c_ast uses
