@@ -325,6 +325,14 @@ class MultiSOExecutor:
         if deps:
             # Use group-level deps system
             for group_dep in deps.group_dependencies:
+                # source_embed dependencies are compile-time edges (the caller's
+                # object code embeds the callee's body/type layout by value).
+                # They are used only for cache invalidation and must not be
+                # treated as link-time dependencies, especially on Windows where
+                # the stub link mode would try to link a .dll that may not exist
+                # for inlined-only builtin generators (e.g. refine, seq).
+                if getattr(group_dep, 'dependency_type', None) == "source_embed":
+                    continue
                 if group_dep.target_group:
                     dep_source_file = group_dep.target_group.file
                     # Derive so_file from group_key directly (not from registry)

@@ -2,6 +2,9 @@
 Unit tests for native executor caching behavior.
 """
 
+import json
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -178,6 +181,87 @@ class TestMultiSOExecutor(unittest.TestCase):
             )
 
         self.assertIsNone(libs)
+        self.assertEqual(task_deps, ())
+
+    def test_source_embed_dependency_is_not_link_dependency(self):
+        """source_embed deps are compile-time edges and must not be linked."""
+        executor = MultiSOExecutor()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            main_source = os.path.join(tmpdir, "main.py")
+            embed_source = os.path.join(tmpdir, "embed.py")
+            callee_source = os.path.join(tmpdir, "callee.py")
+
+            main_so = os.path.join(tmpdir, f"main{get_shared_lib_extension()}")
+            main_obj = main_so.replace(get_shared_lib_extension(), ".o")
+            deps_file = main_obj.replace(".o", ".deps")
+
+            # Files outside cwd are placed under build/external/ by
+            # _derive_so_file_from_group_key, so compute the expected path.
+            callee_so_expected = os.path.join(
+                "build", "external", f"callee{get_shared_lib_extension()}"
+            )
+
+            deps_data = {
+                "version": 11,
+                "source_mtime": 0.0,
+                "link_objects": [],
+                "link_libraries": [],
+                "group_keys": [
+                    [main_source, None, None, None],
+                    [embed_source, None, None, None],
+                    [callee_source, None, None, None],
+                ],
+                "main_group_idx": 0,
+                "group_dependencies": [
+                    {"dependency_type": "source_embed", "target_group_idx": 1},
+                    {"dependency_type": "function_call", "target_group_idx": 2},
+                ],
+            }
+            with open(deps_file, "w") as f:
+                json.dump(deps_data, f)
+
+            dependencies = executor._get_library_dependencies(main_source, main_so)
+
+        self.assertEqual(dependencies, [(callee_source, callee_so_expected)])
+
+    def test_windows_stub_mode_ignores_source_embed_target(self):
+        """On Windows, source_embed targets must not appear in the link command."""
+        executor = MultiSOExecutor()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            main_source = os.path.join(tmpdir, "main.py")
+            embed_source = os.path.join(tmpdir, "embed.py")
+            main_so = os.path.join(tmpdir, "main.dll")
+            main_obj = main_so.replace(".dll", ".o")
+            deps_file = main_obj.replace(".o", ".deps")
+            embed_so = os.path.join(tmpdir, "embed.dll")
+
+            deps_data = {
+                "version": 11,
+                "source_mtime": 0.0,
+                "link_objects": [],
+                "link_libraries": [],
+                "group_keys": [
+                    [main_source, None, None, None],
+                    [embed_source, None, None, None],
+                ],
+                "main_group_idx": 0,
+                "group_dependencies": [
+                    {"dependency_type": "source_embed", "target_group_idx": 1},
+                ],
+            }
+            with open(deps_file, "w") as f:
+                json.dump(deps_data, f)
+
+            with patch("pythoc.native_executor.sys.platform", "win32"):
+                libs, task_deps = executor._dependency_link_plan(
+                    main_obj,
+                    main_so,
+                    executor._get_library_dependencies(main_source, main_so),
+                )
+
+        self.assertEqual(libs, [])
         self.assertEqual(task_deps, ())
 
 
