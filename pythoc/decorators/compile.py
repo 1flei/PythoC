@@ -691,6 +691,16 @@ def _compile_impl(func_or_class,
     # Note: We do NOT check cache here. Cache is checked at flush time.
     # This allows all @compile decorators to register before any flush happens.
     
+    # --- Registration-phase cache: if the same group was already compiled
+    # and its object file is still up-to-date, reuse the existing wrapper
+    # instead of rebuilding AST / binding_state / compile_callback.
+    existing_wrapper = _try_reuse_cached_wrapper(
+        output_manager, group_key, func, wrapper,
+        compile_suffix, effect_suffix,
+    )
+    if existing_wrapper is not None:
+        return existing_wrapper
+
     func_info = FunctionInfo(
         name=func.__name__,
         source_file=source_file,
@@ -747,6 +757,10 @@ def _compile_impl(func_or_class,
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
     output_manager.record_group_planning_deps_from_globals(
+        group_key, binding_state.compilation_globals,
+    )
+    from ..build.deps import get_dependency_tracker
+    get_dependency_tracker().record_type_layout_deps_from_globals(
         group_key, binding_state.compilation_globals,
     )
 
@@ -852,3 +866,111 @@ def _compile_impl(func_or_class,
     wrapper.handle_call = handle_call
     wrapper._is_compiled = True
     return wrapper
+
+
+def _clone_binding_to_wrapper(binding, existing, wrapper):
+    """Clone binding state from *existing* wrapper onto *new* wrapper."""
+    import copy
+    new_binding = copy.copy(binding)
+    new_binding.wrapper = wrapper
+
+    wrapper._binding = new_binding
+    wrapper._state = new_binding
+    wrapper._func_info = existing._func_info
+    wrapper._signature = existing._signature
+
+    # Backward-compat aliases
+    wrapper._so_file = new_binding.so_file
+    wrapper._source_file = new_binding.source_file
+    wrapper._compiler = new_binding.compiler
+    wrapper._original_name = new_binding.original_name
+    wrapper._actual_func_name = new_binding.actual_func_name
+    wrapper._mangled_name = new_binding.mangled_name
+    wrapper._group_key = new_binding.group_key
+    wrapper._compile_suffix = new_binding.compile_suffix
+    wrapper._effect_suffix = new_binding.effect_suffix
+    wrapper._is_compiled = True
+
+    # The compiler lowers calls to this wrapper via handle_call. It must be a
+    # fresh closure capturing the new wrapper, not a copy of the existing one.
+    def handle_call(visitor, func_ref, args, node):
+        from ..call_normalization import lower_compile_handle_call
+        return lower_compile_handle_call(wrapper, visitor, func_ref, args, node)
+
+    wrapper.handle_call = handle_call
+
+    def get_effect_specialized(target_effect_suffix, effect_overrides):
+        if wrapper._binding.effect_suffix == target_effect_suffix:
+            return wrapper
+        return materialize_specialization(
+            wrapper, target_effect_suffix, effect_overrides)
+
+    wrapper.get_effect_specialized = get_effect_specialized
+
+
+def _try_reuse_cached_wrapper(
+    output_manager, group_key, func, wrapper,
+    compile_suffix, effect_suffix,
+):
+    """Try to reuse an existing wrapper from a previously-registered group.
+
+    Two tiers of caching are checked in order:
+
+    1. On-disk cache: the group's ``.o`` file already exists and is
+       up-to-date. The flush-time cache will later reuse the object file;
+       here we only avoid rebuilding the registration metadata (AST parse,
+       FunctionInfo, FunctionBindingState) when an identical wrapper already
+       exists in this process.
+
+    2. In-process cache: no ``.o`` exists yet, but the same group already
+       holds wrappers in this process (e.g. a second instantiation of the
+       same generic type with the same ``type_suffix``). We clone the
+       existing ``FunctionBindingState`` onto the new wrapper, skipping the
+       expensive ``getsource -> ast.parse -> binding_state`` work entirely.
+       Compilation correctness is not affected because the real lowering
+       still happens at ``flush_all`` time when the ``.o`` is eventually
+       produced.
+    """
+    group = output_manager._all_groups.get(group_key)
+    if group is None:
+        return None
+
+    # Helper – locate an existing wrapper whose binding matches the
+    # requested signature.
+    def _find_match():
+        for existing in group.get('all_wrappers', []):
+            binding = getattr(existing, '_binding', getattr(existing, '_state', None))
+            if binding is None:
+                continue
+            if (
+                binding.original_name == func.__name__
+                and binding.compile_suffix == compile_suffix
+                and binding.effect_suffix == effect_suffix
+            ):
+                return existing, binding
+        return None, None
+
+    # Tier 1 – .o cache hit (object file on disk is fresh).
+    # We still record type-layout dependencies from the current globals so
+    # source_embed edges are not lost across registration-phase reuse.
+    if output_manager._group_object_cache_hit(group_key, group):
+        existing, binding = _find_match()
+        if existing is not None:
+            _clone_binding_to_wrapper(binding, existing, wrapper)
+            from ..build.deps import get_dependency_tracker
+            get_dependency_tracker().record_type_layout_deps_from_globals(
+                tuple(group_key), wrapper._binding.compilation_globals,
+            )
+            output_manager.add_wrapper_to_group(group_key, wrapper)
+            return wrapper
+        return None
+
+    # Tier 2 – in-process cache: the same group was already registered
+    # in this process (no on-disk .o yet, and possibly not flushed).
+    existing, binding = _find_match()
+    if existing is not None:
+        _clone_binding_to_wrapper(binding, existing, wrapper)
+        output_manager.add_wrapper_to_group(group_key, wrapper)
+        return wrapper
+
+    return None

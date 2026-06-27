@@ -465,6 +465,10 @@ class OutputManager:
         cwd = os.getcwd()
 
         for group_dep in deps.group_dependencies:
+            # source_embed deps are validated by mtime, not output existence
+            # (an inlined-only module may emit no object of its own).
+            if getattr(group_dep, 'dependency_type', None) == "source_embed":
+                continue
             target_group = getattr(group_dep, 'target_group', None)
             if target_group is None or not target_group.file:
                 continue
@@ -731,8 +735,47 @@ class OutputManager:
         return (
             bool(source_file)
             and BuildCache.check_obj_uptodate(obj_file, source_file)
+            and self._cached_source_embed_deps_uptodate(group)
             and self._cached_object_covers_pending_symbols(group_key, group)
         )
+
+    def _cached_source_embed_deps_uptodate(self, group) -> bool:
+        """Check cached object is newer than every source-embed dependency.
+
+        A source-embed dependency means this group's object embeds, by value,
+        code or a type layout owned by another source file (e.g. a cross-module
+        inlined yield generator and the structs it allocates). The cache only
+        tracks each group's own mtime, so without this check a layout change in
+        the dependency would be served from a stale .o whose baked-in frame size
+        no longer matches -> silent memory corruption. We conservatively treat
+        the cache as stale whenever a dependency source is newer than the .o.
+        """
+        obj_file = group.get('obj_file')
+        if not obj_file:
+            return True
+
+        from .deps import get_dependency_tracker
+        from .cache import BuildCache
+
+        deps = get_dependency_tracker().load_deps(obj_file)
+        if not deps:
+            return True
+
+        for group_dep in deps.group_dependencies:
+            if getattr(group_dep, 'dependency_type', None) != "source_embed":
+                continue
+            target_group = getattr(group_dep, 'target_group', None)
+            if target_group is None or not target_group.file:
+                continue
+            if not BuildCache.check_obj_uptodate(obj_file, target_group.file):
+                from ..logger import logger
+                logger.debug(
+                    f"Cache miss for {group.get('source_file')}: source-embed "
+                    f"dependency {target_group.file} is newer than {obj_file}"
+                )
+                return False
+
+        return True
 
     def _commit_cached_group(self, group_key, group):
         """Commit OutputManager state after a cache hit."""

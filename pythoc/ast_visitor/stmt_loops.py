@@ -293,6 +293,14 @@ class LoopsMixin:
         func_obj = inline_info.get('func_obj', None)
         callee_globals = inline_info.get('callee_globals', None)
 
+        # The inlined generator body is spliced into this group's object code by
+        # value, including the layout/size of any structs it allocates. If that
+        # generator lives in another source file, this group must be recompiled
+        # whenever that file changes; otherwise the cache keeps a stale frame
+        # layout and corrupts memory. Record a source-embed dependency so the
+        # incremental cache mtime-invalidates this group against the callee.
+        self._record_inline_source_dependency(func_obj)
+
         # Get inlined result
         # after_else_label is the label name for break to jump to (skip else)
         inline_result, after_else_label = adapter.try_inline_for_loop(
@@ -330,6 +338,39 @@ class LoopsMixin:
                 if not cf.is_terminated():
                     cf.add_stmt(label_stmt)
                     self.visit(label_stmt)
+
+    def _record_inline_source_dependency(self, func_obj):
+        """Record a source-embed dependency on an inlined generator's file.
+
+        Cross-module yield inlining copies the callee's body (and the layout of
+        structs it allocates) into the current group's object file. The
+        incremental cache only tracks each group's own source mtime, so without
+        this edge a layout change in the callee leaves a stale frame size in
+        this group's cached .o. Recording a "source_embed" dependency makes the
+        cache rebuild this group when the callee's source file changes. Same-file
+        inlining needs no edge: the group's own mtime already covers it.
+        """
+        if func_obj is None:
+            return
+        caller_group_key = self.current_group_key
+        if not caller_group_key:
+            return
+
+        from ..utils.inspect_utils import get_function_file_with_inspect
+        callee_file = get_function_file_with_inspect(func_obj)
+        if not callee_file:
+            return
+
+        caller_file = caller_group_key[0] if len(caller_group_key) else None
+        if caller_file == callee_file:
+            return
+
+        from ..build.deps import get_dependency_tracker
+        get_dependency_tracker().record_group_dependency(
+            tuple(caller_group_key),
+            (callee_file, None, None, None),
+            "source_embed",
+        )
 
     def _visit_for_with_constant_unroll(self, node: ast.For, py_iterable):
         """Unroll for loop at compile time for constant iterables

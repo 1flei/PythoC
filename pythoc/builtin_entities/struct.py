@@ -82,6 +82,13 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     _struct_info: Optional[Any] = None  # StructInfo from registry
     _llvm_struct_type: Optional[Any] = None  # Cached IdentifiedStructType
     _setting_body: bool = False  # Flag to prevent recursive body setting
+    # Force the IdentifiedStructType path even without a backing @compile class.
+    # A self-referential struct (a field that forward-references the struct's
+    # own name, e.g. ptr["Node"]) cannot be expressed as a literal (structural)
+    # LLVM type, so a named identified type is required to break the cycle.
+    # Programmatically built struct types set this together with _canonical_name
+    # to name the identified type.
+    _force_identified: bool = False
     _llvm_body_set: bool = False  # Whether LLVM body has been set
     _structure_hash: Optional[int] = None  # Hash for fast type compatibility check
     _llvm_field_map: Optional[Dict[int, int]] = None  # PC field idx -> LLVM field idx
@@ -237,8 +244,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
         
-        # Rule: @compile class always uses IdentifiedStructType
-        if cls._is_compile_class():
+        # Rule: @compile class always uses IdentifiedStructType.
+        # _force_identified extends this to named programmatic structs, which is
+        # required for recursive types (a literal struct cannot reference itself).
+        if cls._is_compile_class() or cls._force_identified:
             if module_context is None:
                 logger.error(
                     f"@compile class '{cls._canonical_name}' requires module_context for IdentifiedStructType",

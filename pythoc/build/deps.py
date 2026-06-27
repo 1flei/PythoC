@@ -27,7 +27,17 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 8  # Increment when scheduler/cache/effect planning semantics change
+DEPS_VERSION = 11  # Increment when scheduler/cache/effect planning semantics change
+
+
+def _type_source_file(pc_type: Any) -> Optional[str]:
+    """Best-effort source file where a @compile aggregate/enum type is defined."""
+    import inspect
+    try:
+        src = inspect.getsourcefile(pc_type) or inspect.getfile(pc_type)
+    except (TypeError, OSError):
+        return None
+    return os.path.abspath(src) if src else None
 
 
 @dataclass
@@ -110,9 +120,23 @@ class GroupKey:
 
 @dataclass
 class GroupDependency:
-    """Dependency on another compilation group."""
+    """Dependency on another compilation group.
+
+    dependency_type semantics:
+    - "function_call"/"function_ref"/"effect"/"import": link-time references.
+      The caller does not embed the target's code by value, so a change to the
+      target's *body* only requires a relink, not a caller recompile. The cache
+      only checks that the target's output artifacts still exist.
+    - "source_embed": the caller's object code embeds, by value, code or a type
+      layout whose source of truth lives in the target group's source file
+      (e.g. a cross-module yield generator inlined into the caller, which also
+      bakes in the layout/size of structs it allocates). Such a caller MUST be
+      recompiled when the target's source file changes, otherwise the caller
+      keeps a stale, wrong-sized frame -> silent memory corruption. The cache
+      therefore mtime-invalidates the caller against these targets' sources.
+    """
     target_group: GroupKey              # The group we depend on
-    dependency_type: str = "function_call"  # Type: "function_call", "effect", "import"
+    dependency_type: str = "function_call"  # See class docstring for values
     
     def to_dict(self, group_key_index: Optional[int] = None) -> Dict[str, Any]:
         """Convert to dict for JSON serialization."""
@@ -359,6 +383,50 @@ class DependencyTracker:
             target_group = GroupKey.from_tuple(target_group_key)
             caller_deps.add_group_dependency(target_group, dependency_type)
     
+    def record_type_layout_deps_from_globals(self, group_key: Tuple, globals_dict: Dict[str, Any]):
+        """Record source_embed deps for cross-module @compile types in globals.
+
+        A group that imports a @compile struct/union/enum bakes that type's
+        layout (size, field offsets) into its own object code -- e.g. via
+        sizeof(T), an array[T, N] local, a by-value T field/parameter, or a
+        stack slot of type T. The incremental cache only tracks each group's
+        own source mtime, so a layout change in the *defining* module would
+        otherwise be served from this group's stale .o whose baked-in frame
+        size no longer matches, causing silent memory corruption.
+
+        Recording a source_embed edge to the defining file forces a rebuild of
+        this group whenever that file changes. Plain function references stay
+        link-time (function_ref) and are intentionally not covered here.
+        """
+        if not isinstance(globals_dict, dict) or not group_key:
+            return
+        import sys
+        stdlib = getattr(sys, 'stdlib_module_names', frozenset())
+        caller_file = group_key[0] if len(group_key) else None
+        recorded: Set[str] = set()
+        for value in globals_dict.values():
+            if not isinstance(value, type):
+                continue
+            # @compile struct/union/enum types carry a `_field_types` schema and
+            # a sized LLVM layout; builtin scalars (i32, ptr, ...) and function
+            # wrappers do not, so their ABI is fixed and needs no source edge.
+            if getattr(value, '_field_types', None) is None:
+                continue
+            if not hasattr(value, 'get_size_bytes'):
+                continue
+            # Skip stdlib-defined classes (e.g. abc.ABC bases) that happen to
+            # expose these attributes; their layout is not pythoc-owned.
+            top_mod = (getattr(value, '__module__', '') or '').split('.')[0]
+            if top_mod in stdlib:
+                continue
+            src = _type_source_file(value)
+            if not src or src == caller_file or src in recorded:
+                continue
+            recorded.add(src)
+            self.record_group_dependency(
+                tuple(group_key), (src, None, None, None), "source_embed",
+            )
+
     def record_extern_dependency(self, group_key: Tuple, libraries: List[str]):
         """Record dependency on external libraries."""
         with self._lock:

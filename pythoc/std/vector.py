@@ -41,7 +41,7 @@ def Vector(element_type, inline_capacity = 0, size_type = u64):
 
     @compile(suffix=type_suffix)
     def vector_destroy(v: ptr[_Vector]) -> None:
-        if v.size >= inline_capacity:
+        if v.size > inline_capacity:
             # Free heap storage
             free(v.storage.heap_data.heap_buf)
         v.size = 0
@@ -52,24 +52,31 @@ def Vector(element_type, inline_capacity = 0, size_type = u64):
 
     @compile(suffix=type_suffix)
     def vector_capacity(v: ptr[_Vector]) -> size_type:
-        if v.size < inline_capacity:
+        if v.size <= inline_capacity:
             return inline_capacity
         else:
             return v.storage.heap_data.capacity
 
     @compile(suffix=type_suffix)
     def vector_get(v: ptr[_Vector], index: size_type) -> element_type:
-        if v.size < inline_capacity:
+        if v.size <= inline_capacity:
             return v.storage.inline_buffer[index]
         else:
             return v.storage.heap_data.heap_buf[index]
 
     @compile(suffix=type_suffix)
     def vector_set(v: ptr[_Vector], index: size_type, value: element_type):
-        if v.size < inline_capacity:
+        if v.size <= inline_capacity:
             v.storage.inline_buffer[index] = value
         else:
             v.storage.heap_data.heap_buf[index] = value
+
+    @compile(suffix=type_suffix)
+    def vector_data(v: ptr[_Vector]) -> ptr[element_type]:
+        if v.size <= inline_capacity:
+            return ptr(v.storage.inline_buffer[0])
+        else:
+            return v.storage.heap_data.heap_buf
 
     @compile(suffix=type_suffix)
     def vector_push_back(v: ptr[_Vector], value: element_type):
@@ -94,9 +101,10 @@ def Vector(element_type, inline_capacity = 0, size_type = u64):
             new_mem_i8: ptr[i8] = realloc(v.storage.heap_data.heap_buf, new_capacity * sizeof(element_type))
             v.storage.heap_data.heap_buf = ptr[element_type](new_mem_i8)
             v.storage.heap_data.capacity = new_capacity
-        # Write element
-        vector_set(v, v.size, value)
+        # Advance size first so the storage predicate (size <= inline_capacity)
+        # routes the just-migrated boundary element to the correct buffer.
         v.size += 1
+        vector_set(v, v.size - 1, value)
 
     @compile(suffix=type_suffix)
     def vector_pop_back(v: ptr[_Vector]) -> None:
@@ -111,6 +119,7 @@ def Vector(element_type, inline_capacity = 0, size_type = u64):
         capacity = vector_capacity
         get = vector_get
         set = vector_set
+        data = vector_data
         push_back = vector_push_back
         pop_back = vector_pop_back
         type = _Vector

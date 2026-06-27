@@ -201,28 +201,50 @@ class ExpressionsMixin:
         self.builder.position_at_end(then_block)
         then_val = self.visit_rvalue_expression(node.body)
         then_block = self.builder.block  # Update in case of nested blocks
-        self.builder.branch(merge_block)
-        
+
         # Generate else block
         self.builder.position_at_end(else_block)
         else_val = self.visit_rvalue_expression(node.orelse)
         else_block = self.builder.block  # Update in case of nested blocks
+
+        # Pick a common result type so the phi is well-typed. A literal branch
+        # (e.g. `x if c else 0`) is otherwise a zero-sized pyconst and fails phi
+        # type checking, so coerce it to the runtime branch's type. Conversions
+        # are emitted inside each branch block to keep phi operands dominated.
+        result_type = None
+        if isinstance(then_val, ValueRef) and not then_val.is_python_value():
+            result_type = then_val.type_hint
+        elif isinstance(else_val, ValueRef) and not else_val.is_python_value():
+            result_type = else_val.type_hint
+        elif isinstance(then_val, ValueRef):
+            result_type = then_val.type_hint
+
+        def _coerce_branch(val, block):
+            if result_type is None or not isinstance(val, ValueRef):
+                return val
+            self.builder.position_at_end(block)
+            if val.is_python_value():
+                return self.type_converter._promote_python_to_pc(
+                    val.get_python_value(), result_type)
+            return self.type_converter.convert(val, result_type)
+
+        then_val = _coerce_branch(then_val, then_block)
+        else_val = _coerce_branch(else_val, else_block)
+
+        self.builder.position_at_end(then_block)
         self.builder.branch(merge_block)
-        
+        self.builder.position_at_end(else_block)
+        self.builder.branch(merge_block)
+
         # Merge results
         self.builder.position_at_end(merge_block)
         phi = self.builder.phi(get_type(then_val))
         phi.add_incoming(ensure_ir(then_val), then_block)
         phi.add_incoming(ensure_ir(else_val), else_block)
-        
-        # Use type_hint from then branch (prefer then_val's type)
-        result_type = then_val.type_hint if isinstance(then_val, ValueRef) else None
-        if result_type is None and isinstance(else_val, ValueRef):
-            result_type = else_val.type_hint
-        
+
         return wrap_value(phi, kind="value", type_hint=result_type)
 
-    
+
     def visit_List(self, node: ast.List):
         """Handle list expressions as pc_list literal carriers."""
         from ..builtin_entities.pc_list import pc_list
