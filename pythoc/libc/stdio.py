@@ -77,6 +77,27 @@ def fflush(stream: ptr[i8]) -> i32:
     """Flush file buffer"""
     pass
 
+# macOS exposes stdin/stdout/stderr as global FILE* variables.  The C
+# preprocessor turns references to `stdin`, `stdout`, and `stderr` into the
+# accessor names below; pcc lowers those references to function calls.
+@extern(lib='c')
+def __stdinp() -> ptr[i8]:
+    """Return the standard input stream (macOS)."""
+    pass
+
+
+@extern(lib='c')
+def __stdoutp() -> ptr[i8]:
+    """Return the standard output stream (macOS)."""
+    pass
+
+
+@extern(lib='c')
+def __stderrp() -> ptr[i8]:
+    """Return the standard error stream (macOS)."""
+    pass
+
+
 # P0 additions: buffering, seeking, char IO, formatted to buffers
 @extern(lib='c')
 def fseek(stream: ptr[i8], offset: i64, whence: i32) -> i32:
