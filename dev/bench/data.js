@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782580399873,
+  "lastUpdate": 1782624769698,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2335,6 +2335,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.01,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "2d5a1b6721ef78677d79984ed1e0b1ccbf429d93",
+          "message": "Unify compound literal init",
+          "timestamp": "2026-06-28T13:28:08+08:00",
+          "tree_id": "083a37a05fdd5595c78219d08b8fe466b6b1a466",
+          "url": "https://github.com/1flei/PythoC/commit/2d5a1b6721ef78677d79984ed1e0b1ccbf429d93"
+        },
+        "date": 1782624769159,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.82,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.06,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.005,
             "unit": "seconds/test"
           }
         ]
