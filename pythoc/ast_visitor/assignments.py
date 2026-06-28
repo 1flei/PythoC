@@ -358,15 +358,32 @@ class AssignmentsMixin:
 
         # Now parse the RHS
         if node is None or node.value is None:
-            # No initialization value - create undefined value (matches C behavior)
             llvm_type = pc_type.get_llvm_type(self.module.context)
-            undef_value = ir.Constant(llvm_type, ir.Undefined)
-            rvalue = wrap_value(undef_value, kind="value", type_hint=pc_type)
+            from ..ir_helpers import is_thread_local
+            if is_static(pc_type) or is_thread_local(pc_type):
+                # Static storage duration: an absent initializer is zero, not
+                # indeterminate (C semantics, and the static seed must be a
+                # constant anyway). create_zero_constant covers scalars,
+                # pointers, arrays, and structs.
+                seed_value = self.type_converter.create_zero_constant(llvm_type)
+            else:
+                # Automatic storage: leave the value indeterminate (matches C).
+                seed_value = ir.Constant(llvm_type, ir.Undefined)
+            rvalue = wrap_value(seed_value, kind="value", type_hint=pc_type)
         else:
             rvalue = self.visit_rvalue_expression(node.value)
 
+            # A static aggregate initialized by a braced literal needs a
+            # compile-time constant seed (C constant aggregate init), not the
+            # runtime element stores the normal coercion would emit.
+            from ..ir_helpers import is_thread_local
+            const_seed = None
+            if is_static(pc_type) or is_thread_local(pc_type):
+                const_seed = self.type_converter.try_const_aggregate(rvalue, pc_type)
+            if const_seed is not None:
+                rvalue = wrap_value(const_seed, kind="value", type_hint=pc_type)
             # If the type of RHS does not match pc_type, convert it
-            if rvalue.type_hint != pc_type:
+            elif rvalue.type_hint != pc_type:
                 rvalue = self.implicit_coercer.coerce(rvalue, pc_type, node)
             
         # Store the value

@@ -235,6 +235,170 @@ def rebuild_mapping_carrier(template: Any, entries: List[Tuple[Any, Any]]) -> An
     )
 
 
+def aggregate_layout(visitor, target_pc_type):
+    """Return ``(llvm_aggregate_type, [slot_pc_type, ...])`` for an array/struct
+    target, or None for non-aggregates.
+
+    Array slots repeat the (possibly inner-array) element type ``size`` times;
+    struct slots are the field types. This is the single description of an
+    aggregate's shape shared by the constant and value materializers, so the two
+    never diverge on element typing or zero-fill counts.
+    """
+    from .schema_protocol import is_schema_type, get_schema_field_types
+    from .type_converter import strip_qualifiers
+
+    target_pc_type = strip_qualifiers(target_pc_type)
+    ctx = visitor.module.context
+
+    if hasattr(target_pc_type, 'is_array') and target_pc_type.is_array():
+        dims = target_pc_type.dimensions
+        if not isinstance(dims, (list, tuple)):
+            dims = [dims]
+        size = dims[0]
+        if len(dims) == 1:
+            inner_type = target_pc_type.element_type
+        else:
+            from .builtin_entities import array
+            inner_type = array[(target_pc_type.element_type,) + tuple(dims[1:])]
+        return target_pc_type.get_llvm_type(ctx), [inner_type] * size
+
+    if is_schema_type(target_pc_type):
+        field_types = get_schema_field_types(target_pc_type)
+        if field_types is None:
+            return None
+        return target_pc_type.get_llvm_type(ctx), list(field_types)
+
+    return None
+
+
+def _lower_aggregate_slots(visitor, carrier, target_pc_type, element_fn):
+    """Lower a sequence literal onto an aggregate's slots, or return None.
+
+    Walks the shared :func:`aggregate_layout`, lowering each provided element
+    through ``element_fn(visitor, elem, slot_pc_type)`` and zero-filling any
+    trailing slots. Returns ``(llvm_aggregate_type, [ir_value, ...])``. Returns
+    None when the target is not an aggregate, there are too many initializers, or
+    ``element_fn`` rejects an element (by returning None).
+    """
+    if not is_sequence_carrier(carrier):
+        return None
+    layout = aggregate_layout(visitor, target_pc_type)
+    if layout is None:
+        return None
+    agg_llvm, slot_types = layout
+    elements = get_sequence_elements(carrier)
+    if len(elements) > len(slot_types):
+        return None
+
+    ctx = visitor.module.context
+    tc = visitor.type_converter
+    values = []
+    for i, slot_type in enumerate(slot_types):
+        if i < len(elements):
+            v = element_fn(visitor, elements[i], slot_type)
+            if v is None:
+                return None
+        else:
+            v = tc.create_zero_constant(slot_type.get_llvm_type(ctx))
+        values.append(v)
+    return agg_llvm, values
+
+
+def lower_sequence_to_constant(visitor, carrier, target_pc_type):
+    """Fold a sequence literal carrier to a single ir.Constant, or return None.
+
+    The constant-only view of aggregate materialization: every leaf must fold to
+    an ir.Constant (so the result is usable as a static/global initializer, which
+    cannot run instructions). Any non-constant leaf or unsupported shape returns
+    None. Builder-free, so it is valid at global scope.
+    """
+    from llvmlite import ir
+
+    lowered = _lower_aggregate_slots(
+        visitor, carrier, target_pc_type, _lower_element_to_constant)
+    if lowered is None:
+        return None
+    agg_llvm, consts = lowered
+    return ir.Constant(agg_llvm, consts)
+
+
+def materialize_sequence_value(visitor, carrier, target_pc_type):
+    """Build an aggregate IR *value* from a sequence literal (array or struct).
+
+    Single pass for both kinds: each element is lowered once, then the aggregate
+    is assembled as an ir.Constant when every element folded to a constant, or as
+    an ``insertvalue`` chain otherwise. There is no separate constant/runtime
+    code path -- constness is just a property of the assembled result. Requires a
+    builder (use at function scope); for static seeds use
+    :func:`lower_sequence_to_constant`.
+    """
+    from llvmlite import ir
+
+    lowered = _lower_aggregate_slots(
+        visitor, carrier, target_pc_type, _lower_element_value)
+    if lowered is None:
+        logger.error(
+            f"Cannot materialize sequence literal into {target_pc_type}",
+            node=None, exc_type=TypeError)
+    agg_llvm, values = lowered
+    if all(isinstance(v, ir.Constant) for v in values):
+        return ir.Constant(agg_llvm, values)
+    agg = ir.Constant(agg_llvm, ir.Undefined)
+    for i, v in enumerate(values):
+        agg = visitor.builder.insert_value(agg, v, i)
+    return agg
+
+
+def _carrier_of(elem):
+    """Return the nested sequence carrier inside an element, or None."""
+    if isinstance(elem, ValueRef) and elem.is_python_value():
+        inner = elem.get_python_value()
+        return inner if is_sequence_carrier(inner) else None
+    return elem if is_sequence_carrier(elem) else None
+
+
+def _lower_element_to_constant(visitor, elem, target_pc_type):
+    """Fold one aggregate element to an ir.Constant, or return None.
+
+    Nested sequence literals recurse through ``lower_sequence_to_constant``;
+    every other leaf goes through ``TypeConverter.convert`` and is accepted only
+    if it folds to an ir.Constant.
+    """
+    from llvmlite import ir
+    from .valueref import ensure_ir, wrap_value
+
+    nested = _carrier_of(elem)
+    if nested is not None:
+        return lower_sequence_to_constant(visitor, nested, target_pc_type)
+
+    if not isinstance(elem, ValueRef):
+        from .builtin_entities.python_type import PythonType
+        elem = wrap_value(elem, kind="python",
+                          type_hint=PythonType.wrap(elem, is_constant=True))
+    ir_val = ensure_ir(visitor.type_converter.convert(elem, target_pc_type))
+    return ir_val if isinstance(ir_val, ir.Constant) else None
+
+
+def _lower_element_value(visitor, elem, target_pc_type):
+    """Lower one aggregate element to an ir value (constant or runtime).
+
+    Nested sequence literals recurse through ``materialize_sequence_value`` (which
+    yields an ir.Constant when it can), so the caller's constness check stays
+    accurate; every other leaf goes through ``TypeConverter.convert``.
+    """
+    from .valueref import ensure_ir, wrap_value
+
+    nested = _carrier_of(elem)
+    if nested is not None:
+        return materialize_sequence_value(visitor, nested, target_pc_type)
+
+    if not isinstance(elem, ValueRef):
+        from .builtin_entities.python_type import PythonType
+        elem = wrap_value(elem, kind="python",
+                          type_hint=PythonType.wrap(elem, is_constant=True))
+    return ensure_ir(visitor.type_converter.convert(elem, target_pc_type))
+
+
 def wrap_literal_result(result: Any):
     from .builtin_entities.pc_dict import pc_dict
     from .builtin_entities.pc_list import pc_list

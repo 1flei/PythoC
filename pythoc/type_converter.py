@@ -486,292 +486,66 @@ class TypeConverter:
         return pc_list.from_elements(elements)
 
     def _convert_list_to_array(self, python_list, target_array_type):
-        """Convert Python list/tuple to array constant.
-        
-        Args:
-            python_list: Python list or tuple
-            target_array_type: Target array type (array[T, N])
-        
-        Returns:
-            ValueRef with pointer to array
-        """
-        array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
-        
-        # Build the array constant recursively
-        array_const = self._build_array_constant_recursive(python_list, target_array_type)
-        
-        # Arrays cannot exist as values in C semantics - materialize to memory immediately
-        tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "array_literal")
-        self.builder.store(array_const, tmp_alloca)
-        
-        # Return as pointer to array
-        return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
-    
-    def _build_array_constant_recursive(self, python_list, target_array_type):
-        """Build array constant recursively (returns IR constant, not ValueRef)"""
-        pc_elem_type = target_array_type.element_type
-        dimensions = target_array_type.dimensions
-        if not isinstance(dimensions, (list, tuple)):
-            dimensions = [dimensions]
-        
-        # Get LLVM types
-        elem_llvm_type = pc_elem_type.get_llvm_type(self._visitor.module.context)
-        array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
-        
-        # Handle 1D array
-        if len(dimensions) == 1:
-            size = dimensions[0]
-            
-            # Convert each element
-            elem_constants = []
-            for i, py_elem in enumerate(python_list):
-                if i >= size:
-                    break
-                
-                # Wrap Python value as PythonType ValueRef
-                from .builtin_entities.python_type import PythonType
-                py_valueref = PythonType.wrap(py_elem, is_constant=True)
-                py_valueref = wrap_value(py_elem, kind="python", type_hint=py_valueref)
-                
-                # Convert to element type
-                elem_val = self.convert(py_valueref, pc_elem_type)
-                elem_constants.append(ensure_ir(elem_val))
-            
-            # Zero-fill remaining elements if list is shorter than array
-            if len(elem_constants) < size:
-                zero_val = self.create_zero_constant(elem_llvm_type)
-                elem_constants.extend([zero_val] * (size - len(elem_constants)))
-            
-            # Create and return array constant (IR value, not ValueRef)
-            return ir.Constant(array_llvm_type, elem_constants)
-        
-        # Handle multi-dimensional array (recursive)
-        else:
-            # For multi-dim array like array[array[T, M], N]
-            # python_list should be a nested list [[...], [...], ...]
-            outer_size = dimensions[0]
-            
-            # Build inner array type
-            inner_dims = dimensions[1:]
-            from .builtin_entities import array
-            
-            # Create inner array type: array[i32, 3, 4] for original array[i32, 2, 3, 4]
-            # Use tuple unpacking compatible with Python 3.9+
-            inner_array_type = array[(pc_elem_type,) + tuple(inner_dims)]
-            
-            # Convert each sub-list
-            elem_constants = []
-            from .literal_protocol import extract_subscript_items, is_sequence_carrier
-
-            for i, py_sublist in enumerate(python_list):
-                if i >= outer_size:
-                    break
-
-                if not is_sequence_carrier(py_sublist):
-                    raise TypeError(f"Expected nested sequence literal for multi-dimensional array, got {type(py_sublist).__name__}")
-
-                inner_const = self._build_array_constant_recursive(tuple(extract_subscript_items(py_sublist)), inner_array_type)
-                elem_constants.append(inner_const)
-            
-            # Zero-fill remaining elements
-            if len(elem_constants) < outer_size:
-                inner_llvm_type = inner_array_type.get_llvm_type(self._visitor.module.context)
-                zero_val = self.create_zero_constant(inner_llvm_type)
-                elem_constants.extend([zero_val] * (outer_size - len(elem_constants)))
-            
-            # Create and return outer array constant (IR value, not ValueRef)
-            return ir.Constant(array_llvm_type, elem_constants)
+        """Convert a Python list/tuple literal to an array value (pointer)."""
+        return self._convert_pc_list_to_array(
+            self._sequence_literal_to_pc_list(python_list), target_array_type)
 
     def _convert_pc_list_to_array(self, pc_list_type, target_array_type):
-        """Convert pc_list type to array.
-        
-        pc_list contains ValueRefs (both pyconst and IR values), so we need to
-        convert each element to the target array element type.
-        
-        Args:
-            pc_list_type: PCListType with stored elements
-            target_array_type: Target array type (array[T, N])
-        
-        Returns:
-            ValueRef with array value
+        """Materialize a sequence-literal carrier into an array value (pointer).
+
+        Arrays are lvalues here, so the assembled aggregate (an ir.Constant when
+        every element folds, an insertvalue chain otherwise) is stored once into
+        an entry-block alloca and returned as a pointer. Both the constant and
+        runtime cases go through the same single-pass materializer.
         """
-        from .builtin_entities.pc_list import PCListType
-        
-        # Get elements from pc_list
-        elements = pc_list_type.get_elements()
-        
-        # Get target array info
-        pc_elem_type = target_array_type.element_type
-        dimensions = target_array_type.dimensions
-        if not isinstance(dimensions, (list, tuple)):
-            dimensions = [dimensions]
-        
-        # Get LLVM types
-        elem_llvm_type = pc_elem_type.get_llvm_type(self._visitor.module.context)
+        from .literal_protocol import materialize_sequence_value
+
+        array_value = materialize_sequence_value(
+            self._visitor, pc_list_type, target_array_type)
         array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
-        
-        # Handle 1D array
-        if len(dimensions) == 1:
-            size = dimensions[0]
-            
-            # Check if all elements are constants (can use ir.Constant)
-            all_constants = True
-            elem_ir_values = []
-            
-            for i, elem in enumerate(elements):
-                if i >= size:
-                    break
-                
-                # Convert element to target element type
-                converted = self.convert(elem, pc_elem_type)
-                ir_val = ensure_ir(converted)
-                elem_ir_values.append(ir_val)
-                
-                # Check if it's a constant
-                if not isinstance(ir_val, ir.Constant):
-                    all_constants = False
-            
-            # Zero-fill remaining elements
-            if len(elem_ir_values) < size:
-                zero_val = self.create_zero_constant(elem_llvm_type)
-                elem_ir_values.extend([zero_val] * (size - len(elem_ir_values)))
-            
-            if all_constants:
-                # All constants - create array constant
-                array_const = ir.Constant(array_llvm_type, elem_ir_values)
-                
-                # Materialize to memory (C semantics)
-                tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array")
-                self.builder.store(array_const, tmp_alloca)
-                
-                return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
-            else:
-                # Has runtime values - need to store element by element
-                tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array")
-                
-                for i, ir_val in enumerate(elem_ir_values):
-                    elem_ptr = self.builder.gep(
-                        tmp_alloca,
-                        [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
-                        inbounds=True
-                    )
-                    self.builder.store(ir_val, elem_ptr)
-                
-                return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
-        
-        # Handle multi-dimensional array
-        else:
-            outer_size = dimensions[0]
-            inner_dims = dimensions[1:]
-            from .builtin_entities import array
-            from .literal_protocol import is_sequence_carrier
-            inner_array_type = array[(pc_elem_type,) + tuple(inner_dims)]
+        tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "array_literal")
+        self.builder.store(array_value, tmp_alloca)
+        return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
 
-            tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "pc_list_array_nd")
+    def try_const_aggregate(self, value_ref, target_pc_type):
+        """Fold a braced aggregate initializer to an ir.Constant, or return None.
 
-            for i, elem in enumerate(elements):
-                if i >= outer_size:
-                    break
+        Thin entry over the shared carrier lowering: a static/global aggregate
+        initialized by a sequence literal whose elements are all compile-time
+        constants becomes a constant aggregate seed instead of runtime element
+        stores. Non-constant elements (or unsupported shapes) return None so the
+        caller falls back to the normal conversion path.
+        """
+        from .literal_protocol import (
+            is_sequence_carrier, lower_sequence_to_constant,
+        )
 
-                if elem.is_python_value():
-                    py_val = elem.get_python_value()
-                    if not is_sequence_carrier(py_val):
-                        raise TypeError(
-                            f"Expected sequence literal for multi-dimensional array element, got {type(py_val)}"
-                        )
-                    inner_carrier = self._sequence_literal_to_pc_list(py_val)
-                    inner_val = self._convert_pc_list_to_array(inner_carrier, inner_array_type)
-                else:
-                    raise TypeError(
-                        f"Expected python-backed sequence literal for multi-dimensional array element, got {elem.type_hint}"
-                    )
-                
-                # Store inner array to outer array element
-                elem_ptr = self.builder.gep(
-                    tmp_alloca,
-                    [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), i)],
-                    inbounds=True
-                )
-                store_value = self._materialize_store_operand(inner_val, inner_array_type)
-                self.builder.store(store_value, elem_ptr)
-            
-            return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
+        if not (isinstance(value_ref, ValueRef) and value_ref.is_python_value()):
+            return None
+        carrier = value_ref.get_python_value()
+        if not is_sequence_carrier(carrier):
+            return None
+        return lower_sequence_to_constant(self._visitor, carrier, target_pc_type)
 
     def _convert_tuple_to_struct(self, python_tuple, target_struct_type):
-        """Convert Python tuple to struct value.
-        
-        Handles various element types:
-        - Python primitives (int, float, bool, str)
-        - Python tuples/lists (nested structures)
-        - ValueRef (already-evaluated expressions like union() calls)
-        
-        Args:
-            python_tuple: Python tuple or list (may contain ValueRef elements)
-            target_struct_type: Target struct type (BuiltinEntity subclass)
-        
-        Returns:
-            ValueRef with struct value
+        """Convert a tuple/list literal to a struct value.
+
+        Goes through the same single-pass materializer as arrays: the result is
+        an ir.Constant when every field folds to a constant, or an insertvalue
+        chain otherwise (handling nested struct/array fields and zero-fill).
         """
+        from .literal_protocol import materialize_sequence_value
+
         field_types = get_schema_field_types(target_struct_type)
         if field_types is None:
             raise TypeError(f"Cannot get field types from {target_struct_type}")
-        
-        # Check length
         if len(python_tuple) != len(field_types):
             raise TypeError(
                 f"Tuple length {len(python_tuple)} does not match struct field count {len(field_types)}"
             )
-        
-        # Convert each element to corresponding field type
-        field_values = []
-        for i, (elem, field_type) in enumerate(zip(python_tuple, field_types)):
-            # Case 1: elem is already a ValueRef (e.g., from union() call or other expressions)
-            if isinstance(elem, ValueRef):
-                # Convert to field type if needed
-                if elem.type_hint != field_type:
-                    field_val = self.convert(elem, field_type)
-                else:
-                    field_val = elem
-                field_values.append(ensure_ir(field_val))
-            
-            # Case 2: elem is a Python tuple/list - recursively convert
-            elif isinstance(elem, (tuple, list)):
-                # Check if field_type is struct/array/union
-                if is_schema_type(field_type):
-                    # Nested struct
-                    field_val = self._convert_tuple_to_struct(elem, field_type)
-                    field_values.append(ensure_ir(field_val))
-                elif hasattr(field_type, 'is_array') and field_type.is_array():
-                    # Nested array
-                    field_val = self._convert_list_to_array(elem, field_type)
-                    field_values.append(ensure_ir(field_val))
-                elif hasattr(field_type, 'get_name') and field_type.get_name() == 'union':
-                    # Union field - create undefined union (Python tuples cannot directly initialize unions)
-                    # User should use union[...]() constructor explicitly
-                    raise TypeError(
-                        f"Cannot initialize union field from tuple. "
-                        f"Use explicit union constructor: union[...]() "
-                    )
-                else:
-                    raise TypeError(f"Cannot convert {type(elem)} to field type {field_type}")
-            
-            # Case 3: elem is a Python primitive - wrap and convert
-            else:
-                from .builtin_entities import PythonType
-                py_valueref = PythonType.wrap(elem, is_constant=True)
-                py_valueref = wrap_value(elem, kind="python", type_hint=py_valueref)
-                
-                # Convert to field type
-                field_val = self.convert(py_valueref, field_type)
-                field_values.append(ensure_ir(field_val))
-        
-        # Create struct constant
-        struct_llvm_type = target_struct_type.get_llvm_type(self._visitor.module.context)
 
-        # Build struct value
-        struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
-        for i, field_val in enumerate(field_values):
-            struct_value = self._visitor.builder.insert_value(struct_value, field_val, i)
+        struct_value = materialize_sequence_value(
+            self._visitor, python_tuple, target_struct_type)
         return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
 
     def _convert_dict_to_struct(self, mapping_val, target_struct_type):
