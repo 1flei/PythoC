@@ -124,6 +124,10 @@ class FunctionInfo:
     # Applied to cross-module `declare` so the optimizer can treat calls as pure, etc.
     fn_attrs: Set[str] = field(default_factory=set)
     binding_state: Optional[Any] = None
+    # Parametric polymorphism metadata (populated when parameters are annotated with ``param``).
+    parametric_indices: Optional[List[int]] = None
+    concrete_indices: Optional[List[int]] = None
+    parametric_param_names: Optional[List[str]] = None
 
     @property
     def wrapper(self):

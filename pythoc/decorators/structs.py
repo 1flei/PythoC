@@ -4,7 +4,7 @@ import textwrap
 import ast
 from ..registry import register_struct_from_class
 from ..builtin_entities.struct import create_struct_type
-from ..logger import set_source_context
+from ..logger import set_source_context, logger
 
 
 def add_struct_handle_call(cls):
@@ -228,9 +228,18 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
             parsed_field_types.append(resolved_type)
         else:
             parsed_field_types.append(ftype)
-    
+
     # === CREATE UNIFIED STRUCT TYPE ===
     field_names = [fname for fname, ftype in cls._struct_fields]
+
+    for fname, ftype in zip(field_names, parsed_field_types):
+        if getattr(ftype, '_is_param', False) or (
+            isinstance(ftype, type) and getattr(ftype, '_is_param', False)
+        ):
+            logger.error(
+                f"'param' cannot be used as a struct field type ('{fname}')",
+                exc_type=TypeError,
+            )
     unified_type = type_factory(parsed_field_types, field_names, python_class=cls)
     
     # === HANDLE FORWARD/CIRCULAR REFERENCES ===

@@ -22,6 +22,7 @@ from .builtin_entities import (
     va_start, va_arg, va_end,
     pc_literal,
     llvm_asm,
+    param,
 )
 
 # Provide lowercase alias for convenience
@@ -66,6 +67,8 @@ __all__ = [
     'f16', 'bf16', 'f32', 'f64', 'f128',
     # Other types
     'bool', 'ptr', 'array', 'struct', 'union', 'func', 'enum',
+    # Parametric parameter type
+    'param',
     # Refined types
     'refined', 'assume', 'refine',
     # Type qualifiers

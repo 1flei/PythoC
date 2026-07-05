@@ -51,6 +51,385 @@ from ..logger import logger, set_source_context
 DEFAULT_EFFECT_KEY = "__default__"
 
 
+def _is_parametric_type(pc_type):
+    """Check whether a resolved PC type is the ``param`` compile-time parameter type."""
+    return getattr(pc_type, '_is_param', False)
+
+
+def _make_parametric_suffix(param_values):
+    """Build a stable compile suffix from a tuple of parametric argument values."""
+    return normalize_suffix(tuple(param_values))
+
+
+def _extract_raw_annotations(func_ast):
+    """Extract raw annotation AST nodes from a function definition.
+
+    Returns a dict mapping parameter names to their annotation AST nodes and
+    the key ``'return'`` to the return annotation node.  These raw nodes are
+    kept for parametric functions so that annotations referencing parameter
+    names can be re-resolved at specialization time.
+    """
+    raw = {}
+    if func_ast.returns is not None:
+        raw['return'] = func_ast.returns
+    for arg in func_ast.args.args:
+        if arg.annotation is not None:
+            raw[arg.arg] = arg.annotation
+    return raw
+
+
+def _remove_parametric_params_from_ast(func_ast, parametric_param_names):
+    """Return a new AST with parametric parameters removed.
+
+    The returned AST is a deep copy.  Parametric parameters are removed from
+    ``args.args`` together with their corresponding defaults.  Phase 1 does
+    not support defaults on parametric parameters; an error is raised if one
+    is found.
+    """
+    import copy
+
+    func_ast = copy.deepcopy(func_ast)
+    n_args = len(func_ast.args.args)
+    n_defaults = len(func_ast.args.defaults)
+    default_start = n_args - n_defaults
+
+    new_args = []
+    new_defaults = []
+    for i, arg in enumerate(func_ast.args.args):
+        is_parametric = arg.arg in parametric_param_names
+        if is_parametric:
+            if i >= default_start:
+                logger.error(
+                    f"parametric parameter '{arg.arg}' cannot have a default value",
+                    node=arg, exc_type=TypeError,
+                )
+            continue
+        new_args.append(arg)
+        if i >= default_start:
+            new_defaults.append(func_ast.args.defaults[i - default_start])
+
+    func_ast.args.args = new_args
+    func_ast.args.defaults = new_defaults
+    return func_ast
+
+
+def _param_value_to_ast(value):
+    """Convert a compile-time parametric value into an AST expression node.
+
+    Supports:
+      - PythoC builtin types (e.g. ``i32``) -> ``Name`` node using the type name
+      - Python constants (int, float, str, bool, None) -> ``Constant`` node
+
+    Returns ``None`` for values that cannot be expressed as a standalone AST
+    expression in Phase 1.
+    """
+    from ..builtin_entities import BuiltinEntity
+
+    if isinstance(value, type) and issubclass(value, BuiltinEntity):
+        return ast.Name(id=value.get_name(), ctx=ast.Load())
+    if isinstance(value, BuiltinEntity):
+        return ast.Name(id=value.get_name(), ctx=ast.Load())
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return ast.Constant(value=value)
+    return None
+
+
+class _ParametricNameSubstitutor(ast.NodeTransformer):
+    """Substitute parametric parameter names with their compile-time values.
+
+    This is needed for yield-based parametric functions because their bodies
+    are inlined into the caller's AST; the caller does not have the parametric
+    names in scope.  Replacing the names with concrete AST expressions (type
+    names for type params, constants for value params) makes the inlined body
+    self-contained.
+    """
+
+    def __init__(self, param_values_by_name):
+        self.param_values_by_name = param_values_by_name
+        self.substitutions = {
+            name: _param_value_to_ast(value)
+            for name, value in param_values_by_name.items()
+        }
+
+    def visit_Name(self, node):
+        replacement = self.substitutions.get(node.id)
+        if replacement is not None:
+            import copy
+            return copy.deepcopy(replacement)
+        return node
+
+
+def _substitute_parametric_names_in_ast(func_ast, param_values_by_name):
+    """Return a new AST with parametric parameter names replaced by values."""
+    import copy
+
+    func_ast = copy.deepcopy(func_ast)
+    substitutor = _ParametricNameSubstitutor(param_values_by_name)
+    return substitutor.visit(func_ast)
+
+
+def _resolve_annotations_with_params(raw_annotations, user_globals, param_values_by_name, parametric_names):
+    """Resolve annotations using a namespace that includes parametric values.
+
+    Annotations for the parametric parameters themselves (e.g. ``T: param``)
+    are skipped because ``param`` is not a runtime type and those parameters
+    are removed from the specialized AST.
+    """
+    from ..type_resolver import TypeResolver
+
+    namespace = dict(user_globals)
+    namespace.update(param_values_by_name)
+    resolver = TypeResolver(module_context=None, user_globals=namespace)
+
+    resolved = {}
+    for name, ann_node in raw_annotations.items():
+        if name in parametric_names:
+            continue
+        resolved[name] = resolver.parse_annotation(ann_node)
+    return resolved
+
+
+def _compile_parametric_specialization(
+    factory_wrapper,
+    param_values,
+):
+    """Compile one specialization of a parametric function.
+
+    This is invoked by the factory with the concrete parametric argument values.
+    It transforms the original AST (removing parametric parameters), resolves
+    annotations in a namespace where the parametric names are bound, and uses
+    ``meta.compile_api.compile_ast`` to produce a normal compiled wrapper.
+    """
+    from ..meta.compile_api import compile_ast
+
+    param_names = factory_wrapper._parametric_param_names
+    if len(param_names) != len(param_values):
+        raise TypeError(
+            f"expected {len(param_names)} parametric arguments, got {len(param_values)}"
+        )
+
+    param_values_by_name = dict(zip(param_names, param_values))
+
+    # Build suffix: combine user-provided compile suffix with parametric suffix.
+    param_suffix = _make_parametric_suffix(param_values)
+    original_suffix = factory_wrapper._original_compile_suffix
+    if original_suffix and param_suffix:
+        suffix = f"{original_suffix}_{param_suffix}"
+    elif original_suffix:
+        suffix = original_suffix
+    else:
+        suffix = param_suffix
+
+    # Transform AST: drop parametric parameters.
+    spec_ast = _remove_parametric_params_from_ast(
+        factory_wrapper._original_func_ast,
+        set(param_names),
+    )
+
+    # Resolve annotations with parametric names in scope.
+    raw_annotations = factory_wrapper._raw_annotations
+    resolved = _resolve_annotations_with_params(
+        raw_annotations,
+        factory_wrapper._original_user_globals,
+        param_values_by_name,
+        set(param_names),
+    )
+    return_type = resolved.get('return')
+    param_types = {
+        name: resolved[name]
+        for name in factory_wrapper._concrete_param_names
+    }
+
+    # Augment globals so the body sees parametric names as compile-time values.
+    spec_globals = dict(factory_wrapper._original_user_globals)
+    spec_globals.update(param_values_by_name)
+
+    source_code = factory_wrapper._original_source_code
+    try:
+        source_code = ast.unparse(spec_ast)
+    except Exception:
+        pass
+
+    # Use a synthetic source file for each specialization.  PythoC's build
+    # manager locks a source file once its shared library has been loaded, so
+    # defining new compiled functions for the original file after native
+    # execution has started is not allowed.  Parametric specializations are
+    # created lazily at call sites, so we place them in their own file.
+    # The synthetic file must be unique per (function, suffix) pair.
+    synthetic_source_file = "{}.__parametric__.{}.{}".format(
+        factory_wrapper._source_file,
+        factory_wrapper._original_name,
+        suffix if suffix else "default",
+    )
+
+    # Yield-based generators must be returned as placeholders that trigger
+    # inline expansion at call sites, just like non-parametric yield functions.
+    # Because the inlined body is spliced into the caller, any reference to a
+    # parametric parameter name must be replaced by its compile-time value so
+    # the caller can resolve it.
+    from ..ast_visitor.yield_transform import analyze_yield_function
+    yield_analyzer = analyze_yield_function(spec_ast)
+    if yield_analyzer:
+        from ..ast_visitor.yield_transform import create_yield_iterator_wrapper
+
+        inlined_ast = _substitute_parametric_names_in_ast(spec_ast, param_values_by_name)
+        try:
+            source_code = ast.unparse(inlined_ast)
+        except Exception:
+            pass
+
+        class _YieldFuncStub:
+            __name__ = factory_wrapper._original_name
+            __globals__ = spec_globals
+
+        return create_yield_iterator_wrapper(
+            _YieldFuncStub(), inlined_ast, yield_analyzer, spec_globals,
+            synthetic_source_file, _get_registry(),
+        )
+
+    return compile_ast(
+        spec_ast,
+        param_types=param_types,
+        return_type=return_type,
+        name=factory_wrapper._original_name,
+        suffix=suffix,
+        attrs=factory_wrapper._original_fn_attrs,
+        source_file=synthetic_source_file,
+        source_code=source_code,
+        start_line=factory_wrapper._start_line,
+        user_globals=spec_globals,
+        effect_suffix=factory_wrapper._original_effect_suffix,
+        copy_ast=False,
+    )
+
+
+def _create_parametric_factory_wrapper(
+    func,
+    func_ast,
+    source_file,
+    source_code,
+    start_line,
+    user_globals,
+    param_names,
+    parametric_param_names,
+    fn_attrs,
+    compile_suffix,
+    effect_suffix,
+):
+    """Create a factory wrapper for a function with parametric parameters.
+
+    The returned object is callable both from Python and from compiled code.
+    Calling it with all arguments splits out the parametric values, produces a
+    specialization, and forwards the remaining arguments.
+    """
+    parametric_set = set(parametric_param_names)
+    parametric_indices = [i for i, name in enumerate(param_names) if name in parametric_set]
+    concrete_indices = [i for i, name in enumerate(param_names) if name not in parametric_set]
+    concrete_param_names = [param_names[i] for i in concrete_indices]
+
+    raw_annotations = _extract_raw_annotations(func_ast)
+
+    n_parametric = len(parametric_param_names)
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if len(args) == n_parametric and n_parametric < len(param_names):
+            # Partial application: bind compile-time params and return the
+            # specialized wrapper; concrete arguments will be supplied later.
+            return wrapper._factory_func(*args)
+
+        if len(args) != len(param_names):
+            raise TypeError(
+                f"{func.__name__}() takes {len(param_names)} positional arguments "
+                f"but {len(args)} were given"
+            )
+        param_values = [args[i] for i in parametric_indices]
+        concrete_args = [args[i] for i in concrete_indices]
+        specialized = wrapper._factory_func(*param_values)
+        return specialized(*concrete_args)
+
+    wrapper._is_compiled = True
+    wrapper._is_parametric = True
+    wrapper._parametric_indices = parametric_indices
+    wrapper._concrete_indices = concrete_indices
+    wrapper._parametric_param_names = parametric_param_names
+    wrapper._concrete_param_names = concrete_param_names
+    wrapper._param_names = param_names
+    wrapper._original_name = func.__name__
+    wrapper._original_func_ast = func_ast
+    wrapper._original_source_code = source_code
+    wrapper._original_user_globals = user_globals
+    wrapper._raw_annotations = raw_annotations
+    wrapper._original_fn_attrs = set(fn_attrs) if fn_attrs else set()
+    wrapper._original_compile_suffix = compile_suffix
+    wrapper._original_effect_suffix = effect_suffix
+    wrapper._source_file = source_file
+    wrapper._start_line = start_line
+
+    _specialization_cache = {}
+
+    def factory(*param_values):
+        key = tuple(param_values)
+        if key in _specialization_cache:
+            return _specialization_cache[key]
+
+        # Validate that parametric arguments are hashable (needed for suffix/cache).
+        for v in param_values:
+            try:
+                hash(v)
+            except TypeError:
+                raise TypeError(
+                    f"parametric argument {v!r} is not hashable and cannot be used "
+                    f"as a compile-time parameter"
+                )
+
+        specialized = _compile_parametric_specialization(wrapper, param_values)
+        _specialization_cache[key] = specialized
+        return specialized
+
+    wrapper._factory_func = factory
+
+    def handle_call(visitor, func_ref, args, node):
+        if len(args) != len(param_names):
+            logger.error(
+                f"{func.__name__}() takes {len(param_names)} positional arguments "
+                f"but {len(args)} were given",
+                node=node, exc_type=TypeError,
+            )
+
+        param_args = [args[i] for i in parametric_indices]
+        concrete_args = [args[i] for i in concrete_indices]
+
+        param_values = []
+        for arg in param_args:
+            if not arg.is_python_value():
+                logger.error(
+                    "parametric argument must be a compile-time Python value",
+                    node=node, exc_type=TypeError,
+                )
+            param_values.append(arg.get_python_value())
+
+        specialized = wrapper._factory_func(*param_values)
+
+        # Yield placeholders cannot be lowered like normal compiled wrappers;
+        # they must return inline-expansion metadata to the for-loop visitor.
+        # The specialized AST has parametric parameters removed, so the call
+        # node forwarded to the placeholder must only contain concrete args.
+        if getattr(specialized, '_is_yield_generated', False):
+            import copy
+            specialized_call_node = copy.deepcopy(node)
+            specialized_call_node.args = [node.args[i] for i in concrete_indices]
+            return specialized.handle_call(
+                visitor, func_ref, concrete_args, specialized_call_node
+            )
+
+        from ..call_normalization import lower_compile_handle_call
+        return lower_compile_handle_call(specialized, visitor, func_ref, concrete_args, node)
+
+    wrapper.handle_call = handle_call
+    return wrapper
+
+
 def _materialize_single_specialization(template_wrapper, effect_key, effect_bindings):
     """Materialize one wrapper specialization and queue its compilation."""
     state = getattr(template_wrapper, '_binding', template_wrapper._state)
@@ -517,31 +896,110 @@ def _compile_impl(func_or_class,
             raise RuntimeError(f"Expected FunctionDef, got {type(func_ast)}")
     except Exception as e:
         raise RuntimeError(f"Failed to parse function {func.__name__}: {e}")
-    
+
+    actual_func_name = func.__name__
+
+    # Determine parameter names early; we need them to inject parametric names
+    # into the annotation namespace so that annotations like ``x: T`` can be
+    # resolved when ``T`` itself is a compile-time parameter.
+    param_names = [arg.arg for arg in func_ast.args.args]
+
+    # Pre-identify parameters annotated directly with ``param`` so that their
+    # names can be made available during annotation resolution without shadowing
+    # non-parametric parameter names.
+    from ..builtin_entities import param as param_type
+    raw_parametric_names = set()
+
+    def _annotation_is_param(ann):
+        if isinstance(ann, str):
+            return ann.strip() == 'param'
+        return ann is param_type
+
+    if hasattr(func, '__annotations__') and func.__annotations__:
+        for name, ann in func.__annotations__.items():
+            if name == 'return':
+                continue
+            if _annotation_is_param(ann):
+                raw_parametric_names.add(name)
+    else:
+        for arg in func_ast.args.args:
+            if arg.annotation is not None and _annotation_is_param(arg.annotation):
+                raw_parametric_names.add(arg.arg)
+        if func_ast.args.vararg is not None and func_ast.args.vararg.annotation is not None:
+            if _annotation_is_param(func_ast.args.vararg.annotation):
+                raw_parametric_names.add(func_ast.args.vararg.arg)
+        if func_ast.args.kwarg is not None and func_ast.args.kwarg.annotation is not None:
+            if _annotation_is_param(func_ast.args.kwarg.annotation):
+                raw_parametric_names.add(func_ast.args.kwarg.arg)
+
+    # --- Parametric polymorphism: functions with ``param`` parameters are
+    # desugared into a factory.  Resolve their annotations lazily at
+    # specialization time, because parameter names like ``T`` are not in scope
+    # at decoration time.  This must happen before the yield check so that
+    # parametric generator functions are also handled by the factory path.
+    if raw_parametric_names:
+        # Phase 1 restrictions.
+        if func_ast.args.vararg is not None and func_ast.args.vararg.arg in raw_parametric_names:
+            logger.error(
+                f"parametric *args is not supported in Phase 1: {func_ast.args.vararg.arg}",
+                node=func_ast, exc_type=NotImplementedError,
+            )
+        if func_ast.args.kwarg is not None and func_ast.args.kwarg.arg in raw_parametric_names:
+            logger.error(
+                f"parametric **kwargs is not supported in Phase 1: {func_ast.args.kwarg.arg}",
+                node=func_ast, exc_type=NotImplementedError,
+            )
+
+        n_args = len(func_ast.args.args)
+        n_defaults = len(func_ast.args.defaults)
+        default_start = n_args - n_defaults
+        for i, arg in enumerate(func_ast.args.args):
+            if arg.arg in raw_parametric_names and i >= default_start:
+                logger.error(
+                    f"parametric parameter '{arg.arg}' cannot have a default value",
+                    node=arg, exc_type=TypeError,
+                )
+
+        # Preserve the original parameter order; ``list(raw_parametric_names)``
+        # would be unordered because it is a set.
+        parametric_param_names = [name for name in param_names if name in raw_parametric_names]
+
+        return _create_parametric_factory_wrapper(
+            func=func,
+            func_ast=func_ast,
+            source_file=source_file,
+            source_code=func_source,
+            start_line=start_line,
+            user_globals=user_globals,
+            param_names=param_names,
+            parametric_param_names=parametric_param_names,
+            fn_attrs=fn_attrs,
+            compile_suffix=compile_suffix,
+            effect_suffix=effect_suffix,
+        )
+
     # Check if this is a yield-based generator function
     from ..ast_visitor.yield_transform import analyze_yield_function
     yield_analyzer = analyze_yield_function(func_ast)
-    
+
     if yield_analyzer:
         import copy
         original_func_ast = copy.deepcopy(func_ast)
-        
+
         from .visible import get_all_accessible_symbols
         transform_globals = get_all_accessible_symbols(
-            func, 
-            include_closure=True, 
+            func,
+            include_closure=True,
             include_builtins=True,
             captured_symbols=captured_symbols
         )
-        
+
         from ..ast_visitor.yield_transform import create_yield_iterator_wrapper
         wrapper = create_yield_iterator_wrapper(
             func, func_ast, yield_analyzer, transform_globals, source_file, registry
         )
         wrapper._original_ast = original_func_ast
         return wrapper
-
-    actual_func_name = func.__name__
 
     from ..type_resolver import TypeResolver
     from ..registry import FunctionInfo
@@ -592,8 +1050,6 @@ def _compile_impl(func_or_class,
                 param_type = type_resolver.parse_annotation(arg.annotation)
                 if param_type:
                     param_type_hints[arg.arg] = param_type
-
-    param_names = [arg.arg for arg in func_ast.args.args]
     from ..ast_visitor.varargs import resolve_varargs, resolve_kwargs
     resolved_varargs = resolve_varargs(func_ast, type_resolver)
     varargs_name = resolved_varargs.param_name
@@ -610,6 +1066,12 @@ def _compile_impl(func_or_class,
     if resolved_kwargs.is_typed:
         param_names.append(resolved_kwargs.param_name)
         param_type_hints[resolved_kwargs.param_name] = resolved_kwargs.parsed_type
+
+    if _is_parametric_type(return_type_hint):
+        logger.error(
+            "'param' cannot be used as a function return type",
+            node=func_ast.returns, exc_type=TypeError,
+        )
 
     # Build mangled name: name_{compile_suffix}_{effect_suffix}
     # compile_suffix comes first, then effect_suffix

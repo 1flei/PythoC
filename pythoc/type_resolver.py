@@ -182,13 +182,18 @@ class TypeResolver:
         from .builtin_entities import BuiltinEntity
 
         if isinstance(value, type):
-            if issubclass(value, BuiltinEntity) and value.can_be_type():
-                return value
+            if issubclass(value, BuiltinEntity):
+                if getattr(value, '_is_param', False):
+                    raise TypeError("'param' cannot be used as a runtime type")
+                if value.can_be_type():
+                    return value
 
             if getattr(value, "_is_struct", False) or getattr(value, "_is_enum", False) or getattr(value, "_is_union", False):
                 return value
 
         if isinstance(value, BuiltinEntity):
+            if getattr(value, '_is_param', False):
+                raise TypeError("'param' cannot be used as a runtime type")
             return value
 
         if isinstance(value, str):

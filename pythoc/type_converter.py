@@ -241,6 +241,12 @@ class TypeConverter:
                 and issubclass(stripped_target, func_type_cls)
             )
             if hasattr(python_val, '_is_compiled') and python_val._is_compiled:
+                if getattr(python_val, '_is_parametric', False):
+                    logger.error(
+                        "A parametric function cannot be used as a first-class value "
+                        "without supplying its compile-time arguments first.",
+                        node=node, exc_type=TypeError,
+                    )
                 from .callable_lowering import lower_compile_wrapper
                 caller_group_key = getattr(self._visitor, 'current_group_key', None)
                 lowered = lower_compile_wrapper(

@@ -61,6 +61,10 @@ class FunctionBindingState:
     template_compile_callback: Optional[Any] = None
     compilation_globals: Dict[str, Any] = field(default_factory=dict)
     wrapper: Optional[Any] = None
+    # Parametric polymorphism metadata.
+    parametric_indices: Optional[List[int]] = None
+    concrete_indices: Optional[List[int]] = None
+    parametric_param_names: Optional[List[str]] = None
 
 
 @dataclass

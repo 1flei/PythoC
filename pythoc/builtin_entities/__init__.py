@@ -30,6 +30,9 @@ from .types import (
     bool, void, ptr,
 )
 
+# Parametric parameter type
+from .param import param
+
 # Extended float types (f16, bf16, f128) are in pythoc.std.float_types
 # Import them here for backward compatibility
 from ..std.float_types import f16, bf16, f128
@@ -123,10 +126,13 @@ __all__ = [
     
     # Void type
     'void',
-    
+
     # Pointer type
     'ptr',
-    
+
+    # Parametric parameter type
+    'param',
+
     # Linear token type
     'linear',
     
