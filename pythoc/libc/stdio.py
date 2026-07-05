@@ -4,6 +4,24 @@ Standard I/O Library Functions (stdio.h)
 
 from ..decorators import extern
 from ..builtin_entities import ptr, i8, i32, i64
+from ..forward_ref import mark_type_defined
+
+# FILE is an opaque stdio stream type.  Exposing it as a named alias lets
+# generated code use ``ptr[FILE]`` while keeping the actual representation as
+# an opaque byte pointer.
+FILE = i8
+mark_type_defined("FILE", FILE)
+
+__all__ = [
+    'FILE',
+    'printf', 'scanf', 'puts', 'getchar', 'putchar',
+    'fopen', 'fclose', 'freopen',
+    'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
+    '__stdinp', '__stdoutp', '__stderrp',
+    'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
+    'setvbuf', 'setbuf', 'fgetc', 'fputc', 'ungetc',
+    'sprintf', 'snprintf', 'vprintf', 'vfprintf', 'vsnprintf',
+]
 
 # Input/Output functions
 @extern(lib='c')
@@ -40,6 +58,11 @@ def fopen(filename: ptr[i8], mode: ptr[i8]) -> ptr[i8]:
 @extern(lib='c')
 def fclose(stream: ptr[i8]) -> i32:
     """Close a file"""
+    pass
+
+@extern(lib='c')
+def freopen(filename: ptr[i8], mode: ptr[i8], stream: ptr[i8]) -> ptr[i8]:
+    """Reopen a file using a different file name/mode."""
     pass
 
 @extern(lib='c')

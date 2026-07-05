@@ -22,6 +22,24 @@ from ..builtin_entities import (
 from ..builtin_entities import bool as pc_bool
 
 
+def _make_zero_aggregate(ty: ir.Type) -> ir.Constant:
+    """Return an all-zero aggregate constant for struct/array types.
+
+    PythoC sometimes emits ``ir.Constant(aggregate_type, 0)`` for zero-
+    initialized static variables.  llvmlite requires a nested list of
+    per-element zeros instead, so expand the scalar zero recursively.
+    """
+    if isinstance(ty, ir.ArrayType):
+        return ir.Constant(ty, [_make_zero_aggregate(ty.element) for _ in range(ty.count)])
+    if isinstance(ty, (ir.BaseStructType, ir.LiteralStructType, ir.IdentifiedStructType)):
+        return ir.Constant(ty, [_make_zero_aggregate(f) for f in ty.elements])
+    if isinstance(ty, ir.PointerType):
+        return ir.Constant(ty, None)
+    if isinstance(ty, ir.FloatType):
+        return ir.Constant(ty, 0.0)
+    return ir.Constant(ty, 0)
+
+
 class AssignmentsMixin:
     """Mixin containing assignments-related visitor methods"""
     
@@ -261,6 +279,10 @@ class AssignmentsMixin:
             global_var.linkage = 'internal'  # Internal linkage = static in C
             if is_thread_local(pc_type):
                 global_var.storage_class = 'thread_local'
+            # llvmlite rejects a scalar zero for aggregate static initializers.
+            if isinstance(rvalue_ir, ir.Constant) and isinstance(rvalue_ir.type, (ir.ArrayType, ir.BaseStructType, ir.LiteralStructType, ir.IdentifiedStructType)):
+                if isinstance(rvalue_ir.constant, int) and rvalue_ir.constant == 0:
+                    rvalue_ir = _make_zero_aggregate(rvalue_ir.type)
             global_var.initializer = rvalue_ir
             global_var.global_constant = False
             

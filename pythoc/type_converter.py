@@ -235,20 +235,33 @@ class TypeConverter:
         # The *call* path goes through handle_call -> callable_lowering directly.
         if isinstance(value, ValueRef) and value.is_python_value():
             python_val = value.get_python_value()
+            from .builtin_entities.func import func as func_type_cls
+            target_is_func = (
+                isinstance(stripped_target, type)
+                and issubclass(stripped_target, func_type_cls)
+            )
             if hasattr(python_val, '_is_compiled') and python_val._is_compiled:
                 from .callable_lowering import lower_compile_wrapper
                 caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                return lower_compile_wrapper(
+                lowered = lower_compile_wrapper(
                     python_val, self._visitor.module, caller_group_key,
                     node=node,
                 )
+                # If the requested target is not a function type (e.g. ptr[void]),
+                # continue converting from the lowered function pointer.
+                if not target_is_func:
+                    return self.convert(lowered, target_type, node)
+                return lowered
             if getattr(python_val, '_is_extern', False):
                 from .callable_lowering import lower_extern_wrapper
                 caller_group_key = getattr(self._visitor, 'current_group_key', None)
-                return lower_extern_wrapper(
+                lowered = lower_extern_wrapper(
                     python_val, self._visitor.module, caller_group_key,
                     node=node,
                 )
+                if not target_is_func:
+                    return self.convert(lowered, target_type, node)
+                return lowered
             # Otherwise, auto-promote Python values to PC values
             value = self._promote_python_to_pc(python_val, stripped_target)
             return value
@@ -946,16 +959,20 @@ class TypeConverter:
         if isinstance(val_ir.type, ir.PointerType) and isinstance(val_ir.type.pointee, ir.ArrayType):
             zero = ir.Constant(ir.IntType(32), 0)
             elem_ptr = self.builder.gep(val_ir, [zero, zero], inbounds=True)
+            if elem_ptr.type != target_type:
+                elem_ptr = self.builder.bitcast(elem_ptr, target_type)
             return wrap_value(elem_ptr, kind="value", type_hint=type_hint)
-        
+
         # Fallback: use address field if available
         if isinstance(value, ValueRef) and value.has_place():
             addr_ir = ensure_ir(value.require_place())
             if isinstance(addr_ir.type, ir.PointerType) and isinstance(addr_ir.type.pointee, ir.ArrayType):
                 zero = ir.Constant(ir.IntType(32), 0)
                 elem_ptr = self.builder.gep(addr_ir, [zero, zero], inbounds=True)
+                if elem_ptr.type != target_type:
+                    elem_ptr = self.builder.bitcast(elem_ptr, target_type)
                 return wrap_value(elem_ptr, kind="value", type_hint=type_hint)
-        
+
         # This should not happen in correct C semantics
         raise TypeError(
             f"Array value conversion failed: expected pointer-to-array, got {val_ir.type}. "
@@ -972,12 +989,14 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
-        # Array decay: [N x T]* -> T*
+        # Array decay: [N x T]* -> T* (and then to the target pointer type)
         if isinstance(source_type.pointee, ir.ArrayType) and (
             isinstance(target_type.pointee, ir.Type) and not isinstance(target_type.pointee, ir.ArrayType)
         ):
             zero = ir.Constant(ir.IntType(32), 0)
             elem_ptr = self.builder.gep(value_ir, [zero, zero], inbounds=True)
+            if elem_ptr.type != target_type:
+                elem_ptr = self.builder.bitcast(elem_ptr, target_type)
             return wrap_value(elem_ptr, kind="value", type_hint=type_hint)
         # Null constants: keep null
         if isinstance(value_ir, ir.Constant) and value_ir.constant is None:
@@ -1293,6 +1312,10 @@ class ImplicitCoercer:
         tgt_pointee = getattr(target_type, 'pointee_type', None)
         if src_pointee is None or tgt_pointee is None:
             return False
+        # Strip storage/const qualifiers from the pointee; e.g. ptr[static[T]]
+        # should be compatible with ptr[T].
+        src_pointee = strip_qualifiers(src_pointee)
+        tgt_pointee = strip_qualifiers(tgt_pointee)
         # Identity check
         if src_pointee is tgt_pointee:
             return True

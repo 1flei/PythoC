@@ -6,7 +6,7 @@ many portable C sources (e.g. sysconf, getpid, read, write).
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64, void
+from ..builtin_entities import ptr, i8, i32, i64, u64, void
 
 
 @extern(lib='c')
@@ -60,4 +60,16 @@ def access(path: ptr[i8], mode: i32) -> i32:
 @extern(lib='c')
 def isatty(fd: i32) -> i32:
     """Test whether a file descriptor refers to a terminal."""
+    pass
+
+
+@extern(lib='c')
+def getpagesize() -> i32:
+    """Return the underlying hardware page size."""
+    pass
+
+
+@extern(lib='c')
+def mprotect(addr: ptr[void], len: u64, prot: i32) -> i32:
+    """Set protection on a region of memory."""
     pass

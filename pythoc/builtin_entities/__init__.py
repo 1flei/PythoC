@@ -52,7 +52,7 @@ from .refined import refined, RefinedType
 from .qualifiers import const, static, thread_local, volatile
 
 # Built-in functions
-from .intrinsics import sizeof, nullptr, seq, consume, assume, refine, typeof, char, defer, instantiate
+from .intrinsics import sizeof, offsetof, nullptr, seq, consume, assume, refine, typeof, char, defer, instantiate
 from .intrinsics import va_start, va_arg, va_end
 # Scoped goto/label (user-facing API)
 from .intrinsics import label, goto, goto_begin, goto_end
@@ -154,6 +154,7 @@ __all__ = [
     
     # Built-in functions
     'sizeof',
+    'offsetof',
     'typeof',
     'nullptr',
     'getptr',

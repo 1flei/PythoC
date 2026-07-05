@@ -4,6 +4,7 @@ from ..valueref import wrap_value
 
 from .typeof import typeof
 from .sizeof import sizeof
+from .offsetof import offsetof
 from .char import char
 from .seq import seq
 from .consume import consume
@@ -19,6 +20,7 @@ nullptr = wrap_value(ir.Constant(ir.PointerType(ir.IntType(8)), None), kind="val
 __all__ = [
     'typeof',
     'sizeof',
+    'offsetof',
     'char',
     'seq',
     'consume',

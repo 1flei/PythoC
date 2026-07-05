@@ -463,10 +463,9 @@ class LLVMCBuilder(LLVMBuilder):
         
         # Default: direct call
         call_arg_attrs = {idx: ['byval'] for idx in byval_arg_indices}
-        call_result = self._builder.call(
+        return self._builder.call(
             fn,
             coerced_args,
             name=name,
             arg_attrs=call_arg_attrs or None,
         )
-        return call_result
