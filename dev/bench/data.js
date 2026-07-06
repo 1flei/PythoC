@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782664673588,
+  "lastUpdate": 1783346388426,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2413,6 +2413,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.139,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "c0419e4eb60d58628bf16e1cf74a16a99eb914b4",
+          "message": "Introduce class based vector, map and set",
+          "timestamp": "2026-07-06T21:47:31+08:00",
+          "tree_id": "9b8a8ac25ce8722c94c39ecfe51434c93e13ca11",
+          "url": "https://github.com/1flei/PythoC/commit/c0419e4eb60d58628bf16e1cf74a16a99eb914b4"
+        },
+        "date": 1783346387490,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.94,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.02,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.075,
             "unit": "seconds/test"
           }
         ]
