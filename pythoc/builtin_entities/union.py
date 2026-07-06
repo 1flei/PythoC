@@ -199,9 +199,17 @@ class UnionType(CompositeType):
             logger.error(f"union field type {field_type} has no get_llvm_type method",
                         node=node, exc_type=TypeError)
         
+        # A union field may be ``void`` (e.g. the payload of an enum variant with
+        # no data). LLVM cannot represent a pointer-to-void, so return a dummy
+        # address value instead of loading.
+        from llvmlite.ir.types import VoidType
+        if isinstance(field_llvm_type, VoidType):
+            return wrap_value(union_ptr, kind="address", type_hint=field_type,
+                              address=union_ptr)
+
         # Bitcast union pointer to field type pointer
         field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
-        
+
         # Load value and return with address for lvalue support
         loaded_value = visitor.builder.load(field_ptr)
         return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr)

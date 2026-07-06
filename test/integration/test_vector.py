@@ -9,77 +9,177 @@ IntVec = Vector(i32, 4)
 I16Vec = Vector(i16, 1)
 I64Vec = Vector(i64, 2)
 
-def test_base(vect, push_size):
-    @compile(suffix=(vect, push_size))
-    def test_vector() -> i32:
-        v: vect.type
-        vp = ptr(v)
-        vect.init(vp)
 
-        for i in seq(push_size):
-            vect.push_back(vp, i)
+# ---------------------------------------------------------------------------
+# Basic push_back / get / size / capacity across the three vector types.
+# ---------------------------------------------------------------------------
 
-        sz: i32 = vect.size(vp)
-        cap: i32 = vect.capacity(vp)
-        printf("Vector: size=%d, capacity=%d\n", sz, cap)
+@compile(suffix=(IntVec, 10))
+def test_intvec_base() -> i32:
+    v: IntVec
+    vp = ptr(v)
+    IntVec.init(vp)
 
-        for j in seq(sz):
-            val: i32 = vect.get(vp, j)
-            printf("  v[%d] = %d\n", j, i32(val))
+    for i in seq(10):
+        IntVec.push_back(vp, i)
 
-        vect.destroy(vp)
-        return 0
-    return test_vector
+    sz: i32 = IntVec.size(vp)
+    cap: i32 = IntVec.capacity(vp)
+    printf("Vector: size=%d, capacity=%d\n", sz, cap)
+
+    for j in seq(sz):
+        val: i32 = IntVec.get(vp, j)
+        printf("  v[%d] = %d\n", j, i32(val))
+
+    IntVec.destroy(vp)
+    return 0
 
 
-def test_boundary(vect, cap):
-    """Push exactly inline_capacity elements.
+@compile(suffix=(I16Vec, 10))
+def test_i16vec_base() -> i32:
+    v: I16Vec
+    vp = ptr(v)
+    I16Vec.init(vp)
 
-    At size == inline_capacity the small-vector is still inline; a wrong
-    inline/heap predicate would read the heap union member (garbage) here.
-    Verify both the indexed accessor and the contiguous data() pointer.
-    """
-    @compile(suffix=(vect, cap, "boundary"))
-    def run() -> i32:
-        v: vect.type
-        vp = ptr(v)
-        vect.init(vp)
+    for i in seq(10):
+        I16Vec.push_back(vp, i16(i))
 
-        for i in seq(cap):
-            vect.push_back(vp, i)
+    sz: i32 = I16Vec.size(vp)
+    cap: i32 = I16Vec.capacity(vp)
+    printf("Vector: size=%d, capacity=%d\n", sz, cap)
 
-        sz: i32 = i32(vect.size(vp))
-        bad: i32 = 0
-        j: i32 = 0
-        while j < sz:
-            if i32(vect.get(vp, j)) != j:
-                bad = bad + 1
-            j = j + 1
+    for j in seq(sz):
+        val: i16 = I16Vec.get(vp, j)
+        printf("  v[%d] = %d\n", j, i32(val))
 
-        d = vect.data(vp)
-        if sz > 0:
-            if i32(d[0]) != 0:
-                bad = bad + 1
-            if i32(d[sz - 1]) != (sz - 1):
-                bad = bad + 1
+    I16Vec.destroy(vp)
+    return 0
 
-        printf("boundary size=%d bad=%d\n", sz, bad)
-        vect.destroy(vp)
-        return bad
-    return run
+
+@compile(suffix=(I64Vec, 10))
+def test_i64vec_base() -> i32:
+    v: I64Vec
+    vp = ptr(v)
+    I64Vec.init(vp)
+
+    for i in seq(10):
+        I64Vec.push_back(vp, i64(i))
+
+    sz: i32 = I64Vec.size(vp)
+    cap: i32 = I64Vec.capacity(vp)
+    printf("Vector: size=%d, capacity=%d\n", sz, cap)
+
+    for j in seq(sz):
+        val: i64 = I64Vec.get(vp, j)
+        printf("  v[%d] = %lld\n", j, val)
+
+    I64Vec.destroy(vp)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Boundary: push exactly inline_capacity elements.
+#
+# At size == inline_capacity the small-vector is still inline; a wrong
+# inline/heap predicate would read the heap union member (garbage) here.
+# ---------------------------------------------------------------------------
+
+@compile(suffix=(IntVec, 4, "boundary"))
+def test_intvec_boundary() -> i32:
+    v: IntVec
+    vp = ptr(v)
+    IntVec.init(vp)
+
+    for i in seq(4):
+        IntVec.push_back(vp, i)
+
+    sz: i32 = i32(IntVec.size(vp))
+    bad: i32 = 0
+    j: i32 = 0
+    while j < sz:
+        if IntVec.get(vp, j) != j:
+            bad = bad + 1
+        j = j + 1
+
+    d = IntVec.data(vp)
+    if sz > 0:
+        if d[0] != 0:
+            bad = bad + 1
+        if d[sz - 1] != (sz - 1):
+            bad = bad + 1
+
+    printf("boundary size=%d bad=%d\n", sz, bad)
+    IntVec.destroy(vp)
+    return bad
+
+
+@compile(suffix=(I16Vec, 1, "boundary"))
+def test_i16vec_boundary() -> i32:
+    v: I16Vec
+    vp = ptr(v)
+    I16Vec.init(vp)
+
+    for i in seq(1):
+        I16Vec.push_back(vp, i16(i))
+
+    sz: i32 = i32(I16Vec.size(vp))
+    bad: i32 = 0
+    j: i32 = 0
+    while j < sz:
+        if i32(I16Vec.get(vp, j)) != j:
+            bad = bad + 1
+        j = j + 1
+
+    d = I16Vec.data(vp)
+    if sz > 0:
+        if i32(d[0]) != 0:
+            bad = bad + 1
+        if i32(d[sz - 1]) != (sz - 1):
+            bad = bad + 1
+
+    printf("boundary size=%d bad=%d\n", sz, bad)
+    I16Vec.destroy(vp)
+    return bad
+
+
+@compile(suffix=(I64Vec, 2, "boundary"))
+def test_i64vec_boundary() -> i32:
+    v: I64Vec
+    vp = ptr(v)
+    I64Vec.init(vp)
+
+    for i in seq(2):
+        I64Vec.push_back(vp, i64(i))
+
+    sz: i32 = i32(I64Vec.size(vp))
+    bad: i32 = 0
+    j: i32 = 0
+    while j < sz:
+        if i64(I64Vec.get(vp, j)) != i64(j):
+            bad = bad + 1
+        j = j + 1
+
+    d = I64Vec.data(vp)
+    if sz > 0:
+        if d[0] != 0:
+            bad = bad + 1
+        if d[sz - 1] != (sz - 1):
+            bad = bad + 1
+
+    printf("boundary size=%d bad=%d\n", sz, bad)
+    I64Vec.destroy(vp)
+    return bad
+
 
 if __name__ == "__main__":
-    fs = []
-    for t in [IntVec, I16Vec, I64Vec]:
-        fs += [test_base(t, 10)]
+    test_intvec_base()
+    test_i16vec_base()
+    test_i64vec_base()
 
-    for f in fs:
-        f()
-
-    # Regression: resting exactly at inline_capacity must stay inline.
     failures = 0
-    for t, cap in [(IntVec, 4), (I16Vec, 1), (I64Vec, 2)]:
-        failures += int(test_boundary(t, cap)())
+    failures += int(test_intvec_boundary())
+    failures += int(test_i16vec_boundary())
+    failures += int(test_i64vec_boundary())
 
     if failures:
         print("Vector boundary regression FAILED")

@@ -498,20 +498,34 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
-        
-        # Check if it's a field access
-        if not cls.has_field(attr_name):
-            # Fall back to class-level method lookup (compiled wrappers
-            # attached by @compile/class-method support).
-            from ..decorators.class_methods import (
-                lookup_class_method, wrap_class_method_as_python_value,
-            )
+
+        from ..decorators.class_methods import (
+            lookup_class_method, wrap_class_method_as_python_value,
+        )
+
+        # Instance-level and class-level attribute access have distinct
+        # namespaces.  An instance access (``v.size``) always resolves to a
+        # struct field; a class-level access (``Vec.size``) always resolves to
+        # a class attribute such as a compiled method.  They are not mixed
+        # through fallback rules.
+        is_class_level = (
+            base.is_python_value()
+            and getattr(base.value, '_struct_type', None) is cls
+        )
+
+        if is_class_level:
             method = lookup_class_method(cls, attr_name)
             if method is not None:
                 return wrap_class_method_as_python_value(method, node)
+            logger.error(
+                f"struct '{cls.get_name()}' has no class attribute '{attr_name}'",
+                node=node, exc_type=AttributeError,
+            )
+
+        if not cls.has_field(attr_name):
             logger.error(f"struct '{cls.get_name()}' has no field named '{attr_name}'",
                         node=node, exc_type=AttributeError)
-        
+
         field_index = cls.get_field_index(attr_name)
         field_type = cls._field_types[field_index]
 

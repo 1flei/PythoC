@@ -3,132 +3,99 @@ from pythoc import *
 from pythoc.libc.stdlib import malloc, free, realloc
 from pythoc.libc.string import memset, memcpy
 
-def Vector(element_type, inline_capacity = 0, size_type = u64):
+
+def Vector(element_type, inline_capacity=0, size_type=u64):
     """
     Factory that generates a small-vector type specialized by element type and
-    inline capacity, plus a set of C-style functions operating on it.
+    inline capacity, plus C-style methods operating on it.
 
-    Memory layout optimization:
-    - size: current number of elements
-    - storage: union of inline_buffer and heap metadata
-      * When size < inline_capacity: use inline_buffer
-      * When size >= inline_capacity: use heap (capacity + heap_buf)
+    The returned object is the compiled ``_Vector`` class itself, with compiled
+    helper methods declared directly inside the class body.  Callers write::
 
-    Returns a VectorApi with `.type` for the struct and functions like `.init`.
+        IntVec = Vector(i32, 4)
+        v: IntVec
+        vp = ptr(v)
+        IntVec.init(vp)
+        IntVec.push_back(vp, 42)
+
+    Methods do not receive a synthetic ``self``; the first argument is the
+    pointer to the vector instance, just like the previous ``api`` pattern.
+    Instance-level attribute access resolves struct fields and class-level
+    access resolves class attributes (methods), so a field and a method may
+    share the same name without ambiguity.
     """
     if not isinstance(inline_capacity, int) or inline_capacity < 0:
         raise TypeError("inline_capacity must be a non-negative integer")
+    if not (hasattr(size_type, '_is_integer') and size_type._is_integer):
+        raise TypeError(
+            f"Vector: size_type must be a PythoC integer type, got {size_type}"
+        )
 
-    # Use tuple suffix for automatic deduplication
-    # compile() will normalize this to a string like "int_0_u64"
     type_suffix = (element_type, inline_capacity, size_type)
 
-    # Define vector struct with union storage
-    @compile(suffix=type_suffix)
-    class _HeapData:
-        capacity: size_type
-        heap_buf: ptr[element_type]
-    
     @compile(suffix=type_suffix)
     class _Vector:
         size: size_type
-        storage: union[heap_data: _HeapData, inline_buffer: array[element_type, inline_capacity]]
+        storage: union[
+            heap_data: struct[capacity: size_type, heap_buf: ptr[element_type]],
+            inline_buffer: array[element_type, inline_capacity],
+        ]
 
-    # Define C-style functions bound to this _Vector type
-    @compile(suffix=type_suffix)
-    def vector_init(v: ptr[_Vector]) -> None:
-        memset(v, 0, sizeof(_Vector))
+        def init(v: ptr[_Vector]) -> None:
+            memset(v, 0, sizeof(_Vector))
 
-    @compile(suffix=type_suffix)
-    def vector_destroy(v: ptr[_Vector]) -> None:
-        if v.size > inline_capacity:
-            # Free heap storage
-            free(v.storage.heap_data.heap_buf)
-        v.size = 0
+        def destroy(v: ptr[_Vector]) -> None:
+            if v.size > inline_capacity:
+                free(v.storage.heap_data.heap_buf)
+            v.size = 0
 
-    @compile(suffix=type_suffix)
-    def vector_size(v: ptr[_Vector]) -> size_type:
-        return v.size
+        def size(v: ptr[_Vector]) -> size_type:
+            return v.size
 
-    @compile(suffix=type_suffix)
-    def vector_capacity(v: ptr[_Vector]) -> size_type:
-        if v.size <= inline_capacity:
-            return inline_capacity
-        else:
+        def capacity(v: ptr[_Vector]) -> size_type:
+            if v.size <= inline_capacity:
+                return size_type(inline_capacity)
             return v.storage.heap_data.capacity
 
-    @compile(suffix=type_suffix)
-    def vector_get(v: ptr[_Vector], index: size_type) -> element_type:
-        if v.size <= inline_capacity:
-            return v.storage.inline_buffer[index]
-        else:
+        def get(v: ptr[_Vector], index: size_type) -> element_type:
+            if v.size <= inline_capacity:
+                return v.storage.inline_buffer[index]
             return v.storage.heap_data.heap_buf[index]
 
-    @compile(suffix=type_suffix)
-    def vector_set(v: ptr[_Vector], index: size_type, value: element_type):
-        if v.size <= inline_capacity:
-            v.storage.inline_buffer[index] = value
-        else:
-            v.storage.heap_data.heap_buf[index] = value
+        def set(v: ptr[_Vector], index: size_type, value: element_type) -> None:
+            if v.size <= inline_capacity:
+                v.storage.inline_buffer[index] = value
+            else:
+                v.storage.heap_data.heap_buf[index] = value
 
-    @compile(suffix=type_suffix)
-    def vector_data(v: ptr[_Vector]) -> ptr[element_type]:
-        if v.size <= inline_capacity:
-            return ptr(v.storage.inline_buffer[0])
-        else:
+        def data(v: ptr[_Vector]) -> ptr[element_type]:
+            if v.size <= inline_capacity:
+                return ptr(v.storage.inline_buffer[0])
             return v.storage.heap_data.heap_buf
 
-    @compile(suffix=type_suffix)
-    def vector_push_back(v: ptr[_Vector], value: element_type):
-        current_cap: size_type = vector_capacity(v)
-        
-        if v.size == inline_capacity:
-            # Transition from inline to heap
-            # new_capacity: size_type = inline_capacity * 2 if inline_capacity > 0 else 4
-            new_capacity: size_type = 4
-            if inline_capacity > 0:
-                new_capacity = inline_capacity * 2
-            new_heap: ptr[element_type] = malloc(new_capacity * sizeof(element_type))
-            memcpy(new_heap, ptr(v.storage.inline_buffer[0]), v.size * sizeof(element_type))
-            v.storage.heap_data.capacity = new_capacity
-            v.storage.heap_data.heap_buf = new_heap
-        elif v.size >= current_cap:
-            # Already in heap mode, reallocate
-            # old_buf: ptr[i8] = ptr[i8](v.storage.heap_data.heap_buf)
-            new_capacity: size_type = 4
-            if current_cap > 0:
-                new_capacity = current_cap * 2
-            new_mem_i8: ptr[i8] = realloc(v.storage.heap_data.heap_buf, new_capacity * sizeof(element_type))
-            v.storage.heap_data.heap_buf = ptr[element_type](new_mem_i8)
-            v.storage.heap_data.capacity = new_capacity
-        # Advance size first so the storage predicate (size <= inline_capacity)
-        # routes the just-migrated boundary element to the correct buffer.
-        v.size += 1
-        vector_set(v, v.size - 1, value)
+        def push_back(v: ptr[_Vector], value: element_type) -> None:
+            current_cap: size_type = _Vector.capacity(v)
 
-    @compile(suffix=type_suffix)
-    def vector_pop_back(v: ptr[_Vector]) -> None:
-        if v.size > 0:
-            v.size = v.size - 1
+            if v.size == inline_capacity:
+                new_capacity: size_type = 4
+                if inline_capacity > 0:
+                    new_capacity = inline_capacity * 2
+                new_heap: ptr[element_type] = malloc(new_capacity * sizeof(element_type))
+                memcpy(new_heap, ptr(v.storage.inline_buffer[0]), v.size * sizeof(element_type))
+                v.storage.heap_data.capacity = new_capacity
+                v.storage.heap_data.heap_buf = new_heap
+            elif v.size >= current_cap:
+                new_capacity: size_type = 4
+                if current_cap > 0:
+                    new_capacity = current_cap * 2
+                new_mem_i8: ptr[i8] = realloc(v.storage.heap_data.heap_buf, new_capacity * sizeof(element_type))
+                v.storage.heap_data.heap_buf = ptr[element_type](new_mem_i8)
+                v.storage.heap_data.capacity = new_capacity
+            v.size += 1
+            _Vector.set(v, v.size - 1, value)
 
-    # Return an API class containing functions and the Vector type itself
-    class api:
-        init = vector_init
-        destroy = vector_destroy
-        size = vector_size
-        capacity = vector_capacity
-        get = vector_get
-        set = vector_set
-        data = vector_data
-        push_back = vector_push_back
-        pop_back = vector_pop_back
-        type = _Vector
-        
-        @classmethod
-        def get_name(cls):
-            """Return a unique name based on the vector's element type and capacity"""
-            elem_name = element_type.get_name() if hasattr(element_type, 'get_name') else str(element_type)
-            size_name = size_type.get_name() if hasattr(size_type, 'get_name') else str(size_type)
-            return f'Vector_{elem_name}_{inline_capacity}_{size_name}'
+        def pop_back(v: ptr[_Vector]) -> None:
+            if v.size > 0:
+                v.size = v.size - 1
 
-    return api
+    return _Vector
