@@ -698,10 +698,14 @@ class ControlFlowBuilder:
 
         Does NOT emit any IR (that's emit_ir()'s job).
         """
-        # For blocks without explicit terminator, connect to exit block
+        # For blocks without explicit terminator, connect to exit block.
+        # Terminated blocks (e.g., those ending in unreachable) should not get a
+        # fallthrough edge because they have no runtime successor.
         reachable = self._cfg.get_reachable_blocks()
         for block_id in reachable:
             if block_id == self._exit_block.id:
+                continue
+            if self._terminated.get(block_id, False):
                 continue
             successors = self._cfg.get_successors(block_id)
             if not successors:

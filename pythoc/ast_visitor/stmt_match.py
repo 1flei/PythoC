@@ -194,6 +194,9 @@ class MatchStatementMixin:
                         # case x: - bind the subject to variable x
                         self._bind_match_variable(pattern.name, subject_ref)
 
+                # Consume linear subjects before executing body
+                self._consume_linear_subjects([subject_ref], case)
+
                 # Execute case body
                 self._visit_stmt_list(case.body, add_to_cfg=True)
 
@@ -243,6 +246,8 @@ class MatchStatementMixin:
                     # Bind variable if present (case x:)
                     if pattern.name is not None:
                         self._bind_match_variable(pattern.name, subjects[0])
+                    # Consume linear subjects before executing body
+                    self._consume_linear_subjects(subjects, case)
                     self._visit_stmt_list(case.body, add_to_cfg=True)
                 if not cf.is_terminated():
                     cf.branch(merge_block)
@@ -282,6 +287,8 @@ class MatchStatementMixin:
 
                         # Use process_condition for guard check
                         def guard_then():
+                            # Guard passed: consume linear subjects before body
+                            self._consume_linear_subjects(subjects, case)
                             # Execute case body
                             self._visit_stmt_list(case.body, add_to_cfg=True)
                             # Branch to merge
@@ -312,6 +319,8 @@ class MatchStatementMixin:
                         # Bind pattern variables
                         for var_name, var_value in bindings:
                             self._bind_match_variable(var_name, var_value)
+                        # Consume linear subjects before executing body
+                        self._consume_linear_subjects(subjects, case)
                         # Execute case body
                         self._visit_stmt_list(case.body, add_to_cfg=True)
                     # Branch to merge
@@ -832,3 +841,32 @@ class MatchStatementMixin:
         # Store the matched value
         var_value_ir = ensure_ir(var_value)
         self.builder.store(var_value_ir, alloca)
+
+        # Register the newly bound variable as the holder of the linear token.
+        # When a match extracts a linear field, ownership moves from the scrutinee
+        # to the bound variable; this transitions that variable from invalid to valid.
+        if pc_type is not None and self._is_linear_type(pc_type):
+            var_info = self.lookup_variable(var_name)
+            if var_info is not None:
+                self._init_linear_states(var_info, pc_type, initial_state='active')
+
+    def _consume_linear_subjects(self, subjects: list, case_node):
+        """Consume linear match subjects when a case is selected.
+
+        Matching a linear value consumes the scrutinee. For each subject whose type
+        is linear (including enums with linear variants), emit a LinearTransition
+        valid -> invalid.
+
+        This must be called *after* the guard has been verified to pass, so that a
+        failing guard does not consume the subject before falling through to the
+        next case.
+        """
+        for subject in subjects:
+            if not isinstance(subject, ValueRef):
+                continue
+            if subject.type_hint is None:
+                continue
+            if self._is_linear_type(subject.type_hint):
+                self._transfer_linear_ownership(
+                    subject, reason="match_consumption", node=case_node
+                )

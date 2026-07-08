@@ -374,34 +374,54 @@ class LinearChecker:
         This implements semantic 2: variables must not hold linear state at lifetime end.
         At function exit (virtual exit block), all linear tokens must be consumed.
         
+        The exit block is a merge point for all return/fallthrough paths.  We must
+        inspect every predecessor's exit snapshot, not just the first one that was
+        propagated during the forward pass.  If any path reaches the exit with a
+        still-active linear token, that token is leaked.
+        
         Args:
             cfg: The CFG
             block_id: Exit block ID (should be cfg.exit_id)
         """
-        entry_snapshot = self.entry_snapshots.get(block_id, {})
-        
-        # Find any valid (unconsumed) tokens
+        preds = [e for e in cfg.get_predecessors(block_id) if e.kind != 'loop_back']
+        if not preds:
+            return
+
+        # Collect exit snapshots from all predecessors.  A token is unconsumed at
+        # exit if it is valid/active in at least one predecessor's exit snapshot.
+        pred_snapshots: List[LinearSnapshot] = []
+        for edge in preds:
+            if edge.source_id in self.exit_snapshots:
+                pred_snapshots.append(self.exit_snapshots[edge.source_id])
+
+        if not pred_snapshots:
+            return
+
+        unconsumed_set: Set[Tuple[int, Tuple[int, ...]]] = set()
+        for snapshot in pred_snapshots:
+            for var_id, paths in snapshot.items():
+                for path, state in paths.items():
+                    if state in ('valid', 'active'):
+                        unconsumed_set.add((var_id, path))
+
+        if not unconsumed_set:
+            return
+
         unconsumed = []
-        for var_id in sorted(entry_snapshot.keys()):
-            paths_dict = entry_snapshot[var_id]
+        for var_id, path in sorted(unconsumed_set):
             var_name, line_number = self._var_id_info.get(var_id, (f"<id={var_id}>", None))
-            for path in sorted(paths_dict.keys()):
-                state = paths_dict[path]
-                # Check for valid/active state (both old and new naming)
-                if state in ('valid', 'active'):
-                    path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                    if line_number:
-                        path_str = f"{path_str} (line {line_number})"
-                    unconsumed.append(path_str)
-        
-        if unconsumed:
-            self.errors.append(LinearError(
-                kind='unconsumed_at_exit',
-                block_id=block_id,
-                message=f"Linear tokens not consumed before function exit: {', '.join(unconsumed)}",
-                details=unconsumed,
-                source_node=self._get_block_source_node(cfg, block_id)
-            ))
+            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
+            if line_number:
+                path_str = f"{path_str} (line {line_number})"
+            unconsumed.append(path_str)
+
+        self.errors.append(LinearError(
+            kind='unconsumed_at_exit',
+            block_id=block_id,
+            message=f"Linear tokens not consumed before function exit: {', '.join(unconsumed)}",
+            details=unconsumed,
+            source_node=self._get_block_source_node(cfg, block_id)
+        ))
     
     def _compute_entry_snapshot(
         self, cfg: CFG, block_id: int

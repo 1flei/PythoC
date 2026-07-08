@@ -699,6 +699,61 @@ class PatternNormalizer:
         return get_schema_field_types(subject_type)
 
 
+def _check_linear_variant_exhaustiveness(node: ast.Match, enum_type: Any,
+                                         visitor: Any) -> None:
+    """Ensure linear enum variants are explicitly matched when a wildcard exists.
+
+    An enum with linear variants must be exhaustively matched, and a wildcard
+    pattern is not allowed to silently swallow a linear variant (which would leak
+    its payload). If all linear variants are already explicitly matched, the
+    wildcard is fine.
+    """
+    from .schema_protocol import is_linear_schema_type
+    from .valueref import ValueRef
+
+    if not hasattr(enum_type, '_is_enum') or not enum_type._is_enum:
+        return
+
+    variant_types = getattr(enum_type, '_variant_types', [])
+    variant_names = getattr(enum_type, '_variant_names', [])
+
+    linear_variants = {
+        name for name, vt in zip(variant_names, variant_types)
+        if vt is not None and is_linear_schema_type(vt)
+    }
+    if not linear_variants:
+        return
+
+    matched_variants: Set[str] = set()
+    has_wildcard = False
+
+    for case in node.cases:
+        pattern = case.pattern
+        if isinstance(pattern, ast.MatchSequence) and len(pattern.patterns) >= 1:
+            first = pattern.patterns[0]
+            if isinstance(first, ast.MatchValue):
+                tag_val = visitor.visit_rvalue_expression(first.value)
+                if isinstance(tag_val, ValueRef) and tag_val.is_python_value():
+                    tag_int = tag_val.value
+                    tag_values = getattr(enum_type, '_tag_values', {})
+                    for vname, vtag in tag_values.items():
+                        if vtag == tag_int:
+                            matched_variants.add(vname)
+                            break
+        elif isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
+            has_wildcard = True
+
+    if has_wildcard:
+        unmatched = linear_variants - matched_variants
+        if unmatched:
+            logger.error(
+                f"Match with wildcard does not explicitly handle linear variants: "
+                f"{', '.join(sorted(unmatched))}. "
+                f"Linear payloads must be explicitly matched and consumed.",
+                node=node, exc_type=ValueError,
+            )
+
+
 def check_match_exhaustiveness(node: ast.Match, subject_types: List[Any],
                                visitor=None) -> None:
     """Check if a match statement is exhaustive.
@@ -710,6 +765,13 @@ def check_match_exhaustiveness(node: ast.Match, subject_types: List[Any],
         subject_types: List of types for subjects
         visitor: Optional AST visitor for expression evaluation
     """
+    # Check linear-variant exhaustiveness for enum subjects.
+    # This must run even if there is an unguarded catch-all, because a wildcard
+    # cannot silently swallow a linear enum variant.
+    for subject_type in subject_types:
+        if isinstance(subject_type, type) and getattr(subject_type, '_is_enum', False):
+            _check_linear_variant_exhaustiveness(node, subject_type, visitor)
+
     # Fast path: unguarded catch-all = exhaustive
     for case in node.cases:
         pattern = case.pattern

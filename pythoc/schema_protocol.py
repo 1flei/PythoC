@@ -237,6 +237,16 @@ def get_linear_schema_paths(
     if isinstance(schema_type, type) and getattr(schema_type, '_is_linear', False):
         return [prefix]
 
+    # Enum with a linear variant: treat the whole enum as linear.
+    # If any constructor has a linear parameter, the whole type is treated as
+    # linear. We track the enum as a single linear resource at path `()` instead
+    # of per-variant paths.
+    if isinstance(schema_type, type) and getattr(schema_type, '_is_enum', False):
+        variant_types = getattr(schema_type, '_variant_types', None)
+        if variant_types is not None:
+            if any(vt is not None and is_linear_schema_type(vt) for vt in variant_types):
+                return [prefix]
+
     paths = []
     for index, _, field_type in iter_schema_fields(schema_type):
         paths.extend(get_linear_schema_paths(field_type, prefix + (index,)))
