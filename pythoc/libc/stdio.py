@@ -3,7 +3,7 @@ Standard I/O Library Functions (stdio.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64
+from ..builtin_entities import ptr, i8, i32, i64, void
 from ..forward_ref import mark_type_defined
 
 # FILE is an opaque stdio stream type.  Exposing it as a named alias lets
@@ -15,7 +15,7 @@ mark_type_defined("FILE", FILE)
 __all__ = [
     'FILE',
     'printf', 'scanf', 'puts', 'getchar', 'putchar',
-    'fopen', 'fclose', 'freopen',
+    'fopen', 'fclose', 'freopen', 'remove',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
     '__stdinp', '__stdoutp', '__stderrp',
     'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
@@ -61,17 +61,22 @@ def fclose(stream: ptr[i8]) -> i32:
     pass
 
 @extern(lib='c')
+def remove(filename: ptr[i8]) -> i32:
+    """Remove a file"""
+    pass
+
+@extern(lib='c')
 def freopen(filename: ptr[i8], mode: ptr[i8], stream: ptr[i8]) -> ptr[i8]:
     """Reopen a file using a different file name/mode."""
     pass
 
 @extern(lib='c')
-def fread(ptr: ptr[i8], size: i64, count: i64, stream: ptr[i8]) -> i64:
+def fread(ptr: ptr[void], size: i64, count: i64, stream: ptr[i8]) -> i64:
     """Read data from file"""
     pass
 
 @extern(lib='c')
-def fwrite(ptr: ptr[i8], size: i64, count: i64, stream: ptr[i8]) -> i64:
+def fwrite(ptr: ptr[void], size: i64, count: i64, stream: ptr[i8]) -> i64:
     """Write data to file"""
     pass
 
