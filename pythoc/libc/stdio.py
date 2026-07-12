@@ -15,7 +15,7 @@ mark_type_defined("FILE", FILE)
 __all__ = [
     'FILE',
     'printf', 'scanf', 'puts', 'getchar', 'putchar',
-    'fopen', 'fclose', 'freopen', 'remove',
+    'fopen', 'fclose', 'freopen', 'remove', 'fdopen',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
     '__stdinp', '__stdoutp', '__stderrp',
     'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
@@ -68,6 +68,11 @@ def remove(filename: ptr[i8]) -> i32:
 @extern(lib='c')
 def freopen(filename: ptr[i8], mode: ptr[i8], stream: ptr[i8]) -> ptr[i8]:
     """Reopen a file using a different file name/mode."""
+    pass
+
+@extern(lib='c')
+def fdopen(fd: i32, mode: ptr[i8]) -> ptr[i8]:
+    """Open a stream from an existing file descriptor."""
     pass
 
 @extern(lib='c')

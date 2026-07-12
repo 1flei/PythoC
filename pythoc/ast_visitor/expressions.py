@@ -21,7 +21,7 @@ from ..builtin_entities import (
 )
 from ..builtin_entities import bool as pc_bool
 from ..logger import logger
-from ..type_converter import ImplicitCoercer, get_base_type
+from ..type_converter import TypeConverter, ImplicitCoercer, get_base_type
 from ..literal_protocol import wrap_literal_result
 
 
@@ -186,46 +186,41 @@ class ExpressionsMixin:
     
 
     def visit_IfExp(self, node: ast.IfExp):
-        """Handle ternary conditional expressions (a if condition else b)"""
-        condition = self.value_dispatcher.to_boolean(self.visit_expression(node.test))
-        
-        # Create basic blocks
+        """Handle ternary conditional expressions (a if condition else b)."""
+        test_val = self.visit_expression(node.test)
+
+        # Compile-time Python condition: keep Python semantics and return the
+        # selected branch directly without emitting IR.
+        if isinstance(test_val, ValueRef) and test_val.is_python_value():
+            selected = node.body if test_val.get_python_value() else node.orelse
+            return self.visit_rvalue_expression(selected)
+
+        # Runtime condition: emit branches and a phi.
+        condition = self.value_dispatcher.to_boolean(test_val)
         then_block = self.builder.create_block("ternary_then")
         else_block = self.builder.create_block("ternary_else")
         merge_block = self.builder.create_block("ternary_merge")
-        
-        # Branch based on condition
         self.builder.cbranch(condition, then_block, else_block)
-        
-        # Generate then block
+
         self.builder.position_at_end(then_block)
         then_val = self.visit_rvalue_expression(node.body)
         then_block = self.builder.block  # Update in case of nested blocks
 
-        # Generate else block
         self.builder.position_at_end(else_block)
         else_val = self.visit_rvalue_expression(node.orelse)
         else_block = self.builder.block  # Update in case of nested blocks
 
-        # Pick a common result type so the phi is well-typed. A literal branch
-        # (e.g. `x if c else 0`) is otherwise a zero-sized pyconst and fails phi
-        # type checking, so coerce it to the runtime branch's type. Conversions
-        # are emitted inside each branch block to keep phi operands dominated.
-        result_type = None
-        if isinstance(then_val, ValueRef) and not then_val.is_python_value():
-            result_type = then_val.type_hint
-        elif isinstance(else_val, ValueRef) and not else_val.is_python_value():
-            result_type = else_val.type_hint
-        elif isinstance(then_val, ValueRef):
-            result_type = then_val.type_hint
+        result_type = self._resolve_ternary_result_type(then_val, else_val)
+        if result_type is None:
+            logger.error(
+                "No common type for ternary branches",
+                node=node, exc_type=TypeError,
+            )
 
         def _coerce_branch(val, block):
-            if result_type is None or not isinstance(val, ValueRef):
+            if not isinstance(val, ValueRef):
                 return val
             self.builder.position_at_end(block)
-            if val.is_python_value():
-                return self.type_converter._promote_python_to_pc(
-                    val.get_python_value(), result_type)
             return self.type_converter.convert(val, result_type)
 
         then_val = _coerce_branch(then_val, then_block)
@@ -236,7 +231,6 @@ class ExpressionsMixin:
         self.builder.position_at_end(else_block)
         self.builder.branch(merge_block)
 
-        # Merge results
         self.builder.position_at_end(merge_block)
         phi = self.builder.phi(get_type(then_val))
         phi.add_incoming(ensure_ir(then_val), then_block)
@@ -244,6 +238,85 @@ class ExpressionsMixin:
 
         return wrap_value(phi, kind="value", type_hint=result_type)
 
+    def _resolve_ternary_result_type(self, then_val, else_val):
+        """Pick the common PC type for a ternary expression.
+
+        - PC + PC        -> unify via C conditional-expression rules.
+        - PC + pyconst   -> PC type wins, pyconst is promoted to it.
+        - pyconst + PC   -> PC type wins, pyconst is promoted to it.
+        - pyconst + pyconst -> promote each to its default PC type, then unify.
+        """
+        then_is_py = isinstance(then_val, ValueRef) and then_val.is_python_value()
+        else_is_py = isinstance(else_val, ValueRef) and else_val.is_python_value()
+
+        if not then_is_py and not else_is_py:
+            return TypeConverter.infer_unified_pc_type(
+                then_val.type_hint, else_val.type_hint)
+        if not then_is_py and else_is_py:
+            return then_val.type_hint
+        if then_is_py and not else_is_py:
+            return else_val.type_hint
+
+        # Both pyconst: infer each default runtime PC type and unify.
+        then_type = self._infer_pc_type_from_python_value(then_val)
+        else_type = self._infer_pc_type_from_python_value(else_val)
+        return TypeConverter.infer_unified_pc_type(then_type, else_type)
+
+    def _infer_pc_type_from_python_value(self, value_ref: ValueRef):
+        """If value_ref is a Python value, infer its runtime PC type.
+
+        For @compile/@extern function wrappers this returns the function pointer
+        type.  For primitive literals (int/float/bool/str) this returns the
+        default PC type (i64/f64/bool/ptr[i8]).  Returns None when no runtime
+        PC type can be inferred.
+        """
+        if not (isinstance(value_ref, ValueRef) and value_ref.is_python_value()):
+            return None
+        python_val = value_ref.get_python_value()
+
+        if getattr(python_val, '_is_compiled', False):
+            func_info = getattr(python_val, '_func_info', None)
+            if func_info is not None:
+                return func_info.callable_pc_type
+
+        if getattr(python_val, '_is_extern', False):
+            # Extern wrappers declare their signature explicitly.
+            from ..builtin_entities.func import func as func_type_cls
+            from ..builtin_entities.types import void
+            import inspect
+
+            signature = python_val._extern_config.get('signature')
+            param_type_map = dict(python_val.param_types)
+            fixed_params = []
+            for param in signature.parameters.values():
+                if param.kind == inspect.Parameter.VAR_POSITIONAL:
+                    continue
+                if param.kind == inspect.Parameter.VAR_KEYWORD:
+                    continue
+                fixed_params.append((param.name, param_type_map[param.name]))
+            ret_type = python_val.return_type if python_val.return_type is not None else void
+            callable_items = tuple(fixed_params) + ((None, ret_type),)
+            return func_type_cls.handle_type_subscript(callable_items)
+
+        try:
+            return TypeConverter.infer_default_pc_type_from_python(python_val)
+        except TypeError:
+            return None
+
+    def _runtime_types_equal(self, a, b) -> bool:
+        """Check whether two inferred runtime PC types are equivalent.
+
+        Parameterized types (ptr[T], array[T,N], func[...]) may be represented
+        by different type objects even when structurally identical, so we use
+        the canonical type_id for comparison.
+        """
+        if a == b:
+            return True
+        from ..type_id import get_type_id
+        try:
+            return get_type_id(a) == get_type_id(b)
+        except Exception:
+            return False
 
     def visit_List(self, node: ast.List):
         """Handle list expressions as pc_list literal carriers."""

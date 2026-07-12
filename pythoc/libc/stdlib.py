@@ -110,3 +110,9 @@ def strtoll(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> i64:
 def strtoull(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> i64:
     """Convert string to unsigned long long (mapped to i64)"""
     pass
+
+
+@extern(lib='c')
+def realpath(path: ptr[i8], resolved_path: ptr[i8]) -> ptr[i8]:
+    """Resolve a pathname to an absolute path"""
+    pass

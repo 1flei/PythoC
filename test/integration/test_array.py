@@ -5,7 +5,7 @@ array syntax design proposals for pc library
 Multiple candidate syntaxes for array support
 """
 
-from pythoc import i32, i64, f64, bool, ptr, compile, nullptr, array
+from pythoc import i32, i64, f64, bool, ptr, compile, nullptr, array, i8, u8, struct
 from pythoc.libc.stdio import printf
 
 @compile
@@ -364,6 +364,61 @@ def test_tuple_index_assignment() -> i32:
     
     return 0
 
+
+@compile
+def test_string_init_i8_array() -> i32:
+    """Test string literal initialization of array[i8, N]."""
+    # Shorter than array: implicit null terminator + zero fill
+    a: array[i8, 10] = "abcd"
+    total: i32 = 0
+    i: i32 = 0
+    while i < 10:
+        total = total + a[i]
+        i = i + 1
+    return total
+
+
+@compile
+def test_string_init_exact_size_array() -> i32:
+    """Test string literal that exactly fills the array (no null terminator)."""
+    a: array[i8, 4] = "abcd"
+    total: i32 = 0
+    i: i32 = 0
+    while i < 4:
+        total = total + a[i]
+        i = i + 1
+    return total
+
+
+@compile
+def test_string_init_u8_array() -> i32:
+    """Test string literal initialization of array[u8, N]."""
+    a: array[u8, 10] = "abcd"
+    total: i32 = 0
+    i: i32 = 0
+    while i < 10:
+        total = total + a[i]
+        i = i + 1
+    return total
+
+
+@compile
+class StringInitStruct:
+    name: array[i8, 16]
+
+
+@compile
+def test_string_init_struct_array_field() -> i32:
+    """Test string literal initialization of a struct array field via pc_tuple."""
+    s: StringInitStruct = ("/               ",)
+    total: i32 = 0
+    i: i32 = 0
+    while i < 16:
+        total = total + s.name[i]
+        i = i + 1
+    return total
+
+
 if __name__ == "__main__":
     test_array()
     test_1d_array()
@@ -402,5 +457,22 @@ if __name__ == "__main__":
 
     printf("\n=== Tuple Index Assignment Test ===\n")
     test_tuple_index_assignment()
-    
+
+    # Test string literal initialization of byte arrays
+    printf("\n=== String Init i8 Array Test ===\n")
+    result = test_string_init_i8_array()
+    assert result == 394, f"expected 394, got {result}"
+
+    printf("\n=== String Init Exact Size Array Test ===\n")
+    result = test_string_init_exact_size_array()
+    assert result == 394, f"expected 394, got {result}"
+
+    printf("\n=== String Init u8 Array Test ===\n")
+    result = test_string_init_u8_array()
+    assert result == 394, f"expected 394, got {result}"
+
+    printf("\n=== String Init Struct Array Field Test ===\n")
+    result = test_string_init_struct_array_field()
+    assert result == 527, f"expected 527, got {result}"
+
     print("All array tests passed!")

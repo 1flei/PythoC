@@ -257,6 +257,13 @@ class TypeConverter:
                 # continue converting from the lowered function pointer.
                 if not target_is_func:
                     return self.convert(lowered, target_type, node)
+                if not self._func_types_compatible(lowered.type_hint, stripped_target):
+                    func_name = getattr(python_val, '__name__', repr(python_val))
+                    logger.error(
+                        f"Function '{func_name}' has signature {lowered.type_hint.get_name()}, "
+                        f"but is being used as {stripped_target.get_name()}",
+                        node=node, exc_type=TypeError,
+                    )
                 return lowered
             if getattr(python_val, '_is_extern', False):
                 from .callable_lowering import lower_extern_wrapper
@@ -267,6 +274,13 @@ class TypeConverter:
                 )
                 if not target_is_func:
                     return self.convert(lowered, target_type, node)
+                if not self._func_types_compatible(lowered.type_hint, stripped_target):
+                    func_name = getattr(python_val, 'func_name', repr(python_val))
+                    logger.error(
+                        f"Extern function '{func_name}' has signature {lowered.type_hint.get_name()}, "
+                        f"but is being used as {stripped_target.get_name()}",
+                        node=node, exc_type=TypeError,
+                    )
                 return lowered
             # Otherwise, auto-promote Python values to PC values
             value = self._promote_python_to_pc(python_val, stripped_target)
@@ -381,7 +395,13 @@ class TypeConverter:
             return self._visitor.value_dispatcher.handle_type_call(target_type_ref, [tag_ref], None)
         
         if isinstance(python_val, str):
-            # Create global string constant
+            # If the target is a byte-sized integer array, treat the string as an
+            # array initializer (C semantics: copy characters, append implicit
+            # null terminator if there is room, zero-fill the rest).
+            if self._is_byte_array_type(target_type):
+                return self._convert_string_to_array_value(python_val, target_type)
+
+            # Otherwise create global string constant as ptr[i8]
             from .builtin_entities import ptr, i8
             str_const = self._visitor._create_string_constant(python_val)
             return wrap_value(str_const, kind="value", type_hint=ptr[i8])
@@ -401,10 +421,112 @@ class TypeConverter:
                 return wrap_value(ptr_val, kind="value", type_hint=target_type)
             else:
                 raise TypeError(f"Cannot promote Python {type(python_val).__name__} to pointer type")
-        
+
+        # Handle float -> integer conversion (e.g. pyconst float used in i32 context).
+        # Truncate toward zero to match C semantics.
+        if isinstance(python_val, float) and hasattr(target_type, '_is_integer') and target_type._is_integer:
+            python_val = int(python_val)
+
         ir_val = ir.Constant(llvm_type, python_val)
         return wrap_value(ir_val, kind="value", type_hint=target_type)
-        
+
+    @staticmethod
+    def _func_types_compatible(source_func_type, target_func_type) -> bool:
+        """Check whether two func[...] types have the same callable signature.
+
+        Parameter names are ignored; the comparison uses the lowered LLVM
+        function type, so differently-spelled but structurally identical types
+        (e.g. two `ptr[void]` specializations) are still compatible.
+        The bare, unspecialized ``func`` type is treated as compatible with any
+        function pointer.
+        """
+        if source_func_type == target_func_type:
+            return True
+        # Bare func type is an untyped function pointer: accept any func value.
+        if (getattr(target_func_type, 'param_types', None) is None
+                and getattr(target_func_type, 'return_type', None) is None):
+            return True
+        if (getattr(source_func_type, 'param_types', None) is None
+                or getattr(target_func_type, 'param_types', None) is None):
+            return False
+        if len(source_func_type.param_types) != len(target_func_type.param_types):
+            return False
+        # Compare lowered LLVM function types to avoid identity issues with
+        # specialized pointer / array / struct types.
+        try:
+            source_llvm = source_func_type.get_function_type(None)
+            target_llvm = target_func_type.get_function_type(None)
+            return source_llvm == target_llvm
+        except Exception:
+            return False
+
+    @staticmethod
+    def _is_byte_array_type(pc_type) -> bool:
+        """Return True if pc_type is an array whose element type is one byte."""
+        base_type = strip_qualifiers(pc_type)
+        if not (hasattr(base_type, 'is_array') and base_type.is_array()):
+            return False
+        elem_type = getattr(base_type, 'element_type', None)
+        if elem_type is None:
+            return False
+        if not (hasattr(elem_type, '_is_integer') and elem_type._is_integer):
+            return False
+        if getattr(elem_type, '_is_bool', False):
+            return False
+        return getattr(elem_type, '_size_bytes', None) == 1
+
+    def _convert_string_to_array_value(self, string_val: str, target_array_type) -> ValueRef:
+        """Convert a Python string literal into a fixed-size byte array value.
+
+        Follows C string literal initialization rules for char arrays:
+        - If the string fits with room for a null terminator, copy the bytes,
+          append '\0', and zero-fill any remaining slots.
+        - If the string exactly fills the array, copy the bytes as-is.
+        - If the string is too long, raise a type error.
+
+        The result is an aggregate LLVM value (not a pointer) so it can be used
+        both as a direct array initializer and as a nested aggregate element
+        (e.g. a struct field of type array[i8, N]).
+        """
+        from .literal_protocol import materialize_sequence_value
+        from .builtin_entities.pc_list import pc_list
+        from .valueref import wrap_python_constant, wrap_value
+
+        if not self._is_byte_array_type(target_array_type):
+            raise TypeError(
+                f"Cannot convert string literal to non-byte-array type {target_array_type}"
+            )
+
+        bytes_data = string_val.encode('utf-8')
+        dims = getattr(target_array_type, 'dimensions', None) or ()
+        total_size = 1
+        for dim in dims:
+            total_size *= dim
+
+        if len(bytes_data) < total_size:
+            byte_values = list(bytes_data) + [0]  # implicit null terminator
+        elif len(bytes_data) == total_size:
+            byte_values = list(bytes_data)
+        else:
+            raise TypeError(
+                f"String literal is too long for {target_array_type}: "
+                f"{len(bytes_data)} bytes given, {total_size} bytes available"
+            )
+
+        # Zero-fill any remaining slots.
+        while len(byte_values) < total_size:
+            byte_values.append(0)
+
+        elements = [wrap_python_constant(b) for b in byte_values]
+        pc_list_carrier = pc_list.from_elements(elements)
+        array_value = materialize_sequence_value(
+            self._visitor, pc_list_carrier, target_array_type)
+        return wrap_value(
+            array_value,
+            kind="value",
+            type_hint=target_array_type,
+        )
+
     @staticmethod
     def infer_default_pc_type_from_python(python_val):
         """Infer default PC type from Python value
@@ -1143,6 +1265,67 @@ class TypeConverter:
             right_promoted = self.convert(right, left.type_hint)
             return left, right_promoted
 
+    @staticmethod
+    def infer_unified_pc_type(left_pc_type, right_pc_type):
+        """Return the least upper bound of two runtime PC types, or None.
+
+        This is the type-only counterpart of ``unify_binop_types``: it computes
+        the common PC type without emitting IR, so it can be used by control-flow
+        constructs such as ternary expressions.
+
+        Rules mirror C usual arithmetic conversions / conditional expressions:
+        - identical type -> that type
+        - both integer -> wider integer
+        - any float involved -> float (f64 wins over f32)
+        - compatible pointers (same pointee, void ptr, null) -> concrete ptr
+        - no common type -> None
+        """
+        if left_pc_type is None or right_pc_type is None:
+            return None
+
+        # Identity / canonical equality
+        if left_pc_type == right_pc_type:
+            return left_pc_type
+        try:
+            from .type_id import get_type_id
+            if get_type_id(left_pc_type) == get_type_id(right_pc_type):
+                return left_pc_type
+        except Exception:
+            pass
+
+        # Arithmetic types
+        left_is_float = hasattr(left_pc_type, '_is_float') and left_pc_type._is_float
+        right_is_float = hasattr(right_pc_type, '_is_float') and right_pc_type._is_float
+        if left_is_float or right_is_float:
+            from .builtin_entities import f64
+            if left_is_float and right_is_float:
+                return f64 if (left_pc_type == f64 or right_pc_type == f64) else left_pc_type
+            return left_pc_type if left_is_float else right_pc_type
+
+        left_is_int = hasattr(left_pc_type, '_is_integer') and left_pc_type._is_integer
+        right_is_int = hasattr(right_pc_type, '_is_integer') and right_pc_type._is_integer
+        if left_is_int and right_is_int:
+            left_width = left_pc_type.get_llvm_type(None).width
+            right_width = right_pc_type.get_llvm_type(None).width
+            if left_width >= right_width:
+                return left_pc_type
+            return right_pc_type
+
+        # Pointer types
+        left_is_ptr = hasattr(left_pc_type, '_is_pointer') and left_pc_type._is_pointer
+        right_is_ptr = hasattr(right_pc_type, '_is_pointer') and right_pc_type._is_pointer
+        if left_is_ptr and right_is_ptr:
+            # void pointer unifies with any concrete pointer
+            if ImplicitCoercer.is_void_pointer(left_pc_type):
+                return right_pc_type
+            if ImplicitCoercer.is_void_pointer(right_pc_type):
+                return left_pc_type
+            # compatible pointees -> concrete pointer type
+            if ImplicitCoercer.are_compatible_pointers(left_pc_type, right_pc_type):
+                return left_pc_type
+
+        return None
+
     def unify_binop_types(self, left: Union[ir.Value, ValueRef], right: Union[ir.Value, ValueRef]) -> Tuple[ValueRef, ValueRef, bool]:
         """Unify operands for binary operations via PC types."""
         if left.is_python_value() and right.is_python_value():
@@ -1313,7 +1496,17 @@ class ImplicitCoercer:
 
     @staticmethod
     def are_compatible_pointers(source_type, target_type) -> bool:
-        """True if two pointer types have the same pointee (by identity or type_id)."""
+        """True if two pointer types have the same pointee (by identity or type_id).
+
+        Function pointer types (func[...]) are compared by their lowered LLVM
+        function type so that differently-named but structurally identical
+        signatures are still compatible.
+        """
+        from .builtin_entities.func import func as func_type_cls
+        if (isinstance(source_type, type) and issubclass(source_type, func_type_cls)
+                and isinstance(target_type, type) and issubclass(target_type, func_type_cls)):
+            return TypeConverter._func_types_compatible(source_type, target_type)
+
         src_pointee = getattr(source_type, 'pointee_type', None)
         tgt_pointee = getattr(target_type, 'pointee_type', None)
         if src_pointee is None or tgt_pointee is None:
