@@ -35,8 +35,11 @@ class offsetof(BuiltinFunction):
         field_name = field_arg.value
 
         offset = cls._get_field_offset(pc_type, field_name)
-        ir_val = ir.Constant(u64.get_llvm_type(), offset)
-        return wrap_value(ir_val, kind="value", type_hint=u64)
+        # offsetof() is a compile-time constant; represent it as a Python value
+        # (like sizeof()) so Python-level arithmetic on it remains foldable.
+        from .python_type import PythonType
+        python_type = PythonType.wrap(offset, is_constant=True)
+        return wrap_value(offset, kind="python", type_hint=python_type)
 
     @classmethod
     def _get_field_offset(cls, pc_type, field_name: str) -> int:

@@ -411,13 +411,14 @@ class TypeConverter:
         module_context = getattr(module, 'context', None) if module else None
         llvm_type = target_type.get_llvm_type(module_context)
         
-        # Handle pointer types specially - convert integer to pointer via inttoptr
+        # Handle pointer types specially - convert integer to pointer via inttoptr.
+        # Python integer constants are compile-time values, so the resulting
+        # pointer is also a constant expression (matching C's address constants).
         if hasattr(target_type, 'is_pointer') and target_type.is_pointer():
             if isinstance(python_val, int):
-                # Create integer constant first, then convert to pointer
                 from .builtin_entities import i64
                 int_val = ir.Constant(i64.get_llvm_type(), python_val)
-                ptr_val = self._visitor.builder.inttoptr(int_val, llvm_type)
+                ptr_val = ir.Constant.inttoptr(int_val, llvm_type)
                 return wrap_value(ptr_val, kind="value", type_hint=target_type)
             else:
                 raise TypeError(f"Cannot promote Python {type(python_val).__name__} to pointer type")
@@ -980,6 +981,25 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
+
+        # Constant-fold integer conversions so compile-time values like offsetof()
+        # remain constants when assigned to differently-sized fields.
+        if isinstance(value_ir, ir.Constant) and value_ir.constant is not None and value_ir.constant is not ir.Undefined:
+            if source_type.width < target_type.width:
+                result = (
+                    value_ir.zext(target_type)
+                    if source_is_unsigned
+                    else value_ir.sext(target_type)
+                )
+            elif source_type.width > target_type.width:
+                if target_type.width == 1:
+                    result = ir.Constant(target_type, int(value_ir.constant != 0))
+                else:
+                    result = value_ir.trunc(target_type)
+            else:
+                result = value_ir
+            return wrap_value(result, kind="value", type_hint=type_hint)
+
         if source_type.width < target_type.width:
             result = (
                 self.builder.zext(value_ir, target_type)
@@ -1008,6 +1028,15 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
+
+        if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, int) and value_ir.constant is not ir.Undefined:
+            result = (
+                value_ir.uitofp(target_type)
+                if source_is_unsigned
+                else value_ir.sitofp(target_type)
+            )
+            return wrap_value(result, kind="value", type_hint=type_hint)
+
         result = (
             self.builder.uitofp(value_ir, target_type)
             if source_is_unsigned
@@ -1025,6 +1054,15 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
+
+        if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, float):
+            result = (
+                value_ir.fptoui(target_type)
+                if target_is_unsigned
+                else value_ir.fptosi(target_type)
+            )
+            return wrap_value(result, kind="value", type_hint=type_hint)
+
         result = (
             self.builder.fptoui(value_ir, target_type)
             if target_is_unsigned
@@ -1042,7 +1080,7 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
-        
+
         # Determine source and target bit widths
         # Map types to bit widths: half/bf16=16, float=32, double=64, fp128=128
         def get_float_bits(float_type):
@@ -1058,10 +1096,20 @@ class TypeConverter:
             else:
                 # Fallback: unknown float type
                 raise TypeError(f"Unknown float type: {type_class}")
-        
+
         source_bits = get_float_bits(source_type)
         target_bits = get_float_bits(target_type)
-        
+
+        # Constant-fold float conversions when possible.
+        if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, float):
+            if source_bits < target_bits:
+                result = value_ir.fpext(target_type)
+            elif source_bits > target_bits:
+                result = value_ir.fptrunc(target_type)
+            else:
+                result = value_ir
+            return wrap_value(result, kind="value", type_hint=type_hint)
+
         if source_bits < target_bits:
             # Extend to larger type
             result = self.builder.fpext(value_ir, target_type)
@@ -1159,8 +1207,10 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
-        if isinstance(value_ir, ir.Constant) and value_ir.constant == 0:
-            result = ir.Constant(target_type, None)
+        if isinstance(value_ir, ir.Constant):
+            # Constant integer -> pointer is a constant expression, usable in
+            # static/global initializers (C address constant semantics).
+            result = ir.Constant.inttoptr(value_ir, target_type)
         else:
             result = self.builder.inttoptr(value_ir, target_type)
         return wrap_value(result, kind="value", type_hint=type_hint)
