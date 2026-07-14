@@ -54,8 +54,10 @@ class HelpersMixin:
         global_str.global_constant = True
         global_str.initializer = ir.Constant(char_array_type, byte_array)
         
-        # Return pointer to first element
-        gep_result = self.builder.gep(ensure_ir(global_str), [ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), 0)])
+        # Return pointer to first element as a constant expression.  Python string
+        # literals are compile-time constants, so the corresponding ptr[i8] value
+        # can be folded and used in static/global initializers.
+        gep_result = global_str.gep([ir.Constant(ir.IntType(32), 0), ir.Constant(ir.IntType(32), 0)])
         return gep_result
     
     def _get_floor_intrinsic(self, type_):

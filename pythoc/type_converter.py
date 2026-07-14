@@ -680,9 +680,9 @@ class TypeConverter:
         field_types = get_schema_field_types(target_struct_type)
         if field_types is None:
             raise TypeError(f"Cannot get field types from {target_struct_type}")
-        if len(python_tuple) != len(field_types):
+        if len(python_tuple) > len(field_types):
             raise TypeError(
-                f"Tuple length {len(python_tuple)} does not match struct field count {len(field_types)}"
+                f"Tuple length {len(python_tuple)} exceeds struct field count {len(field_types)}"
             )
 
         struct_value = materialize_sequence_value(

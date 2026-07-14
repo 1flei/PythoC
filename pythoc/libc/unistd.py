@@ -16,6 +16,12 @@ def sysconf(name: i32) -> i64:
 
 
 @extern(lib='c')
+def open(path: ptr[i8], flags: i32, *args) -> i32:
+    """Open or create a file for reading or writing."""
+    pass
+
+
+@extern(lib='c')
 def getpid() -> i32:
     """Return the process ID."""
     pass
