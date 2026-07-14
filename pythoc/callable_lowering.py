@@ -160,7 +160,8 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
     temp_builder = LLVMBuilder()
     func_wrapper = temp_builder.declare_function(
         module, actual_func_name,
-        param_llvm_types, return_llvm_type
+        param_llvm_types, return_llvm_type,
+        var_arg=bool(func_info.has_llvm_varargs),
     )
     ir_func = func_wrapper.ir_function
 

@@ -185,7 +185,9 @@ class func(BuiltinType):
                 )
 
         fn_type = getattr(func_ptr, 'function_type', None)
-        is_varargs = bool(fn_type and getattr(fn_type, 'var_arg', False))
+        is_varargs = bool(
+            fn_type and getattr(fn_type, 'var_arg', False)
+        ) or bool(cls.has_llvm_varargs)
 
         # --- Normalize typed *args / **kwargs carriers ---
         # This is the single convergence point for ALL call paths.
