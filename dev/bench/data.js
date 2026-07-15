@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784045729700,
+  "lastUpdate": 1784123115109,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2487,6 +2487,45 @@ window.BENCHMARK_DATA = {
             "name": "nsieve",
             "value": 1.04,
             "unit": "PC/C ratio"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "11ca74f593108903630c93ec3bcc129b74bbab5f",
+          "message": "Update constant folding to support higher version of llvm",
+          "timestamp": "2026-07-15T21:39:42+08:00",
+          "tree_id": "d893ee82e95ec4ff772201148b582d973f5cb263",
+          "url": "https://github.com/1flei/PythoC/commit/11ca74f593108903630c93ec3bcc129b74bbab5f"
+        },
+        "date": 1784123114280,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.68,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.109,
+            "unit": "seconds/test"
           }
         ]
       }
