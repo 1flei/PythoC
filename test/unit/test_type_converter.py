@@ -37,7 +37,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.IntType(32))
         result_ir = ensure_ir(result)
-        self.assertIn('sext', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertEqual(result_ir.constant, 127)
     
     def test_int_to_int_zext(self):
         """Test integer zero extension (u8 -> u32)"""
@@ -47,7 +49,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.IntType(32))
         result_ir = ensure_ir(result)
-        self.assertIn('zext', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertEqual(result_ir.constant, 255)
     
     def test_int_to_int_trunc(self):
         """Test integer truncation (i32 -> i8)"""
@@ -57,7 +61,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.IntType(8))
         result_ir = ensure_ir(result)
-        self.assertIn('trunc', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertEqual(result_ir.constant, 1000 & 0xFF)
     
     def test_int_to_int_same_width(self):
         """Test integer conversion with same width (no-op)"""
@@ -75,7 +81,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.FloatType())
         result_ir = ensure_ir(result)
-        self.assertIn('sitofp', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertAlmostEqual(result_ir.constant, 42.0)
     
     def test_int_to_double(self):
         """Test integer to double conversion"""
@@ -85,7 +93,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.DoubleType())
         result_ir = ensure_ir(result)
-        self.assertIn('sitofp', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertAlmostEqual(result_ir.constant, 42.0)
     
     def test_unsigned_int_to_float(self):
         """Test unsigned integer to float conversion"""
@@ -95,7 +105,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.FloatType())
         result_ir = ensure_ir(result)
-        self.assertIn('uitofp', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertAlmostEqual(result_ir.constant, 42.0)
     
     def test_float_to_int(self):
         """Test float to integer conversion"""
@@ -105,7 +117,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.IntType(32))
         result_ir = ensure_ir(result)
-        self.assertIn('fptosi', str(result_ir))
+        # Constant inputs are folded to the target constant directly (truncated toward zero)
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertEqual(result_ir.constant, 42)
     
     def test_float_to_unsigned_int(self):
         """Test float to unsigned integer conversion"""
@@ -115,7 +129,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.IntType(32))
         result_ir = ensure_ir(result)
-        self.assertIn('fptoui', str(result_ir))
+        # Constant inputs are folded to the target constant directly (truncated toward zero)
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertEqual(result_ir.constant, 42)
     
     def test_float_to_double(self):
         """Test float to double conversion"""
@@ -125,7 +141,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.DoubleType())
         result_ir = ensure_ir(result)
-        self.assertIn('fpext', str(result_ir))
+        # Constant inputs are folded to the target constant directly
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertAlmostEqual(result_ir.constant, 3.14, places=5)
     
     def test_double_to_float(self):
         """Test double to float conversion"""
@@ -135,7 +153,9 @@ class TestTypeConverter(unittest.TestCase):
         
         self.assertEqual(get_type(result), ir.FloatType())
         result_ir = ensure_ir(result)
-        self.assertIn('fptrunc', str(result_ir))
+        # Constant inputs are folded to the target constant directly (single precision)
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertAlmostEqual(result_ir.constant, 3.14159265359, places=5)
     
     def test_ptr_to_ptr(self):
         """Test pointer to pointer conversion (bitcast)"""
@@ -231,9 +251,10 @@ class TestTypeConverter(unittest.TestCase):
         result = self.converter.convert(i8_const, i32)
         
         self.assertEqual(get_type(result), ir.IntType(32))
-        # Converter uses builder instructions even for constants
+        # Constant inputs are folded to the target constant directly
         result_ir = ensure_ir(result)
-        self.assertIn('sext', str(result_ir))
+        self.assertIsInstance(result_ir, ir.Constant)
+        self.assertEqual(result_ir.constant, 42)
     
     def test_unify_binop_types_int_int(self):
         """Test unify_binop_types with two integers"""

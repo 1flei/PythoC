@@ -984,20 +984,30 @@ class TypeConverter:
 
         # Constant-fold integer conversions so compile-time values like offsetof()
         # remain constants when assigned to differently-sized fields.
+        # We compute the resulting integer value directly instead of emitting a
+        # cast constexpr (sext/zext/trunc), because newer LLVM versions reject
+        # those constexprs as instruction operands.
         if isinstance(value_ir, ir.Constant) and value_ir.constant is not None and value_ir.constant is not ir.Undefined:
-            if source_type.width < target_type.width:
-                result = (
-                    value_ir.zext(target_type)
-                    if source_is_unsigned
-                    else value_ir.sext(target_type)
-                )
-            elif source_type.width > target_type.width:
-                if target_type.width == 1:
-                    result = ir.Constant(target_type, int(value_ir.constant != 0))
+            v = value_ir.constant
+            sw = source_type.width
+            tw = target_type.width
+            if sw < tw:
+                if source_is_unsigned:
+                    v = v & ((1 << sw) - 1)
                 else:
-                    result = value_ir.trunc(target_type)
+                    # sign-extend from sw bits
+                    if v & (1 << (sw - 1)):
+                        v = v - (1 << sw)
+            elif sw > tw:
+                if tw == 1:
+                    v = int(v != 0)
+                else:
+                    v = v & ((1 << tw) - 1)
             else:
-                result = value_ir
+                if source_is_unsigned:
+                    v = v & ((1 << sw) - 1)
+                # same-width signed: keep Python int as-is
+            result = ir.Constant(target_type, v)
             return wrap_value(result, kind="value", type_hint=type_hint)
 
         if source_type.width < target_type.width:
@@ -1029,12 +1039,18 @@ class TypeConverter:
     ) -> ValueRef:
         value_ir = ensure_ir(value)
 
+        # Constant-fold integer -> float conversion by computing the float value
+        # directly. Avoids emitting a sitofp/uitofp constexpr, which LLVM 20+
+        # rejects as an instruction operand.
         if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, int) and value_ir.constant is not ir.Undefined:
-            result = (
-                value_ir.uitofp(target_type)
-                if source_is_unsigned
-                else value_ir.sitofp(target_type)
-            )
+            v = value_ir.constant
+            sw = source_type.width
+            if source_is_unsigned:
+                v = v & ((1 << sw) - 1)
+            else:
+                if v & (1 << (sw - 1)):
+                    v = v - (1 << sw)
+            result = ir.Constant(target_type, float(v))
             return wrap_value(result, kind="value", type_hint=type_hint)
 
         result = (
@@ -1055,12 +1071,17 @@ class TypeConverter:
     ) -> ValueRef:
         value_ir = ensure_ir(value)
 
+        # Constant-fold float -> integer conversion by computing the integer value
+        # directly. Avoids emitting a fptosi/fptoui constexpr, which LLVM 20+
+        # rejects as an instruction operand.
         if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, float):
-            result = (
-                value_ir.fptoui(target_type)
-                if target_is_unsigned
-                else value_ir.fptosi(target_type)
-            )
+            v = value_ir.constant
+            # C-style truncation toward zero
+            int_val = int(v)
+            if target_is_unsigned:
+                tw = target_type.width
+                int_val = int_val & ((1 << tw) - 1)
+            result = ir.Constant(target_type, int_val)
             return wrap_value(result, kind="value", type_hint=type_hint)
 
         result = (
@@ -1100,14 +1121,26 @@ class TypeConverter:
         source_bits = get_float_bits(source_type)
         target_bits = get_float_bits(target_type)
 
-        # Constant-fold float conversions when possible.
-        if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, float):
+        # Constant-fold float conversions by computing the target float value
+        # directly. Avoids emitting fpext/fptrunc constexprs, which LLVM 20+
+        # rejects as instruction operands. Only fold 32/64-bit IEEE floats.
+        if (
+            isinstance(value_ir, ir.Constant)
+            and isinstance(value_ir.constant, float)
+            and source_bits in (32, 64)
+            and target_bits in (32, 64)
+        ):
+            v = value_ir.constant
             if source_bits < target_bits:
-                result = value_ir.fpext(target_type)
+                # float -> double: Python float already has double precision
+                result = ir.Constant(target_type, v)
             elif source_bits > target_bits:
-                result = value_ir.fptrunc(target_type)
+                # double -> float: round to single precision
+                import struct
+                v32 = struct.unpack('f', struct.pack('f', v))[0]
+                result = ir.Constant(target_type, v32)
             else:
-                result = value_ir
+                result = ir.Constant(target_type, v)
             return wrap_value(result, kind="value", type_hint=type_hint)
 
         if source_bits < target_bits:
