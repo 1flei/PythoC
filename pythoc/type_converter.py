@@ -257,7 +257,8 @@ class TypeConverter:
                 # continue converting from the lowered function pointer.
                 if not target_is_func:
                     return self.convert(lowered, target_type, node)
-                if not self._func_types_compatible(lowered.type_hint, stripped_target):
+                _module_ctx = getattr(getattr(self._visitor, 'module', None), 'context', None)
+                if not self._func_types_compatible(lowered.type_hint, stripped_target, _module_ctx):
                     func_name = getattr(python_val, '__name__', repr(python_val))
                     logger.error(
                         f"Function '{func_name}' has signature {lowered.type_hint.get_name()}, "
@@ -274,7 +275,8 @@ class TypeConverter:
                 )
                 if not target_is_func:
                     return self.convert(lowered, target_type, node)
-                if not self._func_types_compatible(lowered.type_hint, stripped_target):
+                _module_ctx = getattr(getattr(self._visitor, 'module', None), 'context', None)
+                if not self._func_types_compatible(lowered.type_hint, stripped_target, _module_ctx):
                     func_name = getattr(python_val, 'func_name', repr(python_val))
                     logger.error(
                         f"Extern function '{func_name}' has signature {lowered.type_hint.get_name()}, "
@@ -432,12 +434,13 @@ class TypeConverter:
         return wrap_value(ir_val, kind="value", type_hint=target_type)
 
     @staticmethod
-    def _func_types_compatible(source_func_type, target_func_type) -> bool:
+    def _func_types_compatible(source_func_type, target_func_type, module_context=None) -> bool:
         """Check whether two func[...] types have the same callable signature.
 
-        Parameter names are ignored; the comparison uses the lowered LLVM
-        function type, so differently-spelled but structurally identical types
-        (e.g. two `ptr[void]` specializations) are still compatible.
+        Parameter names are ignored.  The comparison first checks structural
+        equality of the PC parameter/return types (so named and unnamed
+        parameter lists are compatible), then falls back to the lowered LLVM
+        function type when a module context is available.
         The bare, unspecialized ``func`` type is treated as compatible with any
         function pointer.
         """
@@ -452,14 +455,33 @@ class TypeConverter:
             return False
         if len(source_func_type.param_types) != len(target_func_type.param_types):
             return False
-        # Compare lowered LLVM function types to avoid identity issues with
-        # specialized pointer / array / struct types.
-        try:
-            source_llvm = source_func_type.get_function_type(None)
-            target_llvm = target_func_type.get_function_type(None)
-            return source_llvm == target_llvm
-        except Exception:
-            return False
+
+        # Structural comparison ignoring parameter names and qualifiers.
+        # Use canonical type IDs because specialized types such as ptr[T] are
+        # distinct class objects even when they spell the same type.
+        def _type_id(t):
+            return t.get_type_id() if hasattr(t, 'get_type_id') else str(t)
+
+        source_param_ids = [_type_id(p) for p in source_func_type.param_types]
+        target_param_ids = [_type_id(p) for p in target_func_type.param_types]
+        source_ret_id = _type_id(source_func_type.return_type)
+        target_ret_id = _type_id(target_func_type.return_type)
+
+        if source_param_ids == target_param_ids and source_ret_id == target_ret_id:
+            return True
+
+        # Fall back to the lowered LLVM function type when a module context is
+        # available; this catches cases where distinct PC types lower to the
+        # same C ABI signature.
+        if module_context is not None:
+            try:
+                source_llvm = source_func_type.get_function_type(module_context)
+                target_llvm = target_func_type.get_function_type(module_context)
+                return source_llvm == target_llvm
+            except Exception:
+                pass
+
+        return False
 
     @staticmethod
     def _is_byte_array_type(pc_type) -> bool:

@@ -24,6 +24,23 @@ class ValueRefDispatcher:
     def _get_base_pc_type(self, value) -> Optional[type]:
         return get_base_type(getattr(value, "type_hint", None))
 
+    def _decay_array_for_compare(self, value: ValueRef) -> ValueRef:
+        """Decay an array operand to its pointer type for comparison.
+
+        In C, array expressions decay to pointers in most contexts, including
+        comparisons like ``ptr != arr``. This helper converts array operands to
+        their decayed pointer type before the generic icmp lowering path runs.
+        """
+        from .ir_helpers import strip_qualifiers, propagate_qualifiers
+
+        type_hint = getattr(value, "type_hint", None)
+        base_type = strip_qualifiers(type_hint)
+        if base_type is None or not getattr(base_type, "is_array", lambda: False)():
+            return value
+        decay_ptr_type = base_type.get_decay_pointer_type()
+        decay_ptr_type = propagate_qualifiers(type_hint, decay_ptr_type)
+        return self.visitor.type_converter.convert(value, decay_ptr_type)
+
     @staticmethod
     def _has_type_flag(pc_type, flag_name: str) -> bool:
         return pc_type is not None and getattr(pc_type, flag_name, False)
@@ -486,6 +503,11 @@ class ValueRefDispatcher:
         reverse_compare_handler = getattr(getattr(right, "type_hint", None), "handle_compare", None)
         if callable(reverse_compare_handler):
             return reverse_compare_handler(self.visitor, left, op, right, node)
+
+        # Arrays decay to pointers in comparison contexts, matching C semantics
+        # for expressions like ``ptr != arr`` or ``arr == ptr``.
+        left = self._decay_array_for_compare(left)
+        right = self._decay_array_for_compare(right)
 
         left, right, is_float_cmp = self.visitor.type_converter.unify_binop_types(left, right)
 

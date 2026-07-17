@@ -3,7 +3,7 @@ Mathematical Functions (math.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import f64
+from ..builtin_entities import f64, i32
 
 # Trigonometric functions
 @extern(lib='m')
@@ -159,3 +159,13 @@ def tgamma(x: f64) -> f64: pass
 
 @extern(lib='m')
 def cbrt(x: f64) -> f64: pass
+
+@extern(lib='m')
+def ldexp(x: f64, exp: i32) -> f64:
+    """Multiply x by 2^exp."""
+    pass
+
+@extern(lib='m')
+def ldexpl(x: f64, exp: i32) -> f64:
+    """long double variant of ldexp; mapped to f64 on targets without long double."""
+    pass

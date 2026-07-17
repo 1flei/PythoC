@@ -6,6 +6,11 @@ class ExternFunctionWrapper:
     def __init__(self, func, lib, calling_convention, return_type, param_types, **kwargs):
         self.func = func
         self.func_name = func.__name__
+        # The C symbol name used for linking and ctypes lookup.  Defaults to
+        # the Python function name, but can be overridden when the Python
+        # identifier must differ from the C symbol (e.g. ``raise_`` -> ``raise``,
+        # or a function whose name collides with a type name).
+        self.c_name = kwargs.pop('name', func.__name__)
         self.lib = lib
         self.calling_convention = calling_convention
         self.return_type = return_type
@@ -74,7 +79,7 @@ class ExternFunctionWrapper:
             else:
                 raise
         
-        self._ctypes_func = getattr(lib_handle, self.func_name)
+        self._ctypes_func = getattr(lib_handle, self.c_name)
         # TODO: map argtypes/restype
 
     def __repr__(self):

@@ -42,6 +42,7 @@ __all__ = [
     # math.h functions
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2', 'sinh', 'cosh', 'tanh',
     'exp', 'log', 'log10', 'pow', 'sqrt', 'ceil', 'floor', 'fabs', 'fmod',
+    'ldexp', 'ldexpl',
 
     # Memory management utilities
     'memalloc', 'memfree', 'memzero',
@@ -72,7 +73,8 @@ __all__ = [
     '__error',
 
     # signal.h
-    'siginfo_t', 'signal', 'raise_', 'sigaction', 'sigemptyset', 'sigfillset',
+    'siginfo_t', 'sigset_t', 'sigaction', 'signal', 'raise_', 'sigaction_',
+    'sigemptyset', 'sigfillset', 'sigprocmask',
 
     # setjmp.h
     'jmp_buf', 'sigjmp_buf', 'setjmp', 'longjmp',

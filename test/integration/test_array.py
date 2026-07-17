@@ -419,6 +419,36 @@ def test_string_init_struct_array_field() -> i32:
     return total
 
 
+@compile
+class ArrayCmpStruct:
+    name: array[i8, 16]
+    real: ptr[i8]
+
+
+@compile
+def test_array_ptr_compare_struct() -> i32:
+    """Test array decay to pointer when compared against a pointer field."""
+    s: ArrayCmpStruct = ("hello", nullptr)
+    # C semantics: s.name decays to ptr[i8], so this compares two addresses.
+    return i32(s.real != s.name)
+
+
+@compile
+def test_array_ptr_equal() -> i32:
+    """Test array == pointer when pointer points to the array."""
+    buf: array[i8, 16] = "hello"
+    p: ptr[i8] = buf
+    return i32(p == buf)
+
+
+@compile
+def test_two_arrays_compare() -> i32:
+    """Test array == array compares decayed pointer addresses, not contents."""
+    a: array[i8, 4] = "abcd"
+    b: array[i8, 4] = "abcd"
+    return i32(a != b)
+
+
 if __name__ == "__main__":
     test_array()
     test_1d_array()
@@ -474,5 +504,17 @@ if __name__ == "__main__":
     printf("\n=== String Init Struct Array Field Test ===\n")
     result = test_string_init_struct_array_field()
     assert result == 527, f"expected 527, got {result}"
+
+    printf("\n=== Array Pointer Compare Struct Test ===\n")
+    result = test_array_ptr_compare_struct()
+    assert result == 1, f"expected 1, got {result}"
+
+    printf("\n=== Array Pointer Equal Test ===\n")
+    result = test_array_ptr_equal()
+    assert result == 1, f"expected 1, got {result}"
+
+    printf("\n=== Two Arrays Compare Test ===\n")
+    result = test_two_arrays_compare()
+    assert result == 1, f"expected 1, got {result}"
 
     print("All array tests passed!")

@@ -202,6 +202,9 @@ def lower_extern_wrapper(
         ValueRef(kind='pointer', type_hint=func[param_types..., return_type])
     """
     func_name = extern_wrapper.func_name
+    # The C symbol name may differ from the Python function name when the
+    # wrapper uses @extern(name='...') to avoid identifier collisions.
+    c_name = getattr(extern_wrapper, 'c_name', func_name)
     signature = extern_wrapper._extern_config.get('signature')
     param_type_map = dict(extern_wrapper.param_types)
     fixed_params = []
@@ -229,12 +232,12 @@ def lower_extern_wrapper(
 
     # --- Try to reuse existing declaration ---
     try:
-        existing = module.get_global(func_name)
+        existing = module.get_global(c_name)
         if existing.is_declaration:
             ir_func = existing
         else:
             logger.error(
-                f"Cannot call extern function '{func_name}': "
+                f"Cannot call extern function '{func_name}' (symbol '{c_name}'): "
                 f"a local function with the same name is already defined.",
                 node=node, exc_type=NameError,
             )
@@ -253,7 +256,7 @@ def lower_extern_wrapper(
 
         from .builder import LLVMBuilder
         func_wrapper = LLVMBuilder().declare_function(
-            module, func_name,
+            module, c_name,
             param_llvm_types, return_llvm_type,
             var_arg=has_varargs,
         )
