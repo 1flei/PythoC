@@ -23,6 +23,14 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
     Instance-level attribute access resolves struct fields and class-level
     access resolves class attributes (methods), so a field and a method may
     share the same name without ambiguity.
+
+    Inline/heap discrimination uses a smallvec-style dual-purpose word: the
+    ``size_or_cap`` field holds the element count while inline (always
+    ``<= inline_capacity``) and the heap capacity once spilled (always
+    ``> inline_capacity``).  Spilling is one-way, so the predicate
+    ``size_or_cap > inline_capacity`` stays correct no matter how far
+    ``pop_back`` shrinks the element count; the spilled element count lives
+    in the heap branch of the union instead.
     """
     if not isinstance(inline_capacity, int) or inline_capacity < 0:
         raise TypeError("inline_capacity must be a non-negative integer")
@@ -35,9 +43,9 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
 
     @compile(suffix=type_suffix)
     class _Vector:
-        size: size_type
+        size_or_cap: size_type
         storage: union[
-            heap_data: struct[capacity: size_type, heap_buf: ptr[element_type]],
+            heap_data: struct[size: size_type, heap_buf: ptr[element_type]],
             inline_buffer: array[element_type, inline_capacity],
         ]
 
@@ -45,57 +53,82 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
             memset(v, 0, sizeof(_Vector))
 
         def destroy(v: ptr[_Vector]) -> None:
-            if v.size > inline_capacity:
+            if v.size_or_cap > inline_capacity:
                 free(v.storage.heap_data.heap_buf)
-            v.size = 0
+            v.size_or_cap = 0
 
         def size(v: ptr[_Vector]) -> size_type:
-            return v.size
+            if v.size_or_cap > inline_capacity:
+                return v.storage.heap_data.size
+            return v.size_or_cap
 
         def capacity(v: ptr[_Vector]) -> size_type:
-            if v.size <= inline_capacity:
-                return size_type(inline_capacity)
-            return v.storage.heap_data.capacity
+            if v.size_or_cap > inline_capacity:
+                return v.size_or_cap
+            return size_type(inline_capacity)
 
         def get(v: ptr[_Vector], index: size_type) -> element_type:
-            if v.size <= inline_capacity:
-                return v.storage.inline_buffer[index]
-            return v.storage.heap_data.heap_buf[index]
+            if v.size_or_cap > inline_capacity:
+                return v.storage.heap_data.heap_buf[index]
+            return v.storage.inline_buffer[index]
 
         def set(v: ptr[_Vector], index: size_type, value: element_type) -> None:
-            if v.size <= inline_capacity:
-                v.storage.inline_buffer[index] = value
-            else:
+            if v.size_or_cap > inline_capacity:
                 v.storage.heap_data.heap_buf[index] = value
+            else:
+                v.storage.inline_buffer[index] = value
 
         def data(v: ptr[_Vector]) -> ptr[element_type]:
-            if v.size <= inline_capacity:
-                return ptr(v.storage.inline_buffer[0])
-            return v.storage.heap_data.heap_buf
+            if v.size_or_cap > inline_capacity:
+                return v.storage.heap_data.heap_buf
+            return ptr(v.storage.inline_buffer[0])
 
         def push_back(v: ptr[_Vector], value: element_type) -> None:
-            current_cap: size_type = _Vector.capacity(v)
-
-            if v.size == inline_capacity:
+            if v.size_or_cap > inline_capacity:
+                # Spilled: grow the heap allocation if it is full.
+                if v.storage.heap_data.size == v.size_or_cap:
+                    grown_capacity: size_type = v.size_or_cap * 2
+                    new_mem_i8: ptr[i8] = realloc(
+                        v.storage.heap_data.heap_buf,
+                        grown_capacity * sizeof(element_type),
+                    )
+                    v.storage.heap_data.heap_buf = ptr[element_type](new_mem_i8)
+                    v.size_or_cap = grown_capacity
+                v.storage.heap_data.heap_buf[v.storage.heap_data.size] = value
+                v.storage.heap_data.size = v.storage.heap_data.size + 1
+            elif v.size_or_cap == inline_capacity:
+                # Inline buffer is full: spill onto the heap.
                 new_capacity: size_type = 4
                 if inline_capacity > 0:
                     new_capacity = inline_capacity * 2
-                new_heap: ptr[element_type] = malloc(new_capacity * sizeof(element_type))
-                memcpy(new_heap, ptr(v.storage.inline_buffer[0]), v.size * sizeof(element_type))
-                v.storage.heap_data.capacity = new_capacity
+                new_heap: ptr[element_type] = malloc(
+                    new_capacity * sizeof(element_type))
+                if inline_capacity > 0:
+                    memcpy(new_heap, ptr(v.storage.inline_buffer[0]),
+                           v.size_or_cap * sizeof(element_type))
+                new_heap[v.size_or_cap] = value
+                # Publish the heap branch of the union only after the inline
+                # buffer has been copied out; they share storage.
+                v.storage.heap_data.size = v.size_or_cap + 1
                 v.storage.heap_data.heap_buf = new_heap
-            elif v.size >= current_cap:
-                new_capacity: size_type = 4
-                if current_cap > 0:
-                    new_capacity = current_cap * 2
-                new_mem_i8: ptr[i8] = realloc(v.storage.heap_data.heap_buf, new_capacity * sizeof(element_type))
-                v.storage.heap_data.heap_buf = ptr[element_type](new_mem_i8)
-                v.storage.heap_data.capacity = new_capacity
-            v.size += 1
-            _Vector.set(v, v.size - 1, value)
+                v.size_or_cap = new_capacity
+            else:
+                v.storage.inline_buffer[v.size_or_cap] = value
+                v.size_or_cap = v.size_or_cap + 1
 
         def pop_back(v: ptr[_Vector]) -> None:
-            if v.size > 0:
-                v.size = v.size - 1
+            if v.size_or_cap > inline_capacity:
+                if v.storage.heap_data.size > 0:
+                    v.storage.heap_data.size = v.storage.heap_data.size - 1
+            else:
+                if v.size_or_cap > 0:
+                    v.size_or_cap = v.size_or_cap - 1
+
+        def set_size(v: ptr[_Vector], new_size: size_type) -> None:
+            """Set the logical element count. Caller must keep it <= capacity."""
+            if v.size_or_cap > inline_capacity:
+                v.storage.heap_data.size = new_size
+            else:
+                v.size_or_cap = new_size
 
     return _Vector

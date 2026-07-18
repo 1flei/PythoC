@@ -171,6 +171,96 @@ def test_i64vec_boundary() -> i32:
     return bad
 
 
+# ---------------------------------------------------------------------------
+# Spill-then-pop regression.
+#
+# Spilling is one-way: after the vector spills to the heap, pop_back may bring
+# the element count back at or below inline_capacity.  The vector must keep
+# using the heap branch (correct values, no leak in destroy), and further
+# push_back must keep appending on the heap.
+# ---------------------------------------------------------------------------
+
+@compile(suffix=(IntVec, "spill_pop"))
+def test_intvec_spill_pop() -> i32:
+    v: IntVec
+    vp = ptr(v)
+    IntVec.init(vp)
+
+    for i in seq(6):
+        IntVec.push_back(vp, i)
+
+    # Mutate while spilled; the inline buffer keeps the stale pre-spill copy.
+    IntVec.set(vp, 0, 99)
+
+    IntVec.pop_back(vp)
+    IntVec.pop_back(vp)
+    IntVec.pop_back(vp)
+
+    bad: i32 = 0
+    sz: i32 = i32(IntVec.size(vp))
+    if sz != 3:
+        bad = bad + 1
+    if IntVec.get(vp, 0) != 99:
+        bad = bad + 1
+    j: i32 = 1
+    while j < sz:
+        if IntVec.get(vp, j) != j:
+            bad = bad + 1
+        j = j + 1
+
+    d = IntVec.data(vp)
+    d[0] = 42
+    if IntVec.get(vp, 0) != 42:
+        bad = bad + 1
+
+    IntVec.push_back(vp, 7)
+    if i32(IntVec.size(vp)) != 4:
+        bad = bad + 1
+    if IntVec.get(vp, 0) != 42:
+        bad = bad + 1
+    if IntVec.get(vp, 3) != 7:
+        bad = bad + 1
+
+    printf("spill_pop size=%d cap=%d bad=%d\n",
+           i32(IntVec.size(vp)), i32(IntVec.capacity(vp)), bad)
+    IntVec.destroy(vp)
+    return bad
+
+
+@compile(suffix=(I64Vec, "spill_pop"))
+def test_i64vec_spill_pop() -> i32:
+    v: I64Vec
+    vp = ptr(v)
+    I64Vec.init(vp)
+
+    for i in seq(5):
+        I64Vec.push_back(vp, i64(i))
+
+    for i in seq(4):
+        I64Vec.pop_back(vp)
+
+    bad: i32 = 0
+    sz: i32 = i32(I64Vec.size(vp))
+    if sz != 1:
+        bad = bad + 1
+    j: i32 = 0
+    while j < sz:
+        if i64(I64Vec.get(vp, j)) != i64(j):
+            bad = bad + 1
+        j = j + 1
+
+    I64Vec.push_back(vp, i64(9))
+    if i32(I64Vec.size(vp)) != 2:
+        bad = bad + 1
+    if i64(I64Vec.get(vp, 1)) != i64(9):
+        bad = bad + 1
+
+    printf("spill_pop i64 size=%d cap=%d bad=%d\n",
+           i32(I64Vec.size(vp)), i32(I64Vec.capacity(vp)), bad)
+    I64Vec.destroy(vp)
+    return bad
+
+
 if __name__ == "__main__":
     test_intvec_base()
     test_i16vec_base()
@@ -180,6 +270,8 @@ if __name__ == "__main__":
     failures += int(test_intvec_boundary())
     failures += int(test_i16vec_boundary())
     failures += int(test_i64vec_boundary())
+    failures += int(test_intvec_spill_pop())
+    failures += int(test_i64vec_spill_pop())
 
     if failures:
         print("Vector boundary regression FAILED")
