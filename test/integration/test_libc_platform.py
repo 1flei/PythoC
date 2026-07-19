@@ -82,8 +82,11 @@ def test_flock_size() -> i32:
 
 
 class TestLibcPlatform(unittest.TestCase):
+    @unittest.skipIf(sys.platform == 'win32',
+                     'raise(0) is a POSIX null-signal probe; the UCRT treats '
+                     '0 as an invalid parameter and terminates the process')
     def test_raise_null_signal(self):
-        """raise_(0) should succeed on all POSIX platforms and Windows."""
+        """raise_(0) should succeed on POSIX platforms."""
         self.assertEqual(test_raise_null_signal(), 0)
 
     def test_timeval_layout(self):
