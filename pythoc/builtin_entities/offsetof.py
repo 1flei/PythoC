@@ -37,8 +37,11 @@ class offsetof(BuiltinFunction):
         offset = cls._get_field_offset(pc_type, field_name)
         # offsetof() is a compile-time constant; represent it as a Python value
         # (like sizeof()) so Python-level arithmetic on it remains foldable.
+        # Mark the preferred PC type as u64 (size_t) so varargs calls such as
+        # printf("%zu", offsetof(...)) materialize a real integer value.
         from .python_type import PythonType
-        python_type = PythonType.wrap(offset, is_constant=True)
+        from .types import u64
+        python_type = PythonType.wrap(offset, is_constant=True, preferred_pc_type=u64)
         return wrap_value(offset, kind="python", type_hint=python_type)
 
     @classmethod

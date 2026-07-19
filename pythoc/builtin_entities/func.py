@@ -227,6 +227,9 @@ class func(BuiltinType):
 
         # For varargs functions, pass remaining arguments beyond the fixed
         # params. Apply C default argument promotions (i8/i16 -> i32, f32 -> f64).
+        # Compile-time Python constants (e.g. sizeof/offsetof results) that carry
+        # a preferred PC type are materialized to that type so they are passed as
+        # real varargs values instead of zero-sized pyconst placeholders.
         if is_varargs and len(args) > len(param_llvm_types):
             from . import i8 as pc_i8, i16 as pc_i16, i32 as pc_i32
             from . import f32 as pc_f32, f64 as pc_f64
@@ -238,6 +241,9 @@ class func(BuiltinType):
                     converted_args.append(ensure_ir(promoted))
                 elif hint == pc_f32:
                     promoted = visitor.type_converter.convert(extra_arg, pc_f64, node)
+                    converted_args.append(ensure_ir(promoted))
+                elif extra_arg.is_python_value() and hasattr(hint, 'promote_to_default_pc_type'):
+                    promoted = hint.promote_to_default_pc_type()
                     converted_args.append(ensure_ir(promoted))
                 else:
                     converted_args.append(ensure_ir(extra_arg))

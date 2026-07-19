@@ -8,7 +8,7 @@ other platforms fall back to an opaque type.
 """
 
 from .. import compile
-from ..builtin_entities import array, i32, i64, ptr, u16, u32, u64, u8, void
+from ..builtin_entities import array, i8, i32, i64, ptr, u16, u32, u64, u8, void
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS, IS_X86_64, IS_ARM64
 

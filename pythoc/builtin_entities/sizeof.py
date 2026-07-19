@@ -33,7 +33,11 @@ class sizeof(BuiltinFunction):
         
         size = cls._get_type_size(pc_type, visitor)
         from .python_type import PythonType
-        python_type = PythonType.wrap(size, is_constant=True)
+        from .types import u64
+        # Keep the result foldable as a Python constant, but mark its preferred
+        # PC type as u64 (size_t) so varargs calls such as printf("%zu", sizeof(...))
+        # materialize a real integer value.
+        python_type = PythonType.wrap(size, is_constant=True, preferred_pc_type=u64)
         return wrap_value(size, kind="python", type_hint=python_type)
     
     @classmethod

@@ -25,6 +25,13 @@ from .dispatch import *
 from .semaphore import *
 from .ucontext import *
 
+# POSIX-specific modules with platform-dependent layouts (sys/types.h,
+# sys/stat.h, sys/resource.h, sys/mman.h, pthread.h, fcntl.h) are NOT
+# re-exported here: importing them from the top level would imply they are
+# portable, and their short names (stat, flock, timespec, ...) would pollute
+# this namespace.  Import them explicitly from their submodules instead, e.g.
+# ``from pythoc.libc.sys_stat import stat, stat_``.
+
 __all__ = [
     # stdio.h
     'FILE',

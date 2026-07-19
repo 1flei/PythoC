@@ -8,7 +8,7 @@ because signal structures differ across OS and architecture.
 
 from .. import compile
 from ..decorators import extern
-from ..builtin_entities import array, func, i32, i64, i8, ptr, u32, u64, union, void
+from ..builtin_entities import array, func, i16, i32, i64, i8, ptr, u32, u64, union, void
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS, IS_X86_64, IS_ARM64
 
