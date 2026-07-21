@@ -210,6 +210,20 @@ class ExpressionsMixin:
         else_val = self.visit_rvalue_expression(node.orelse)
         else_block = self.builder.block  # Update in case of nested blocks
 
+        from ..builtin_entities.types import void as _void_type
+        then_hint = get_type_hint(then_val) if isinstance(then_val, ValueRef) else None
+        else_hint = get_type_hint(else_val) if isinstance(else_val, ValueRef) else None
+        if then_hint is _void_type or else_hint is _void_type:
+            # C conditional with a void branch (e.g. assert's
+            # `cond ? (void)0 : __assert_rtn(...)`): the whole expression is
+            # void; both branches are evaluated for side effects only.
+            self.builder.position_at_end(then_block)
+            self.builder.branch(merge_block)
+            self.builder.position_at_end(else_block)
+            self.builder.branch(merge_block)
+            self.builder.position_at_end(merge_block)
+            return wrap_value(None, kind="python", type_hint=_void_type)
+
         result_type = self._resolve_ternary_result_type(then_val, else_val)
         if result_type is None:
             logger.error(

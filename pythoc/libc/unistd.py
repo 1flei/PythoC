@@ -6,7 +6,7 @@ many portable C sources (e.g. sysconf, getpid, read, write).
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64, u64, void
+from ..builtin_entities import ptr, i8, i32, i64, u32, u64, void
 
 
 @extern(lib='c')
@@ -78,4 +78,58 @@ def getpagesize() -> i32:
 @extern(lib='c')
 def mprotect(addr: ptr[void], len: u64, prot: i32) -> i32:
     """Set protection on a region of memory."""
+    pass
+
+
+@extern(lib='c')
+def unlink(path: ptr[i8]) -> i32:
+    """Remove a directory entry."""
+    pass
+
+
+@extern(lib='c')
+def chdir(path: ptr[i8]) -> i32:
+    """Change working directory."""
+    pass
+
+
+@extern(lib='c')
+def gethostname(name: ptr[i8], namelen: u64) -> i32:
+    """Get host name."""
+    pass
+
+
+@extern(lib='c')
+def getuid() -> u32:
+    """Get real user ID."""
+    pass
+
+
+@extern(lib='c')
+def readlink(path: ptr[i8], buf: ptr[i8], bufsize: u64) -> i64:
+    """Read the target of a symbolic link."""
+    pass
+
+
+@extern(lib='c')
+def symlink(target: ptr[i8], linkpath: ptr[i8]) -> i32:
+    """Create a symbolic link."""
+    pass
+
+
+@extern(lib='c')
+def pipe(fds: ptr[i32]) -> i32:
+    """Create a pipe."""
+    pass
+
+
+@extern(lib='c')
+def sleep(seconds: u32) -> u32:
+    """Sleep for seconds."""
+    pass
+
+
+@extern(lib='c')
+def usleep(useconds: u32) -> i32:
+    """Sleep for microseconds."""
     pass

@@ -6,6 +6,7 @@ current platform.  They are expected to run on macOS, Linux and Windows CI
 runners; expected values differ by platform where noted.
 """
 
+import importlib
 import platform
 import sys
 import unittest
@@ -21,6 +22,60 @@ from pythoc.libc.fcntl import flock
 
 
 IS_ARM64 = platform.machine().lower() in ('arm64', 'aarch64')
+IS_POSIX = sys.platform != 'win32'
+
+
+if IS_POSIX:
+    # dirent / cassert refuse to import on Windows; setenv / gethostname
+    # have no UCRT symbol.  Guard the imports so collection works everywhere.
+    from pythoc import array, i8, nullptr, ptr
+    from pythoc.libc.dirent import DIR, dirent, opendir, readdir, closedir
+    from pythoc.libc.stdlib import getenv, setenv, unsetenv
+    from pythoc.libc.unistd import gethostname
+
+
+    @compile
+    def test_dirent_size() -> i32:
+        """Return sizeof(dirent) to verify platform layout."""
+        return sizeof(dirent)
+
+
+    @compile
+    def test_dirent_d_name_offset() -> i32:
+        """Return offsetof(dirent, d_name) to verify field layout."""
+        return offsetof("dirent", "d_name")
+
+
+    @compile
+    def test_opendir_readdir() -> i32:
+        """Open '.', read one entry, close; 0 on full success."""
+        d: ptr[DIR] = opendir(".")
+        if d == nullptr:
+            return 1
+        e: ptr[dirent] = readdir(d)
+        if e == nullptr:
+            return 2
+        return closedir(d)
+
+
+    @compile
+    def test_setenv_roundtrip() -> i32:
+        """setenv/getenv/unsetenv roundtrip; 0 on success."""
+        if setenv("PYTHOC_TEST_ENV_VAR", "42", 1) != 0:
+            return 1
+        v: ptr[i8] = getenv("PYTHOC_TEST_ENV_VAR")
+        if v == nullptr:
+            return 2
+        if v[0] != 52 or v[1] != 50:  # '4', '2'
+            return 3
+        return unsetenv("PYTHOC_TEST_ENV_VAR")
+
+
+    @compile
+    def test_gethostname_call() -> i32:
+        """gethostname into a stack buffer; 0 on success."""
+        buf: array[i8, 256] = ""
+        return gethostname(buf, 256)
 
 
 @compile
@@ -167,6 +222,43 @@ class TestLibcPlatform(unittest.TestCase):
         elif sys.platform.startswith('linux'):
             # glibc order: l_type, l_whence first, tail padding to 8
             self.assertEqual(size, 32)
+
+    @unittest.skipIf(not IS_POSIX, '<dirent.h> is POSIX-only')
+    def test_dirent_layout(self):
+        size = test_dirent_size()
+        d_name_off = test_dirent_d_name_offset()
+        if sys.platform == 'darwin':
+            # ino + seekoff + reclen + namlen + type + d_name[1024], 8-aligned
+            self.assertEqual(size, 1048)
+            self.assertEqual(d_name_off, 21)
+        elif sys.platform.startswith('linux'):
+            # glibc: ino + off + reclen + type + d_name[256], 8-aligned
+            self.assertEqual(size, 280)
+            self.assertEqual(d_name_off, 19)
+
+    @unittest.skipIf(not IS_POSIX, '<dirent.h> is POSIX-only')
+    def test_opendir_readdir(self):
+        self.assertEqual(test_opendir_readdir(), 0)
+
+    @unittest.skipIf(not IS_POSIX, 'setenv/gethostname have no UCRT symbol')
+    def test_setenv_roundtrip(self):
+        self.assertEqual(test_setenv_roundtrip(), 0)
+
+    @unittest.skipIf(not IS_POSIX, 'setenv/gethostname have no UCRT symbol')
+    def test_gethostname_call(self):
+        self.assertEqual(test_gethostname_call(), 0)
+
+    def test_cassert_symbol(self):
+        """cassert exposes the platform assertion handler, or refuses to import."""
+        if sys.platform == 'darwin':
+            m = importlib.import_module('pythoc.libc.cassert')
+            self.assertEqual(getattr(m, '__assert_rtn').c_name, '__assert_rtn')
+        elif sys.platform.startswith('linux'):
+            m = importlib.import_module('pythoc.libc.cassert')
+            self.assertEqual(getattr(m, '__assert_fail').c_name, '__assert_fail')
+        else:
+            with self.assertRaises(NotImplementedError):
+                importlib.import_module('pythoc.libc.cassert')
 
 
 if __name__ == '__main__':

@@ -191,7 +191,13 @@ class TypeConverter:
         # Strip qualifiers for comparison and conversion
         stripped_target = strip_qualifiers(target_type)
         stripped_source = strip_qualifiers(value.type_hint) if value.type_hint else None
-        
+
+        # C-style discard cast: converting any already-evaluated value to void
+        # is a no-op; the value's side effects happened before the conversion.
+        from .builtin_entities.types import void as _void_type
+        if stripped_target is _void_type:
+            return wrap_value(None, kind="python", type_hint=_void_type)
+
         if stripped_source == stripped_target:
             # Types match after stripping qualifiers, just update type_hint
             return value.clone(type_hint=target_type)

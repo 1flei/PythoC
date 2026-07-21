@@ -10,10 +10,7 @@ Layouts are platform-specific because ``time_t``, ``suseconds_t`` and the
 from ..decorators import compile, extern
 from ..builtin_entities import ptr, i8, i32, i64, void
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS
-
-
-# time_t is a 64-bit signed integer on all 64-bit platforms.
-time_t = i64
+from .sys_types import time_t
 
 
 if IS_MACOS:
@@ -72,6 +69,12 @@ else:
 @extern(lib='c')
 def gettimeofday(tv: ptr[timeval], tz: ptr[void]) -> i32:
     """Get current time of day."""
+    pass
+
+
+@extern(lib='c')
+def utimes(path: ptr[i8], times: ptr[timeval]) -> i32:
+    """Set file access and modification times."""
     pass
 
 

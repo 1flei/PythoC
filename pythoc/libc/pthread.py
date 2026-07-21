@@ -126,6 +126,7 @@ def pthread_mutexattr_destroy(attr: ptr[pthread_mutexattr_t]) -> i32:
 
 
 __all__ = [
+    "pthread_t",
     "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t",
     "PTHREAD_MUTEX_INITIALIZER", "PTHREAD_MUTEX_RECURSIVE",
     "pthread_self", "pthread_equal",

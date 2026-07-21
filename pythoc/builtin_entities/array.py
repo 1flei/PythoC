@@ -147,6 +147,21 @@ class array(BuiltinType):
         return elem_size * total_elements
     
     @classmethod
+    def get_alignment(cls) -> int:
+        """Get alignment in bytes.
+
+        C aligns an array to its element type's alignment, never more.
+        """
+        elem = cls.element_type
+        if elem is None:
+            return 1
+        if hasattr(elem, 'get_alignment'):
+            return elem.get_alignment()
+        if hasattr(elem, 'get_size_bytes'):
+            return min(elem.get_size_bytes(), 8)
+        return 1
+    
+    @classmethod
     def can_be_called(cls) -> bool:
         return True  # array[T, N]() for zero-initialization
     

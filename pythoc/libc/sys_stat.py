@@ -17,9 +17,8 @@ from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS, IS_ARM64
 from .sys_types import (
     dev_t, ino_t, mode_t, nlink_t, uid_t, gid_t,
-    off_t, blkcnt_t, blksize_t,
+    off_t, blkcnt_t, blksize_t, time_t,
 )
-from .time import time_t
 
 
 if IS_MACOS:

@@ -360,7 +360,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                 # Skip zero-sized fields (pyconst)
                 if field_size == 0:
                     continue
-                field_align = min(field_size, 8)
+                if hasattr(field_type, 'get_alignment'):
+                    field_align = field_type.get_alignment()
+                else:
+                    field_align = min(field_size, 8)
             else:
                 field_size = 4
                 field_align = 4
@@ -376,6 +379,30 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             total_size += max_align - (total_size % max_align)
         
         return total_size
+
+    
+    @classmethod
+    def get_alignment(cls) -> int:
+        """Get alignment in bytes: the maximum field alignment (C rules)."""
+        cls._ensure_field_types_resolved()
+        
+        if cls._field_types is None:
+            return 1
+        
+        max_align = 1
+        for field_type in cls._field_types:
+            if hasattr(field_type, 'get_size_bytes') and field_type.get_size_bytes() == 0:
+                # Skip zero-sized fields (pyconst)
+                continue
+            if hasattr(field_type, 'get_alignment'):
+                field_align = field_type.get_alignment()
+            elif hasattr(field_type, 'get_size_bytes'):
+                field_align = min(field_type.get_size_bytes(), 8)
+            else:
+                field_align = 4
+            max_align = max(max_align, field_align)
+        
+        return max_align
 
     
     @classmethod

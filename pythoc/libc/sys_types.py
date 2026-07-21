@@ -11,6 +11,10 @@ from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS, IS_ARM64
 
 
+# time_t is a 64-bit signed integer on all 64-bit platforms.
+time_t = i64
+
+
 if IS_MACOS:
     dev_t = i32
     ino_t = u64
@@ -66,12 +70,12 @@ else:
 
 for _name in (
     "dev_t", "ino_t", "mode_t", "nlink_t", "uid_t", "gid_t",
-    "off_t", "blkcnt_t", "blksize_t", "pid_t", "pthread_t",
+    "off_t", "blkcnt_t", "blksize_t", "pid_t", "pthread_t", "time_t",
 ):
     mark_type_defined(_name, globals()[_name])
 
 
 __all__ = [
     "dev_t", "ino_t", "mode_t", "nlink_t", "uid_t", "gid_t",
-    "off_t", "blkcnt_t", "blksize_t", "pid_t", "pthread_t",
+    "off_t", "blkcnt_t", "blksize_t", "pid_t", "pthread_t", "time_t",
 ]

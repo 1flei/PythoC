@@ -184,6 +184,38 @@ def ternary_compile_time_false() -> i32:
     return (1 if False else 2)
 
 
+@compile
+def _bump(p: ptr[i32]) -> void:
+    p[0] = p[0] + 1
+
+
+@compile
+def ternary_void_else_branch(flag: i32) -> i32:
+    """C assert-macro shape: `cond ? (void)0 : side_effect()`.
+
+    One branch is void, so the whole ternary is void and the branches are
+    evaluated for side effects only.
+    """
+    cell: i32 = 0
+    (void(0) if flag else _bump(ptr(cell)))
+    return cell
+
+
+@compile
+def ternary_void_then_branch(flag: i32) -> i32:
+    """Same void ternary with the void branch on the then side."""
+    cell: i32 = 0
+    (_bump(ptr(cell)) if flag else void(0))
+    return cell
+
+
+@compile
+def void_discard_cast(x: i32) -> i32:
+    """(void)expr discard cast: operand is evaluated, result discarded."""
+    void(x + 1)
+    return x
+
+
 import unittest
 
 
@@ -252,6 +284,17 @@ class TestFunc(unittest.TestCase):
         """Compile-time Python flag keeps Python semantics."""
         self.assertEqual(ternary_compile_time_true(), 1)
         self.assertEqual(ternary_compile_time_false(), 2)
+
+    def test_ternary_void_branch(self):
+        """Ternary with a void branch is void; side effects still run."""
+        self.assertEqual(ternary_void_else_branch(1), 0)
+        self.assertEqual(ternary_void_else_branch(0), 1)
+        self.assertEqual(ternary_void_then_branch(1), 1)
+        self.assertEqual(ternary_void_then_branch(0), 0)
+
+    def test_void_discard_cast(self):
+        """(void)expr evaluates the operand and discards the result."""
+        self.assertEqual(void_discard_cast(41), 41)
 
 
 if __name__ == '__main__':

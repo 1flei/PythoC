@@ -87,6 +87,16 @@ def getenv(name: ptr[i8]) -> ptr[i8]:
     pass
 
 @extern(lib='c')
+def setenv(name: ptr[i8], value: ptr[i8], overwrite: i32) -> i32:
+    """Set an environment variable (POSIX)"""
+    pass
+
+@extern(lib='c')
+def unsetenv(name: ptr[i8]) -> i32:
+    """Unset an environment variable (POSIX)"""
+    pass
+
+@extern(lib='c')
 def qsort(base: ptr[void], nmemb: i64, size: i64, compar: ptr[void]) -> None:
     """Sort array with comparator (function pointer approximated as ptr[void])"""
     pass

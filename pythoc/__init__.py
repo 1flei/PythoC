@@ -47,6 +47,7 @@ from .utils.build_utils import (
 )
 from .cimport import cimport, cimport_header, cimport_source
 from .config import config
+from .forward_ref import mark_type_defined, register_forward_ref_callback
 
 # Import libc module for convenient access
 from . import libc
@@ -128,6 +129,10 @@ __all__ = [
 
     # PC literal carrier
     'pc_literal',
+
+    # Forward reference resolution
+    'mark_type_defined',
+    'register_forward_ref_callback',
 
     # Centralised runtime configuration
     'config',

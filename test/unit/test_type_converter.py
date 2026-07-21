@@ -256,6 +256,15 @@ class TestTypeConverter(unittest.TestCase):
         self.assertIsInstance(result_ir, ir.Constant)
         self.assertEqual(result_ir.constant, 42)
     
+    def test_convert_to_void(self):
+        """C-style discard cast: converting any value to void is a no-op"""
+        from pythoc import i32, void
+        i32_val = wrap_value(ir.Constant(ir.IntType(32), 42), kind="value", type_hint=i32)
+        result = self.converter.convert(i32_val, void)
+        
+        self.assertEqual(result.type_hint, void)
+        self.assertTrue(result.is_python_value())
+    
     def test_unify_binop_types_int_int(self):
         """Test unify_binop_types with two integers"""
         from pythoc.builtin_entities import i8, i32
