@@ -53,6 +53,16 @@ class _GroupObjectTaskResult:
     compiled_symbols: Set[str] = field(default_factory=set)
 
 
+@dataclass
+class _CodegenTaskResult:
+    """Worker result for one codegen (Phase 1) task."""
+
+    group_key: Tuple
+    group: dict
+    status: Optional[str]
+    compile_result: Optional["_CompileResult"] = None
+
+
 class OutputManager:
     """
     Manages compilation groups and output file generation.
@@ -97,9 +107,9 @@ class OutputManager:
         # should eventually move into a build planning phase.
         self._active_build_groups = set()
 
-        # Planning-time group dependencies discovered from import/registration
-        # metadata, not from codegen visitors.
-        self._planning_group_deps = {}
+        # Effect specialization graph — replaces BFS-based planning deps.
+        from ..effect_graph import EffectGraph
+        self._effect_graph = EffectGraph()
     
     def _next_group_object_task_id(self, group_key):
         """Return a unique scheduler task id for one group-object attempt."""
@@ -107,6 +117,47 @@ class OutputManager:
             self._group_object_task_seq += 1
             seq = self._group_object_task_seq
         return f"compile-object:{repr(group_key)}:{seq}"
+
+    def _next_compile_task_id(self, group_key):
+        """Return a unique scheduler task id for one Phase 2 compile-object attempt."""
+        with self._state_lock:
+            self._group_object_task_seq += 1
+            seq = self._group_object_task_seq
+        return f"publish-object:{repr(group_key)}:{seq}"
+
+    def _reject_if_flushed(self, group_key, context_msg=""):
+        """Reject attempts to add to a flushed group — groups are immutable after flush.
+
+        This replaces the old group-reopen mechanism. If the group's .so has been
+        dlopen'd, the error is more specific (native execution started). Otherwise
+        it's a code-ordering issue (flush triggered before all @compile defined).
+        """
+        if group_key not in self._all_groups:
+            return  # Group doesn't exist yet — nothing to reject
+        if group_key in self._pending_groups:
+            return  # Still pending — fine to add
+
+        # Group was flushed. Reject — no reopen in any case.
+        from ..native_executor import get_multi_so_executor
+        executor = get_multi_so_executor()
+        group = self._all_groups[group_key]
+        so_file = group.get('so_file')
+        source_file_path = group_key[0] if group_key else 'unknown'
+
+        if so_file and so_file in executor.loaded_libs:
+            raise RuntimeError(
+                f"Cannot define new @compile function after module '{source_file_path}' "
+                f"has started native execution. All @compile functions must be defined "
+                f"before any compiled function is called."
+            )
+        raise RuntimeError(
+            f"Cannot add new @compile function to module '{source_file_path}' "
+            f"after flush has already occurred. This typically happens when a "
+            f"module-level statement triggers native execution (e.g. bindgen, "
+            f"calling a compiled function) before all @compile functions are "
+            f"defined. Move all @compile decorators before any code that "
+            f"triggers execution."
+        )
 
     def get_or_create_group(self, group_key, compiler, ir_file, obj_file, so_file, 
                            source_file):
@@ -125,52 +176,11 @@ class OutputManager:
             dict: Group info with keys: compiler, wrappers, ir_file, obj_file, so_file, source_file
         """
         with self._state_lock:
-            # Check if already in _all_groups (including completed groups)
+            # Reject if group already flushed — groups are immutable after flush.
+            self._reject_if_flushed(group_key)
+
             if group_key in self._all_groups:
-                group = self._all_groups[group_key]
-                in_flushed = group_key in self._flushed_groups
-
-                # If the group was already flushed, it may still be safe to add more
-                # functions as long as the corresponding shared library has NOT been
-                # loaded yet. This is important for flows where internal native
-                # execution (e.g. bindgen) triggers a flush mid-import, but the user
-                # module continues to define more @compile functions afterwards.
-                if in_flushed:
-                    from ..native_executor import get_multi_so_executor
-                    executor = get_multi_so_executor()
-
-                    existing_so_file = group.get('so_file')
-                    if existing_so_file and existing_so_file in executor.loaded_libs:
-                        source_file_path = group_key[0] if group_key else 'unknown'
-                        from ..logger import logger
-                        logger.error(
-                            f"Cannot define new compiled function after native execution has started. "
-                            f"File '{source_file_path}' was already compiled and loaded. "
-                            f"Move all @compile decorated functions before any code that triggers execution."
-                        )
-                        raise RuntimeError(
-                            f"Cannot define new @compile function after module '{source_file_path}' "
-                            f"has started native execution. All @compile functions must be defined "
-                            f"before any compiled function is called."
-                        )
-
-                    # Re-open the group for further compilation. We must also ensure
-                    # it is considered pending again, otherwise wrappers won't be
-                    # added.
-                    if group_key in self._flushed_groups:
-                        self._flushed_groups.remove(group_key)
-                    self._pending_groups[group_key] = group
-
-                    # Restore cached compilations back to pending. These are functions
-                    # that were skipped due to cache hit but now need to be recompiled
-                    # together with the new functions to create a complete .o file.
-                    if group_key in self._cached_compilations:
-                        cached = self._cached_compilations.pop(group_key)
-                        if group_key not in self._pending_compilations:
-                            self._pending_compilations[group_key] = []
-                        self._pending_compilations[group_key].extend(cached)
-
-                return group
+                return self._all_groups[group_key]
             
             if group_key not in self._pending_groups:
                 group = {
@@ -244,61 +254,6 @@ class OutputManager:
                 'specialized_by_name': dict(specialized_by_name),
             }
 
-    def _iter_compiled_values(self, root):
-        """Yield compiled wrappers reachable from simple import-time values."""
-        seen = set()
-        stack = [root]
-        while stack:
-            value = stack.pop()
-            value_id = id(value)
-            if value_id in seen:
-                continue
-            seen.add(value_id)
-
-            if callable(value) and getattr(value, '_is_compiled', False):
-                yield value
-                continue
-
-            if isinstance(value, dict):
-                stack.extend(value.values())
-                continue
-
-            if isinstance(value, (list, tuple, set, frozenset)):
-                stack.extend(value)
-                continue
-
-            value_dict = getattr(value, '__dict__', None)
-            if isinstance(value_dict, dict):
-                stack.extend(value_dict.values())
-
-    def record_group_planning_dependency(self, group_key, target_group_key):
-        """Record a registration-time group dependency for build planning."""
-        if not group_key or not target_group_key or group_key == target_group_key:
-            return
-        # Module globals contain all previously defined functions from the same
-        # source file.  Those are not import/factory dependencies and treating
-        # them as such would over-specialize the whole module under unrelated
-        # effect suffixes.
-        if len(group_key) >= 1 and len(target_group_key) >= 1 and group_key[0] == target_group_key[0]:
-            return
-        with self._state_lock:
-            self._planning_group_deps.setdefault(group_key, set()).add(target_group_key)
-
-    def record_group_planning_deps_from_globals(self, group_key, globals_dict):
-        """Record compiled-wrapper group deps visible from a function's globals."""
-        if not isinstance(globals_dict, dict):
-            return
-        for value in globals_dict.values():
-            for wrapper in self._iter_compiled_values(value):
-                binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
-                target_group_key = getattr(binding, 'group_key', None)
-                self.record_group_planning_dependency(group_key, target_group_key)
-
-    def get_group_planning_dependencies(self, group_key):
-        """Return registration-time group dependencies for build planning."""
-        with self._state_lock:
-            return set(self._planning_group_deps.get(group_key, set()))
-    
     def queue_compilation(self, group_key, callback, func_info):
         """
         Queue a function for deferred compilation.
@@ -317,39 +272,12 @@ class OutputManager:
                     f"active_build_groups={sorted(map(repr, self._active_build_groups))}"
                 )
 
+            # Reject if group already flushed — groups are immutable after flush.
+            self._reject_if_flushed(group_key)
+
             if group_key not in self._pending_compilations:
                 self._pending_compilations[group_key] = []
             self._pending_compilations[group_key].append((callback, func_info))
-
-            # If this group already exists but was previously flushed, it might not
-            # currently be in `_pending_groups`. In that case, pending compilations
-            # would never be processed. Ensure the group is marked pending again.
-            if group_key in self._all_groups and group_key not in self._pending_groups:
-                group = self._all_groups[group_key]
-
-                # If the group's shared library has already been loaded, we must not
-                # allow new compilations into it (same rule as in `get_or_create_group`).
-                from ..native_executor import get_multi_so_executor
-                executor = get_multi_so_executor()
-                so_file = group.get('so_file')
-                if so_file and so_file in executor.loaded_libs:
-                    source_file_path = group_key[0] if group_key else 'unknown'
-                    raise RuntimeError(
-                        f"Cannot define new @compile function after module '{source_file_path}' "
-                        f"has started native execution. All @compile functions must be defined "
-                        f"before any compiled function is called."
-                    )
-
-                if group_key in self._flushed_groups:
-                    self._flushed_groups.remove(group_key)
-
-                self._pending_groups[group_key] = group
-
-                # If we previously cached skipped compilations for this group (cache hit),
-                # restore them so we rebuild a complete object file.
-                if group_key in self._cached_compilations:
-                    cached = self._cached_compilations.pop(group_key)
-                    self._pending_compilations[group_key].extend(cached)
 
             pending_count = len(self._pending_compilations[group_key])
 
@@ -691,12 +619,37 @@ class OutputManager:
         for callback, _func_info in iteration.items:
             callback(compiler)
 
+    def _record_type_layout_deps_for_iteration(self, group_key, iteration, seen_globals_ids):
+        """Record type-layout (source_embed) deps for one compile iteration.
+
+        Runs once per unique ``compilation_globals`` dict per group
+        (deduplicated via ``seen_globals_ids``) so the scan cost is
+        O(unique module namespaces), not O(functions).
+        """
+        from .deps import get_dependency_tracker
+        dep_tracker = get_dependency_tracker()
+        for _callback, func_info in iteration.items:
+            wrapper = getattr(func_info, 'wrapper', None)
+            binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+            globals_dict = getattr(binding, 'compilation_globals', None)
+            if not isinstance(globals_dict, dict):
+                continue
+            gid = id(globals_dict)
+            if gid in seen_globals_ids:
+                continue
+            seen_globals_ids.add(gid)
+            dep_tracker.record_type_layout_deps_from_globals(group_key, globals_dict)
+
     def _compile_pending_for_group(self, group_key, group) -> _CompileResult:
         """
         Compile all pending functions for a group using two-pass iterations.
 
         The method is split into explicit phases so the scheduler can later
         move queue mutation and dependency/effect commits out of object emission.
+
+        Codegen of one slice can enqueue effect/suffix specializations for
+        the next slice of this same group; the drain loop re-checks
+        ``_pending_compilations`` on every iteration and picks those up.
         """
         if not group:
             return _CompileResult()
@@ -710,6 +663,8 @@ class OutputManager:
 
         compiled_funcs = set()
         result = _CompileResult()
+        seen_globals_ids = set()
+        group_effect_deps = set()
 
         # Loop until no more pending compilations for this group.  Compiling one
         # slice can still enqueue effect/suffix specializations for the next one.
@@ -718,11 +673,31 @@ class OutputManager:
             if not iteration.items:
                 break
 
-            result.compiled_count += len(iteration.items)
+            self._record_type_layout_deps_for_iteration(
+                group_key, iteration, seen_globals_ids,
+            )
+
+            _it_count = len(iteration.items)
+            result.compiled_count += _it_count
             result.compiled_symbols |= iteration.symbols
 
             self._prepare_compile_iteration(compiler, iteration)
             self._compile_iteration_bodies(compiler, iteration)
+
+            for _callback, func_info in iteration.items:
+                effect_deps = getattr(func_info, 'effect_dependencies', None)
+                if effect_deps:
+                    group_effect_deps |= effect_deps
+
+        # Declare the group's effect usage on its EffectGraph node exactly
+        # once, now that every function of the group has been compiled.
+        # Before this point has_effects_declared is False and callers stay
+        # conservative; after it the answer is definitive for the whole group.
+        if result.compiled_count:
+            from ..effect_graph import node_id_from_group_key
+            self._effect_graph.set_node_effects(
+                node_id_from_group_key(group_key), group_effect_deps,
+            )
 
         return result
     
@@ -919,6 +894,147 @@ class OutputManager:
 
         return self._plan_pending_group_tasks()
 
+    # ------------------------------------------------------------------
+    # Phase-split build (Scheme A): codegen (serial) + compile (parallel)
+    # ------------------------------------------------------------------
+
+    def _codegen_group_task(self, group_key, group):
+        """Phase 1 worker: codegen (IR generation) without .o publication.
+
+        Codegen is serialized via implicit DAG chaining (see
+        _plan_pending_codegen_tasks).  No resource lock needed.
+        Writes no artifacts; the cache check runs under the file lock so a
+        concurrent process publishing the same .o cannot be misread.
+        """
+        with self._state_lock:
+            if group_key in self._flushed_groups or group.get('compilation_failed', False):
+                return _CodegenTaskResult(group_key, group, None)
+            self._active_build_groups.add(group_key)
+
+        try:
+            # Cache check under the file lock: another process may be
+            # mid-publish of the same .o/.deps, and only the .o rename is
+            # atomic.  Codegen is serialized, so the lock never contends
+            # in-process.
+            lockfile_path = group['obj_file'] + '.lock'
+            with file_lock(lockfile_path):
+                if self._group_object_cache_hit(group_key, group):
+                    return _CodegenTaskResult(group_key, group, 'cached')
+
+            try:
+                compile_result = self._compile_pending_for_group(group_key, group)
+            except Exception:
+                with self._state_lock:
+                    group['compilation_failed'] = True
+                raise
+
+            if compile_result.compiled_count == 0:
+                return _CodegenTaskResult(group_key, group, 'empty')
+
+            if not group.get('wrappers'):
+                return _CodegenTaskResult(group_key, group, None)
+
+            return _CodegenTaskResult(group_key, group, 'compiled', compile_result)
+        finally:
+            with self._state_lock:
+                self._active_build_groups.discard(group_key)
+
+    def _codegen_on_success(self, task_result):
+        """Phase 1 on_success: dispatch compile task + discover new codegen tasks."""
+        result = task_result.value
+        if not isinstance(result, _CodegenTaskResult):
+            return self._plan_pending_codegen_tasks()
+
+        new_tasks = []
+        group_key = result.group_key
+        group = result.group
+
+        if result.status == 'cached':
+            with self._state_lock:
+                self._commit_cached_group(group_key, group)
+        elif result.status == 'empty':
+            with self._state_lock:
+                self._commit_empty_group(group_key, group)
+        elif result.status == 'compiled':
+            from .planner import plan_compile_object_task
+            new_tasks.append(plan_compile_object_task(
+                self, group_key, group, result.compile_result,
+            ))
+        # status == None: already flushed or failed — nothing to dispatch
+
+        new_tasks.extend(self._plan_pending_codegen_tasks())
+        return new_tasks
+
+    def _compile_object_task(self, group_key, group, compile_result):
+        """Phase 2 worker: publish .o file from codegen-produced IR.
+
+        Acquires the file lock and re-checks cache inside it.  Multiple
+        compile tasks for different groups run in parallel.
+        """
+        obj_file = group['obj_file']
+        lockfile_path = obj_file + '.lock'
+
+        with file_lock(lockfile_path):
+            # Re-check cache inside the lock — another process may have
+            # published the .o while we were waiting.
+            if self._group_object_cache_hit(group_key, group):
+                return _GroupObjectTaskResult(group_key, group, 'cached')
+
+            self._publish_group_object(group_key, group, compile_result)
+
+        return _GroupObjectTaskResult(
+            group_key, group,
+            'compiled',
+            compiled_symbols=set(compile_result.compiled_symbols),
+        )
+
+    def _compile_on_success(self, task_result):
+        """Phase 2 on_success: commit state.
+
+        Returns no new tasks on purpose: codegen tasks are chained only from
+        ``_codegen_on_success``.  If compile completions also planned codegen
+        tasks, two codegen tasks could run concurrently and break the
+        serialization that Phase 1 relies on.
+        """
+        result = task_result.value
+        if not isinstance(result, _GroupObjectTaskResult):
+            return []
+
+        group_key = result.group_key
+        group = result.group
+
+        with self._state_lock:
+            if result.status == 'cached':
+                self._commit_cached_group(group_key, group)
+            elif result.status == 'compiled':
+                if result.compiled_symbols:
+                    existing = set(group.get('compiled_symbols', set()))
+                    group['compiled_symbols'] = existing | result.compiled_symbols
+                self._commit_compiled_group(group_key, group)
+
+        return []
+
+    def _plan_pending_codegen_tasks(self):
+        """Create **one** codegen task for the next pending group.
+
+        Codegen is serialized via implicit DAG chaining: each codegen task's
+        ``on_success`` calls this method again to create the next one.  Only
+        one codegen task exists at a time, so no resource lock is needed.
+        Compile tasks (Phase 2) run in parallel on other workers.
+        """
+        batch = self._take_pending_groups()
+        if not batch:
+            return []
+        # Take only the first pending group — chaining handles the rest.
+        first = batch[0]
+        # Put remaining back so they're available for the next chain link.
+        if len(batch) > 1:
+            with self._state_lock:
+                for gk, g in batch[1:]:
+                    self._pending_groups[gk] = g
+        from .planner import plan_codegen_tasks
+        return plan_codegen_tasks(self, [first])
+
     def _flush_group_object(self, group_key, group):
         """Compile and commit one group immediately (legacy helper)."""
         task_result = type('_ImmediateTaskResult', (), {})()
@@ -951,40 +1067,33 @@ class OutputManager:
                 return captured
         return None
 
-    def _iter_compiled_global_refs(self, wrappers):
-        """Yield compiled wrappers referenced by wrapper global namespaces."""
-        seen = set()
-        for wrapper in wrappers:
-            binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
-            globals_dict = getattr(binding, 'compilation_globals', None) if binding else None
-            if not isinstance(globals_dict, dict):
-                continue
-            for value in globals_dict.values():
-                candidates = [value]
-                value_dict = getattr(value, '__dict__', None)
-                if isinstance(value_dict, dict):
-                    candidates.extend(value_dict.values())
-                for candidate in candidates:
-                    if not callable(candidate) or not getattr(candidate, '_is_compiled', False):
-                        continue
-                    if id(candidate) in seen:
-                        continue
-                    seen.add(id(candidate))
-                    yield candidate
+    def _node_group_index(self):
+        """Snapshot mapping NodeID -> [group_key] for graph neighbor lookups."""
+        from ..effect_graph import node_id_from_group_key
+        with self._state_lock:
+            index = {}
+            for gk in self._all_groups:
+                index.setdefault(node_id_from_group_key(gk), []).append(gk)
+        return index
 
     def _pre_materialize_referenced_default_templates(self):
         """Materialize default template wrappers referenced by pending groups."""
         from ..decorators.compile import materialize_specialization, DEFAULT_EFFECT_KEY
+        from ..effect_graph import node_id_from_group_key
 
         while True:
             with self._state_lock:
                 groups = list(self._pending_groups)
+            node_index = self._node_group_index()
             changed = False
             for group_key in groups:
-                wrappers = self.get_group_wrappers(group_key)
-                candidates = list(self._iter_compiled_global_refs(wrappers))
-                for dep_group_key in self.get_group_planning_dependencies(group_key):
-                    candidates.extend(self.get_group_wrappers(dep_group_key))
+                # Candidates: this group's own wrappers plus wrappers of
+                # groups the EffectGraph says this group depends on.
+                candidates = list(self.get_group_wrappers(group_key))
+                caller_node = node_id_from_group_key(group_key)
+                for neighbor_node in self._effect_graph.get_neighbors(caller_node):
+                    for other_gk in node_index.get(neighbor_node, ()):
+                        candidates.extend(self.get_group_wrappers(other_gk))
                 for candidate in candidates:
                     binding = getattr(candidate, '_binding', getattr(candidate, '_state', None))
                     if not binding or not getattr(binding, 'is_template', False):
@@ -999,6 +1108,7 @@ class OutputManager:
     def _pre_materialize_effect_groups(self):
         """Eagerly materialize whole base groups for pending effect groups."""
         from ..decorators.compile import materialize_group_specialization
+        from ..effect_graph import node_id_from_group_key
 
         while True:
             with self._state_lock:
@@ -1016,6 +1126,7 @@ class OutputManager:
                         for wrapper in wrappers
                     ):
                         effect_groups.append(group_key)
+            node_index = self._node_group_index()
 
             expanded = False
             for group_key in effect_groups:
@@ -1033,40 +1144,26 @@ class OutputManager:
                     base_wrappers[0], effect_suffix, effect_bindings,
                 )
 
-                scan_wrappers = base_wrappers + self.get_group_wrappers(group_key)
-                for candidate in self._iter_compiled_global_refs(scan_wrappers):
-                    binding = getattr(candidate, '_binding', getattr(candidate, '_state', None))
-                    if binding is None or getattr(candidate, '_pc_effect_impl', False):
-                        continue
-                    if binding.effect_suffix == effect_suffix and binding.group_key and len(binding.group_key) == 4:
-                        candidate_base_key = (
-                            binding.group_key[0], binding.group_key[1], binding.group_key[2], None
-                        )
-                        candidate_base_wrappers = self.get_group_wrappers(candidate_base_key)
-                        if candidate_base_wrappers:
-                            materialize_group_specialization(
-                                candidate_base_wrappers[0], effect_suffix, effect_bindings,
-                            )
-                    elif binding.effect_suffix is None:
-                        materialize_group_specialization(
-                            candidate, effect_suffix, effect_bindings,
-                        )
-
-                planning_deps = (
-                    self.get_group_planning_dependencies(base_group_key)
-                    | self.get_group_planning_dependencies(group_key)
+                # Propagate the specialization to groups the EffectGraph says
+                # this group depends on.  Transitively dependent groups are
+                # reached by the outer fixpoint: once a neighbor's effect
+                # group exists, it is processed in a later iteration.
+                planning_nodes = (
+                    self._effect_graph.get_neighbors(node_id_from_group_key(base_group_key))
+                    | self._effect_graph.get_neighbors(node_id_from_group_key(group_key))
                 )
-                for dep_group_key in planning_deps:
-                    if len(dep_group_key) != 4:
-                        continue
-                    dep_base_key = (
-                        dep_group_key[0], dep_group_key[1], dep_group_key[2], None
-                    )
-                    dep_base_wrappers = self.get_group_wrappers(dep_base_key)
-                    if dep_base_wrappers:
-                        materialize_group_specialization(
-                            dep_base_wrappers[0], effect_suffix, effect_bindings,
+                for neighbor_node in planning_nodes:
+                    for dep_group_key in node_index.get(neighbor_node, ()):
+                        if len(dep_group_key) != 4:
+                            continue
+                        dep_base_key = (
+                            dep_group_key[0], dep_group_key[1], dep_group_key[2], None
                         )
+                        dep_base_wrappers = self.get_group_wrappers(dep_base_key)
+                        if dep_base_wrappers:
+                            materialize_group_specialization(
+                                dep_base_wrappers[0], effect_suffix, effect_bindings,
+                            )
 
                 after = sum(len(v) for v in self._pending_compilations.values())
                 expanded = expanded or after > before
@@ -1157,7 +1254,10 @@ class OutputManager:
         self._pre_materialize_referenced_default_templates()
         from .scheduler import BuildScheduler, BuildSchedulerError
         object_workers = int(os.environ.get('PC_OBJECT_BUILD_WORKERS', '1') or '1')
-        tasks = self._plan_pending_group_tasks()
+        # Phase-split build (Scheme A): codegen is serialized via implicit
+        # DAG chaining (one at a time); compile tasks run in parallel on
+        # remaining workers.  object_workers>=2 enables pipelining.
+        tasks = self._plan_pending_codegen_tasks()
         if tasks:
             try:
                 BuildScheduler(max_workers=object_workers).run(tasks)
@@ -1266,16 +1366,6 @@ class OutputManager:
             from ..config import config
             group_deps.debug_info = bool(config.debug_info)
 
-            # Propagate transitive effects from dependent groups.
-            # If this group calls functions in groups that use effects (e.g., c_ast uses
-            # effect.mem), those effects should be reflected in this group's effects_used
-            # so that the effect specialization check in type_converter.py works correctly
-            # for callers that reference this group.
-            for dep in group_deps.group_dependencies:
-                dep_group_deps = dep_tracker.get_deps(dep.target_group.to_tuple())
-                if dep_group_deps and dep_group_deps.effects_used:
-                    group_deps.effects_used |= dep_group_deps.effects_used
-            
             # Save to file
             dep_tracker.save_deps(group_key, obj_file)
     
@@ -1309,7 +1399,8 @@ class OutputManager:
         self._flushed_groups.clear()
         self._group_object_task_seq = 0
         self._active_build_groups.clear()
-        self._planning_group_deps.clear()
+        from ..effect_graph import EffectGraph
+        self._effect_graph = EffectGraph()
     
     def clear_failed_group(self, group_key):
         """

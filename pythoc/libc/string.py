@@ -22,6 +22,12 @@ def strncpy(dest: ptr[i8], src: ptr[i8], n: i64) -> ptr[i8]:
     """Copy string with limit"""
     pass
 
+
+@extern(lib='c')
+def strdup(s: ptr[i8]) -> ptr[i8]:
+    """Duplicate string (allocates with malloc)."""
+    pass
+
 # String concatenation
 @extern(lib='c')
 def strcat(dest: ptr[i8], src: ptr[i8]) -> ptr[i8]:
@@ -74,6 +80,11 @@ def memcmp(s1: ptr[void], s2: ptr[void], n: i64) -> i32:
 @extern(lib='c')
 def memmove(dest: ptr[void], src: ptr[void], n: i64) -> ptr[void]:
     """Move memory block (handles overlap)"""
+    pass
+
+@extern(lib='c')
+def memchr(s: ptr[void], c: i32, n: i64) -> ptr[void]:
+    """Locate byte in memory"""
     pass
 
 # P0 additions: token/suffix searches/spans

@@ -51,9 +51,6 @@ CountingMem = SimpleNamespace(
     free=_counting_free,
 )
 
-# Flush counting allocator
-flush()
-
 
 # Functions that use effect.mem
 @compile
@@ -73,10 +70,6 @@ def allocate_memory_only(size: u64) -> ptr[u8]:
 def free_memory_only(p: ptr[u8]) -> void:
     """Free memory using effect.mem"""
     effect.mem.free(p)
-
-
-# Flush default versions
-flush()
 
 
 # Create counted versions

@@ -323,15 +323,13 @@ def compile_ast(
                 pop_compilation_context()
 
         effect_deps = stop_effect_tracking()
+        # Declared on the group's EffectGraph node once the whole group has
+        # been compiled (see OutputManager._compile_pending_for_group).
         if effect_deps:
             func_info.effect_dependencies = effect_deps
             logger.debug(
                 "Function {} uses effects: {}".format(_fn_ast.name, effect_deps)
             )
-            from ..build.deps import get_dependency_tracker
-            dep_tracker = get_dependency_tracker()
-            for eff in effect_deps:
-                dep_tracker.record_effect_usage(st.group_key, eff)
 
     # Queue compilation and set state
     output_manager.queue_compilation(group_key, compile_callback, func_info)

@@ -188,9 +188,6 @@ class GroupDeps:
     # Link dependencies (aggregated from all functions in group)
     link_objects: List[str] = field(default_factory=list)
     link_libraries: List[str] = field(default_factory=list)
-    
-    # Effect system support (group-level)
-    effects_used: Set[str] = field(default_factory=set)  # All effects used by this group
 
     # Symbols materialized into the current object file for this group.
     # Used to decide whether an up-to-date .o fully covers current pending defs.
@@ -231,10 +228,6 @@ class GroupDeps:
             'link_objects': self.link_objects,
             'link_libraries': self.link_libraries,
         }
-        
-        # Add effects if any
-        if self.effects_used:
-            result['effects_used'] = list(self.effects_used)
 
         if self.compiled_symbols:
             result['compiled_symbols'] = sorted(self.compiled_symbols)
@@ -281,8 +274,6 @@ class GroupDeps:
         for dep_data in d.get('group_dependencies', []):
             group_dependencies.append(GroupDependency.from_dict(dep_data, group_keys))
         
-        # Parse effects
-        effects_used = set(d.get('effects_used', []))
         compiled_symbols = d.get('compiled_symbols', [])
         ast_content_hash = d.get('ast_content_hash')
         debug_info = d.get('debug_info', False)
@@ -294,7 +285,6 @@ class GroupDeps:
             group_dependencies=group_dependencies,
             link_objects=d.get('link_objects', []),
             link_libraries=d.get('link_libraries', []),
-            effects_used=effects_used,
             compiled_symbols=compiled_symbols,
             ast_content_hash=ast_content_hash,
             debug_info=debug_info,
@@ -319,11 +309,7 @@ class GroupDeps:
         """Add a link object (if not already present)."""
         if obj_file not in self.link_objects:
             self.link_objects.append(obj_file)
-    
-    def add_effect(self, effect_name: str):
-        """Add an effect used by this group."""
-        self.effects_used.add(effect_name)
-    
+
     def get_all_dependent_groups(self) -> Set[Tuple]:
         """Get all group keys this group depends on."""
         return {dep.target_group.to_tuple() for dep in self.group_dependencies}
@@ -346,19 +332,6 @@ class DependencyTracker:
 
         # Build tasks can record/load deps concurrently when object workers > 1.
         self._lock = threading.RLock()
-    
-    def _get_transitive_cache(self) -> Dict[Tuple, Optional[bool]]:
-        """Lazily initialize the transitive effects cache."""
-        cache = getattr(self, '_transitive_effects_cache', None)
-        if cache is None:
-            cache = {}
-            self._transitive_effects_cache = cache
-        return cache
-
-    def _clear_transitive_cache(self):
-        cache = getattr(self, '_transitive_effects_cache', None)
-        if cache:
-            cache.clear()
 
     def get_or_create_group_deps(self, group_key: Tuple) -> GroupDeps:
         """Get or create GroupDeps for a group key."""
@@ -440,14 +413,7 @@ class DependencyTracker:
             group_deps = self.get_or_create_group_deps(group_key)
             for obj in obj_files:
                 group_deps.add_link_object(obj)
-    
-    def record_effect_usage(self, group_key: Tuple, effect_name: str):
-        """Record that a group uses an effect."""
-        with self._lock:
-            group_deps = self.get_or_create_group_deps(group_key)
-            group_deps.add_effect(effect_name)
-            self._clear_transitive_cache()
-    
+
     def get_deps_file_path(self, obj_file: str) -> str:
         """Get .deps file path corresponding to an .o file."""
         return obj_file.replace('.o', '.deps')
@@ -571,90 +537,6 @@ class DependencyTracker:
         obj_file = self.derive_obj_file_from_group_key(group_key)
         return self.get_deps(group_key, obj_file=obj_file)
 
-    def group_uses_effects_transitively(
-        self,
-        group_key: Tuple,
-        effect_names: Set[str],
-    ) -> Optional[bool]:
-        """Check whether a group or its dependent groups use any target effect.
-
-        Returns True or False when dependency information is available.
-        Returns None when the dependency information is unavailable, so callers
-        can fall back to conservative specialization.
-
-        Results are memoized per (group_key, frozenset(effect_names)) so that
-        repeated queries during compilation stay O(1) after the first walk.
-        """
-        if not effect_names:
-            return False
-
-        if isinstance(group_key, GroupKey):
-            group_key = group_key.to_tuple()
-
-        frozen_effects = frozenset(effect_names)
-        return self._walk_transitive_effects(group_key, frozen_effects, set())
-
-    def _walk_transitive_effects(
-        self,
-        group_key: Tuple,
-        frozen_effects: frozenset,
-        visiting: Set[Tuple],
-    ) -> Optional[bool]:
-        """DFS helper with per-node memoization."""
-        cache = self._get_transitive_cache()
-        cache_key = (group_key, frozen_effects)
-        cached = cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        if group_key in visiting:
-            return False
-        visiting.add(group_key)
-
-        result = self._compute_transitive_effects(
-            group_key, frozen_effects, visiting
-        )
-
-        visiting.discard(group_key)
-
-        # Only cache definitive results; None means deps unavailable and
-        # may appear later, so we do not cache it.
-        if result is not None:
-            cache[cache_key] = result
-
-        return result
-
-    def _compute_transitive_effects(
-        self,
-        group_key: Tuple,
-        frozen_effects: frozenset,
-        visiting: Set[Tuple],
-    ) -> Optional[bool]:
-        deps = self.get_deps_for_group(group_key)
-        if deps is None:
-            return None
-
-        if deps.effects_used & frozen_effects:
-            return True
-
-        saw_unknown = False
-        for group_dep in deps.group_dependencies:
-            target_group = getattr(group_dep, 'target_group', None)
-            if target_group is None:
-                continue
-
-            target_result = self._walk_transitive_effects(
-                target_group.to_tuple(), frozen_effects, visiting
-            )
-            if target_result is True:
-                return True
-            if target_result is None:
-                saw_unknown = True
-
-        if saw_unknown:
-            return None
-        return False
-    
     def get_link_libraries(self, group_key: Tuple, obj_file: str = None) -> List[str]:
         """Get all link libraries for a group."""
         deps = self.get_deps(group_key, obj_file)
@@ -676,26 +558,17 @@ class DependencyTracker:
             return deps.get_all_dependent_groups()
         return set()
     
-    def get_effects_used(self, group_key: Tuple, obj_file: str = None) -> Set[str]:
-        """Get all effects used by this group."""
-        deps = self.get_deps(group_key, obj_file)
-        if deps:
-            return deps.effects_used
-        return set()
-    
     def clear_group(self, group_key: Tuple):
         """Clear in-memory deps for a group (for recompilation)."""
         if group_key in self._group_deps:
             del self._group_deps[group_key]
         if group_key in self._loaded_deps:
             del self._loaded_deps[group_key]
-        self._clear_transitive_cache()
     
     def clear_all(self):
         """Clear all in-memory state."""
         self._group_deps.clear()
         self._loaded_deps.clear()
-        self._clear_transitive_cache()
 
 
 

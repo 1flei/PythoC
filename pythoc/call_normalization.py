@@ -191,6 +191,13 @@ def normalize_ast_call_args(
     """
     signature = _get_callee_signature_for_ast(func_ref)
     if signature is None:
+        # BuiltinFunction (e.g. llvm_asm) handles keyword args itself via
+        # handle_type_call, so bypass normalization and pass through.
+        type_hint = getattr(func_ref, 'type_hint', None)
+        py_obj = getattr(type_hint, '_python_object', None)
+        from .builtin_entities import BuiltinFunction
+        if isinstance(py_obj, type) and issubclass(py_obj, BuiltinFunction):
+            return positional_args
         if keywords:
             logger.error(
                 "keyword arguments require a callable with named parameters",

@@ -262,6 +262,17 @@ class LLVMBuilder(AbstractBuilder):
     
     def insert_value(self, agg: Any, value: Any, idx: Any, name: str = "") -> Any:
         return self._builder.insert_value(agg, value, idx, name=name)
+
+    # ========== Vector Operations ==========
+
+    def extract_element(self, vector: Any, idx: Any, name: str = "") -> Any:
+        return self._builder.extract_element(vector, idx, name=name)
+
+    def insert_element(self, vector: Any, value: Any, idx: Any, name: str = "") -> Any:
+        return self._builder.insert_element(vector, value, idx, name=name)
+
+    def shuffle_vector(self, vector1: Any, vector2: Any, mask: Any, name: str = "") -> Any:
+        return self._builder.shuffle_vector(vector1, vector2, mask, name=name)
     
     # ========== Block Management ==========
     

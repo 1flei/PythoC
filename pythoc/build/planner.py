@@ -20,7 +20,12 @@ def _deps_file_for_obj(obj_file: Optional[str]) -> Optional[str]:
 
 
 def plan_group_object_tasks(output_manager, groups: Sequence[Tuple[Tuple, dict]]) -> List[BuildTask]:
-    """Plan tasks that compile pending groups into object/deps artifacts."""
+    """Plan tasks that compile pending groups into object/deps artifacts.
+
+    .. deprecated::
+        Use :func:`plan_codegen_tasks` instead.  This function is retained for
+        backward compatibility with tests that call it directly.
+    """
     tasks: List[BuildTask] = []
     for group_key, group in groups:
         obj_file = group.get('obj_file')
@@ -48,6 +53,62 @@ def plan_group_object_tasks(output_manager, groups: Sequence[Tuple[Tuple, dict]]
             on_success=output_manager._commit_group_object_task_result,
         ))
     return tasks
+
+
+def plan_codegen_tasks(output_manager, groups: Sequence[Tuple[Tuple, dict]]) -> List[BuildTask]:
+    """Plan codegen-only tasks (Phase 1: IR generation, no .o write).
+
+    Codegen is serialized via DAG chaining: each codegen task's ``on_success``
+    creates at most one next codegen task, forming a natural serial chain.
+    No resource lock is needed — the DAG dependency ensures only one codegen
+    task is active at a time, while compile tasks (Phase 2) run in parallel
+    on other workers.
+    """
+    tasks: List[BuildTask] = []
+    for group_key, group in groups:
+        task_id = output_manager._next_group_object_task_id(group_key)
+        resources = []
+        if output_manager._group_needs_effect_context_resource(group_key):
+            resources.append("effect-context")
+        tasks.append(BuildTask(
+            id=task_id,
+            kind='codegen_group',
+            inputs=(group.get('source_file'),),
+            resources=tuple(resources),
+            run=lambda gk=group_key, g=group: output_manager._codegen_group_task(gk, g),
+            on_success=output_manager._codegen_on_success,
+        ))
+    return tasks
+
+
+def plan_compile_object_task(
+    output_manager,
+    group_key,
+    group,
+    compile_result,
+    deps=(),
+) -> BuildTask:
+    """Plan a single compile task (Phase 2: IR → .o file).
+
+    This task is dispatched by ``_codegen_on_success`` after codegen completes.
+    It acquires the file lock, re-checks cache, and publishes the .o file.
+    Multiple compile tasks for different groups run in parallel.
+    """
+    obj_file = group.get('obj_file')
+    task_id = output_manager._next_compile_task_id(group_key)
+    return BuildTask(
+        id=task_id,
+        kind='compile_object',
+        deps=tuple(deps),
+        inputs=(group.get('source_file'),),
+        outputs=(
+            group.get('ir_file'),
+            obj_file,
+            _deps_file_for_obj(obj_file),
+        ),
+        run=lambda gk=group_key, g=group, cr=compile_result: output_manager._compile_object_task(gk, g, cr),
+        on_success=output_manager._compile_on_success,
+    )
 
 
 def plan_link_shared_tasks(link_jobs, link_fn) -> List[BuildTask]:

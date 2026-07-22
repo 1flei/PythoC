@@ -178,6 +178,7 @@ class llvm_asm(BuiltinFunction):
         # Name reference (e.g., a type like u64)
         if isinstance(value_node, ast.Name):
             name = value_node.id
-            if name in visitor.user_globals:
-                return visitor.user_globals[name]
+            binding = visitor._lookup_python_global_binding(name)
+            if binding is not None:
+                return binding.value_ref.get_python_value()
         return None

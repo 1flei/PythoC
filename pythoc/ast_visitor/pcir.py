@@ -394,6 +394,24 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
     if op == 'insert_value':
         return _get_vreg_type(args[0])  # Same type as aggregate
 
+    # Vector ops
+    if op == 'extract_element':
+        vec_type = _get_vreg_type(args[0])
+        if vec_type is not None and isinstance(vec_type, ir.VectorType):
+            return vec_type.element
+        return None
+
+    if op == 'insert_element':
+        return _get_vreg_type(args[0])  # Same vector type as input
+
+    if op == 'shuffle_vector':
+        elem_vec = _get_vreg_type(args[0])
+        mask_type = _get_vreg_type(args[2])
+        if (elem_vec is not None and isinstance(elem_vec, ir.VectorType)
+                and mask_type is not None and isinstance(mask_type, ir.VectorType)):
+            return ir.VectorType(elem_vec.element, mask_type.count)
+        return None
+
     # Unary
     if op in ('neg', 'fneg', 'not_'):
         return _get_vreg_type(args[0])

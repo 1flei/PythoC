@@ -360,6 +360,13 @@ class TypeConverter:
         from .builtin_entities.python_type import PythonType
         from .literal_protocol import get_sequence_elements, is_mapping_carrier, is_sequence_carrier
 
+        # @compile / @extern function wrappers used as rvalues (e.g. function
+        # pointer comparisons) lower to func pointers via the general convert
+        # path rather than primitive promotion.
+        if hasattr(python_val, '_is_compiled') or getattr(python_val, '_is_extern', False):
+            wrapped = wrap_value(python_val, kind="python", type_hint=PythonType.wrap(python_val))
+            return self.convert(wrapped, target_type)
+
         if is_sequence_carrier(python_val):
             sequence_items = list(get_sequence_elements(python_val))
 

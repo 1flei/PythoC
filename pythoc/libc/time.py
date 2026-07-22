@@ -8,7 +8,7 @@ Layouts are platform-specific because ``time_t``, ``suseconds_t`` and the
 """
 
 from ..decorators import compile, extern
-from ..builtin_entities import ptr, i8, i32, i64, void
+from ..builtin_entities import ptr, i8, i32, i64, u64, void
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS
 from .sys_types import time_t
 
@@ -87,4 +87,10 @@ def time(t: ptr[i64]) -> i64:
 @extern(lib='c')
 def localtime(t: ptr[time_t]) -> ptr[tm]:
     """Convert calendar time to broken-down local time."""
+    pass
+
+
+@extern(lib='c')
+def strftime(s: ptr[i8], maxsize: u64, format: ptr[i8], tm: ptr[tm]) -> u64:
+    """Format broken-down time into a string."""
     pass

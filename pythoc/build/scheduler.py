@@ -73,6 +73,34 @@ class BuildScheduler:
         self.max_workers = max(1, max_workers)
         self._output_locks: Dict[str, threading.Lock] = {}
         self._output_locks_guard = threading.Lock()
+        # Track resources/outputs held by *running* tasks so the dispatch
+        # loop can skip blocked tasks instead of wasting worker slots.
+        self._busy_resources: Set[str] = set()
+        self._busy_outputs: Set[str] = set()
+
+    def _can_dispatch(self, task: BuildTask) -> bool:
+        """Return True if no running task holds this task's resources/outputs."""
+        for r in task.resources:
+            if r in self._busy_resources:
+                return False
+        for o in task.outputs:
+            if o and os.path.abspath(o) in self._busy_outputs:
+                return False
+        return True
+
+    def _mark_busy(self, task: BuildTask):
+        for r in task.resources:
+            self._busy_resources.add(r)
+        for o in task.outputs:
+            if o:
+                self._busy_outputs.add(os.path.abspath(o))
+
+    def _mark_free(self, task: BuildTask):
+        for r in task.resources:
+            self._busy_resources.discard(r)
+        for o in task.outputs:
+            if o:
+                self._busy_outputs.discard(os.path.abspath(o))
 
     def run(self, tasks: Sequence[BuildTask]) -> Dict[str, TaskResult]:
         task_map: Dict[str, BuildTask] = {}
@@ -132,13 +160,27 @@ class BuildScheduler:
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
             while ready or running:
-                while ready and len(running) < self.max_workers:
-                    task_id = ready.pop()
-                    if task_id in completed or task_id in failed:
-                        continue
-                    task = task_map[task_id]
-                    future = pool.submit(self._run_task, task)
-                    running[future] = task_id
+                # Dispatch loop: scan ready queue for tasks whose resources/
+                # outputs are not held by any running task.  Tasks that can't
+                # dispatch yet are skipped (left in ready) so we don't waste
+                # worker slots on blocked threads.
+                dispatched_any = True
+                while dispatched_any and ready and len(running) < self.max_workers:
+                    dispatched_any = False
+                    skipped: List[str] = []
+                    while ready and len(running) < self.max_workers:
+                        task_id = ready.pop(0)
+                        if task_id in completed or task_id in failed:
+                            continue
+                        task = task_map[task_id]
+                        if not self._can_dispatch(task):
+                            skipped.append(task_id)
+                            continue
+                        self._mark_busy(task)
+                        future = pool.submit(self._run_task, task)
+                        running[future] = task_id
+                        dispatched_any = True
+                    ready.extend(skipped)
 
                 if not running:
                     break
@@ -147,6 +189,7 @@ class BuildScheduler:
                 for future in done:
                     task_id = running.pop(future)
                     task = task_map[task_id]
+                    self._mark_free(task)
                     try:
                         result = future.result()
                         extra_tasks = ()
@@ -161,10 +204,12 @@ class BuildScheduler:
 
                     release_dependents(task_id)
 
-                if failed:
-                    for future in running:
-                        future.cancel()
-                    break
+                # Do NOT abort the entire batch when one task fails.  Tasks
+                # whose dependencies have failed are naturally excluded from
+                # the ready queue by release_dependents/add_tasks.  Independent
+                # tasks (e.g. compile for a different group) must be allowed to
+                # finish so their artifacts are published.  All failures are
+                # collected and raised together after the loop exits.
 
         if failed:
             blocked = sorted(set(task_map) - set(results) - set(failed))

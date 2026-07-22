@@ -33,6 +33,8 @@ from types import SimpleNamespace, ModuleType
 from typing import Any, Dict, Optional, Set, Tuple
 from contextlib import contextmanager
 
+from .effect_graph import node_id_from_group_key
+
 
 # Store the original __import__ function
 _original_import = builtins.__import__
@@ -144,18 +146,26 @@ def resolve_effect_wrapper(wrapper, caller_group_key=None,
     if getattr(original_wrapper, '_pc_effect_impl', False):
         return wrapper
 
-    # --- Check group-level effects_used (including transitive group deps) ---
+    # --- Check group-level effects via EffectGraph ---
     should_specialize = True
     callee_group_key = original_binding.group_key
     if callee_group_key:
-        from .build.deps import get_dependency_tracker
-        dep_tracker = get_dependency_tracker()
-        callee_uses_effects = dep_tracker.group_uses_effects_transitively(
-            callee_group_key,
-            set(effect_overrides.keys()),
-        )
-        if callee_uses_effects is not None:
-            should_specialize = callee_uses_effects
+        from .effect_graph import node_id_from_group_key
+        from .build.output_manager import get_output_manager
+        _om = get_output_manager()
+        _node_id = node_id_from_group_key(callee_group_key)
+        if not _om._effect_graph.has_node(_node_id):
+            # Node not yet in graph — conservative: specialize
+            pass
+        elif not _om._effect_graph.has_effects_declared(_node_id):
+            # Node exists but effects not yet declared (not yet compiled)
+            # — conservative: specialize
+            pass
+        else:
+            # Effects declared (possibly empty set) — definitive answer
+            should_specialize = _om._effect_graph.transitive_uses_effects(
+                _node_id, frozenset(effect_overrides.keys()),
+            )
 
     if not should_specialize:
         return wrapper
@@ -229,10 +239,12 @@ class EffectImportHook:
         # Import with caller effect context suppressed so that if this is the
         # first import of the module, its body defines/captures its own defaults.
         # The explicit import specialization below still uses the caller's
-        # active effect bindings.
+        # active effect bindings.  Delegates to _recording_import (not bare
+        # _original_import) so EffectGraph import edges are still recorded,
+        # while an outer EffectImportHook stays bypassed as before.
         with self._effect_context._suppress_for_module_import():
             with suppress_effect_suffix():
-                module = _original_import(name, globals, locals, fromlist, level)
+                module = _recording_import(name, globals, locals, fromlist, level)
 
         suffix = self._effect_context._suffix
         if suffix is None or not fromlist:
@@ -299,6 +311,30 @@ class EffectImportHook:
                 # Replace the attribute in the module temporarily
                 # so that `from module import func` gets the wrapped version
                 setattr(module, attr_name, wrapped)
+
+                # --- Record import edge and layer in EffectGraph ---
+                import_binding = getattr(
+                    attr, '_binding', getattr(attr, '_state', None)
+                )
+                import_gk = getattr(import_binding, 'group_key', None) if import_binding else None
+                if import_gk:
+                    from .build.output_manager import get_output_manager
+                    _om = get_output_manager()
+                    imported_node = node_id_from_group_key(import_gk)
+
+                    # Record layer membership for the imported node
+                    _om._effect_graph.add_layer(imported_node, suffix)
+
+                    # Record edge + layer for the importing module so the
+                    # layer propagates through its (already recorded) import
+                    # edges to transitive dependencies.
+                    caller_file = (
+                        globals.get('__file__') if isinstance(globals, dict) else None
+                    )
+                    if caller_file and caller_file != import_gk[0]:
+                        caller_node = (caller_file, None, None)
+                        _om._effect_graph.add_edge(caller_node, imported_node)
+                        _om._effect_graph.add_layer(caller_node, suffix)
 
         return module
 
@@ -1029,3 +1065,89 @@ def restore_effect_context(captured: Dict[str, Any]):
                         effect._effects[name]._set_impl(None)
                 else:
                     effect._effects[name]._set_impl(saved_impl)
+
+
+# ---------------------------------------------------------------------------
+# Always-on import edge recording for the EffectGraph
+#
+# Group-level dependencies must be obtained structurally — from import
+# statements — not by scanning each function's globals.  The recorder below
+# wraps builtins.__import__ for the whole process and, for every import,
+# records (caller_file, None, None) -> NodeID edges for compiled wrappers
+# visible at the imported module's top level.  EffectImportHook (installed
+# per effect context) delegates to _recording_import, so edge recording
+# stays active inside effect contexts as well.
+# ---------------------------------------------------------------------------
+
+
+def _record_wrapper_import_edge(graph, caller_node, caller_file, value):
+    """Record caller_node -> value's group node if value is a compiled wrapper."""
+    if not callable(value) or not getattr(value, '_is_compiled', False):
+        return
+    binding = getattr(value, '_binding', getattr(value, '_state', None))
+    group_key = getattr(binding, 'group_key', None) if binding else None
+    if not group_key or group_key[0] == caller_file:
+        # Same-file dependencies are not cross-group planning edges.
+        return
+    target_node = node_id_from_group_key(group_key)
+    if target_node != caller_node:
+        graph.add_edge(caller_node, target_node)
+
+
+def _record_import_edges(name, caller_globals, fromlist, level, module):
+    """Record caller -> imported dependency edges for one __import__ call."""
+    if not isinstance(caller_globals, dict):
+        return
+    caller_file = caller_globals.get('__file__')
+    if not caller_file:
+        return
+    # Resolve the output manager through sys.modules only: importing it here
+    # would recurse into this recorder, and during pythoc's own init it may
+    # not be importable yet.  Edges of modules loaded that early are recorded
+    # when user code imports them afterwards.
+    om_module = sys.modules.get(__name__.rsplit('.', 1)[0] + '.build.output_manager')
+    if om_module is None:
+        return
+    graph = om_module.get_output_manager()._effect_graph
+    caller_node = (caller_file, None, None)
+
+    modules = []
+    if isinstance(module, ModuleType):
+        modules.append(module)
+    if fromlist:
+        for attr_name in fromlist:
+            if attr_name == '*':
+                continue
+            try:
+                attr = getattr(module, attr_name)
+            except AttributeError:
+                continue
+            if isinstance(attr, ModuleType):
+                modules.append(attr)
+            else:
+                _record_wrapper_import_edge(graph, caller_node, caller_file, attr)
+    elif level == 0 and name:
+        # `import a.b.c` binds the top package; the leaf module holds the attrs.
+        leaf = sys.modules.get(name)
+        if leaf is not None and leaf not in modules:
+            modules.append(leaf)
+
+    for mod in modules:
+        mod_file = getattr(mod, '__file__', None)
+        if not mod_file or mod_file == caller_file:
+            continue
+        for value in vars(mod).values():
+            _record_wrapper_import_edge(graph, caller_node, caller_file, value)
+
+
+def _recording_import(name, globals=None, locals=None, fromlist=(), level=0):
+    """Process-wide __import__ wrapper that records EffectGraph edges."""
+    module = _original_import(name, globals, locals, fromlist, level)
+    try:
+        _record_import_edges(name, globals, fromlist, level, module)
+    except Exception:
+        pass  # Edge recording is best-effort and must never break imports.
+    return module
+
+
+builtins.__import__ = _recording_import

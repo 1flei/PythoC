@@ -118,8 +118,7 @@ class Poly:
                 node
             )
         
-        # Generate or reuse dynamic dispatch for enum arguments.  In strict build
-        # planning mode this should have been prepared before codegen.
+        # Generate or reuse dynamic dispatch for enum arguments.
         dynamic_dispatch = self._get_dynamic_dispatch_func(arg_types, enum_indices, node)
         return dynamic_dispatch.handle_call(visitor, dynamic_dispatch, args, node)
 

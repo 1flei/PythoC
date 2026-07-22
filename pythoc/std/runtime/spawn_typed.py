@@ -31,6 +31,13 @@ _SPAWN_TYPED_SPAWN_RAW_SOURCE = "spawn_typed_spawn_raw.py"
 _SPAWN_TYPED_JOIN_SOURCE = "spawn_typed_join.py"
 _SPAWN_TYPED_JOIN_RAW_SOURCE = "spawn_typed_join_raw.py"
 
+# Cache for _TypedTask: avoids regenerating identical trampolines/spawn/join
+# helpers when the same target_fn signature is used under different executor
+# effects.  The generated code depends only on the target function's
+# signature (name, param types, return type), not on the executor, so
+# caching by type_suffix is safe and prevents group_reopen errors.
+_TYPED_TASK_CACHE = {}
+
 
 def _target_suffix_key(target_fn):
     binding = getattr(target_fn, "_binding", getattr(target_fn, "_state", None))
@@ -72,14 +79,25 @@ def _TypedTask(target_fn, *, stack_size=None):
     ret_type = _extract_return_type(target_fn)
     fn_name = getattr(target_fn, '__name__', 'anon')
 
-    # Use a unique suffix for all generated code
+    # Use a unique suffix for all generated code.  stack_size is baked into
+    # the compiled _typed_spawn/_typed_spawn_raw closures, so it must be part
+    # of the suffix — otherwise two different stack sizes would collide in
+    # the same compilation group and in _TYPED_TASK_CACHE.
     type_suffix = (
         _SPAWN_TYPED_ABI_VERSION,
         fn_name,
         _target_suffix_key(target_fn),
         tuple(t for _, t in param_info),
         ret_type,
+        stack_size,
     )
+
+    # Cache hit: identical signature already generated.  The generated
+    # trampoline/spawn/join helpers depend only on the target function's
+    # signature and stack_size, not on the executor, so reuse is safe.
+    cached = _TYPED_TASK_CACHE.get(type_suffix)
+    if cached is not None:
+        return cached
 
     # ---- 1. Generate Args struct ----
     args_struct = _make_args_struct(param_info, type_suffix)
@@ -133,7 +151,7 @@ def _TypedTask(target_fn, *, stack_size=None):
     def _typed_detach(rt: ptr[Runtime], handle: TaskHandle) -> void:
         runtime_detach(rt, handle)
 
-    return SimpleNamespace(
+    result = SimpleNamespace(
         spawn=spawn_fn,
         join=join_fn,
         spawn_raw=spawn_raw_fn,
@@ -142,6 +160,8 @@ def _TypedTask(target_fn, *, stack_size=None):
         args_type=args_struct,
         trampoline=trampoline,
     )
+    _TYPED_TASK_CACHE[type_suffix] = result
+    return result
 
 
 # ============================================================

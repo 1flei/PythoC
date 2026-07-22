@@ -1152,7 +1152,7 @@ def _compile_impl(func_or_class,
     
     # Note: We do NOT check cache here. Cache is checked at flush time.
     # This allows all @compile decorators to register before any flush happens.
-    
+
     # --- Registration-phase cache: if the same group was already compiled
     # and its object file is still up-to-date, reuse the existing wrapper
     # instead of rebuilding AST / binding_state / compile_callback.
@@ -1218,13 +1218,6 @@ def _compile_impl(func_or_class,
     wrapper._signature = func_info
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
-    output_manager.record_group_planning_deps_from_globals(
-        group_key, binding_state.compilation_globals,
-    )
-    from ..build.deps import get_dependency_tracker
-    get_dependency_tracker().record_type_layout_deps_from_globals(
-        group_key, binding_state.compilation_globals,
-    )
 
     # Always queue compilation callback - cache check is done at flush time
     # These closure locals are needed because they are AST/source artifacts
@@ -1270,14 +1263,12 @@ def _compile_impl(func_or_class,
                 pop_compilation_context()
 
         effect_deps = stop_effect_tracking()
+        # Effect usage is recorded per function here and declared on the
+        # group's EffectGraph node once the whole group has been compiled
+        # (see OutputManager._compile_pending_for_group).
         if effect_deps:
             func_info.effect_dependencies = effect_deps
             logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
-
-            from ..build.deps import get_dependency_tracker
-            dep_tracker = get_dependency_tracker()
-            for effect in effect_deps:
-                dep_tracker.record_effect_usage(st.group_key, effect)
     
     from ..effect import is_effect_suffix_suppressed, effect as _effect_singleton
     # Template condition: suppress_effect_suffix() is hiding a real suffix AND

@@ -21,6 +21,7 @@ __all__ = [
     'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
     'setvbuf', 'setbuf', 'fgetc', 'fputc', 'ungetc',
     'sprintf', 'snprintf', 'vprintf', 'vfprintf', 'vsnprintf',
+    'sscanf', 'popen', 'pclose',
 ]
 
 # Input/Output functions
@@ -103,6 +104,24 @@ def fprintf(stream: ptr[i8], format: ptr[i8], *args) -> i32:
 @extern(lib='c')
 def fscanf(stream: ptr[i8], format: ptr[i8], *args) -> i32:
     """Read formatted input from file"""
+    pass
+
+
+@extern(lib='c')
+def sscanf(s: ptr[i8], format: ptr[i8], *args) -> i32:
+    """Read formatted input from a string"""
+    pass
+
+
+@extern(lib='c')
+def popen(command: ptr[i8], mode: ptr[i8]) -> ptr[FILE]:
+    """Open a pipe to a subprocess"""
+    pass
+
+
+@extern(lib='c')
+def pclose(stream: ptr[FILE]) -> i32:
+    """Close a pipe opened by popen"""
     pass
 
 @extern(lib='c')

@@ -233,6 +233,8 @@ class func(BuiltinType):
         if is_varargs and len(args) > len(param_llvm_types):
             from . import i8 as pc_i8, i16 as pc_i16, i32 as pc_i32
             from . import f32 as pc_f32, f64 as pc_f64
+            from . import ptr as pc_ptr
+            from ..valueref import wrap_value
             for extra_arg in args[len(param_llvm_types):]:
                 hint = getattr(extra_arg, 'type_hint', None)
                 # C default argument promotions for varargs
@@ -242,6 +244,24 @@ class func(BuiltinType):
                 elif hint == pc_f32:
                     promoted = visitor.type_converter.convert(extra_arg, pc_f64, node)
                     converted_args.append(ensure_ir(promoted))
+                elif extra_arg.is_python_value() and isinstance(extra_arg.get_python_value(), str):
+                    # String literals in varargs decay to ptr[i8].
+                    str_const = visitor._create_string_constant(extra_arg.get_python_value())
+                    promoted = wrap_value(str_const, kind="value", type_hint=pc_ptr[pc_i8])
+                    converted_args.append(ensure_ir(promoted))
+                elif extra_arg.is_python_value() and hasattr(extra_arg.get_python_value(), '_is_compiled'):
+                    # Compiled functions in varargs lower to their func pointers.
+                    from ..callable_lowering import lower_compile_wrapper
+                    caller_group_key = getattr(visitor, 'current_group_key', None)
+                    lowered = lower_compile_wrapper(
+                        extra_arg.get_python_value(), visitor.module, caller_group_key, node=node)
+                    converted_args.append(ensure_ir(lowered))
+                elif extra_arg.is_python_value() and getattr(extra_arg.get_python_value(), '_is_extern', False):
+                    from ..callable_lowering import lower_extern_wrapper
+                    caller_group_key = getattr(visitor, 'current_group_key', None)
+                    lowered = lower_extern_wrapper(
+                        extra_arg.get_python_value(), visitor.module, caller_group_key, node=node)
+                    converted_args.append(ensure_ir(lowered))
                 elif extra_arg.is_python_value() and hasattr(hint, 'promote_to_default_pc_type'):
                     promoted = hint.promote_to_default_pc_type()
                     converted_args.append(ensure_ir(promoted))

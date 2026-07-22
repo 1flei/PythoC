@@ -124,6 +124,16 @@ def _record_dependency(func_info, binding_state, caller_group_key):
             caller_group_key, callee_group_key, "function_ref"
         )
 
+        # --- Record edge in EffectGraph for effect propagation ---
+        from .effect_graph import node_id_from_group_key
+        from .build.output_manager import get_output_manager
+        om = get_output_manager()
+        effect_graph = getattr(om, '_effect_graph', None)
+        if effect_graph is not None:
+            caller_node = node_id_from_group_key(caller_group_key)
+            callee_node = node_id_from_group_key(callee_group_key)
+            effect_graph.add_edge(caller_node, callee_node)
+
 
 def _declare_or_get(func_info, actual_func_name, module, node=None):
     """Get existing or declare new ir.Function in the module."""

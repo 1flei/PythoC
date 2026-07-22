@@ -3,7 +3,7 @@ Standard Library Functions (stdlib.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64, f64, void
+from ..builtin_entities import ptr, i8, i32, i64, f64, void, func
 
 # Memory management
 @extern(lib='c')
@@ -35,6 +35,11 @@ def exit(status: i32) -> None:
 @extern(lib='c')
 def abort() -> None:
     """Abort program"""
+    pass
+
+@extern(lib='c')
+def atexit(func: func[void]) -> i32:
+    """Register a function to be called at exit"""
     pass
 
 # String conversion
