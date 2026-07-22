@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784435177202,
+  "lastUpdate": 1784726265525,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2564,6 +2564,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.156,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "399bd468937766aa141b9a3dab824e62525080d1",
+          "message": "Introduce the effect graph and some more libc funcs",
+          "timestamp": "2026-07-22T21:12:55+08:00",
+          "tree_id": "a360ff713f23e692ee12a717d0f4152b2c5c3c8d",
+          "url": "https://github.com/1flei/PythoC/commit/399bd468937766aa141b9a3dab824e62525080d1"
+        },
+        "date": 1784726265205,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.7,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.737,
             "unit": "seconds/test"
           }
         ]
