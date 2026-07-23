@@ -145,16 +145,10 @@ class TestLibcPlatform(unittest.TestCase):
         self.assertEqual(test_raise_null_signal(), 0)
 
     def test_timeval_layout(self):
-        size = test_timeval_size()
-        if sys.platform == 'darwin':
-            # macOS: time_t tv_sec (i64) + suseconds_t tv_usec (i32) + 4 pad
-            self.assertEqual(size, 16)
-        elif sys.platform.startswith('linux'):
-            # glibc: time_t tv_sec (i64) + suseconds_t tv_usec (i64)
-            self.assertEqual(size, 16)
-        elif sys.platform == 'win32':
-            # MSVCRT: time_t tv_sec (i64) + long tv_usec (i32)
-            self.assertEqual(size, 12)
+        # All supported platforms round to 16: macOS/MSVCRT use
+        # time_t tv_sec (i64) + suseconds_t/long tv_usec (i32) + 4 pad,
+        # glibc uses i64 + i64.
+        self.assertEqual(test_timeval_size(), 16)
 
     def test_tm_layout(self):
         size = test_tm_size()
