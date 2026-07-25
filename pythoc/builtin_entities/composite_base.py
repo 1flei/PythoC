@@ -11,12 +11,18 @@ with shared functionality for:
 
 import ast
 import hashlib
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 from llvmlite import ir
 
 from .base import BuiltinType
 from ..logger import logger
 from ..valueref import ValueRef
+
+
+# Serializes lazy field-type resolution (forward references) so concurrent
+# compilations materialize the resolved fields exactly once per class.
+_field_resolution_lock = threading.RLock()
 
 
 class CompositeType(BuiltinType):
@@ -220,7 +226,20 @@ class CompositeType(BuiltinType):
         """
         if cls._field_types_resolved or not cls._needs_type_resolution:
             return
-        
+
+        with _field_resolution_lock:
+            # Double-checked: another thread may have resolved while we waited.
+            if cls._field_types_resolved or not cls._needs_type_resolution:
+                return
+            cls._resolve_field_types_locked()
+
+    @classmethod
+    def _resolve_field_types_locked(cls):
+        """Resolve string field types to actual type objects.
+
+        Caller must hold _field_resolution_lock and have checked
+        _needs_type_resolution / _field_types_resolved.
+        """
         from ..type_resolver import TypeResolver
         from ..registry import get_unified_registry
         
@@ -232,11 +251,12 @@ class CompositeType(BuiltinType):
         for struct_name in registry.list_structs():
             struct_info = registry.get_struct(struct_name)
             if struct_info and struct_info.python_class:
-                type_namespace[struct_name] = struct_info.python_class
+                type_namespace[struct_info.name] = struct_info.python_class
         
         # Add all defined types from forward_ref system
-        from ..forward_ref import _defined_types
-        type_namespace.update(_defined_types)
+        from ..session import CompileSession
+        type_namespace.update(
+            CompileSession.current().forward_refs.defined_types_snapshot())
         
         type_resolver = TypeResolver(user_globals=type_namespace)
         

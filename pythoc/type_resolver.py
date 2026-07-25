@@ -56,7 +56,7 @@ class TypeResolver:
         llvm_type = resolver.annotation_to_llvm_type(ast_node)
     """
 
-    def __init__(self, module_context=None, user_globals=None, visitor=None):
+    def __init__(self, module_context=None, user_globals=None, visitor=None, struct_registry=None):
         """
         Initialize the type resolver.
 
@@ -64,13 +64,14 @@ class TypeResolver:
             module_context: Optional LLVM module context for struct types
             user_globals: Optional user global namespace for type alias resolution
             visitor: AST visitor instance for expression evaluation (created lazily if not provided)
+            struct_registry: Optional struct registry for name-based struct lookup;
+                defaults to the global unified registry
         """
         self.module_context = module_context
         self.user_globals = user_globals or {}
         self.visitor = visitor
         self._constexpr_visitor = None  # Lazy-created constexpr visitor
-        from .registry import _unified_registry
-        self.struct_registry = _unified_registry
+        self.struct_registry = struct_registry if struct_registry is not None else get_unified_registry()
     
     def _get_constexpr_visitor(self):
         """Get or create a constexpr visitor for type evaluation.

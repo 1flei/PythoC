@@ -9,6 +9,7 @@ import os
 import sys
 import ctypes
 import subprocess
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple, Set
 from llvmlite import ir
 
@@ -310,9 +311,6 @@ class MultiSOExecutor:
         Returns:
             List of (dep_source_file, dep_so_file) tuples
         """
-        from .registry import _unified_registry
-        registry = _unified_registry
-        
         dependencies = []
         seen_so_files = set()
         
@@ -1020,13 +1018,16 @@ class MultiSOExecutor:
         return self._get_library_dependencies(source_file, so_file)
 
 
-# Global executor instance
-_multi_so_executor = None
+# Guards lazy check-then-set of the active session's MultiSOExecutor.
+_executor_lock = threading.Lock()
 
 
 def get_multi_so_executor() -> MultiSOExecutor:
-    """Get or create the global multi-SO executor"""
-    global _multi_so_executor
-    if _multi_so_executor is None:
-        _multi_so_executor = MultiSOExecutor()
-    return _multi_so_executor
+    """Get or create the active session's multi-SO executor."""
+    from .session import CompileSession
+    session = CompileSession.current()
+    if session.multi_so_executor is None:
+        with _executor_lock:
+            if session.multi_so_executor is None:
+                session.multi_so_executor = MultiSOExecutor()
+    return session.multi_so_executor

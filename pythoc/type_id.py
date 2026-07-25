@@ -8,6 +8,7 @@ Two types are considered identical if and only if they produce the same type ID.
 Design: Each type implements its own get_type_id() classmethod.
 """
 
+import weakref
 from typing import Any, Optional, Set
 
 # Memoized type IDs.  get_type_id is called for every coercion decision and
@@ -18,7 +19,28 @@ from typing import Any, Optional, Set
 # walked once.  Cycle-back edges still resolve through _visited tokens;
 # entries containing such tokens are context-dependent in the same way the
 # uncached computation was, so caching does not change semantics.
-_type_id_cache = {}
+#
+# The cache is a WeakKeyDictionary keyed by the type object itself, so dead
+# type objects (e.g. specialized classes from a discarded compilation) do
+# not pin memory forever.  Keys that cannot be weak-referenced simply skip
+# the cache.
+_type_id_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _cache_lookup(pc_type: Any) -> Optional[str]:
+    try:
+        return _type_id_cache.get(pc_type)
+    except TypeError:
+        # Key does not support weak references (e.g. None, int)
+        return None
+
+
+def _cache_store(pc_type: Any, result: str):
+    try:
+        _type_id_cache[pc_type] = result
+    except TypeError:
+        # Key does not support weak references; skip caching
+        pass
 
 
 def _recursive_type_token(pc_type: Any) -> str:
@@ -42,9 +64,9 @@ def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
 
     Returns a compact string that uniquely identifies the type.
     """
-    cached = _type_id_cache.get(id(pc_type))
-    if cached is not None and cached[0] is pc_type:
-        return cached[1]
+    cached = _cache_lookup(pc_type)
+    if cached is not None:
+        return cached
     if _visited is None:
         _visited = set()
 
@@ -61,7 +83,7 @@ def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
             result = pc_type.get_type_id(_visited)
         finally:
             _visited.remove(type_key)
-        _type_id_cache[type_key] = (pc_type, result)
+        _cache_store(pc_type, result)
         return result
 
     from llvmlite import ir
@@ -73,7 +95,7 @@ def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
             result = get_type_id(struct_info.python_class, _visited)
         else:
             result = f'{len(pc_type.name)}{pc_type.name}'
-        _type_id_cache[type_key] = (pc_type, result)
+        _cache_store(pc_type, result)
         return result
 
     raise TypeError(f"Type {pc_type} (type={type(pc_type)}) does not have a get_type_id() method")

@@ -20,19 +20,19 @@ class f16(BuiltinType):
     _size_bytes = 2
     _is_signed = True
     _is_float = True
-    _lib_registered = False
-    
+
     @classmethod
     def get_name(cls) -> str:
         return 'f16'
-    
+
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM type and register library dependency"""
-        if not cls._lib_registered:
-            from ..registry import get_unified_registry
-            get_unified_registry().add_link_library('gcc_s')
-            cls._lib_registered = True
+        # add_link_library is set-based: registering on every call keeps
+        # each compile session's link set complete without a cross-session
+        # "already registered" flag.
+        from ..registry import get_unified_registry
+        get_unified_registry().add_link_library('gcc_s')
         return cls._llvm_type
 
 
@@ -45,19 +45,16 @@ class bf16(BuiltinType):
     _size_bytes = 2
     _is_signed = True
     _is_float = True
-    _lib_registered = False
-    
+
     @classmethod
     def get_name(cls) -> str:
         return 'bf16'
-    
+
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM type for bf16 and register library dependency"""
-        if not cls._lib_registered:
-            from ..registry import get_unified_registry
-            get_unified_registry().add_link_library('gcc_s')
-            cls._lib_registered = True
+        from ..registry import get_unified_registry
+        get_unified_registry().add_link_library('gcc_s')
         return ir.BFloatType()
 
 
@@ -74,19 +71,16 @@ class f128(BuiltinType):
     _size_bytes = 16
     _is_signed = True
     _is_float = True
-    _lib_registered = False
-    
+
     @classmethod
     def get_name(cls) -> str:
         return 'f128'
-    
+
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM type for f128 and register library dependency"""
-        if not cls._lib_registered:
-            from ..registry import get_unified_registry
-            get_unified_registry().add_link_library('gcc_s')
-            cls._lib_registered = True
+        from ..registry import get_unified_registry
+        get_unified_registry().add_link_library('gcc_s')
         return ir.FP128Type()
 
 

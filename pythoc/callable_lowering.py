@@ -119,15 +119,30 @@ def _record_dependency(func_info, binding_state, caller_group_key):
 
     if (caller_group_key and callee_group_key
             and caller_group_key != callee_group_key):
+        # Resolve implicit output channels through the binding's session.
+        session = getattr(binding_state, 'session', None)
+        if session is None:
+            raise RuntimeError(
+                "FunctionBindingState has no compile session: bindings must "
+                "be created through @compile inside an active session "
+                "(pythoc.init() or 'with CompileSession():')"
+            )
+
         from .build.deps import get_dependency_tracker
-        get_dependency_tracker().record_group_dependency(
+        from .effect_graph import node_id_from_group_key
+        from .build.output_manager import get_output_manager
+        # Lazily create on the binding's own session, not the caller's.
+        token = session.activate()
+        try:
+            dep_tracker = session.dependency_tracker or get_dependency_tracker()
+            om = session.output_manager or get_output_manager()
+        finally:
+            session.deactivate(token)
+        dep_tracker.record_group_dependency(
             caller_group_key, callee_group_key, "function_ref"
         )
 
         # --- Record edge in EffectGraph for effect propagation ---
-        from .effect_graph import node_id_from_group_key
-        from .build.output_manager import get_output_manager
-        om = get_output_manager()
         effect_graph = getattr(om, '_effect_graph', None)
         if effect_graph is not None:
             caller_node = node_id_from_group_key(caller_group_key)

@@ -31,7 +31,7 @@ from ..cfg.linear_checker import (
 from ..logger import logger
 from .pcir import (
     VReg, VRegPhi, VRegSwitch, SentinelBlock, PCIRInst,
-    infer_result_type, resolve_arg, reset_vreg_counter,
+    infer_result_type, resolve_arg,
 )
 
 if TYPE_CHECKING:
@@ -102,8 +102,9 @@ class ControlFlowBuilder:
         self._finalized = False
         self._emitted = False
 
-        # Reset VReg counter for each function
-        reset_vreg_counter()
+        # Per-function VReg ID counter (ids only need to be unique within
+        # one function compilation)
+        self._next_vreg_id = 0
 
         # CFG data structure
         self._cfg = CFG(func_name=self._func_name)
@@ -159,6 +160,12 @@ class ControlFlowBuilder:
         self._debug_subprogram = subprogram
         self._debug_line_offset = line_offset
 
+    def _alloc_vreg_id(self) -> int:
+        """Allocate the next VReg ID for this function compilation."""
+        vid = self._next_vreg_id
+        self._next_vreg_id += 1
+        return vid
+
     def _make_debug_location(self, node: Optional[ast.AST]):
         """Create a DILocation for an AST node, or None if not applicable."""
         if self._debug_subprogram is None or node is None:
@@ -193,7 +200,7 @@ class ControlFlowBuilder:
                 infer_kwargs['_module_context'] = self._visitor.module.context
             result_type = infer_result_type(name, args, infer_kwargs)
             if result_type is not None:
-                vreg = VReg(result_type)
+                vreg = VReg(result_type, id=self._alloc_vreg_id())
                 inst = PCIRInst(op=name, args=args, kwargs=kwargs, result=vreg)
             else:
                 vreg = None
@@ -394,7 +401,7 @@ class ControlFlowBuilder:
 
         # Create VRegSwitch for case tracking
         current_sentinel = self._block_map.get(src_id)
-        vswitch = VRegSwitch(current_sentinel)
+        vswitch = VRegSwitch(current_sentinel, id=self._alloc_vreg_id())
 
         # Record PCIR
         self._append_pcir(PCIRInst(op='switch', args=(value, default_block), kwargs={}, result=vswitch))
@@ -419,7 +426,7 @@ class ControlFlowBuilder:
 
     def phi(self, typ, name: str = ""):
         """Record a PHI node. Returns VRegPhi for add_incoming calls."""
-        vphi = VRegPhi(typ)
+        vphi = VRegPhi(typ, id=self._alloc_vreg_id())
 
         self._append_pcir(PCIRInst(op='phi', args=(typ,), kwargs={'name': name}, result=vphi))
 
@@ -428,7 +435,7 @@ class ControlFlowBuilder:
     def select(self, cond, lhs, rhs, name: str = ""):
         """Record a select instruction."""
         result_type = infer_result_type('select', (cond, lhs, rhs), {'name': name})
-        vreg = VReg(result_type) if result_type else None
+        vreg = VReg(result_type, id=self._alloc_vreg_id()) if result_type else None
 
         self._append_pcir(PCIRInst(op='select', args=(cond, lhs, rhs), kwargs={'name': name}, result=vreg))
 

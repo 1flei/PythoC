@@ -287,9 +287,11 @@ class TestGlobalEffectSingleton(unittest.TestCase):
                 pass
     
     def test_singleton_exists(self):
-        """Test that global effect singleton exists"""
+        """The effect proxy forwards to the active session's Effect."""
         from pythoc.effect import effect as global_effect
-        self.assertIsInstance(global_effect, Effect)
+        from pythoc.session import CompileSession
+        self.assertIsInstance(CompileSession.current().effects, Effect)
+        self.assertIs(global_effect.get_effect_impl('nonexistent'), None)
     
     def test_singleton_usage(self):
         """Test basic usage of global singleton"""

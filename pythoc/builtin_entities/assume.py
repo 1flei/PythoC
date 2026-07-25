@@ -234,6 +234,7 @@ class assume(BuiltinFunction):
         
         class_name = f"RefinedType_{predicate.__name__}"
         new_refined_type = type(class_name, (RefinedType,), {
+            '_pc_specialized': True,
             '_base_type': None,
             '_predicates': [predicate],
             '_tags': [],
@@ -266,6 +267,7 @@ class assume(BuiltinFunction):
         class_name = "RefinedType_" + '_'.join(sanitized_names)
         
         new_refined_type = type(class_name, (RefinedType,), {
+            '_pc_specialized': True,
             '_base_type': base_type,
             '_predicates': predicates,
             '_tags': tags,

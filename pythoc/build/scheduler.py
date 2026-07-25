@@ -6,11 +6,14 @@ is still handled by the existing file locks around artifact publication.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from ..config import config
 
 
 TaskFn = Callable[[], object]
@@ -67,7 +70,7 @@ class BuildScheduler:
 
     def __init__(self, max_workers: Optional[int] = None):
         if max_workers is None:
-            max_workers = int(os.environ.get("PC_BUILD_WORKERS", "0") or "0")
+            max_workers = config.build_workers
         if max_workers <= 0:
             max_workers = os.cpu_count() or 1
         self.max_workers = max(1, max_workers)
@@ -177,7 +180,13 @@ class BuildScheduler:
                             skipped.append(task_id)
                             continue
                         self._mark_busy(task)
-                        future = pool.submit(self._run_task, task)
+                        # Run the task in a copy of the submitting thread's
+                        # context so scoped config.override() values stay
+                        # visible on worker threads (matching the historical
+                        # process-wide semantics) without sharing overrides
+                        # between unrelated threads.
+                        ctx = contextvars.copy_context()
+                        future = pool.submit(ctx.run, self._run_task, task)
                         running[future] = task_id
                         dispatched_any = True
                     ready.extend(skipped)

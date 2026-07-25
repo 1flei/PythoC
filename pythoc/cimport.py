@@ -36,6 +36,7 @@ from types import ModuleType
 
 from .registry import get_unified_registry
 from .utils.cc_utils import compile_c_to_object, compile_c_sources, find_available_cc
+from .utils.link_utils import file_lock
 
 
 _VALID_CIMPORT_BACKENDS = {"auto", "clang"}
@@ -98,17 +99,25 @@ def _generate_bindings_clang(
     if clang_args:
         effective_clang_args.extend(clang_args)
 
-    generate_bindings_to_file(
-        path,
-        _normalize_lib_for_generated_source(lib or ''),
-        bindings_path,
-        cflags=cflags,
-        include_dirs=include_dirs,
-        defines=defines,
-        target=target or config.cimport_target,
-        sysroot=sysroot or config.cimport_sysroot,
-        clang_args=effective_clang_args,
-    )
+    # Write to a temp file and atomically rename so concurrent processes
+    # never observe a partially written bindings module.
+    tmp_path = bindings_path + '.tmp.' + str(os.getpid())
+    try:
+        generate_bindings_to_file(
+            path,
+            _normalize_lib_for_generated_source(lib or ''),
+            tmp_path,
+            cflags=cflags,
+            include_dirs=include_dirs,
+            defines=defines,
+            target=target or config.cimport_target,
+            sysroot=sysroot or config.cimport_sysroot,
+            clang_args=effective_clang_args,
+        )
+        os.replace(tmp_path, bindings_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def _compute_cache_key(path: str, lib: str, sources: Optional[List[str]] = None,
@@ -352,21 +361,23 @@ def cimport(path: str, *,
     # clang is the only backend; 'auto' resolves to 'clang'
     selected_backend = "clang" if backend_request == "auto" else backend_request
     bindings_path = _bindings_path_for_backend(cache_dir, basename, selected_backend)
-    needs_regen = _bindings_need_regen(path, bindings_path)
-    
-    # Generate bindings if needed
-    if needs_regen:
-        _generate_bindings_clang(
-            path,
-            lib or '',
-            bindings_path,
-            cflags=cflags,
-            include_dirs=include_dirs,
-            defines=defines,
-            target=target,
-            sysroot=sysroot,
-            clang_args=clang_args,
-        )
+
+    # Generate bindings if needed.  A lock file next to the bindings
+    # serializes concurrent regeneration across processes; re-check
+    # freshness inside the lock so waiters skip redundant work.
+    with file_lock(bindings_path + '.lock'):
+        if _bindings_need_regen(path, bindings_path):
+            _generate_bindings_clang(
+                path,
+                lib or '',
+                bindings_path,
+                cflags=cflags,
+                include_dirs=include_dirs,
+                defines=defines,
+                target=target,
+                sysroot=sysroot,
+                clang_args=clang_args,
+            )
     
     # Compile sources if requested
     if compile_sources and sources:
@@ -387,22 +398,25 @@ def cimport(path: str, *,
             
             obj_name = os.path.splitext(os.path.basename(src_rel))[0] + '.o'
             obj_path = os.path.join(obj_cache_dir, obj_name)
-            
-            # Only compile if object doesn't exist or source is newer
-            needs_compile = True
-            if os.path.exists(obj_path) and os.path.exists(src):
-                obj_mtime = os.path.getmtime(obj_path)
-                src_mtime = os.path.getmtime(src)
-                if obj_mtime >= src_mtime:
-                    needs_compile = False
-            
-            if needs_compile:
-                from .utils.cc_utils import compile_c_to_object
-                compile_c_to_object(
-                    src, obj_path, cc=cc, cflags=cflags,
-                    include_dirs=include_dirs, defines=defines
-                )
-            
+
+            # Only compile if object doesn't exist or source is newer.
+            # A per-object lock serializes concurrent compilation across
+            # processes; re-check freshness inside the lock.
+            with file_lock(obj_path + '.lock'):
+                needs_compile = True
+                if os.path.exists(obj_path) and os.path.exists(src):
+                    obj_mtime = os.path.getmtime(obj_path)
+                    src_mtime = os.path.getmtime(src)
+                    if obj_mtime >= src_mtime:
+                        needs_compile = False
+
+                if needs_compile:
+                    from .utils.cc_utils import compile_c_to_object
+                    compile_c_to_object(
+                        src, obj_path, cc=cc, cflags=cflags,
+                        include_dirs=include_dirs, defines=defines
+                    )
+
             compiled_objects.append(obj_path)
         
         objects.extend(compiled_objects)

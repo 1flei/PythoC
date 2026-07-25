@@ -133,6 +133,7 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         
         # Create methods dict with all is_* methods
         methods = {
+            '_pc_specialized': True,
             'qualified_type': base_type,
             '_qualifier_flags': flags,
         }

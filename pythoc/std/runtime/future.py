@@ -15,7 +15,7 @@ bind_mem()
 
 from pythoc import compile, effect, inline, meta, ptr, void, u64, sizeof, move
 from pythoc.builtin_entities.python_type import PythonType
-from pythoc.effect import get_current_compilation_context
+from pythoc.effect import _current_effect, get_current_compilation_context
 from pythoc.logger import logger
 from pythoc.type_converter import get_base_type
 from pythoc.valueref import wrap_value
@@ -41,8 +41,9 @@ def _current_executor_binding(suffix):
             return overrides["executor"], ctx.get("effect_suffix")
         executor_suffix = suffix if suffix is not None else None
         return DefaultExecutor, executor_suffix
-    executor_impl = effect._resolve_effect("executor", __name__) or DefaultExecutor
-    executor_suffix = suffix if suffix is not None else effect._get_current_suffix()
+    eff = _current_effect()
+    executor_impl = eff._resolve_effect("executor", __name__) or DefaultExecutor
+    executor_suffix = suffix if suffix is not None else eff._get_current_suffix()
     return executor_impl, executor_suffix
 
 

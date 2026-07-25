@@ -46,6 +46,7 @@ the consumer module and read ``config.<name>``.
 """
 from __future__ import annotations
 
+import contextvars
 import os
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, Optional
@@ -194,6 +195,25 @@ _register(
     'object files and linked binaries.',
     'Sampled when each compile group is flushed.',
 )
+_register(
+    'build_workers', 'PC_BUILD_WORKERS', 0, _to_int,
+    'Max worker threads for the build scheduler.  0 (or unset) means '
+    'auto: os.cpu_count().',
+    'Read once when a BuildScheduler is constructed without an explicit '
+    'max_workers.',
+)
+_register(
+    'object_build_workers', 'PC_OBJECT_BUILD_WORKERS', 1, _to_int,
+    'Worker count for object compilation during flush_all.  >=2 enables '
+    'pipelining between codegen and object build.',
+    'Sampled on every flush_all.',
+)
+_register(
+    'fail_on_build_time_queue', 'PC_FAIL_ON_BUILD_TIME_QUEUE', False, _to_bool,
+    'Raise when queue_compilation is called while object build groups are '
+    'active (debugging aid for build-time queueing).',
+    'Read on every queue_compilation call.',
+)
 
 
 # --- cimport / external toolchain ----------------------------------------
@@ -235,17 +255,26 @@ _register(
 # ---------------------------------------------------------------------------
 
 
+# Scoped overrides installed by _Config.override().  A ContextVar (rather
+# than the process-wide _values store) keeps concurrent compilations with
+# different configurations from observing each other's temporary overrides.
+# The value is an immutable-by-convention dict; override() installs a new
+# merged dict and resets the token on exit, so the shared default is never
+# mutated.
+_override_values: contextvars.ContextVar = contextvars.ContextVar(
+    'pythoc_config_overrides', default={})
+
+
 class _Config:
     """Process-wide configuration store with env-var fallback.
 
     Semantics:
-    - **Read**: if a knob has been explicitly set in Python (via
-      attribute assignment / ``set()`` / ``override()``), that
-      in-memory value wins.  Otherwise the corresponding env var is
-      re-sampled on every access -- so tests that temporarily patch
-      ``os.environ`` continue to work, and existing call sites that
-      relied on ``os.environ.get`` semantics see no behavioural
-      change.
+    - **Read**: scoped ``override()`` values (context-local) win first,
+      then values explicitly set in Python (via attribute assignment or
+      ``set()``), and finally the corresponding env var is re-sampled on
+      every access -- so tests that temporarily patch ``os.environ``
+      continue to work, and existing call sites that relied on
+      ``os.environ.get`` semantics see no behavioural change.
     - **Write**: stores the typed value in-memory.  Subsequent reads
       return that value until ``reset(name)`` (or ``reset()`` for all
       knobs) is called.
@@ -265,6 +294,9 @@ class _Config:
             raise AttributeError(
                 f"pythoc.config has no knob '{name}'. "
                 f"Known knobs: {sorted(_SCHEMA)}")
+        overrides = _override_values.get()
+        if name in overrides:
+            return overrides[name]
         store = object.__getattribute__(self, '_values')
         if name in store:
             return store[name]
@@ -298,7 +330,10 @@ class _Config:
     def override(self, **kwargs: Any) -> Iterator[None]:
         """Temporarily set knobs for the duration of a ``with`` block.
 
-        Restores prior state on exit (including knobs that were not
+        The override is context-local (contextvars): it is visible on the
+        current thread/context only, so parallel compilations with
+        different configurations do not observe each other's overrides.
+        Prior state is restored on exit (including knobs that were not
         explicitly set before -- they revert to env-fallback), even on
         exception.
 
@@ -307,27 +342,16 @@ class _Config:
             with config.override(save_ir=True):
                 some_compile_call()
         """
-        store = object.__getattribute__(self, '_values')
-        # Snapshot which knobs had explicit values *before* the override
-        # so we can restore the "env fallback" state precisely.
-        was_set: Dict[str, Any] = {}
-        was_unset: list = []
+        for name in kwargs:
+            if name not in _SCHEMA:
+                raise AttributeError(
+                    f"pythoc.config has no knob '{name}'.")
+        scoped = {**_override_values.get(), **kwargs}
+        token = _override_values.set(scoped)
         try:
-            for name, value in kwargs.items():
-                if name not in _SCHEMA:
-                    raise AttributeError(
-                        f"pythoc.config has no knob '{name}'.")
-                if name in store:
-                    was_set[name] = store[name]
-                else:
-                    was_unset.append(name)
-                store[name] = value
             yield
         finally:
-            for name, value in was_set.items():
-                store[name] = value
-            for name in was_unset:
-                store.pop(name, None)
+            _override_values.reset(token)
 
     def reset(self, *names: str) -> None:
         """Forget any in-memory overrides for the given knobs (or all

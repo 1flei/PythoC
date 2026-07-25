@@ -13,26 +13,37 @@ from ..logger import logger
 
 
 def _get_unified_registry():
-    """Lazy import to avoid circular dependency"""
-    from ..registry import _unified_registry
-    return _unified_registry
+    """Lazy import to avoid circular dependency.
+
+    Returns the registry of the currently active compile session; only
+    usable in contexts that run inside a session (e.g. compile time).
+    """
+    from ..registry import get_unified_registry
+    return get_unified_registry()
 
 
 class BuiltinEntityMeta(ABCMeta):
     """Metaclass for automatic registration of built-in entities"""
-    
+
     def __new__(mcs, name, bases, namespace):
         cls = super().__new__(mcs, name, bases, namespace)
-        
+
+        # Specialized type products (ptr[T], struct[...], const[T], etc.)
+        # are created dynamically on every subscript evaluation; they are
+        # not standalone builtin entities and must never enter the pending
+        # registration list (it would grow without bound).
+        if namespace.get('_pc_specialized', False):
+            return cls
+
         # Only register concrete classes
-        if (not name.startswith('_') and 
+        if (not name.startswith('_') and
             name not in ['BuiltinEntity', 'BuiltinType', 'BuiltinFunction', 'PythonType'] and
             not getattr(cls, '__abstractmethods__', None)):
             try:
                 # Get the entity name from the class
                 # For types like i32, the class name IS the entity name
                 entity_name = name.lower()
-                
+
                 # Register to unified registry
                 # Store for later registration to avoid circular import
                 if not hasattr(mcs, '_pending_registrations'):
@@ -40,17 +51,23 @@ class BuiltinEntityMeta(ABCMeta):
                 mcs._pending_registrations.append((entity_name, cls))
             except Exception as e:
                 logger.error(f"Failed to register builtin entity {name}: {e}", node=None, exc_type=RuntimeError)
-        
+
         return cls
-    
+
     @classmethod
     def _register_pending(mcs):
-        """Register any pending entities to unified registry"""
+        """Register any pending entities to the process-level builtin table"""
         if hasattr(mcs, '_pending_registrations'):
-            registry = _get_unified_registry()
+            from ..registry import register_builtin_entity
             for entity_name, cls in mcs._pending_registrations:
-                registry.register_builtin_entity(entity_name, cls)
+                register_builtin_entity(entity_name, cls)
             mcs._pending_registrations.clear()
+        # Import-time registration is complete; further appends only come
+        # from user-defined entities (specialized classes are skipped in
+        # __new__ regardless of this flag).
+        from ..registry import freeze_builtin_entities
+        freeze_builtin_entities()
+        mcs._registrations_frozen = True
 
     def __call__(cls, *args, **kwargs):
         """Intercept type constructor calls at Python runtime.
@@ -420,6 +437,7 @@ class BuiltinType(BuiltinEntity):
             new_name,
             (ptr,),
             {
+                '_pc_specialized': True,
                 'pointee_type': cls,
                 '_name': new_name,
             }

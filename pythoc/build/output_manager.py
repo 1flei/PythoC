@@ -264,7 +264,8 @@ class OutputManager:
             func_info: FunctionInfo for forward declaration
         """
         with self._state_lock:
-            if os.environ.get('PC_FAIL_ON_BUILD_TIME_QUEUE') and self._active_build_groups:
+            from ..config import config
+            if config.fail_on_build_time_queue and self._active_build_groups:
                 func_name = getattr(func_info, 'mangled_name', None) or getattr(func_info, 'name', '<unknown>')
                 raise RuntimeError(
                     "queue_compilation called during object build; "
@@ -315,24 +316,30 @@ class OutputManager:
     def _cached_object_covers_pending_symbols(self, group_key, group):
         """Check whether cached object metadata covers all currently pending defs."""
         pending_symbols = self._get_pending_symbols(group_key)
-        if not pending_symbols:
+        has_ast_hashes = bool(group.get('_ast_content_hashes'))
+        if not pending_symbols and not has_ast_hashes:
             return True
 
-        compiled_symbols = self._get_cached_compiled_symbols(group_key, group)
-        if not compiled_symbols:
-            return False
+        if pending_symbols:
+            compiled_symbols = self._get_cached_compiled_symbols(group_key, group)
+            if not compiled_symbols:
+                return False
 
-        missing_symbols = pending_symbols - compiled_symbols
-        if missing_symbols:
-            from ..logger import logger
-            logger.debug(
-                f"Cache miss for {group_key}: object missing pending symbols {sorted(missing_symbols)}"
-            )
-            return False
+            missing_symbols = pending_symbols - compiled_symbols
+            if missing_symbols:
+                from ..logger import logger
+                logger.debug(
+                    f"Cache miss for {group_key}: object missing pending symbols {sorted(missing_symbols)}"
+                )
+                return False
 
         # #1/#9: Check AST content hash — detect stale cache when source_file
-        # stays the same but the generated AST body changed.
-        if group.get('_ast_content_hashes'):
+        # stays the same but the generated AST body changed.  This must run
+        # even when pending_symbols is empty: the phase-split compile task
+        # re-checks the cache after codegen has already drained the pending
+        # queue, and the hash is the only signal that the on-disk object is
+        # stale in that case.
+        if has_ast_hashes:
             import hashlib
             combined = '|'.join(sorted(group['_ast_content_hashes']))
             current_hash = hashlib.sha256(
@@ -1253,7 +1260,8 @@ class OutputManager:
         self._pre_materialize_effect_groups()
         self._pre_materialize_referenced_default_templates()
         from .scheduler import BuildScheduler, BuildSchedulerError
-        object_workers = int(os.environ.get('PC_OBJECT_BUILD_WORKERS', '1') or '1')
+        from ..config import config
+        object_workers = config.object_build_workers
         # Phase-split build (Scheme A): codegen is serialized via implicit
         # DAG chaining (one at a time); compile tasks run in parallel on
         # remaining workers.  object_workers>=2 enables pipelining.
@@ -1419,8 +1427,8 @@ class OutputManager:
             self._flushed_groups.remove(group_key)
 
 
-# Global singleton instance
-_output_manager = OutputManager()
+# Guards lazy check-then-set of the active session's OutputManager.
+_manager_lock = threading.Lock()
 
 # Track if atexit handler is registered
 _atexit_registered = False
@@ -1437,7 +1445,7 @@ def _atexit_flush():
     same exit code via `os._exit()` to keep output clean.
     """
     try:
-        _output_manager.flush_all()
+        get_output_manager().flush_all()
     except SystemExit as e:
         # Preserve exit status without triggering atexit traceback printing.
         try:
@@ -1463,9 +1471,15 @@ def _ensure_atexit_registered():
 
 
 def get_output_manager():
-    """Get the global OutputManager singleton."""
+    """Get the active session's OutputManager, creating it lazily."""
     _ensure_atexit_registered()
-    return _output_manager
+    from ..session import CompileSession
+    session = CompileSession.current()
+    if session.output_manager is None:
+        with _manager_lock:
+            if session.output_manager is None:
+                session.output_manager = OutputManager()
+    return session.output_manager
 
 
 def flush_all_pending_outputs():
@@ -1474,7 +1488,7 @@ def flush_all_pending_outputs():
     
     This is the main entry point used by the runtime.
     """
-    _output_manager.flush_all()
+    get_output_manager().flush_all()
 
 
 def clear_failed_group(group_key):
@@ -1487,4 +1501,4 @@ def clear_failed_group(group_key):
     Args:
         group_key: (source_file, scope, suffix) tuple
     """
-    _output_manager.clear_failed_group(group_key)
+    get_output_manager().clear_failed_group(group_key)

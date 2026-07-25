@@ -48,16 +48,46 @@ from .utils.build_utils import (
 from .cimport import cimport, cimport_header, cimport_source
 from .config import config
 from .forward_ref import mark_type_defined, register_forward_ref_callback
+from .session import CompileSession
 
-# Import libc module for convenient access
-from . import libc
-from . import std
-from . import meta
 import builtins as _py
 
 # Version information
 __version__ = "0.5.0"
 __author__ = "PythoC Compiler Team"
+
+
+def init() -> CompileSession:
+    """Ensure a compile session is active in this context and return it.
+
+    Every process entry point that compiles PC code should call this once
+    before any @compile decoration executes.  If the current context
+    already has an active session it is returned unchanged; otherwise a
+    new session is created and activated for the rest of the process.
+    """
+    session = CompileSession.active()
+    if session is None:
+        session = CompileSession()
+        session.activate()
+    return session
+
+
+# libc/std/meta are imported lazily on first attribute access: importing
+# them executes @compile/@extern/mark_type_defined at module level, which
+# requires an active compile session.  Keeping them out of the eager
+# import chain above keeps 'import pythoc' itself light.
+_LAZY_SUBMODULES = ('libc', 'std', 'meta')
+
+
+def __getattr__(name):
+    if name in _LAZY_SUBMODULES:
+        import importlib
+        module = importlib.import_module('.' + name, __name__)
+        globals()[name] = module
+        return module
+    raise AttributeError(
+        "module {!r} has no attribute {!r}".format(__name__, name))
+
 
 # Export public API
 __all__ = [
@@ -87,6 +117,10 @@ __all__ = [
     
     # Effect system
     'effect',
+
+    # Compile session
+    'CompileSession',
+    'init',
     
     # C Library
     'libc',
@@ -181,3 +215,13 @@ def hello():
     print("   Use @compile decorator to compile your functions to LLVM IR")
     print("   Use @jit decorator for Just-In-Time compilation")
     print("   Call pythoc.info() for more details")
+
+
+# Convenience default: importing pythoc installs a session in this context
+# so plain scripts and libraries work without boilerplate.  Internals never
+# rely on this being the only session: the session is captured explicitly
+# at decoration time, and tests/embedders can shadow or replace it with
+# 'with CompileSession():' or CompileSession().activate().  Note that a
+# threading.Thread starts with an empty context and must re-activate a
+# session itself.
+init()

@@ -159,14 +159,16 @@ class TestUnifiedRegistry(unittest.TestCase):
         retrieved = sm.lookup_variable("x")
         self.assertEqual(retrieved, var_info1)
 
-    def test_builtin_entity_registration(self):
-        """Test builtin entity registration"""
+    def test_builtin_entity_table_is_frozen_and_shared(self):
+        """Builtin entities live in the process-level frozen table"""
         from pythoc.builtin_entities import i32
 
-        self.registry.register_builtin_entity("i32", i32)
+        # Readable through any registry instance (delegated query).
+        self.assertIs(self.registry.get_builtin_entity("i32"), i32)
 
-        retrieved = self.registry.get_builtin_entity("i32")
-        self.assertEqual(retrieved, i32)
+        # Writes after the import-time freeze are rejected.
+        with self.assertRaises(RuntimeError):
+            self.registry.register_builtin_entity("i32", i32)
 
     def test_struct_registration(self):
         """Test struct registration"""
@@ -191,11 +193,14 @@ class TestUnifiedRegistry(unittest.TestCase):
         pass
 
     def test_global_registry_singleton(self):
-        """Test global registry singleton"""
+        """get_unified_registry returns the active session's registry"""
+        from pythoc.session import CompileSession
+
         registry1 = get_unified_registry()
         registry2 = get_unified_registry()
 
         self.assertIs(registry1, registry2)
+        self.assertIs(registry1, CompileSession.current().registry)
 
 
 if __name__ == '__main__':

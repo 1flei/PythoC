@@ -554,16 +554,19 @@ class LLVMIRVisitor(ast.NodeVisitor):
         return ''.join(parts)
     
     def _get_actual_line_number(self, line_number: Optional[int]) -> Optional[int]:
-        """Get actual line number by adding logger's line offset
-        
+        """Get actual line number by adding the compile frame's line offset
+
         Args:
             line_number: AST relative line number
-            
+
         Returns:
             Actual line number in source file
         """
         if line_number is None:
             return None
+        if self.func_state is not None:
+            return line_number + self.func_state.line_offset
+        # No active compile frame (decoration-time path): fall back to logger
         return line_number + logger.current_line_offset
     
     def _register_linear_token(self, var_name: str, type_hint, node: ast.AST, path: Tuple[int, ...] = ()):

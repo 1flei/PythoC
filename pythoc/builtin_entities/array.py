@@ -340,6 +340,7 @@ class array(BuiltinType):
             f'array[{elem_name}, {dims_str}]',
             (array,),
             {
+                '_pc_specialized': True,
                 'element_type': element_type,
                 'dimensions': builtins.tuple(dimensions)
             }

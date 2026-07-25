@@ -297,6 +297,7 @@ def create_union_type(field_types: List[Any], field_names: Optional[List[str]] =
         type_name,
         (UnionType,),
         {
+            '_pc_specialized': True,
             '_canonical_name': type_name,
             '_field_types': field_types,
             '_field_names': field_names,

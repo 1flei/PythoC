@@ -479,6 +479,7 @@ class ptr(BuiltinType):
         
         # Create a specialized ptr[T] type
         class SpecializedPtr(ptr):
+            _pc_specialized = True
             pointee_type = inner_type
         
         return SpecializedPtr

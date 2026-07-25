@@ -16,7 +16,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from ..compiler import LLVMCompiler
 from ..context import FunctionBindingState
-from ..registry import FunctionInfo, _unified_registry
+from ..session import CompileSession
+from ..registry import FunctionInfo, get_unified_registry
 from ..build import get_output_manager
 from ..decorators.compile import get_compiler
 from ..utils import (
@@ -170,7 +171,7 @@ def compile_ast(
     )
 
     # Register source
-    registry = _unified_registry
+    registry = get_unified_registry()
     registry.register_function_source(source_file, func_name, source_code)
 
     # Param names from AST
@@ -242,7 +243,11 @@ def compile_ast(
 
     def wrapper(*args, **kwargs):
         if not hasattr(wrapper, '_native_func'):
-            wrapper._native_func = executor.execute_function(wrapper)
+            # Double-checked under the binding lock: execute_function may
+            # race when the same wrapper is first called on two threads.
+            with binding_state.lock:
+                if not hasattr(wrapper, '_native_func'):
+                    wrapper._native_func = executor.execute_function(wrapper)
         return wrapper._native_func(*args)
 
     # Get or create group
@@ -261,7 +266,6 @@ def compile_ast(
     # Capture effect context
     from ..effect import capture_effect_context, capture_effect_override_names
     from ..effect import restore_effect_context
-    from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
     captured_effect_ctx = capture_effect_context()
     effect_override_names = capture_effect_override_names()
@@ -280,6 +284,7 @@ def compile_ast(
         effect_override_names=effect_override_names,
         compilation_globals=dict(user_globals),
         wrapper=wrapper,
+        session=CompileSession.current(),
     )
     func_info.binding_state = binding_state
     wrapper._func_info = func_info
@@ -296,14 +301,9 @@ def compile_ast(
 
     def compile_callback(comp):
         st = wrapper._binding
-        start_effect_tracking()
 
         if st.effect_suffix:
-            push_compilation_context(
-                st.compile_suffix, st.effect_suffix,
-                st.captured_effect_context, st.group_key,
-                st.effect_override_names,
-            )
+            push_compilation_context(st)
 
         try:
             with restore_effect_context(st.captured_effect_context):
@@ -317,14 +317,17 @@ def compile_ast(
                     user_globals=st.compilation_globals,
                     group_key=st.group_key,
                     func_state=st,
+                    source_start_line=_start_line,
                 )
         finally:
             if st.effect_suffix:
                 pop_compilation_context()
 
-        effect_deps = stop_effect_tracking()
-        # Declared on the group's EffectGraph node once the whole group has
-        # been compiled (see OutputManager._compile_pending_for_group).
+        # Effect usage recorded on this compile's ActiveCompileFrame
+        # (compiler.py sets st.active_frame).  Declared on the group's
+        # EffectGraph node once the whole group has been compiled
+        # (see OutputManager._compile_pending_for_group).
+        effect_deps = st.active_frame.effect_usage if st.active_frame is not None else set()
         if effect_deps:
             func_info.effect_dependencies = effect_deps
             logger.debug(

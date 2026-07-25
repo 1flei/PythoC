@@ -12,12 +12,24 @@ Design principles:
 - No methods for anonymous structs (methods only for @compile classes)
 """
 
+import threading
+
 from llvmlite import ir
 from ..logger import logger
 from typing import List, Tuple, Optional, Any, Dict
 from .composite_base import CompositeType
 from .base import BuiltinEntityMeta
 from ..valueref import extract_constant_index
+
+
+# Guards identified-struct materialization so that the same struct class can
+# be compiled into multiple LLVM modules (possibly from concurrent threads).
+_llvm_type_lock = threading.RLock()
+# (struct class, module context) pairs whose LLVM body is currently being
+# built.  A self-referential field (e.g. ptr["Node"]) re-enters get_llvm_type()
+# while the body is in progress; the recursive call must observe the opaque
+# placeholder without trying to set the body again.
+_setting_body: set = set()
 
 
 class StructTypeMeta(BuiltinEntityMeta):
@@ -80,8 +92,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     _canonical_name: str = None
     _python_class: Optional[type] = None
     _struct_info: Optional[Any] = None  # StructInfo from registry
-    _llvm_struct_type: Optional[Any] = None  # Cached IdentifiedStructType
-    _setting_body: bool = False  # Flag to prevent recursive body setting
     # Force the IdentifiedStructType path even without a backing @compile class.
     # A self-referential struct (a field that forward-references the struct's
     # own name, e.g. ptr["Node"]) cannot be expressed as a literal (structural)
@@ -89,7 +99,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     # Programmatically built struct types set this together with _canonical_name
     # to name the identified type.
     _force_identified: bool = False
-    _llvm_body_set: bool = False  # Whether LLVM body has been set
     _structure_hash: Optional[int] = None  # Hash for fast type compatibility check
     _llvm_field_map: Optional[Dict[int, int]] = None  # PC field idx -> LLVM field idx
     
@@ -207,19 +216,22 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     @classmethod
     def _get_llvm_field_index(cls, pc_field_index: int, module_context=None) -> int:
         """Get LLVM field index from PC field index.
-        
+
+        The field map only depends on which fields are zero-sized (module
+        independent), so it is materialized once and then frozen.
+
         Args:
             pc_field_index: PC field index (0-based)
             module_context: Optional module context for building field map
-        
+
         Returns:
             LLVM field index, or -1 for zero-sized fields
         """
-        # Rebuild map if module_context provided (for accurate mapping)
-        # or use cached map if available
-        if module_context is not None or cls._llvm_field_map is None:
-            cls._llvm_field_map = cls._build_llvm_field_map(module_context)
-        
+        if cls._llvm_field_map is None:
+            with _llvm_type_lock:
+                if cls._llvm_field_map is None:
+                    cls._llvm_field_map = cls._build_llvm_field_map(module_context)
+
         return cls._llvm_field_map.get(pc_field_index, -1)
     
     @classmethod
@@ -256,45 +268,42 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             # Use Python class name, not canonical name, for @compile classes
             # This ensures consistency with registry lookups
             llvm_type_name = cls._python_class.__name__ if cls._python_class else cls._canonical_name
-            
+
             # Apply anonymous suffix if present (for @compile(anonymous=True))
             if cls._python_class and hasattr(cls._python_class, '_anonymous_suffix') and cls._python_class._anonymous_suffix:
                 llvm_type_name = llvm_type_name + cls._python_class._anonymous_suffix
-            
-            # For anonymous types, don't cache at class level (each instance needs its own LLVM type)
-            # For non-anonymous types, use cached type
-            if cls._python_class and hasattr(cls._python_class, '_anonymous_suffix') and cls._python_class._anonymous_suffix:
-                # Anonymous: always get fresh type from module_context
-                llvm_struct_type = module_context.get_identified_type(llvm_type_name)
-            else:
-                # Non-anonymous: use cached type
-                if cls._llvm_struct_type is None:
-                    cls._llvm_struct_type = module_context.get_identified_type(llvm_type_name)
-                llvm_struct_type = cls._llvm_struct_type
-            
-            # Set body if not already set (avoid infinite recursion for self-referential types)
-            # Check if elements is None (opaque type) AND not currently setting body
-            if llvm_struct_type.elements is None and not cls._setting_body:
-                # Mark that we're setting body to prevent recursion
-                cls._setting_body = True
-                try:
-                    # Build field types, filtering out zero-sized fields (pyconst)
-                    llvm_field_types = []
-                    for field_type in cls._field_types:
-                        if hasattr(field_type, 'get_llvm_type'):
-                            llvm_type = field_type.get_llvm_type(module_context)
-                            # Skip None (zero-sized fields like pyconst)
-                            if llvm_type is not None:
-                                llvm_field_types.append(llvm_type)
-                        else:
-                            logger.error(f"Unknown struct field type {field_type}", node=node, exc_type=TypeError)
-                    
-                    # Set body (this will set elements attribute)
-                    llvm_struct_type.set_body(*llvm_field_types)
-                finally:
-                    # Always clear the flag
-                    cls._setting_body = False
-            
+
+            # The llvmlite context memoizes identified types by name, and each
+            # module owns its context, so this lookup doubles as the per-module
+            # cache: the same struct class yields a distinct IdentifiedStructType
+            # per module, and repeated lookups within one module are free.
+            llvm_struct_type = module_context.get_identified_type(llvm_type_name)
+
+            # Set body if the type is still opaque, unless this (class, module)
+            # pair is already being built further up the stack (self-referential
+            # fields re-enter here and must observe the opaque placeholder).
+            body_key = (cls, module_context)
+            if llvm_struct_type.elements is None and body_key not in _setting_body:
+                with _llvm_type_lock:
+                    if llvm_struct_type.elements is None and body_key not in _setting_body:
+                        _setting_body.add(body_key)
+                        try:
+                            # Build field types, filtering out zero-sized fields (pyconst)
+                            llvm_field_types = []
+                            for field_type in cls._field_types:
+                                if hasattr(field_type, 'get_llvm_type'):
+                                    llvm_type = field_type.get_llvm_type(module_context)
+                                    # Skip None (zero-sized fields like pyconst)
+                                    if llvm_type is not None:
+                                        llvm_field_types.append(llvm_type)
+                                else:
+                                    logger.error(f"Unknown struct field type {field_type}", node=node, exc_type=TypeError)
+
+                            # Set body (this will set elements attribute)
+                            llvm_struct_type.set_body(*llvm_field_types)
+                        finally:
+                            _setting_body.discard(body_key)
+
             return llvm_struct_type
         
         # Rule: Anonymous struct[...] always uses LiteralStructType
@@ -759,6 +768,7 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
         canonical_name,
         (StructType,),
         {
+            '_pc_specialized': True,
             '_canonical_name': canonical_name,
             '_field_types': field_types,
             '_field_names': field_names,

@@ -18,22 +18,6 @@ from typing import Optional, Any, Tuple, List
 from llvmlite import ir
 
 
-_next_vreg_id = 0
-
-
-def _get_next_vreg_id() -> int:
-    global _next_vreg_id
-    vid = _next_vreg_id
-    _next_vreg_id += 1
-    return vid
-
-
-def reset_vreg_counter():
-    """Reset VReg ID counter (call at start of each function compilation)."""
-    global _next_vreg_id
-    _next_vreg_id = 0
-
-
 class VReg:
     """Virtual register representing a not-yet-emitted LLVM value.
 
@@ -46,8 +30,8 @@ class VReg:
     """
     __slots__ = ('id', 'type', '_resolved')
 
-    def __init__(self, ir_type: ir.Type):
-        self.id = _get_next_vreg_id()
+    def __init__(self, ir_type: ir.Type, id: int):
+        self.id = id
         self.type = ir_type
         self._resolved = None  # Actual ir.Value (set during replay)
 
@@ -116,8 +100,8 @@ class VRegPhi:
     """
     __slots__ = ('id', 'type', '_resolved', '_incomings')
 
-    def __init__(self, ir_type: ir.Type):
-        self.id = _get_next_vreg_id()
+    def __init__(self, ir_type: ir.Type, id: int):
+        self.id = id
         self.type = ir_type
         self._resolved = None
         self._incomings: List[Tuple[Any, Any]] = []  # (value, block) pairs
@@ -152,8 +136,8 @@ class VRegSwitch:
     """Virtual switch instruction that supports add_case during PCIR recording."""
     __slots__ = ('id', 'type', '_resolved', '_cases', '_parent_sentinel')
 
-    def __init__(self, parent_sentinel: SentinelBlock):
-        self.id = _get_next_vreg_id()
+    def __init__(self, parent_sentinel: SentinelBlock, id: int):
+        self.id = id
         self.type = ir.VoidType()
         self._resolved = None  # Actual ir.SwitchInstr
         self._cases: List[Tuple[Any, Any]] = []  # (value, block) pairs

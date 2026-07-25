@@ -10,7 +10,7 @@ import os
 import ast
 from typing import Any, List
 
-from ..registry import _unified_registry
+from ..registry import get_unified_registry
 
 from .structs import (
     add_struct_handle_call as _add_struct_handle_call,
@@ -27,7 +27,8 @@ from .compile import compile
 
 
 def _get_registry():
-    return _unified_registry
+    """Registry of the currently active compile session."""
+    return get_unified_registry()
 
 
 # registry helpers

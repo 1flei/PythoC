@@ -574,16 +574,22 @@ class DependencyTracker:
 
 
 
-# Global singleton
-_dependency_tracker = DependencyTracker()
+# Guards lazy check-then-set of the active session's DependencyTracker.
+_tracker_lock = threading.Lock()
 
 
 def get_dependency_tracker() -> DependencyTracker:
-    """Get the global dependency tracker instance."""
-    return _dependency_tracker
+    """Get the active session's dependency tracker, creating it lazily."""
+    from ..session import CompileSession
+    session = CompileSession.current()
+    if session.dependency_tracker is None:
+        with _tracker_lock:
+            if session.dependency_tracker is None:
+                session.dependency_tracker = DependencyTracker()
+    return session.dependency_tracker
 
 
 # Backward compatibility
 def get_group_level_dependency_tracker() -> DependencyTracker:
-    """Get the global group-level dependency tracker instance (alias)."""
-    return _dependency_tracker
+    """Get the active session's dependency tracker instance (alias)."""
+    return get_dependency_tracker()

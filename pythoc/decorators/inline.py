@@ -5,10 +5,6 @@ from functools import wraps
 from ..logger import logger, set_source_context
 
 
-# Registry to track inline methods that need to be attached to classes
-_pending_inline_handlers = []
-
-
 def inline(func=None, *, cls_method=False, method=False):
     """Decorator to mark a function for inline execution
     

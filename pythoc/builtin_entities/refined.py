@@ -76,6 +76,7 @@ def _create_refined_type_class(
         param_names = [f'field_{i}' for i in range(len(param_types))]
 
     new_refined_type = type(class_name, (RefinedType,), {
+        '_pc_specialized': True,
         '_base_type': base_type,
         '_predicates': predicates if predicates else [],
         '_tags': tags if tags else [],

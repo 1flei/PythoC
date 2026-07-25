@@ -16,6 +16,8 @@ class TestConfigSchema(unittest.TestCase):
             'log_level', 'log_modules', 'raise_on_error',
             'debug_ast', 'debug_ast_format', 'debug_ast_diff',
             'save_ir', 'save_unopt_ir', 'opt_level', 'debug_info',
+            'build_workers', 'object_build_workers',
+            'fail_on_build_time_queue',
             'cimport_backend',
             'cimport_target', 'cimport_sysroot', 'libclang_path',
             'cimport_clang_args',
@@ -154,7 +156,6 @@ class TestReset(unittest.TestCase):
 
 
 class TestDescribe(unittest.TestCase):
-
     def test_describe_one(self):
         text = config.describe('save_ir')
         self.assertIn('save_ir', text)
@@ -165,6 +166,68 @@ class TestDescribe(unittest.TestCase):
         self.assertIn('save_ir', text)
         self.assertIn('opt_level', text)
         self.assertIn('log_level', text)
+
+
+class TestOverrideContextIsolation(unittest.TestCase):
+    """config.override() is context-local: while one thread holds an
+    override, other threads keep reading the un-overridden value."""
+
+    def setUp(self):
+        config.reset()
+
+    def tearDown(self):
+        config.reset()
+
+    def test_override_not_visible_on_other_threads(self):
+        import threading
+        config.opt_level = 2
+        entered = threading.Barrier(2)
+        release = threading.Barrier(2)
+        errors = []
+
+        def worker():
+            try:
+                with config.override(opt_level=0):
+                    self.assertEqual(config.opt_level, 0)
+                    entered.wait(timeout=5)
+                    release.wait(timeout=5)
+                    # Still overridden on this thread after the main
+                    # thread read the knob concurrently.
+                    self.assertEqual(config.opt_level, 0)
+            except Exception as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        entered.wait(timeout=5)
+        # The worker holds the override; this thread must be unaffected.
+        self.assertEqual(config.opt_level, 2)
+        release.wait(timeout=5)
+        t.join(timeout=10)
+        self.assertFalse(errors)
+        self.assertEqual(config.opt_level, 2)
+
+    def test_override_does_not_touch_process_store(self):
+        config.opt_level = 3
+        with config.override(opt_level=0):
+            self.assertEqual(config.opt_level, 0)
+            # The process-wide store keeps the pre-override value.
+            self.assertEqual(config._values['opt_level'], 3)
+        self.assertEqual(config.opt_level, 3)
+
+    def test_nested_override_restores_scoped_value(self):
+        with config.override(opt_level=1):
+            self.assertEqual(config.opt_level, 1)
+            with config.override(opt_level=0):
+                self.assertEqual(config.opt_level, 0)
+            self.assertEqual(config.opt_level, 1)
+        self.assertEqual(config.opt_level, 2)  # schema default
+
+    def test_override_wins_over_explicit_set(self):
+        config.opt_level = 3
+        with config.override(opt_level=0):
+            self.assertEqual(config.opt_level, 0)
+        self.assertEqual(config.opt_level, 3)
 
 
 if __name__ == '__main__':

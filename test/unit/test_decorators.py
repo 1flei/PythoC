@@ -6,6 +6,7 @@ import unittest
 import tempfile
 import os
 
+from pythoc import i32
 from pythoc.decorators import compile
 
 
@@ -21,8 +22,11 @@ class TestCompileDecorator(unittest.TestCase):
         """Test decorator can be applied to functions"""
         # Test that decorator can be applied
         try:
+            # Use a PC type so the queued group stays compilable; a bare
+            # `int` annotation would leave a poisoned group in the global
+            # pending queue and break any later flush in this process.
             @compile
-            def test_func(x: int) -> int:
+            def test_func(x: i32) -> i32:
                 """Test function docstring"""
                 return x * 2
             

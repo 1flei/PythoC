@@ -135,6 +135,7 @@ def create_pc_list_type(elements: List['ValueRef']) -> type:
         canonical_name,
         (PCListType,),
         {
+            '_pc_specialized': True,
             '_canonical_name': canonical_name,
             '_field_types': field_types,
             '_field_names': None,  # pc_list has no named fields
@@ -194,6 +195,7 @@ class pc_list(PCListType):
             canonical_name,
             (PCListType,),
             {
+                '_pc_specialized': True,
                 '_canonical_name': canonical_name,
                 '_field_types': list(item),
                 '_field_names': None,

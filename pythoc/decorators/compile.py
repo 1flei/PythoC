@@ -14,6 +14,7 @@ import inspect
 import os
 import ast
 import sys
+import threading
 from typing import Any, List, Optional
 
 from ..call_normalization import pack_native_call_args
@@ -22,7 +23,7 @@ from ..call_normalization import pack_native_call_args
 _SCOPE_NOT_PROVIDED = object()
 
 from ..compiler import LLVMCompiler
-from ..registry import register_struct_from_class, _unified_registry
+from ..registry import register_struct_from_class, get_unified_registry
 from ..context import FunctionBindingState
 
 from .structs import (
@@ -49,6 +50,9 @@ from ..logger import logger, set_source_context
 
 
 DEFAULT_EFFECT_KEY = "__default__"
+
+# Fallback lock for wrapper lazy init when no binding state is available
+_wrapper_init_lock = threading.RLock()
 
 
 def _is_parametric_type(pc_type):
@@ -367,25 +371,27 @@ def _create_parametric_factory_wrapper(
     wrapper._start_line = start_line
 
     _specialization_cache = {}
+    _specialization_cache_lock = threading.RLock()
 
     def factory(*param_values):
         key = tuple(param_values)
-        if key in _specialization_cache:
-            return _specialization_cache[key]
+        with _specialization_cache_lock:
+            if key in _specialization_cache:
+                return _specialization_cache[key]
 
-        # Validate that parametric arguments are hashable (needed for suffix/cache).
-        for v in param_values:
-            try:
-                hash(v)
-            except TypeError:
-                raise TypeError(
-                    f"parametric argument {v!r} is not hashable and cannot be used "
-                    f"as a compile-time parameter"
-                )
+            # Validate that parametric arguments are hashable (needed for suffix/cache).
+            for v in param_values:
+                try:
+                    hash(v)
+                except TypeError:
+                    raise TypeError(
+                        f"parametric argument {v!r} is not hashable and cannot be used "
+                        f"as a compile-time parameter"
+                    )
 
-        specialized = _compile_parametric_specialization(wrapper, param_values)
-        _specialization_cache[key] = specialized
-        return specialized
+            specialized = _compile_parametric_specialization(wrapper, param_values)
+            _specialization_cache[key] = specialized
+            return specialized
 
     wrapper._factory_func = factory
 
@@ -434,45 +440,46 @@ def _materialize_single_specialization(template_wrapper, effect_key, effect_bind
     """Materialize one wrapper specialization and queue its compilation."""
     state = getattr(template_wrapper, '_binding', template_wrapper._state)
     func_info = getattr(template_wrapper, '_func_info', None)
-    if effect_key in state.effect_specialized_cache:
-        return state.effect_specialized_cache[effect_key]
+    with state.lock:
+        if effect_key in state.effect_specialized_cache:
+            return state.effect_specialized_cache[effect_key]
 
-    if effect_key == DEFAULT_EFFECT_KEY:
-        # Default: queue the template's own compile_callback in-place
-        om = get_output_manager()
-        om.queue_compilation(
-            state.group_key,
-            state.template_compile_callback,
-            func_info,
-        )
-        state.is_template = False
-        state.effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
-        logger.debug(f"Materialized default specialization: {state.original_name}")
-        return template_wrapper
-    # Non-default: call _compile_impl with effect_suffix
-    from ..effect import capture_effect_override_names, restore_effect_context
-    from ..effect import get_current_compilation_context
-    original_scope = state.group_key[1] if state.group_key else None
-    compilation_ctx = get_current_compilation_context()
-    if compilation_ctx:
-        effect_override_names = compilation_ctx.get('effect_override_names', set())
-    else:
-        effect_override_names = capture_effect_override_names()
+        if effect_key == DEFAULT_EFFECT_KEY:
+            # Default: queue the template's own compile_callback in-place
+            om = _output_manager_for_state(state)
+            om.queue_compilation(
+                state.group_key,
+                state.template_compile_callback,
+                func_info,
+            )
+            state.is_template = False
+            state.effect_specialized_cache[DEFAULT_EFFECT_KEY] = template_wrapper
+            logger.debug(f"Materialized default specialization: {state.original_name}")
+            return template_wrapper
+        # Non-default: call _compile_impl with effect_suffix
+        from ..effect import capture_effect_override_names, restore_effect_context
+        from ..effect import get_current_compilation_context
+        original_scope = state.group_key[1] if state.group_key else None
+        compilation_ctx = get_current_compilation_context()
+        if compilation_ctx:
+            effect_override_names = compilation_ctx.get('effect_override_names', set())
+        else:
+            effect_override_names = capture_effect_override_names()
 
-    logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
+        logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
 
-    with restore_effect_context(effect_bindings):
-        specialized_wrapper = _compile_impl(
-            template_wrapper.__wrapped__,
-            compile_suffix=state.compile_suffix,
-            effect_suffix=effect_key,
-            captured_symbols=state.captured_symbols,
-            effect_scope=original_scope,
-            effect_override_names=effect_override_names,
-        )
+        with restore_effect_context(effect_bindings):
+            specialized_wrapper = _compile_impl(
+                template_wrapper.__wrapped__,
+                compile_suffix=state.compile_suffix,
+                effect_suffix=effect_key,
+                captured_symbols=state.captured_symbols,
+                effect_scope=original_scope,
+                effect_override_names=effect_override_names,
+            )
 
-    state.effect_specialized_cache[effect_key] = specialized_wrapper
-    return specialized_wrapper
+        state.effect_specialized_cache[effect_key] = specialized_wrapper
+        return specialized_wrapper
 
 
 def _iter_global_compiled_wrappers(group_wrappers):
@@ -637,7 +644,7 @@ def materialize_group_specialization(template_wrapper, effect_key, effect_bindin
         return state.effect_specialized_cache.get(effect_key) or template_wrapper
     _visited.add(base_group_key)
 
-    om = get_output_manager()
+    om = _output_manager_for_state(state)
     group_wrappers = om.get_group_wrappers(base_group_key)
     if not group_wrappers:
         return _materialize_single_specialization(
@@ -732,7 +739,28 @@ def materialize_specialization(template_wrapper, effect_key, effect_bindings):
 
 
 def _get_registry():
-    return _unified_registry
+    """Registry of the currently active compile session."""
+    return get_unified_registry()
+
+
+def _output_manager_for_state(state):
+    """Resolve the OutputManager through the binding's compile session."""
+    session = getattr(state, 'session', None)
+    if session is None:
+        raise RuntimeError(
+            "FunctionBindingState has no compile session: bindings must be "
+            "created through @compile inside an active session "
+            "(pythoc.init() or 'with CompileSession():')"
+        )
+    om = session.output_manager
+    if om is None:
+        # Lazily create on the binding's own session, not the caller's.
+        token = session.activate()
+        try:
+            om = get_output_manager()
+        finally:
+            session.deactivate(token)
+    return om
 
 
 def get_compiler(source_file, user_globals, has_suffix=False):
@@ -854,7 +882,10 @@ def _compile_impl(func_or_class,
     func = func_or_class
 
     from ..native_executor import get_multi_so_executor
-    executor = get_multi_so_executor()    
+    executor = get_multi_so_executor()
+
+    from ..session import CompileSession
+    session = CompileSession.current()
 
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -863,7 +894,10 @@ def _compile_impl(func_or_class,
             materialize_specialization(wrapper, DEFAULT_EFFECT_KEY, {})
 
         if not hasattr(wrapper, '_native_func'):
-            wrapper._native_func = executor.execute_function(wrapper)
+            lock = binding.lock if binding else _wrapper_init_lock
+            with lock:
+                if not hasattr(wrapper, '_native_func'):
+                    wrapper._native_func = executor.execute_function(wrapper)
 
         args = pack_native_call_args(wrapper, args, kwargs)
         return wrapper._native_func(*args)
@@ -1097,7 +1131,9 @@ def _compile_impl(func_or_class,
     
     # Determine grouping key and output paths
     # Design: group_key = (source_file, scope, compile_suffix, effect_suffix)
-    output_manager = get_output_manager()
+    output_manager = session.output_manager
+    if output_manager is None:
+        output_manager = get_output_manager()
     
     # Get scope name (e.g., "GenericType.<locals>" or None for module-level)
     # If effect_scope is provided (not the sentinel), use it directly
@@ -1188,7 +1224,6 @@ def _compile_impl(func_or_class,
     
     from ..effect import capture_effect_context, capture_effect_override_names
     from ..effect import restore_effect_context
-    from ..effect import start_effect_tracking, stop_effect_tracking
     from ..effect import push_compilation_context, pop_compilation_context
     _captured_effect_context = capture_effect_context()
     _effect_override_names = (
@@ -1212,6 +1247,7 @@ def _compile_impl(func_or_class,
         captured_symbols=captured_symbols,
         compilation_globals=dict(user_globals),
         wrapper=wrapper,
+        session=session,
     )
     func_info.binding_state = binding_state
     wrapper._func_info = func_info
@@ -1236,12 +1272,9 @@ def _compile_impl(func_or_class,
         not from closure locals that duplicate the same data.
         """
         st = wrapper._binding
-        start_effect_tracking()
 
         if st.effect_suffix:
-            push_compilation_context(st.compile_suffix, st.effect_suffix,
-                                     st.captured_effect_context, st.group_key,
-                                     st.effect_override_names)
+            push_compilation_context(st)
 
         try:
             with restore_effect_context(st.captured_effect_context):
@@ -1262,10 +1295,11 @@ def _compile_impl(func_or_class,
             if st.effect_suffix:
                 pop_compilation_context()
 
-        effect_deps = stop_effect_tracking()
-        # Effect usage is recorded per function here and declared on the
-        # group's EffectGraph node once the whole group has been compiled
+        # Effect usage recorded on this compile's ActiveCompileFrame
+        # (compiler.py sets st.active_frame).  Declared on the group's
+        # EffectGraph node once the whole group has been compiled
         # (see OutputManager._compile_pending_for_group).
+        effect_deps = st.active_frame.effect_usage if st.active_frame is not None else set()
         if effect_deps:
             func_info.effect_dependencies = effect_deps
             logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")

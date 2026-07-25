@@ -1,17 +1,22 @@
 """
 Unified Registry System for PC Compiler.
 
-Centralizes compilation artifacts that are genuinely process-global:
+Ownership split:
+
+- The builtin-entity table is process-level and frozen after import:
+  ``BuiltinEntityMeta`` registers entities at import time, then the
+  table is read-only and shared by every compile session.
+- Everything else (structs, source files, compilers, shared libraries,
+  link libraries/objects) is mutable compilation state owned by one
+  ``CompileSession``: each session instantiates its own
+  ``UnifiedCompilationRegistry`` and ``get_unified_registry()``
+  resolves the registry of the *active* session.
+
+Also defined here:
 
 - Function metadata (``FunctionInfo``) and per-variable info
   (``VariableInfo``) used across the AST visitor and CFG.
-- Struct metadata registry (``StructInfo``) for user-defined structs.
-- Source file / compiler / shared-library registry used by the
-  multi-so executor.
-- Builtin-entity registry populated from the ``BuiltinEntity``
-  metaclass.
-- Link libraries / object files collected from extern declarations and
-  cimport.
+- Struct metadata record (``StructInfo``) for user-defined structs.
 
 Scope management for *local* variables lives in
 ``scope_manager.ScopeManager``. This module still defines
@@ -25,16 +30,16 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 from dataclasses import dataclass, field
 from llvmlite import ir
 import ast
+import itertools
 
 
-# Global counter for unique variable IDs
-_next_var_id: int = 0
+# Global counter for unique variable IDs.
+# itertools.count: next() is atomic under the GIL, so this is thread-safe.
+_var_id_counter = itertools.count()
 
 def _get_next_var_id() -> int:
     """Get next unique variable ID"""
-    global _next_var_id
-    _next_var_id += 1
-    return _next_var_id
+    return next(_var_id_counter)
 
 
 @dataclass
@@ -179,6 +184,9 @@ class StructInfo:
     field_indices: Dict[str, int] = field(default_factory=dict)
     llvm_type: Optional[ir.Type] = None
     python_class: Optional[type] = None
+    # Registry key: "module.qualname" when python_class is available,
+    # otherwise the bare name.  Set by UnifiedCompilationRegistry.register_struct.
+    qualified_name: Optional[str] = None
     
     def get_field_index(self, field_name: str) -> Optional[int]:
         """Get the index of a field by name"""
@@ -335,13 +343,77 @@ class _InternalVariableRegistry:
         )
 
 
-class UnifiedCompilationRegistry:
-    """Unified registry for all compilation artifacts
-    
-    This centralizes all registration information that was previously scattered
-    across multiple global dictionaries in different files.
+# ============================================================================
+# Builtin Entity Table (process-level, frozen after import)
+# ============================================================================
+#
+# Populated once at import time by ``BuiltinEntityMeta._register_pending()``
+# (called from ``builtin_entities.utility``).  Afterwards the table is
+# read-only, so it is safely shared by all compile sessions and can be
+# queried without an active session.
+
+_builtin_entities: Dict[str, type] = {}
+_builtin_entities_frozen: bool = False
+
+
+def register_builtin_entity(name: str, entity_class: type):
+    """Register a builtin entity (type or function).
+
+    Import time only: raises once the table has been frozen.
     """
-    
+    if _builtin_entities_frozen:
+        raise RuntimeError(
+            f"builtin entity '{name}' registered after the builtin entity "
+            "table was frozen; registration is import-time only"
+        )
+    _builtin_entities[name.lower()] = entity_class
+
+
+def freeze_builtin_entities():
+    """Mark the builtin entity table frozen (end of import-time registration)."""
+    global _builtin_entities_frozen
+    _builtin_entities_frozen = True
+
+
+def get_builtin_entity(name: str) -> Optional[type]:
+    """Get a builtin entity class by name"""
+    return _builtin_entities.get(name.lower())
+
+
+def has_builtin_entity(name: str) -> bool:
+    """Check if a builtin entity exists"""
+    return name.lower() in _builtin_entities
+
+
+def list_builtin_entities() -> List[str]:
+    """List all registered builtin entity names"""
+    return list(_builtin_entities.keys())
+
+
+def list_builtin_types() -> List[str]:
+    """List all builtin types"""
+    return [
+        name for name, entity in _builtin_entities.items()
+        if hasattr(entity, 'can_be_type') and entity.can_be_type()
+    ]
+
+
+def list_builtin_functions() -> List[str]:
+    """List all builtin functions"""
+    return [
+        name for name, entity in _builtin_entities.items()
+        if hasattr(entity, 'can_be_called') and entity.can_be_called()
+    ]
+
+
+class UnifiedCompilationRegistry:
+    """Per-session registry for mutable compilation artifacts.
+
+    Each ``CompileSession`` owns one instance.  Builtin entity queries
+    delegate to the process-level frozen table above, so a session
+    registry also answers builtin lookups for legacy call sites.
+    """
+
     def __init__(self):
         # ===== Source Code Registry =====
         # Source files: source_file -> full source code
@@ -360,10 +432,6 @@ class UnifiedCompilationRegistry:
         # ===== Type Registry =====
         # Struct types: struct_name -> StructInfo
         self._structs: Dict[str, StructInfo] = {}
-
-        # ===== Builtin Entity Registry =====
-        # Builtin entities (types, functions): name -> entity class
-        self._builtin_entities: Dict[str, type] = {}
 
         # ===== Link Libraries Registry =====
         # Libraries to link against (collected from extern functions)
@@ -431,45 +499,62 @@ class UnifiedCompilationRegistry:
         return self._shared_libraries.get(source_file)
     
     # ========== Struct Type Methods ==========
-    
+
+    @staticmethod
+    def _struct_key(name: str, python_class: Optional[type]) -> str:
+        """Compute the registry key for a struct.
+
+        Uses the qualified name "module.qualname" of the Python class when
+        available, so two structs with the same bare name from different
+        modules do not overwrite each other.  Falls back to the bare name.
+        """
+        if python_class is not None:
+            module = getattr(python_class, '__module__', None)
+            qualname = getattr(python_class, '__qualname__', None)
+            if module and qualname:
+                return f"{module}.{qualname}"
+        return name
+
     def register_struct(self, struct_info: StructInfo):
         """Register a struct type"""
         # Build field indices if not provided
         if not struct_info.field_indices:
             struct_info.field_indices = {
-                field_name: idx 
+                field_name: idx
                 for idx, (field_name, _) in enumerate(struct_info.fields)
             }
-        
-        self._structs[struct_info.name] = struct_info
-    
-    def register_struct_from_fields(self, name: str, fields: List[Tuple[str, Any]], 
+
+        struct_info.qualified_name = self._struct_key(struct_info.name, struct_info.python_class)
+        self._structs[struct_info.qualified_name] = struct_info
+
+    def register_struct_from_fields(self, name: str, fields: List[Tuple[str, Any]],
                                    python_class: Optional[type] = None) -> StructInfo:
         """Register a struct type from field list
-        
+
         This is a convenience method that creates a StructInfo and registers it.
         Compatible with the old struct_metadata.register_struct() API.
-        
+
         Args:
             name: Struct name
             fields: List of (field_name, field_type) tuples
             python_class: Optional Python class that this struct represents
-        
+
         Returns:
             The registered StructInfo
         """
-        # Check if already registered - update if so
-        if name in self._structs:
-            struct_info = self._structs[name]
+        # Check if already registered - update in place if so
+        key = self._struct_key(name, python_class)
+        if key in self._structs:
+            struct_info = self._structs[key]
             struct_info.fields = fields
             struct_info.field_indices = {
-                field_name: idx 
+                field_name: idx
                 for idx, (field_name, _) in enumerate(fields)
             }
             if python_class is not None:
                 struct_info.python_class = python_class
             return struct_info
-        
+
         # Create new StructInfo
         struct_info = StructInfo(
             name=name,
@@ -478,17 +563,33 @@ class UnifiedCompilationRegistry:
         )
         self.register_struct(struct_info)
         return struct_info
-    
+
+    def _lookup_struct(self, struct_name: str) -> Optional[StructInfo]:
+        """Two-level struct lookup: exact key first, then bare-name match.
+
+        The exact-key hit covers qualified names and bare keys of structs
+        registered without a python_class.  The fallback scans entries for
+        a StructInfo whose bare name matches, preserving the lookup
+        behavior callers had before keys became qualified.
+        """
+        struct_info = self._structs.get(struct_name)
+        if struct_info is not None:
+            return struct_info
+        for struct_info in self._structs.values():
+            if struct_info.name == struct_name:
+                return struct_info
+        return None
+
     def get_struct(self, struct_name: str) -> Optional[StructInfo]:
         """Get struct information"""
-        return self._structs.get(struct_name)
-    
+        return self._lookup_struct(struct_name)
+
     def has_struct(self, struct_name: str) -> bool:
         """Check if a struct is registered"""
-        return struct_name in self._structs
-    
+        return self._lookup_struct(struct_name) is not None
+
     def list_structs(self) -> List[str]:
-        """List all struct names"""
+        """List all struct registry keys (qualified names where available)"""
         return list(self._structs.keys())
     
     def infer_struct_from_llvm_type(self, llvm_type: ir.Type) -> Optional[StructInfo]:
@@ -530,36 +631,33 @@ class UnifiedCompilationRegistry:
         self._structs.clear()
     
     # ========== Builtin Entity Methods ==========
-    
+    # Builtin entities live in the process-level frozen table defined at
+    # module scope; these delegates let a session registry answer builtin
+    # queries for call sites that already hold a registry object.
+
     def register_builtin_entity(self, name: str, entity_class: type):
-        """Register a builtin entity (type or function)"""
-        self._builtin_entities[name.lower()] = entity_class
-    
+        """Register a builtin entity (import time only; see module table)"""
+        register_builtin_entity(name, entity_class)
+
     def get_builtin_entity(self, name: str) -> Optional[type]:
         """Get a builtin entity class by name"""
-        return self._builtin_entities.get(name.lower())
-    
+        return get_builtin_entity(name)
+
     def has_builtin_entity(self, name: str) -> bool:
         """Check if a builtin entity exists"""
-        return name.lower() in self._builtin_entities
-    
+        return has_builtin_entity(name)
+
     def list_builtin_entities(self) -> List[str]:
         """List all registered builtin entity names"""
-        return list(self._builtin_entities.keys())
-    
+        return list_builtin_entities()
+
     def list_builtin_types(self) -> List[str]:
         """List all builtin types"""
-        return [
-            name for name, entity in self._builtin_entities.items() 
-            if hasattr(entity, 'can_be_type') and entity.can_be_type()
-        ]
-    
+        return list_builtin_types()
+
     def list_builtin_functions(self) -> List[str]:
         """List all builtin functions"""
-        return [
-            name for name, entity in self._builtin_entities.items() 
-            if hasattr(entity, 'can_be_called') and entity.can_be_called()
-        ]
+        return list_builtin_functions()
     
     # ========== Link Libraries Methods ==========
     
@@ -607,13 +705,16 @@ class UnifiedCompilationRegistry:
     # ========== Utility Methods ==========
 
     def clear_all(self):
-        """Clear all registries (useful for testing)"""
+        """Clear all session-owned registries (useful for testing).
+
+        The process-level builtin entity table is intentionally not
+        cleared: it is frozen after import and shared by all sessions.
+        """
         self._source_files.clear()
         self._function_sources.clear()
         self._compilers.clear()
         self._shared_libraries.clear()
         self._structs.clear()
-        self._builtin_entities.clear()
         self._link_libraries.clear()
         self._link_objects.clear()
 
@@ -637,7 +738,7 @@ class UnifiedCompilationRegistry:
             for name, info in self._structs.items():
                 print(f"  {name}: {len(info.fields)} fields")
 
-        print(f"\n[Builtin Entities] {len(self._builtin_entities)}")
+        print(f"\n[Builtin Entities] {len(_builtin_entities)} (process-level, frozen)")
         if verbose:
             types = self.list_builtin_types()
             funcs = self.list_builtin_functions()
@@ -647,13 +748,15 @@ class UnifiedCompilationRegistry:
         print("=" * 60)
 
 
-# Global unified registry instance
-_unified_registry = UnifiedCompilationRegistry()
-
-
 def get_unified_registry() -> UnifiedCompilationRegistry:
-    """Get the global unified registry instance"""
-    return _unified_registry
+    """Get the unified registry of the active compile session.
+
+    Raises:
+        RuntimeError: If no session is active.  Activate one with
+            ``pythoc.init()`` or ``with CompileSession():``.
+    """
+    from .session import CompileSession
+    return CompileSession.current().registry
 
 
 # ============================================================================
@@ -674,5 +777,5 @@ def register_struct_from_class(cls) -> Optional[StructInfo]:
     
     struct_name = cls.__name__
     fields = cls._struct_fields
-    
-    return _unified_registry.register_struct_from_fields(struct_name, fields, python_class=cls)
+
+    return get_unified_registry().register_struct_from_fields(struct_name, fields, python_class=cls)

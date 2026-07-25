@@ -13,8 +13,18 @@ from typing import Any, Optional
 import ast
 
 # Import base classes and basic types from extracted modules
-from .base import BuiltinEntity, BuiltinType, BuiltinFunction, BuiltinEntityMeta, _get_unified_registry
+from .base import BuiltinEntity, BuiltinType, BuiltinFunction, BuiltinEntityMeta
 from .types import i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, bool, void, ptr
+
+# Builtin entity queries read the process-level frozen table directly:
+# they must work at import time, before any compile session exists.
+from ..registry import (
+    get_builtin_entity as _frozen_get_builtin_entity,
+    has_builtin_entity as _frozen_has_builtin_entity,
+    list_builtin_entities as _frozen_list_builtin_entities,
+    list_builtin_types as _frozen_list_builtin_types,
+    list_builtin_functions as _frozen_list_builtin_functions,
+)
 
 # Ensure any pending entities from metaclass are registered
 BuiltinEntityMeta._register_pending()
@@ -26,14 +36,12 @@ BuiltinEntityMeta._register_pending()
 
 def get_builtin_entity(name: str) -> Optional[type]:
     """Get a builtin entity class by name"""
-    registry = _get_unified_registry()
-    return registry.get_builtin_entity(name)
+    return _frozen_get_builtin_entity(name)
 
 
 def has_builtin_entity(name: str) -> bool:
     """Check if a builtin entity exists"""
-    registry = _get_unified_registry()
-    return registry.has_builtin_entity(name)
+    return _frozen_has_builtin_entity(name)
 
 
 def is_builtin_type(name: str) -> bool:
@@ -63,20 +71,17 @@ def get_builtin_type_info(name: str) -> Optional[dict]:
 
 def list_builtin_entities() -> list:
     """List all registered builtin entities"""
-    registry = _get_unified_registry()
-    return registry.list_builtin_entities()
+    return _frozen_list_builtin_entities()
 
 
 def list_builtin_types() -> list:
     """List all builtin types"""
-    registry = _get_unified_registry()
-    return registry.list_builtin_types()
+    return _frozen_list_builtin_types()
 
 
 def list_builtin_functions() -> list:
     """List all builtin functions"""
-    registry = _get_unified_registry()
-    return registry.list_builtin_functions()
+    return _frozen_list_builtin_functions()
 
 
 # ============================================================================
@@ -85,11 +90,10 @@ def list_builtin_functions() -> list:
 
 # Create TYPE_MAP for backward compatibility
 def _build_type_map():
-    """Build TYPE_MAP from unified registry"""
-    registry = _get_unified_registry()
+    """Build TYPE_MAP from the frozen builtin entity table"""
     type_map = {}
-    for name in registry.list_builtin_types():
-        entity_cls = registry.get_builtin_entity(name)
+    for name in _frozen_list_builtin_types():
+        entity_cls = _frozen_get_builtin_entity(name)
         if entity_cls:
             type_map[entity_cls] = name
             type_map[name] = name
@@ -99,11 +103,10 @@ TYPE_MAP = _build_type_map()
 
 # Type name to type class mapping (replaces old PC_TYPE_MAP)
 def _build_type_registry():
-    """Build TYPE_REGISTRY from unified registry"""
-    registry = _get_unified_registry()
+    """Build TYPE_REGISTRY from the frozen builtin entity table"""
     type_registry = {}
-    for name in registry.list_builtin_types():
-        entity_cls = registry.get_builtin_entity(name)
+    for name in _frozen_list_builtin_types():
+        entity_cls = _frozen_get_builtin_entity(name)
         if entity_cls:
             type_registry[name] = entity_cls
     return type_registry
@@ -144,11 +147,10 @@ def is_unsigned_int(type_hint):
 
 # Type sizes mapping (in bytes)
 def _build_type_sizes():
-    """Build TYPE_SIZES from unified registry"""
-    registry = _get_unified_registry()
+    """Build TYPE_SIZES from the frozen builtin entity table"""
     sizes = {}
-    for name in registry.list_builtin_types():
-        entity_cls = registry.get_builtin_entity(name)
+    for name in _frozen_list_builtin_types():
+        entity_cls = _frozen_get_builtin_entity(name)
         if entity_cls:
             sizes[entity_cls] = entity_cls.get_size_bytes()
             sizes[name] = entity_cls.get_size_bytes()
@@ -156,11 +158,10 @@ def _build_type_sizes():
 
 
 def _build_type_alignments():
-    """Build TYPE_ALIGNMENTS from unified registry"""
-    registry = _get_unified_registry()
+    """Build TYPE_ALIGNMENTS from the frozen builtin entity table"""
     alignments = {}
-    for name in registry.list_builtin_types():
-        entity_cls = registry.get_builtin_entity(name)
+    for name in _frozen_list_builtin_types():
+        entity_cls = _frozen_get_builtin_entity(name)
         if entity_cls:
             # Alignment = size for basic types
             alignments[entity_cls] = entity_cls.get_size_bytes()

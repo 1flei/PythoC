@@ -34,63 +34,47 @@ from typing import Any, Dict, Optional, Set, Tuple
 from contextlib import contextmanager
 
 from .effect_graph import node_id_from_group_key
+from .session import CompileSession
 
 
 # Store the original __import__ function
 _original_import = builtins.__import__
 
-# Thread-local storage for tracking effect usage during compilation
-# This is used to record which effects a function uses (for transitive propagation)
-_effect_usage_tracker = threading.local()
 
-# Thread-local storage for tracking current compilation context
-# This stores the suffix and effect overrides of the function currently being compiled
+def record_effect_usage(effect_name: str, compile_frame: Optional[Any] = None):
+    """Record that the function in ``compile_frame`` uses the given effect.
+
+    Usage is attributed to the ActiveCompileFrame of the compilation whose
+    visitor triggered the access (see ActiveCompileFrame.effect_usage).
+    Calls without an active frame (e.g. decoration-time evaluation) are
+    dropped: there is no function to attribute the usage to.
+    """
+    if compile_frame is not None:
+        compile_frame.effect_usage.add(effect_name)
+
+
+# Thread-local stack of FunctionBindingState for the functions currently
+# being compiled on this thread.
+#
+# This dynamic scope is kept deliberately: the readers (effect
+# specialization materialization in decorators/compile.py and the Future
+# executor binding in std/runtime/future.py) run on planning-time paths
+# that cannot reach the active visitor/binding without changing public
+# wrapper APIs (get_effect_specialized, materialize_specialization).
+# Code inside the visitor chain must read visitor.binding_state instead.
 _compilation_context = threading.local()
 
 
-def start_effect_tracking():
-    """Start tracking effect usage for the current function being compiled."""
-    if not hasattr(_effect_usage_tracker, 'stack'):
-        _effect_usage_tracker.stack = []
-    _effect_usage_tracker.stack.append(set())
-
-
-def stop_effect_tracking() -> Set[str]:
-    """Stop tracking and return the set of effects used."""
-    if not hasattr(_effect_usage_tracker, 'stack') or not _effect_usage_tracker.stack:
-        return set()
-    return _effect_usage_tracker.stack.pop()
-
-
-def record_effect_usage(effect_name: str):
-    """Record that the current function uses the given effect."""
-    if hasattr(_effect_usage_tracker, 'stack') and _effect_usage_tracker.stack:
-        _effect_usage_tracker.stack[-1].add(effect_name)
-
-
-def push_compilation_context(compile_suffix: Optional[str], effect_suffix: Optional[str],
-                            effect_overrides: Dict[str, Any], group_key: Optional[tuple] = None,
-                            effect_override_names: Optional[Set[str]] = None):
-    """Push a compilation context onto the stack.
+def push_compilation_context(binding_state):
+    """Push the binding state of the function being compiled.
 
     Called when starting to compile a function that has effect overrides.
-    This allows handle_call to know what suffixes and effects to propagate.
-
-    Args:
-        compile_suffix: The compile_suffix for the current compilation (NOT contagious)
-        effect_suffix: The effect_suffix for the current compilation (contagious)
-        effect_overrides: Dict of effect name -> implementation
-        group_key: 4-tuple group key for dependency tracking
+    Planning-time code (no visitor at hand) uses this to see the compiling
+    function's effect context.
     """
     if not hasattr(_compilation_context, 'stack'):
         _compilation_context.stack = []
-    _compilation_context.stack.append({
-        'compile_suffix': compile_suffix,
-        'effect_suffix': effect_suffix,
-        'effect_overrides': effect_overrides,
-        'group_key': group_key,
-        'effect_override_names': effect_override_names or set(),
-    })
+    _compilation_context.stack.append(binding_state)
 
 
 def pop_compilation_context():
@@ -100,10 +84,36 @@ def pop_compilation_context():
 
 
 def get_current_compilation_context() -> Optional[Dict[str, Any]]:
-    """Get the current compilation context (suffix and effect overrides)."""
-    if hasattr(_compilation_context, 'stack') and _compilation_context.stack:
-        return _compilation_context.stack[-1]
-    return None
+    """Get the current compilation context (suffix and effect overrides).
+
+    Returns a dict view over the binding state of the innermost function
+    being compiled on this thread, or None outside compilation.
+    """
+    if not hasattr(_compilation_context, 'stack') or not _compilation_context.stack:
+        return None
+    st = _compilation_context.stack[-1]
+    return {
+        'compile_suffix': st.compile_suffix,
+        'effect_suffix': st.effect_suffix,
+        'effect_overrides': st.captured_effect_context,
+        'group_key': st.group_key,
+        'effect_override_names': st.effect_override_names or set(),
+    }
+
+
+def _get_output_manager():
+    """Resolve the output manager through the active compile session.
+
+    The session owns the output manager; the fallback to
+    build.output_manager.get_output_manager() lazily creates and
+    attaches it on first use.
+    """
+    session = CompileSession.current()
+    om = session.output_manager
+    if om is None:
+        from .build.output_manager import get_output_manager
+        om = get_output_manager()
+    return om
 
 
 def resolve_effect_wrapper(wrapper, caller_group_key=None,
@@ -151,8 +161,7 @@ def resolve_effect_wrapper(wrapper, caller_group_key=None,
     callee_group_key = original_binding.group_key
     if callee_group_key:
         from .effect_graph import node_id_from_group_key
-        from .build.output_manager import get_output_manager
-        _om = get_output_manager()
+        _om = _get_output_manager()
         _node_id = node_id_from_group_key(callee_group_key)
         if not _om._effect_graph.has_node(_node_id):
             # Node not yet in graph — conservative: specialize
@@ -318,8 +327,7 @@ class EffectImportHook:
                 )
                 import_gk = getattr(import_binding, 'group_key', None) if import_binding else None
                 if import_gk:
-                    from .build.output_manager import get_output_manager
-                    _om = get_output_manager()
+                    _om = _get_output_manager()
                     imported_node = node_id_from_group_key(import_gk)
 
                     # Record layer membership for the imported node
@@ -354,12 +362,25 @@ def _module_default_impl(effect_name: str, caller_module: Optional[str]) -> Any:
     """Lookup per-module effect default registered via effect.default/bind_mem."""
     if not caller_module:
         return None
-    with effect._lock:
-        module_defaults = effect._defaults.get(caller_module, {})
+    eff = _current_effect()
+    with eff._lock:
+        module_defaults = eff._defaults.get(caller_module, {})
         return module_defaults.get(effect_name)
 
 
-def _compile_context_has_override(effect_name: str) -> bool:
+def _compile_context_has_override(effect_name: str, visitor=None) -> bool:
+    """Check whether the compiling function has a caller override for the effect.
+
+    Primary path: the compiling function's binding state, reached
+    explicitly through the visitor.  Fallback: the planning-time dynamic
+    scope (get_current_compilation_context) for calls without a visitor.
+    """
+    binding = getattr(visitor, 'binding_state', None) if visitor is not None else None
+    if binding is not None:
+        if not getattr(binding, 'effect_suffix', None):
+            return False
+        override_names = getattr(binding, 'effect_override_names', None) or set()
+        return effect_name in override_names
     compilation_ctx = get_current_compilation_context()
     if not compilation_ctx:
         return False
@@ -437,9 +458,9 @@ class EffectNamespace:
 
         # Record effect usage for transitive propagation
         # This tracks that the current function being compiled uses this effect
-        record_effect_usage(name)
+        record_effect_usage(name, getattr(visitor, 'func_state', None))
 
-        if _compile_context_has_override(name):
+        if _compile_context_has_override(name, visitor):
             impl = object.__getattribute__(self, '_impl')
         else:
             caller_module = _caller_module_from_visitor(visitor)
@@ -654,8 +675,27 @@ class Effect:
         object.__setattr__(self, '_defaults', {})  # module -> {name -> impl}
         object.__setattr__(self, '_direct_assignments', set())  # names with direct assignment
         object.__setattr__(self, '_lock', threading.RLock())
-        object.__setattr__(self, '_suffix_stack', [])  # Stack of active suffixes
-        object.__setattr__(self, '_override_stack', [])  # Stack of active override names
+        # Per-thread dynamic scope for `with effect(...)` blocks.  The
+        # suffix/override stacks are thread-local so that one thread
+        # compiling inside an effect context cannot leak its suffix or
+        # override names into compilations running on other threads.
+        object.__setattr__(self, '_local', threading.local())
+
+    @property
+    def _suffix_stack(self) -> list:
+        """Per-thread stack of active effect suffixes."""
+        stack = getattr(self._local, 'suffix_stack', None)
+        if stack is None:
+            stack = self._local.suffix_stack = []
+        return stack
+
+    @property
+    def _override_stack(self) -> list:
+        """Per-thread stack of active caller-override name sets."""
+        stack = getattr(self._local, 'override_stack', None)
+        if stack is None:
+            stack = self._local.override_stack = []
+        return stack
 
     def __call__(self, suffix: Optional[str] = None, **overrides) -> EffectContext:
         """
@@ -810,11 +850,11 @@ class Effect:
             return None
 
     def _get_current_suffix(self) -> Optional[str]:
-        """Get the current suffix from the context stack"""
-        with self._lock:
-            if self._suffix_stack:
-                return self._suffix_stack[-1]
-            return None
+        """Get the current suffix from the per-thread context stack"""
+        stack = self._suffix_stack
+        if stack:
+            return stack[-1]
+        return None
 
     def __getattr__(self, name: str) -> Any:
         """
@@ -955,8 +995,59 @@ class Effect:
             return name in self._direct_assignments
 
 
-# Global singleton instance
-effect = Effect()
+# Guards lazy check-then-set of the active session's Effect instance.
+_effect_creation_lock = threading.Lock()
+
+
+def _current_effect() -> Effect:
+    """Return the active session's Effect, creating and attaching it lazily.
+
+    Raises RuntimeError when no compile session is active.
+    """
+    session = CompileSession.current()
+    eff = session.effects
+    if eff is None:
+        with _effect_creation_lock:
+            eff = session.effects
+            if eff is None:
+                eff = Effect()
+                session.effects = eff
+    return eff
+
+
+class _EffectProxy:
+    """Module-level ``effect`` object.
+
+    A thin proxy: every attribute access, assignment, deletion, and call
+    is forwarded to the Effect instance owned by the currently active
+    CompileSession (created lazily on first access).  This keeps the
+    public API (``effect.xxx``, ``effect.default(...)``, ``with
+    effect(...)``) unchanged while the actual state is per-session.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_current_effect(), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(_current_effect(), name, value)
+
+    def __delattr__(self, name: str) -> None:
+        delattr(_current_effect(), name)
+
+    def __call__(self, *args, **kwargs) -> EffectContext:
+        return _current_effect()(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        session = CompileSession.active()
+        if session is None or session.effects is None:
+            return "<effect proxy (unbound)>"
+        return repr(session.effects)
+
+
+# Public module-level effect API; forwards to the active session's Effect.
+effect = _EffectProxy()
 
 
 def get_current_effect_suffix() -> Optional[str]:
@@ -968,11 +1059,12 @@ def get_current_effect_suffix() -> Optional[str]:
     """
     if is_effect_suffix_suppressed():
         return None
-    return effect._get_current_suffix()
+    return _current_effect()._get_current_suffix()
 
 
-import threading
-
+# Kept as thread-local dynamic scope by design: suppression is active at
+# decoration/import time, before any ActiveCompileFrame exists, so there
+# is no compile frame to attach it to.
 _suppress_compile_suffix = threading.local()
 
 
@@ -1010,21 +1102,21 @@ def capture_effect_context() -> Dict[str, Any]:
     Returns:
         Dict mapping effect name to implementation
     """
-    with effect._lock:
+    eff = _current_effect()
+    with eff._lock:
         return {
             name: ns._get_impl()
-            for name, ns in effect._effects.items()
+            for name, ns in eff._effects.items()
             if ns._get_impl() is not None
         }
 
 
 def capture_effect_override_names() -> Set[str]:
     """Return the active caller override names from nested effect contexts."""
-    with effect._lock:
-        names = set()
-        for overrides in effect._override_stack:
-            names.update(overrides)
-        return names
+    names = set()
+    for overrides in _current_effect()._override_stack:
+        names.update(overrides)
+    return names
 
 
 @contextmanager
@@ -1037,20 +1129,22 @@ def restore_effect_context(captured: Dict[str, Any]):
     """
     from .logger import logger
 
+    eff = _current_effect()
+
     # Save current state
     saved = {}
-    with effect._lock:
+    with eff._lock:
         for name, impl in captured.items():
-            if name in effect._effects:
-                saved[name] = effect._effects[name]._get_impl()
+            if name in eff._effects:
+                saved[name] = eff._effects[name]._get_impl()
             else:
                 saved[name] = None
 
             # Set captured implementation
-            if name not in effect._effects:
-                effect._effects[name] = EffectNamespace(name, impl)
+            if name not in eff._effects:
+                eff._effects[name] = EffectNamespace(name, impl)
             else:
-                effect._effects[name]._set_impl(impl)
+                eff._effects[name]._set_impl(impl)
 
         logger.debug(f"restore_effect_context: restored {captured}")
 
@@ -1058,13 +1152,13 @@ def restore_effect_context(captured: Dict[str, Any]):
         yield
     finally:
         # Restore saved state
-        with effect._lock:
+        with eff._lock:
             for name, saved_impl in saved.items():
                 if saved_impl is None:
-                    if name in effect._effects:
-                        effect._effects[name]._set_impl(None)
+                    if name in eff._effects:
+                        eff._effects[name]._set_impl(None)
                 else:
-                    effect._effects[name]._set_impl(saved_impl)
+                    eff._effects[name]._set_impl(saved_impl)
 
 
 # ---------------------------------------------------------------------------
@@ -1101,14 +1195,24 @@ def _record_import_edges(name, caller_globals, fromlist, level, module):
     caller_file = caller_globals.get('__file__')
     if not caller_file:
         return
-    # Resolve the output manager through sys.modules only: importing it here
-    # would recurse into this recorder, and during pythoc's own init it may
-    # not be importable yet.  Edges of modules loaded that early are recorded
-    # when user code imports them afterwards.
-    om_module = sys.modules.get(__name__.rsplit('.', 1)[0] + '.build.output_manager')
-    if om_module is None:
+    # Best-effort: imports may happen before any session is installed
+    # (e.g. pythoc's own import chain); skip recording in that case.
+    session = CompileSession.active()
+    if session is None:
         return
-    graph = om_module.get_output_manager()._effect_graph
+    # Resolve the output manager through the active session first.  While
+    # the session does not own one yet, fall back to the sys.modules lookup:
+    # importing output_manager here would recurse into this recorder, and
+    # during pythoc's own init it may not be importable yet.  Edges of
+    # modules loaded that early are recorded when user code imports them
+    # afterwards.
+    om = session.output_manager
+    if om is None:
+        om_module = sys.modules.get(__name__.rsplit('.', 1)[0] + '.build.output_manager')
+        if om_module is None:
+            return
+        om = om_module.get_output_manager()
+    graph = om._effect_graph
     caller_node = (caller_file, None, None)
 
     modules = []

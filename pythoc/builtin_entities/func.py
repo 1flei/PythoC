@@ -364,6 +364,7 @@ class func(BuiltinType):
             type_name,
             (cls,),
             {
+                '_pc_specialized': True,
                 'param_types': builtins.tuple(param_types),
                 'param_names': param_names,
                 'return_type': return_type,

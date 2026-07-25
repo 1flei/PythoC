@@ -298,7 +298,11 @@ class LLVMCompiler:
         # Set up long-lived binding state and this compilation's active frame.
         if func_state is None:
             from .context import FunctionBindingState
-            func_state = FunctionBindingState(group_key=group_key)
+            from .session import CompileSession
+            func_state = FunctionBindingState(
+                group_key=group_key,
+                session=CompileSession.current(),
+            )
         from .context import ActiveCompileFrame
         compile_frame = ActiveCompileFrame(
             current_function=llvm_function,
@@ -308,9 +312,14 @@ class LLVMCompiler:
             sret_info=sret_info,
             param_coercion_info=func_wrapper.param_coercion_info or {},
             varargs_info=varargs_info,
+            source_file=func_state.source_file or (group_key[0] if group_key else None),
+            line_offset=source_start_line - 1,
         )
         visitor.func_state = compile_frame
         visitor.binding_state = func_state
+        # Back-pointer so the compile callback can harvest per-compile
+        # results (e.g. compile_frame.effect_usage) after this returns.
+        func_state.active_frame = compile_frame
         visitor.current_function = llvm_function
         visitor.current_group_key = group_key  # For dependency tracking at call time
         

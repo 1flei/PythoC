@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Any, Dict, List, Union, TYPE_CHECKING
 from llvmlite import ir
 import ast
+import threading
 
 if TYPE_CHECKING:
     from .builtin_entities import BuiltinType
@@ -61,10 +62,23 @@ class FunctionBindingState:
     template_compile_callback: Optional[Any] = None
     compilation_globals: Dict[str, Any] = field(default_factory=dict)
     wrapper: Optional[Any] = None
+    # Ephemeral: ActiveCompileFrame of this binding's in-flight (or last)
+    # compile, set by compiler.py so compile callbacks can harvest
+    # per-compile results (e.g. effect usage) after
+    # compile_function_from_ast returns.
+    active_frame: Optional[Any] = None
+    # Guards check-then-set on effect_specialized_cache and wrapper lazy init
+    lock: threading.RLock = field(
+        default_factory=threading.RLock, repr=False, compare=False
+    )
     # Parametric polymorphism metadata.
     parametric_indices: Optional[List[int]] = None
     concrete_indices: Optional[List[int]] = None
     parametric_param_names: Optional[List[str]] = None
+    # CompileSession this binding belongs to; filled by the @compile
+    # wrapper at decoration time.  Implicit output channels (output
+    # manager, dependency tracker) are resolved through it.
+    session: Optional[Any] = None
 
 
 @dataclass
@@ -78,6 +92,15 @@ class ActiveCompileFrame:
     param_coercion_info: Dict[int, Any] = field(default_factory=dict)
     varargs_info: Optional[dict] = None
     all_inlined_stmts: list = field(default_factory=list)
+    # Source context for compile-time line number semantics (debug info,
+    # linear events). Line offset = function start line - 1, added to AST
+    # relative line numbers.
+    source_file: Optional[str] = None
+    line_offset: int = 0
+    # Effect names used by the function being compiled, recorded on effect
+    # attribute access; harvested by the compile callback for transitive
+    # propagation into the EffectGraph.
+    effect_usage: set = field(default_factory=set)
 
 
 class CompilationContext:

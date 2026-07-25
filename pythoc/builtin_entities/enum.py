@@ -70,6 +70,7 @@ def _create_enum_type(variants, tag_type, class_name=None):
         class_name,
         (EnumType,),
         {
+            '_pc_specialized': True,
             '_tag_type': tag_type,
             '_union_payload': union_payload,
             '_variant_names': [name for name, _, _ in variants],
