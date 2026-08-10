@@ -132,6 +132,77 @@ class _InitDispatcher:
         return self._init_into_fn.handle_call(visitor, func_ref, args, node)
 
 
+class _CallDispatcher:
+    """Lazy per-call-site type specialization for ``api.call``.
+
+    Used when the instantiated closure has unannotated parameters. Each
+    compiled call site contributes its argument types; one specialized
+    ``call`` wrapper is compiled per signature and cached. This mirrors
+    how unannotated parameters behave for inline closures and ``param``
+    functions: the body is stamped out per use with the actual types.
+    """
+
+    def __init__(self, *, wrapper_ast, param_names, declared_param_types,
+                 state_ptr_type, return_type, suffix, gv):
+        self._wrapper_ast = wrapper_ast
+        self._param_names = list(param_names)
+        self._declared_param_types = dict(declared_param_types)
+        self._state_ptr_type = state_ptr_type
+        self._return_type = return_type
+        self._suffix = suffix
+        self._gv = gv
+        self._specializations = {}
+
+    def __call__(self, *args, **kwargs):
+        raise TypeError(
+            "instantiate: api.call of a closure with unannotated parameters "
+            "can only be used inside compiled code (parameter types are "
+            "taken from the call site)"
+        )
+
+    def handle_call(self, visitor, func_ref, args, node):
+        from ..logger import logger
+
+        call_args = list(args[1:])  # args[0] is the state pointer
+        if len(call_args) != len(self._param_names):
+            logger.error(
+                f"instantiate: closure call takes {len(self._param_names)} "
+                f"arguments, got {len(call_args)}",
+                node=node, exc_type=TypeError,
+            )
+
+        param_types = {"s": self._state_ptr_type}
+        inferred = []
+        for name, arg in zip(self._param_names, call_args):
+            declared = self._declared_param_types.get(name)
+            if declared is not None:
+                param_types[name] = declared
+                continue
+            pc_type = arg.get_pc_type() if hasattr(arg, "get_pc_type") else None
+            if pc_type is None:
+                logger.error(
+                    "instantiate: cannot determine a parameter type from an "
+                    "untyped call argument; pass a typed value (e.g. i32(1))",
+                    node=node, exc_type=TypeError,
+                )
+            param_types[name] = pc_type
+            inferred.append(pc_type)
+
+        key = tuple(inferred)
+        wrapper = self._specializations.get(key)
+        if wrapper is None:
+            sig = "_".join(t.get_name() for t in inferred)
+            wrapper = _compile_ast_function(
+                copy.deepcopy(self._wrapper_ast),
+                param_types=param_types,
+                return_type=self._return_type,
+                suffix=f"{self._suffix}_{sig}" if sig else self._suffix,
+                gv=self._gv,
+            )
+            self._specializations[key] = wrapper
+        return wrapper.handle_call(visitor, func_ref, args, node)
+
+
 def _compile_normalized_source(source: _InstantiateSource) -> Any:
     """Dispatch a normalized instantiate source to the right lowerer."""
     if source.func_ast is None:
@@ -226,6 +297,33 @@ def _instantiate_genexpr(source) -> Any:
 def _instantiate_closure(source) -> Any:
     """Reserve the architecture slot for closure-backed instantiate."""
     func_ast = getattr(source, "func_ast", None)
+    capture_bindings = getattr(source, "_capture_bindings", None)
+    capture_runtime = getattr(source, "_capture_runtime", None)
+
+    # Default arguments of a lambda are eager captures: move them out of
+    # the call signature and into the capture channels (constant bindings
+    # for Python values, runtime captures moved into the state at init).
+    default_vrefs = list(getattr(source, "_default_vrefs", None) or [])
+    if default_vrefs:
+        param_names = list(getattr(source, "_param_names", []))
+        n_required = getattr(source, "_n_required", len(param_names))
+        defaulted_names = param_names[n_required:]
+        func_ast = copy.deepcopy(func_ast)
+        func_ast.args.args = list(func_ast.args.args[:n_required])
+        capture_bindings = dict(capture_bindings or {})
+        capture_runtime = list(capture_runtime or [])
+        for name, vref in zip(defaulted_names, default_vrefs):
+            if vref.is_python_value():
+                capture_bindings[name] = extract_value_from_vref(vref)
+            else:
+                pc_type = vref.get_pc_type() if hasattr(vref, "get_pc_type") else None
+                if pc_type is None:
+                    raise TypeError(
+                        f"instantiate: default argument '{name}' has no "
+                        f"determinable PC type"
+                    )
+                capture_runtime.append(RuntimeCapture(name, pc_type, vref))
+
     callee_globals = dict(getattr(source, "func_globals", None) or {})
     # Ensure builtin PC types are available for type annotation resolution
     # ( FakeClosure tests or closures defined with empty globals need this )
@@ -245,12 +343,12 @@ def _instantiate_closure(source) -> Any:
     return _compile_normalized_source(_InstantiateSource(
         source_kind="closure",
         func_ast=func_ast,
-        capture_bindings=getattr(source, "_capture_bindings", None),
+        capture_bindings=capture_bindings,
         source_object_id=id(source),
         func_name_hint=getattr(func_ast, "name", "closure"),
         callee_globals=callee_globals,
         capture_mode="closure",
-        capture_runtime=getattr(source, "_capture_runtime", None),
+        capture_runtime=capture_runtime,
     ))
 
 
@@ -777,13 +875,27 @@ def _compile_closure_fn_pipeline(
         include_intrinsics=False,
     )
 
-    cf = _compile_ast_function(
-        wrapper_ast,
-        param_types=param_types,
-        return_type=return_type,
-        suffix=sfx,
-        gv=gv,
-    )
+    untyped_params = [arg.arg for arg in fa.args.args if arg.annotation is None]
+    if untyped_params:
+        # Unannotated parameters are handled like param parameters: the
+        # call wrapper is stamped out per call-site argument signature.
+        cf = _CallDispatcher(
+            wrapper_ast=wrapper_ast,
+            param_names=[arg.arg for arg in fa.args.args],
+            declared_param_types={k: v for k, v in param_types.items() if k != "s"},
+            state_ptr_type=ip,
+            return_type=return_type,
+            suffix=sfx,
+            gv=gv,
+        )
+    else:
+        cf = _compile_ast_function(
+            wrapper_ast,
+            param_types=param_types,
+            return_type=return_type,
+            suffix=sfx,
+            gv=gv,
+        )
 
     init_into_fn = _build_init_into_fn(
         runtime_captures, ip, sfx + "_ii", gv, set_pc=False

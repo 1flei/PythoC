@@ -12,8 +12,7 @@ TestStruct = struct[('a', i32), ('b', pyconst[42])]
 @compile
 def test_pyconst_field_access() -> i32:
     """Test accessing pyconst field in struct"""
-    
-    @compile(suffix=TestStruct)
+
     def get_b(x: TestStruct) -> i32:
         return i32(x.b)  # Should return constant 42
     

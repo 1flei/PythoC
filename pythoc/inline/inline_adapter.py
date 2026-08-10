@@ -240,6 +240,11 @@ class InlineAdapter:
                     logger.warning(f"  Scope {i}: {list(scope.keys())}")
             return None
 
+        # Python-valued results (void callees, compile-time constants):
+        # pass the stored value through instead of loading from an alloca.
+        if var_info.alloca is None or var_info.value_ref.is_python_value():
+            return var_info.value_ref
+
         alloca = var_info.alloca
         loaded_value = self.visitor.builder.load(alloca)
 

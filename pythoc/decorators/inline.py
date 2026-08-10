@@ -143,6 +143,7 @@ def inline(func=None, *, cls_method=False, method=False):
         
         # Common metadata
         wrapper._is_inline = True
+        wrapper._pc_compile_level_callable = True
         wrapper._func_ast = func_ast
         wrapper._param_names = param_names
         wrapper._original_func = f

@@ -18,6 +18,28 @@ from .schema_protocol import get_schema_field_types, is_schema_type
 import ast
 
 
+def raise_if_compile_level_callable(python_val):
+    """Uniform boundary error for compile-level callables.
+
+    Compile-level callables (nested-def closures, lambdas, yield-function
+    placeholders, @inline wrappers) are compile-time-only values: calling
+    one inline-expands it. Using one as a *runtime* value (storing into a
+    PC-typed variable, converting to func[...], returning from a compiled
+    function, arithmetic, ...) is always an error; raise one uniform
+    message for it here. No-op for anything else.
+    """
+    if not getattr(python_val, '_pc_compile_level_callable', False):
+        return
+    name = (getattr(python_val, 'name', None)
+            or getattr(python_val, '__name__', None)
+            or type(python_val).__name__)
+    raise TypeError(
+        f"Compile-level callable '{name}' cannot be used as a runtime value; "
+        f"it can only be called (which inline-expands it at compile time). "
+        f"Convert it explicitly with instantiate(...) where supported"
+    )
+
+
 def strip_qualifiers(pc_type):
     """Strip type qualifiers (const, volatile, static) but NOT refined types
     
@@ -398,6 +420,7 @@ class TypeConverter:
             raise TypeError(f"Cannot promote mapping literal to PC type {target_type}")
 
         if not isinstance(python_val, (int, float, bool, str, type(None))):
+            raise_if_compile_level_callable(python_val)
             raise TypeError(
                 f"Cannot promote Python value of type {type(python_val).__name__} to PC type. "
                 f"Only primitive types and literal carriers are supported. Got: {repr(python_val)}"
@@ -587,6 +610,7 @@ class TypeConverter:
         elif isinstance(python_val, str):
             return ptr[i8]
         else:
+            raise_if_compile_level_callable(python_val)
             raise TypeError(f"Cannot infer PC type from Python type {type(python_val).__name__}")
     
     def promote_to_pc_default(self, python_val) -> ValueRef:

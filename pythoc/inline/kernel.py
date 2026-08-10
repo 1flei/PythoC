@@ -99,6 +99,14 @@ def _param_binding(has_annotation, target, annotation, value):
 def _type_convert(converter, value):
     return converter(value)
 
+
+# label scope around inlined prefix statements (keeps defer semantics for
+# the inlined region when the result assignment lives outside the label)
+@quote
+def _prefix_label_scope(label_name, body):
+    with __pc_intrinsics.label(label_name):  # noqa: F821
+        body
+
 # -- Frame templates --
 # Unified: all branches encoded as const guards.
 # _fold_const_if eliminates dead branches at instantiation.
@@ -135,6 +143,32 @@ def _extract_callee(callee_ast):
         raise TypeError(
             "Expected FunctionDef or Lambda, got {}".format(
                 type(callee_ast).__name__))
+
+
+def _count_returns(body):
+    """Number of Return statements in body.
+
+    Returns inside nested function/lambda definitions do not count.
+    """
+    class _ReturnCounter(ast.NodeVisitor):
+        count = 0
+
+        def visit_Return(self, node):
+            self.count += 1
+
+        def visit_FunctionDef(self, node):
+            pass
+
+        def visit_AsyncFunctionDef(self, node):
+            pass
+
+        def visit_Lambda(self, node):
+            pass
+
+    counter = _ReturnCounter()
+    for stmt in body:
+        counter.visit(stmt)
+    return counter.count
 
 
 def _build_rename_map(local_vars, param_vars, captured_vars, inline_id):
@@ -460,12 +494,55 @@ def expand_inline(request):
         exit_label = "_inline_exit_{}".format(inline_id)
         request.exit_rule.exit_label = exit_label
 
+    # --- Single terminal return (unannotated callees) ---
+    # Without a return annotation the result variable's type cannot be
+    # declared up front, so a result assignment inside the label scope
+    # would die with it. When the body has exactly one return and it is
+    # the last statement, emit the result assignment at the frame's top
+    # level instead (inferred-type assignment); the remaining prefix keeps
+    # a label scope so inlined defers still fire at the end of the region.
+    # Unannotated callees with multiple return points are rejected.
+    # Callees without any return (void) need no handling.
+    result_var = getattr(request.exit_rule, 'result_var', None)
+    terminal_value = None
+    has_terminal_return = False
+    prefix_label = exit_label
+    if (isinstance(request.exit_rule, ReturnExitRule)
+            and result_var
+            and _get_result_type(callee_ast) is None):
+        n_returns = _count_returns(callee_body)
+        if n_returns == 1 and isinstance(callee_body[-1], ast.Return):
+            terminal_value = callee_body[-1].value
+            has_terminal_return = True
+            callee_body = callee_body[:-1]
+            exit_label = None
+            request.exit_rule.exit_label = None
+        elif n_returns > 0:
+            raise RuntimeError(
+                "Cannot inline an unannotated callee with multiple return "
+                "points; add a return type annotation"
+            )
+
     # --- Transform body (rename + exit-rule) ---
     body_stmts = _transform_body(callee_body, request.exit_rule, rename_map)
 
+    if has_terminal_return:
+        from .exit_rules import VariableRenamer, _return_exit_template
+        if body_stmts:
+            body_stmts = _prefix_label_scope(
+                ast.Constant(value=prefix_label), body_stmts).stmts
+        if terminal_value is not None:
+            renamed_value = VariableRenamer(rename_map).visit(
+                copy.deepcopy(terminal_value))
+            body_stmts += _return_exit_template(
+                meta_const(True), meta_const(False),
+                ast.Name(id=result_var, ctx=ast.Store()),
+                renamed_value,
+                ast.Constant(value="_unused"),
+            ).stmts
+
     # --- Compute frame parameters ---
     has_label = exit_label is not None
-    result_var = getattr(request.exit_rule, 'result_var', None)
     result_type = _get_result_type(callee_ast) if has_label else None
     has_result_decl = bool(result_type and result_var)
 

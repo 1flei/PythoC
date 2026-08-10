@@ -56,6 +56,7 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
         )
 
     placeholder_wrapper._is_yield_generated = True
+    placeholder_wrapper._pc_compile_level_callable = True
     placeholder_wrapper.__name__ = func.__name__
     placeholder_wrapper._original_ast = func_ast
     placeholder_wrapper._yield_func_obj = func
