@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784817378097,
+  "lastUpdate": 1786376928076,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2643,6 +2643,40 @@ window.BENCHMARK_DATA = {
             "name": "compile_speed",
             "value": 0.808,
             "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "b37ffc1a059fac8ff9001add9f872f41bc0ad032",
+          "message": "Introduce lambda as closure",
+          "timestamp": "2026-08-10T22:34:12+08:00",
+          "tree_id": "f1037cbd62010783c953530edac0000fed4bd25a",
+          "url": "https://github.com/1flei/PythoC/commit/b37ffc1a059fac8ff9001add9f872f41bc0ad032"
+        },
+        "date": 1786376926660,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.68,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
           }
         ]
       }
