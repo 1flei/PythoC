@@ -298,6 +298,7 @@ def _compile_parametric_specialization(
         name=factory_wrapper._original_name,
         suffix=suffix,
         attrs=factory_wrapper._original_fn_attrs,
+        linkage=getattr(factory_wrapper, '_original_linkage', None),
         source_file=synthetic_source_file,
         source_code=source_code,
         start_line=factory_wrapper._start_line,
@@ -319,6 +320,7 @@ def _create_parametric_factory_wrapper(
     fn_attrs,
     compile_suffix,
     effect_suffix,
+    linkage=None,
 ):
     """Create a factory wrapper for a function with parametric parameters.
 
@@ -365,6 +367,7 @@ def _create_parametric_factory_wrapper(
     wrapper._original_user_globals = user_globals
     wrapper._raw_annotations = raw_annotations
     wrapper._original_fn_attrs = set(fn_attrs) if fn_attrs else set()
+    wrapper._original_linkage = linkage
     wrapper._original_compile_suffix = compile_suffix
     wrapper._original_effect_suffix = effect_suffix
     wrapper._source_file = source_file
@@ -788,7 +791,7 @@ def get_compiler(source_file, user_globals, has_suffix=False):
 
 
 def compile(func_or_class=None, suffix=None, attrs=None,
-            _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
+            linkage=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
     """
     Compile a Python function or class to native code.
     
@@ -799,6 +802,10 @@ def compile(func_or_class=None, suffix=None, attrs=None,
         attrs: Set of LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
                Applied to cross-module `declare` so the optimizer can treat calls
                as pure/no-side-effect, enabling CSE and store forwarding.
+        linkage: Linkage kind for the emitted function definition:
+               'external' (default), 'internal' (like a C static function),
+               'weak_odr' or 'linkonce_odr' (like C inline/ODR definitions,
+               allowing multiple modules to define the same symbol).
         _effect_suffix: Internal parameter for effect override (from with effect(suffix=X)).
                 This IS contagious - propagates to transitive calls that use effects.
         _effect_scope: Internal parameter for transitive effect compilation.
@@ -825,6 +832,10 @@ def compile(func_or_class=None, suffix=None, attrs=None,
     # Normalize compile_suffix early
     compile_suffix = normalize_suffix(suffix)
     fn_attrs = set(attrs) if attrs else set()
+
+    from ..ir_helpers import validate_func_linkage
+    func_name = getattr(func_or_class, '__name__', None)
+    linkage = validate_func_linkage(linkage, func_name)
     
     # Get effect_suffix from context if not explicitly provided
     if _effect_suffix is None:
@@ -840,7 +851,8 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                                 effect_suffix=effect_suffix,
                                 captured_symbols=captured_symbols,
                                 effect_scope=_effect_scope,
-                                fn_attrs=fn_attrs)
+                                fn_attrs=fn_attrs,
+                                linkage=linkage)
         return decorator
 
     return _compile_impl(func_or_class, 
@@ -848,7 +860,8 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                         effect_suffix=effect_suffix,
                         captured_symbols=captured_symbols,
                         effect_scope=_effect_scope,
-                        fn_attrs=fn_attrs)
+                        fn_attrs=fn_attrs,
+                        linkage=linkage)
 
 
 def _compile_impl(func_or_class, 
@@ -857,7 +870,8 @@ def _compile_impl(func_or_class,
                   captured_symbols=None,
                   effect_scope=_SCOPE_NOT_PROVIDED,
                   effect_override_names=None,
-                  fn_attrs=None):
+                  fn_attrs=None,
+                  linkage=None):
     """Internal implementation of compile decorator.
     
     Uses 4-tuple group_key: (source_file, scope, compile_suffix, effect_suffix)
@@ -871,6 +885,8 @@ def _compile_impl(func_or_class,
                      _SCOPE_NOT_PROVIDED means use get_definition_scope().
                      None means module-level scope.
         fn_attrs: Set of LLVM function-level attributes for cross-module declares.
+        linkage: Normalized linkage kind (None = default external); already
+                 validated by the public compile() entry point.
     """
     if inspect.isclass(func_or_class):
         return _compile_dynamic_class(
@@ -1010,6 +1026,7 @@ def _compile_impl(func_or_class,
             fn_attrs=fn_attrs,
             compile_suffix=compile_suffix,
             effect_suffix=effect_suffix,
+            linkage=linkage,
         )
 
     # Check if this is a yield-based generator function
@@ -1017,9 +1034,6 @@ def _compile_impl(func_or_class,
     yield_analyzer = analyze_yield_function(func_ast)
 
     if yield_analyzer:
-        import copy
-        original_func_ast = copy.deepcopy(func_ast)
-
         from .visible import get_all_accessible_symbols
         transform_globals = get_all_accessible_symbols(
             func,
@@ -1032,7 +1046,8 @@ def _compile_impl(func_or_class,
         wrapper = create_yield_iterator_wrapper(
             func, func_ast, yield_analyzer, transform_globals, source_file, registry
         )
-        wrapper._original_ast = original_func_ast
+        # _original_ast is set by the placeholder creation (normalized,
+        # e.g. effect-perform desugar) - do not overwrite with the raw AST.
         return wrapper
 
     from ..type_resolver import TypeResolver
@@ -1208,6 +1223,7 @@ def _compile_impl(func_or_class,
         param_names=param_names,
         overload_enabled=False,
         fn_attrs=fn_attrs or set(),
+        linkage=linkage,
         has_llvm_varargs=resolved_varargs.has_llvm_varargs,
         has_varargs=resolved_varargs.is_typed,
         has_kwargs=resolved_kwargs.is_typed,

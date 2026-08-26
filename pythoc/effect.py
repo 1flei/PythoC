@@ -358,6 +358,26 @@ def _caller_module_from_visitor(visitor) -> Optional[str]:
     return user_globals.get('__name__')
 
 
+def _block_bound_impl(effect_name: str, visitor) -> Any:
+    """Innermost block-scoped effect binding, if any.
+
+    Block bindings come from `with effect(x=impl):` in compiled code and
+    live on the active compile frame; they win over both caller overrides
+    and module defaults because they are the most local binding.
+    """
+    frame = getattr(visitor, 'func_state', None)
+    bindings_stack = (
+        getattr(frame, 'block_effect_bindings', None)
+        if frame is not None else None
+    )
+    if not bindings_stack:
+        return None
+    for bindings in reversed(bindings_stack):
+        if effect_name in bindings:
+            return bindings[effect_name]
+    return None
+
+
 def _module_default_impl(effect_name: str, caller_module: Optional[str]) -> Any:
     """Lookup per-module effect default registered via effect.default/bind_mem."""
     if not caller_module:
@@ -460,9 +480,13 @@ class EffectNamespace:
         # This tracks that the current function being compiled uses this effect
         record_effect_usage(name, getattr(visitor, 'func_state', None))
 
-        if _compile_context_has_override(name, visitor):
+        # Resolution order: block-scoped binding (with effect(...) in
+        # compiled code) > caller override > module default > namespace impl
+        impl = _block_bound_impl(name, visitor)
+
+        if impl is None and _compile_context_has_override(name, visitor):
             impl = object.__getattribute__(self, '_impl')
-        else:
+        if impl is None:
             caller_module = _caller_module_from_visitor(visitor)
             impl = _module_default_impl(name, caller_module)
             if impl is None:
@@ -475,7 +499,6 @@ class EffectNamespace:
                 f"Use effect.default({name}=impl) or effect.{name} = impl to set one.",
                 node=node, exc_type=AttributeError
             )
-
         if not hasattr(impl, attr_name):
             from .logger import logger
             logger.error(

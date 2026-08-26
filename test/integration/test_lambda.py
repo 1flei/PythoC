@@ -19,7 +19,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc.decorators.compile import compile
-from pythoc.builtin_entities import void, i32, ptr, defer, linear, consume, func
+from pythoc.builtin_entities import void, i32, ptr, defer, linear, consume, func, defer, linear, consume, func
 from pythoc.builtin_entities.instantiate import instantiate
 from pythoc.logger import set_raise_on_error
 from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group

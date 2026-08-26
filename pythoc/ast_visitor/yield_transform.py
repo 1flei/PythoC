@@ -49,6 +49,9 @@ def analyze_yield_function(func_ast: ast.FunctionDef) -> Optional[YieldAnalyzer]
 
 def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
     """Create a yield placeholder with explicit callee globals."""
+    from ..inline.perform_desugar import desugar_effect_performs
+    func_ast = desugar_effect_performs(func_ast)
+
     def placeholder_wrapper(*args, **kwargs):
         raise RuntimeError(
             f"Function '{func.__name__}' with yield requires inlining. "

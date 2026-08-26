@@ -198,6 +198,10 @@ def normalize_ast_call_args(
         from .builtin_entities import BuiltinFunction
         if isinstance(py_obj, type) and issubclass(py_obj, BuiltinFunction):
             return positional_args
+        # Python-constant callables (PythonType) also bypass: keyword
+        # arguments are evaluated as constants by PythonType._eval_call.
+        if py_obj is not None:
+            return positional_args
         if keywords:
             logger.error(
                 "keyword arguments require a callable with named parameters",

@@ -101,6 +101,10 @@ class ActiveCompileFrame:
     # attribute access; harvested by the compile callback for transitive
     # propagation into the EffectGraph.
     effect_usage: set = field(default_factory=set)
+    # Block-scoped effect bindings (with effect(x=impl): in compiled code):
+    # a stack of {name: impl} dicts, innermost last. Consulted before
+    # overrides and module defaults during effect resolution.
+    block_effect_bindings: list = field(default_factory=list)
 
 
 class CompilationContext:

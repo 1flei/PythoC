@@ -267,6 +267,15 @@ class LLVMCompiler:
         logger.debug(f"param_coercion_info={func_wrapper.param_coercion_info}")
         llvm_function = func_wrapper.ir_function
         sret_info = func_wrapper.sret_info
+
+        # Apply user-requested linkage (internal / weak_odr / linkonce_odr)
+        # to the definition. Cross-module declarations keep the default
+        # external linkage; only the definition's linkage controls how the
+        # symbol is emitted into the object file.
+        func_info = getattr(getattr(func_state, 'wrapper', None), '_func_info', None)
+        linkage = getattr(func_info, 'linkage', None)
+        if linkage:
+            llvm_function.linkage = linkage
         
         # Set parameter names (user parameters only, sret is handled internally)
         for i, param_name in enumerate(resolved_decl.param_names):

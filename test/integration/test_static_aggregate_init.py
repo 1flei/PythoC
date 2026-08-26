@@ -3,6 +3,7 @@
 
 from pythoc import compile, i32, i8, u32, u64, ptr, static, array, nullptr, offsetof, sizeof, char, void
 from pythoc import enum
+from pythoc import func
 
 
 @enum(i32)
@@ -159,6 +160,45 @@ def test_static_array_int_to_ptr() -> u64:
     return u64(s[1].name)
 
 
+@compile
+def op_add(x: i32, y: i32) -> i32:
+    return x + y
+
+
+@compile
+def op_sub(x: i32, y: i32) -> i32:
+    return x - y
+
+
+@compile
+class MethodDef:
+    name: ptr[i8]
+    func: func[i32, i32, i32]
+    flags: i32
+
+
+@compile
+def test_static_array_func_ptr() -> i32:
+    s: static[array[MethodDef, 3]] = (
+        (ptr[i8]("add"), op_add, 0),
+        (ptr[i8]("sub"), op_sub, 1),
+        (nullptr, nullptr, 0),
+    )
+    return s[0].func(10, 5) + s[1].func(10, 5) + s[0].flags + s[1].flags
+
+
+@compile
+class ArrayRef:
+    p: ptr[array[i32, 2]]
+
+
+@compile
+def test_static_array_global_ref() -> i32:
+    inner: static[array[i32, 2]] = (7, 8)
+    outer: static[array[ArrayRef, 1]] = ((ptr(inner),),)
+    return outer[0].p[0][0] + outer[0].p[0][1]
+
+
 if __name__ == "__main__":
     assert test_static_array_partial_string() == 1
     assert test_static_array_offsetof() == 0
@@ -175,4 +215,6 @@ if __name__ == "__main__":
     assert test_static_null_ptr_cast() == 1
     assert test_static_int_to_ptr_addr() == 0x1234
     assert test_static_array_int_to_ptr() == 0xABCD
+    assert test_static_array_func_ptr() == 21
+    assert test_static_array_global_ref() == 15
     print("All static aggregate init tests passed!")

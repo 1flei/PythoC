@@ -147,23 +147,36 @@ class ControlFlowMixin:
         return result
     
     def visit_With(self, node: ast.With):
-        """Handle with statements - currently only supports scoped labels
-        
-        Syntax:
-            with label("name"):
-                # body can use goto_begin("name") or goto_end("name")
-                pass
+        """Handle with statements
+
+        Supported forms:
+            with label("name"):          scoped label (goto_begin/goto_end)
+            with effect(x=impl, ...):    block-scoped effect binding: the
+                                         block runs normally, once, in place;
+                                         effect references inside resolve to
+                                         the given implementations for this
+                                         block's compilation
         """
         # Currently only support single context manager
         if len(node.items) != 1:
             logger.error("with statement currently only supports single context manager",
                         node=node, exc_type=SyntaxError)
-        
+
         item = node.items[0]
-        
+
+        # Block-scoped effect binding (checked before evaluating the call,
+        # which would fail - the effect proxy is not callable)
+        if isinstance(item.context_expr, ast.Call):
+            func_val = self.visit_expression(item.context_expr.func)
+            if func_val.is_python_value():
+                from ..effect import effect as _effect_proxy
+                if func_val.get_python_value() is _effect_proxy:
+                    self._visit_with_effect_binding(node, item.context_expr)
+                    return
+
         # Evaluate the context expression
         ctx_expr = self.visit_expression(item.context_expr)
-        
+
         # Check if this is a scoped label
         if ctx_expr.is_python_value():
             py_val = ctx_expr.get_python_value()
@@ -171,10 +184,46 @@ class ControlFlowMixin:
                 label_name = py_val[1]
                 self._visit_with_scoped_label(node, label_name)
                 return
-        
+
         # Other with statements not supported yet
         logger.error("with statement currently only supports 'label' context manager",
                     node=node, exc_type=NotImplementedError)
+
+    def _visit_with_effect_binding(self, node: ast.With, call: ast.Call):
+        """Handle with effect(x=impl, ...): block-scoped effect binding.
+
+        Pushes the bindings onto the active compile frame for the duration
+        of the block; resolution consults them first (see effect.py's
+        _block_bound_impl). Bindings are compile-time only - no suffix, no
+        recompilation - and block-scoped impls may be compile-level
+        closures capturing the current frame.
+        """
+        if call.args:
+            logger.error(
+                "with effect(...) takes only keyword arguments",
+                node=node, exc_type=TypeError
+            )
+        if self.func_state is None:
+            logger.error(
+                "with effect(...) requires a function compilation context",
+                node=node, exc_type=RuntimeError
+            )
+
+        bindings = {}
+        for kw in call.keywords:
+            value_ref = self.visit_expression(kw.value)
+            if not value_ref.is_python_value():
+                logger.error(
+                    f"effect binding '{kw.arg}' must be a compile-time value",
+                    node=kw.value, exc_type=TypeError
+                )
+            bindings[kw.arg] = value_ref.get_python_value()
+
+        self.func_state.block_effect_bindings.append(bindings)
+        try:
+            self._visit_stmt_list(node.body, add_to_cfg=True)
+        finally:
+            self.func_state.block_effect_bindings.pop()
     
     def _visit_with_scoped_label(self, node: ast.With, label_name: str):
         """Handle with label("name"): statement

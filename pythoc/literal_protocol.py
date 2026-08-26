@@ -307,10 +307,12 @@ def _lower_aggregate_slots(visitor, carrier, target_pc_type, element_fn):
 def lower_sequence_to_constant(visitor, carrier, target_pc_type):
     """Fold a sequence literal carrier to a single ir.Constant, or return None.
 
-    The constant-only view of aggregate materialization: every leaf must fold to
-    an ir.Constant (so the result is usable as a static/global initializer, which
-    cannot run instructions). Any non-constant leaf or unsupported shape returns
-    None. Builder-free, so it is valid at global scope.
+    The constant-only view of aggregate materialization: every leaf must fold
+    to a link-time constant (an ir.Constant or an ir.GlobalValue such as a
+    function or global variable reference), so the result is usable as a
+    static/global initializer, which cannot run instructions. Any other leaf
+    or unsupported shape returns None. Builder-free, so it is valid at global
+    scope.
     """
     from llvmlite import ir
 
@@ -333,6 +335,7 @@ def materialize_sequence_value(visitor, carrier, target_pc_type):
     :func:`lower_sequence_to_constant`.
     """
     from llvmlite import ir
+    from .ir_helpers import is_link_time_constant
 
     lowered = _lower_aggregate_slots(
         visitor, carrier, target_pc_type, _lower_element_value)
@@ -341,7 +344,7 @@ def materialize_sequence_value(visitor, carrier, target_pc_type):
             f"Cannot materialize sequence literal into {target_pc_type}",
             node=None, exc_type=TypeError)
     agg_llvm, values = lowered
-    if all(isinstance(v, ir.Constant) for v in values):
+    if all(is_link_time_constant(v) for v in values):
         return ir.Constant(agg_llvm, values)
     agg = ir.Constant(agg_llvm, ir.Undefined)
     for i, v in enumerate(values):
@@ -358,14 +361,14 @@ def _carrier_of(elem):
 
 
 def _lower_element_to_constant(visitor, elem, target_pc_type):
-    """Fold one aggregate element to an ir.Constant, or return None.
+    """Fold one aggregate element to a link-time constant, or return None.
 
     Nested sequence literals recurse through ``lower_sequence_to_constant``;
-    every other leaf goes through ``TypeConverter.convert`` and is accepted only
-    if it folds to an ir.Constant.
+    every other leaf goes through ``TypeConverter.convert`` and is accepted
+    only if it is a link-time constant (see ``is_link_time_constant``).
     """
-    from llvmlite import ir
     from .valueref import ensure_ir, wrap_value
+    from .ir_helpers import is_link_time_constant
 
     nested = _carrier_of(elem)
     if nested is not None:
@@ -376,7 +379,7 @@ def _lower_element_to_constant(visitor, elem, target_pc_type):
         elem = wrap_value(elem, kind="python",
                           type_hint=PythonType.wrap(elem, is_constant=True))
     ir_val = ensure_ir(visitor.type_converter.convert(elem, target_pc_type))
-    return ir_val if isinstance(ir_val, ir.Constant) else None
+    return ir_val if is_link_time_constant(ir_val) else None
 
 
 def _lower_element_value(visitor, elem, target_pc_type):

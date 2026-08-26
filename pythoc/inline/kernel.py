@@ -549,7 +549,13 @@ def expand_inline(request):
     decl_stmts = []
     if isinstance(request.exit_rule, YieldExitRule):
         exit_rule = request.exit_rule
-        if exit_rule.return_type_annotation:
+        # A void-returning producer yields no payload: no loop-var
+        # declaration (declaring one would be a void-typed variable).
+        is_void_return = (
+            isinstance(exit_rule.return_type_annotation, ast.Name)
+            and exit_rule.return_type_annotation.id == 'void'
+        )
+        if exit_rule.return_type_annotation and not is_void_return:
             decl_stmts = _build_loop_var_declarations(
                 exit_rule.loop_var,
                 exit_rule.return_type_annotation,

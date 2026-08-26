@@ -268,9 +268,10 @@ class AssignmentsMixin:
             global_name = f"{func_name}.{var_name}"
             
             # Static variable with compile-time constant initialization (like C).
-            # Valid initializers are constants and global values such as function
-            # references (ir.Function), which are link-time constants.
-            if not isinstance(rvalue_ir, (ir.Constant, ir.Function)):
+            # Valid initializers are link-time constants: folded constants and
+            # global values such as function or global variable references.
+            from ..ir_helpers import is_link_time_constant
+            if not is_link_time_constant(rvalue_ir):
                 logger.error(
                     f"Static variable '{var_name}' requires compile-time constant initializer",
                     node=node

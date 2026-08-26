@@ -40,6 +40,22 @@ class ErrnoSlotProvider:
         return _slot_fn
 
 
+class _LocalSlotProvider:
+    """errno provider whose slot is a frame local captured by a closure.
+
+    Used by result_do: the err channel lives in the composing function's
+    frame (an alloca promoted to a register), replacing the global static
+    slot on the do path. The slot function is a compile-level closure
+    capturing the channel by reference.
+    """
+
+    def __init__(self, slot_fn):
+        self._slot_fn = slot_fn
+
+    def get_slot(self, err_type):
+        return self._slot_fn
+
+
 effect.default(errno=ErrnoSlotProvider())
 
 
@@ -150,15 +166,16 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
     def result_is_err(r: result_type) -> pc_bool:
         return not result_is_ok(r)
 
-    errno_slot = effect.errno.get_slot(err_type)
-
     @compile(suffix=(suffix_base, "bind"))
     def result_bind(r: result_type) -> ok_type:
         match r:
             case (result_type.Ok, value):
                 yield value
             case (result_type.Err, err_value):
-                ptr[err_type](errno_slot())[0] = err_value
+                # Resolve the err channel at compile time, per use site -
+                # block-scoped effect bindings (e.g. result_do's frame-local
+                # slot) win over the module default provider.
+                ptr[err_type](effect.errno.get_slot(err_type)())[0] = err_value
                 pass
 
     @compile(suffix=(suffix_base, "unwrap_or"))
@@ -172,12 +189,20 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
     @inline
     def result_do(
         genexp,
-        _errno_slot=errno_slot,
         _result_type=result_type,
     ) -> result_type:
-        for value in genexp:
-            return _result_type(_result_type.Ok, value)
-        return _result_type(_result_type.Err, ptr[err_type](_errno_slot())[0])
+        # The err channel is a frame local of the composing function: the
+        # slot function is a compile-level closure capturing it by
+        # reference, bound block-scoped so the inlined binds write into it.
+        err: err_type
+
+        def _slot() -> ptr[err_type]:
+            return ptr(err)
+
+        with effect(errno=_LocalSlotProvider(_slot)):
+            for value in genexp:
+                return _result_type(_result_type.Ok, value)
+        return _result_type(_result_type.Err, err)
 
     class result_api:
         type = result_type

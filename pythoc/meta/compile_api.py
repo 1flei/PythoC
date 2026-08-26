@@ -38,6 +38,7 @@ def compile_ast(
     name=None,
     suffix=None,
     attrs=None,
+    linkage=None,
     source_file=None,
     source_code=None,
     start_line=1,
@@ -62,6 +63,7 @@ def compile_ast(
         name: Override the function name (applied to AST before compilation).
         suffix: Explicit compile_suffix for specialization.
         attrs: Set of LLVM function-level attributes.
+        linkage: Linkage kind for the emitted definition (see @compile).
         source_file: Source file for grouping/diagnostics. If None, uses
             the caller's file.
         source_code: Source code string for diagnostics.
@@ -92,6 +94,9 @@ def compile_ast(
         fn_ast.name = name
 
     func_name = fn_ast.name
+
+    from ..ir_helpers import validate_func_linkage
+    linkage = validate_func_linkage(linkage, func_name)
 
     # #6: Debug dump — print the generated Python-like source for inspection.
     if debug:
@@ -235,6 +240,7 @@ def compile_ast(
         param_names=param_names,
         overload_enabled=False,
         fn_attrs=fn_attrs,
+        linkage=linkage,
     )
 
     # Create wrapper

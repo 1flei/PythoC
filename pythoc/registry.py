@@ -128,6 +128,10 @@ class FunctionInfo:
     # LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
     # Applied to cross-module `declare` so the optimizer can treat calls as pure, etc.
     fn_attrs: Set[str] = field(default_factory=set)
+    # Linkage kind for the emitted definition, from @compile(linkage=...).
+    # None keeps the default external linkage; validated values are
+    # 'internal', 'weak_odr', 'linkonce_odr' (see validate_func_linkage).
+    linkage: Optional[str] = None
     binding_state: Optional[Any] = None
     # Parametric polymorphism metadata (populated when parameters are annotated with ``param``).
     parametric_indices: Optional[List[int]] = None

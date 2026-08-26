@@ -1,6 +1,6 @@
 """IR generation helpers for type qualifiers (const, volatile)"""
 from llvmlite import ir
-from typing import Any
+from typing import Any, Optional
 from .logger import logger
 
 
@@ -116,6 +116,42 @@ def is_static(pc_type: Any) -> bool:
 def is_thread_local(pc_type: Any) -> bool:
     """Check if type is thread_local qualified"""
     return is_qualifier_type(pc_type, 'thread_local')
+
+
+def is_link_time_constant(value: Any) -> bool:
+    """Check if an IR value is usable inside a constant (static) initializer.
+
+    ir.Constant covers folded constants. ir.GlobalValue subclasses
+    (ir.Function, ir.GlobalVariable) are link-time constants and valid
+    elements of constant aggregate initializers, even though llvmlite does
+    not model them as ir.Constant.
+    """
+    return isinstance(value, (ir.Constant, ir.GlobalValue))
+
+
+# Linkage kinds supported by @compile(linkage=...). They map to the C
+# toolchain concepts of a plain external definition (default), a static
+# function (internal), and inline/ODR definitions (weak_odr / linkonce_odr).
+FUNC_LINKAGE_KINDS = frozenset({'external', 'internal', 'weak_odr', 'linkonce_odr'})
+
+
+def validate_func_linkage(linkage: Optional[str],
+                          func_name: Optional[str] = None) -> Optional[str]:
+    """Validate a user-requested function linkage kind.
+
+    Returns the normalized linkage: None for the default external linkage,
+    so not specifying linkage keeps the emitted IR byte-identical to before.
+    Unsupported values raise a loud error.
+    """
+    if linkage is None:
+        return None
+    if linkage not in FUNC_LINKAGE_KINDS:
+        logger.error(
+            f"Unsupported linkage '{linkage}'"
+            + (f" for function '{func_name}'" if func_name else "")
+            + f"; expected one of {sorted(FUNC_LINKAGE_KINDS)}",
+            node=None, exc_type=TypeError)
+    return None if linkage == 'external' else linkage
 
 
 def make_load_volatile(load_inst: ir.LoadInstr) -> ir.LoadInstr:

@@ -309,6 +309,7 @@ class LoopsMixin:
             inline_info['call_node'],
             func_obj=func_obj,
             callee_globals_override=callee_globals,
+            all_visible=inline_info.get('is_closure', False),
         )
 
         if inline_result is None:

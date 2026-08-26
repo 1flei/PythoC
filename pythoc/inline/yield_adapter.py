@@ -41,6 +41,7 @@ class YieldInlineAdapter:
         call_node: ast.Call,
         func_obj=None,
         callee_globals_override=None,
+        all_visible=False,
     ):
         """
         Try to inline a for loop over a yield function
@@ -50,6 +51,9 @@ class YieldInlineAdapter:
             func_ast: The yield function's AST
             call_node: The original call AST node
             func_obj: Original function object (to access __globals__)
+            all_visible: If True, the callee captures names from ALL
+                enclosing scopes (closure semantics); otherwise only the
+                current scope (module-level yield function semantics).
 
         Returns:
             (InlineResult, after_else_label) tuple if successful,
@@ -69,7 +73,7 @@ class YieldInlineAdapter:
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
 
         # Get caller context (available variables in current scope)
-        caller_context = self._build_caller_context()
+        caller_context = self._build_caller_context(all_visible=all_visible)
 
         # Extract return type annotation from function
         return_type_annotation = None
@@ -139,10 +143,10 @@ class YieldInlineAdapter:
         # Other complex targets not supported
         return None
     
-    def _build_caller_context(self) -> ScopeContext:
+    def _build_caller_context(self, all_visible: bool = False) -> ScopeContext:
         """
         Build caller scope context from visitor state
-        
+
         Returns all variables available in current scope
         """
         scope_manager = getattr(self.visitor, 'scope_manager', None)
@@ -150,7 +154,7 @@ class YieldInlineAdapter:
         return build_caller_context(
             scope_manager,
             local_vars=local_vars,
-            visibility="current",
+            visibility="all_visible" if all_visible else "current",
         )
     
     def _is_inlinable(self, func_ast: ast.FunctionDef) -> bool:

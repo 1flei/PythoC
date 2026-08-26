@@ -29,6 +29,14 @@ class _ClosureWrapper:
     (via ClosureAdapter). Default arguments are pre-evaluated ValueRefs
     captured eagerly at the closure definition site.
 
+    A closure whose body contains yield is a for-loop producer, not a
+    plain call: handle_call returns a ValueRef carrying
+    ``_yield_inline_info`` so the yield-inline machinery splices the
+    consumer's loop body into the closure body. Captures work by
+    reference exactly as for plain closures - which makes a closure
+    handler able to write a frame-local channel (e.g. an error slot)
+    with zero runtime cost.
+
     Marked as a compile-level callable so misuse in runtime positions
     produces the uniform boundary error.
     """
@@ -46,9 +54,28 @@ class _ClosureWrapper:
         self._param_names = param_names
         self._n_required = n_required
         self._default_vrefs = default_vrefs
+        self._has_yield = _contains_yield(func_ast)
 
     def handle_call(self, visitor, func_ref, args, call_node):
-        """Execute closure inline using ClosureAdapter"""
+        """Execute closure inline, or hand it to the yield-inline path."""
+        if self._has_yield:
+            from ..builtin_entities.python_type import PythonType
+            result = wrap_value(self, kind='python', type_hint=PythonType(self))
+            result._yield_inline_info = {
+                'func_obj': None,
+                'callee_globals': self.func_globals,
+                'placeholder': self,
+                'original_ast': self.func_ast,
+                'call_node': call_node,
+                'call_args': args,
+                # Closures capture by reference from ALL enclosing scopes,
+                # unlike module-level yield functions (whose free names
+                # resolve via callee globals). The yield-inline path must
+                # use the matching caller visibility.
+                'is_closure': True,
+            }
+            return result
+
         from ..inline import ClosureAdapter
 
         n_provided = len(args)
@@ -66,6 +93,29 @@ class _ClosureWrapper:
         # Use ClosureAdapter to inline the closure with captured globals
         adapter = ClosureAdapter(visitor, param_bindings, func_globals=self.func_globals)
         return adapter.execute_closure(self.func_ast)
+
+
+def _contains_yield(func_ast: ast.FunctionDef) -> bool:
+    """True if the function body contains yield directly (not in nested defs)."""
+    class _YieldFinder(ast.NodeVisitor):
+        found = False
+
+        def visit_Yield(self, node):
+            self.found = True
+
+        def visit_FunctionDef(self, node):
+            pass
+
+        def visit_AsyncFunctionDef(self, node):
+            pass
+
+        def visit_Lambda(self, node):
+            pass
+
+    finder = _YieldFinder()
+    for stmt in func_ast.body:
+        finder.visit(stmt)
+    return finder.found
 
 
 class FunctionsMixin:

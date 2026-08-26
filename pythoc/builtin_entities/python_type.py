@@ -314,24 +314,24 @@ class PythonType(_PythonTypeBase):
         """Evaluate a Python callable with pre-evaluated arguments."""
         from llvmlite import ir
 
-        args_py = []
-        for arg in args:
+        def _as_python(arg):
             if hasattr(arg, 'is_python_value') and arg.is_python_value():
-                args_py.append(arg.value)
-                continue
-
+                return arg.value
             if isinstance(arg.value, ir.Constant):
                 if isinstance(arg.value.type, ir.IntType):
-                    args_py.append(arg.value.constant)
+                    return arg.value.constant
                 elif isinstance(arg.value.type, (ir.FloatType, ir.DoubleType)):
-                    args_py.append(arg.value.constant)
-                else:
-                    args_py.append(arg)
-            else:
-                args_py.append(arg)
+                    return arg.value.constant
+            return arg
+
+        args_py = [_as_python(arg) for arg in args]
+        kwargs_py = {}
+        for kw in (node.keywords if node is not None else []):
+            kwargs_py[kw.arg] = _as_python(
+                visitor.visit_rvalue_expression(kw.value))
 
         try:
-            result = target_callable(*args_py)
+            result = target_callable(*args_py, **kwargs_py)
         except Exception as e:
             import traceback
             tb_str = ''.join(traceback.format_exception(type(e), e, e.__traceback__))
