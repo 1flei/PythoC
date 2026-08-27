@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786376928076,
+  "lastUpdate": 1787850337871,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2671,6 +2671,40 @@ window.BENCHMARK_DATA = {
           {
             "name": "binary_tree",
             "value": 0.68,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "27fa9fc44472ed01cd3b534c744d1653dd885dc7",
+          "message": "Introduce class static member as an alternative to the module static variable",
+          "timestamp": "2026-08-27T23:51:23+08:00",
+          "tree_id": "eb5ae7dcc29f84b55dcc6c50752534c57c6ea9de",
+          "url": "https://github.com/1flei/PythoC/commit/27fa9fc44472ed01cd3b534c744d1653dd885dc7"
+        },
+        "date": 1787850336891,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.81,
             "unit": "PC/C ratio"
           },
           {
