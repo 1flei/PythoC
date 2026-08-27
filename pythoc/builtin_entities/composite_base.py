@@ -428,7 +428,12 @@ class CompositeType(BuiltinType):
                 parsed_field_types.append(resolved_type)
             else:
                 parsed_field_types.append(ftype)
-        
+
+        # Class-level static members (``name: static[T] = ...``) are not
+        # instance fields; split them out before the unified type is built.
+        from ..decorators.class_statics import split_static_members
+        parsed_field_types = split_static_members(target_cls, parsed_field_types)
+
         field_names = [fname for fname, ftype in target_cls._struct_fields]
         needs_type_resolution = any(isinstance(ft, str) for ft in parsed_field_types)
         

@@ -228,6 +228,18 @@ class UnionType(CompositeType):
         
         # Check if union has this field
         if not cls.has_field(attr_name):
+            # Class-level access may resolve to a class static member before
+            # falling back to compiled class methods.
+            is_class_level = (
+                base.is_python_value()
+                and getattr(base.value, '_union_type', None) is cls
+            )
+            if is_class_level:
+                from ..decorators.class_statics import (
+                    lookup_class_static, get_or_create_static_global,
+                )
+                if lookup_class_static(cls, attr_name) is not None:
+                    return get_or_create_static_global(visitor, cls, attr_name, node)
             # Fall back to class-level method lookup (compiled wrappers
             # attached by @compile/class-method support).
             from ..decorators.class_methods import (

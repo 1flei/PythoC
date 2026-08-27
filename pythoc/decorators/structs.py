@@ -229,6 +229,11 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
         else:
             parsed_field_types.append(ftype)
 
+    # Class-level static members (``name: static[T] = ...``) are not instance
+    # fields; split them out before the unified type is built.
+    from .class_statics import split_static_members
+    parsed_field_types = split_static_members(cls, parsed_field_types)
+
     # === CREATE UNIFIED STRUCT TYPE ===
     field_names = [fname for fname, ftype in cls._struct_fields]
 

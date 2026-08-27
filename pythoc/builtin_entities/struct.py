@@ -550,6 +550,11 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         )
 
         if is_class_level:
+            from ..decorators.class_statics import (
+                lookup_class_static, get_or_create_static_global,
+            )
+            if lookup_class_static(cls, attr_name) is not None:
+                return get_or_create_static_global(visitor, cls, attr_name, node)
             method = lookup_class_method(cls, attr_name)
             if method is not None:
                 return wrap_class_method_as_python_value(method, node)

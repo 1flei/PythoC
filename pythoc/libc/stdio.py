@@ -17,6 +17,7 @@ __all__ = [
     'printf', 'scanf', 'puts', 'getchar', 'putchar',
     'fopen', 'fclose', 'freopen', 'remove', 'fdopen',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
+    'fileno',
     '__stdinp', '__stdoutp', '__stderrp',
     'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
     'setvbuf', 'setbuf', 'fgetc', 'fputc', 'ungetc',
@@ -127,6 +128,11 @@ def pclose(stream: ptr[FILE]) -> i32:
 @extern(lib='c')
 def fflush(stream: ptr[i8]) -> i32:
     """Flush file buffer"""
+    pass
+
+@extern(lib='c')
+def fileno(stream: ptr[i8]) -> i32:
+    """Return the integer file descriptor underlying a stream"""
     pass
 
 # macOS exposes stdin/stdout/stderr as global FILE* variables.  The C
