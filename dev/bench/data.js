@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787850337871,
+  "lastUpdate": 1787923467921,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2711,6 +2711,45 @@ window.BENCHMARK_DATA = {
             "name": "nsieve",
             "value": 1.05,
             "unit": "PC/C ratio"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "60770915b3e06a5364cdd17873436838d9551c3a",
+          "message": "Modify the default behavior of class static member and fix CI",
+          "timestamp": "2026-08-28T21:20:44+08:00",
+          "tree_id": "01f28ac780bc51897e9b961e06020d828ff4aee4",
+          "url": "https://github.com/1flei/PythoC/commit/60770915b3e06a5364cdd17873436838d9551c3a"
+        },
+        "date": 1787923467190,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.99,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.53,
+            "unit": "seconds/test"
           }
         ]
       }
