@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from pythoc.native_executor import MultiSOExecutor
+from pythoc.build.deps import DEPS_VERSION
 from pythoc.utils.link_utils import get_shared_lib_extension
 
 
@@ -203,7 +204,7 @@ class TestMultiSOExecutor(unittest.TestCase):
             )
 
             deps_data = {
-                "version": 11,
+                "version": DEPS_VERSION,
                 "source_mtime": 0.0,
                 "link_objects": [],
                 "link_libraries": [],
@@ -238,7 +239,7 @@ class TestMultiSOExecutor(unittest.TestCase):
             embed_so = os.path.join(tmpdir, "embed.dll")
 
             deps_data = {
-                "version": 11,
+                "version": DEPS_VERSION,
                 "source_mtime": 0.0,
                 "link_objects": [],
                 "link_libraries": [],

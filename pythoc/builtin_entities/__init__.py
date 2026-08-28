@@ -65,7 +65,7 @@ from .llvm_asm import llvm_asm
 
 # Atomic operation intrinsics
 from .atomic import (
-    atomic_load_i64, atomic_store_i64, atomic_fetch_add_i64, atomic_cas_i64,
+    atomic_load_i64, atomic_store_i64, atomic_fetch_add_i64, atomic_cas_i64, atomic_cas_i32,
     atomic_load_i32, atomic_store_i32,
 )
 
@@ -180,7 +180,7 @@ __all__ = [
     # Inline assembly intrinsic
     'llvm_asm',
     'atomic_load_i64', 'atomic_store_i64',
-    'atomic_fetch_add_i64', 'atomic_cas_i64',
+    'atomic_fetch_add_i64', 'atomic_cas_i64', 'atomic_cas_i32',
     'atomic_load_i32', 'atomic_store_i32',
     
     # Python type wrapper

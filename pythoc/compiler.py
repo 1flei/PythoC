@@ -28,6 +28,10 @@ binding.initialize_native_asmparser()
 # Detect pass manager API: llvmlite <0.45 uses legacy PM, >=0.45 uses new PM.
 _USE_NEW_PM = not hasattr(binding, 'create_function_pass_manager')
 
+# One TargetMachine per process/triple: layout is a function of the
+# target, not of the individual LLVM module.
+_target_machine_cache = {}
+
 
 @dataclass
 class _ResolvedFunctionDeclaration:
@@ -71,8 +75,11 @@ class LLVMCompiler:
             triple = triple.replace('-windows-msvc', '-windows-gnu')
         self.module.triple = triple
         # Set data layout for correct struct size calculation
-        target = binding.Target.from_triple(self.module.triple)
-        target_machine = target.create_target_machine()
+        target_machine = _target_machine_cache.get(triple)
+        if target_machine is None:
+            target = binding.Target.from_triple(triple)
+            target_machine = target.create_target_machine()
+            _target_machine_cache[triple] = target_machine
         self.module.data_layout = target_machine.target_data
         return self.module
     

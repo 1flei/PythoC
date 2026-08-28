@@ -135,3 +135,34 @@ class atomic_cas_i64(BuiltinFunction):
         )
         result = visitor.builder.zext(success, ir.IntType(32))
         return wrap_value(result, kind='value', type_hint=i32)
+
+
+class atomic_cas_i32(BuiltinFunction):
+    @classmethod
+    def get_name(cls) -> str:
+        return 'atomic_cas_i32'
+
+    @classmethod
+    def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
+        if len(args) != 3:
+            logger.error(
+                "atomic_cas_i32() takes exactly 3 arguments",
+                node=node, exc_type=TypeError,
+            )
+        ptr_value = ensure_ir(args[0])
+        expected_ptr = ensure_ir(args[1])
+        expected = visitor.builder.load_atomic(
+            expected_ptr, ordering='seq_cst', align=4, typ=ir.IntType(32),
+        )
+        desired = visitor.implicit_coercer.coerce(args[2], i32, node)
+        pair = visitor.builder.cmpxchg(
+            ptr_value, expected, ensure_ir(desired),
+            ordering='seq_cst', failordering='seq_cst',
+        )
+        old_value = visitor.builder.extract_value(pair, 0)
+        success = visitor.builder.extract_value(pair, 1)
+        visitor.builder.store_atomic(
+            old_value, expected_ptr, ordering='seq_cst', align=4,
+        )
+        result = visitor.builder.zext(success, ir.IntType(32))
+        return wrap_value(result, kind='value', type_hint=i32)

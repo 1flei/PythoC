@@ -802,10 +802,12 @@ def compile(func_or_class=None, suffix=None, attrs=None,
         attrs: Set of LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
                Applied to cross-module `declare` so the optimizer can treat calls
                as pure/no-side-effect, enabling CSE and store forwarding.
-        linkage: Linkage kind for the emitted function definition:
-               'external' (default), 'internal' (like a C static function),
-               'weak_odr' or 'linkonce_odr' (like C inline/ODR definitions,
-               allowing multiple modules to define the same symbol).
+        linkage: Linkage kind for the emitted function definition, or for
+               class-level static members when decorating a class:
+               'external' (default for functions), 'internal' (like a C
+               static; module-private), 'weak_odr' or 'linkonce_odr' (like
+               C++ inline/ODR definitions, allowing multiple modules to
+               define the same symbol; default for class statics).
         _effect_suffix: Internal parameter for effect override (from with effect(suffix=X)).
                 This IS contagious - propagates to transitive calls that use effects.
         _effect_scope: Internal parameter for transitive effect compilation.
@@ -835,6 +837,11 @@ def compile(func_or_class=None, suffix=None, attrs=None,
 
     from ..ir_helpers import validate_func_linkage
     func_name = getattr(func_or_class, '__name__', None)
+    # Class statics default to weak_odr (one program-wide entity, like a C++
+    # inline static member); 'internal' gives module-private storage instead.
+    # Keep the requested value before validate_func_linkage collapses
+    # 'external' to None for functions.
+    static_linkage = linkage if linkage else 'weak_odr'
     linkage = validate_func_linkage(linkage, func_name)
     
     # Get effect_suffix from context if not explicitly provided
@@ -852,7 +859,8 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                                 captured_symbols=captured_symbols,
                                 effect_scope=_effect_scope,
                                 fn_attrs=fn_attrs,
-                                linkage=linkage)
+                                linkage=linkage,
+                                static_linkage=static_linkage)
         return decorator
 
     return _compile_impl(func_or_class, 
@@ -861,7 +869,8 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                         captured_symbols=captured_symbols,
                         effect_scope=_effect_scope,
                         fn_attrs=fn_attrs,
-                        linkage=linkage)
+                        linkage=linkage,
+                        static_linkage=static_linkage)
 
 
 def _compile_impl(func_or_class, 
@@ -871,7 +880,8 @@ def _compile_impl(func_or_class,
                   effect_scope=_SCOPE_NOT_PROVIDED,
                   effect_override_names=None,
                   fn_attrs=None,
-                  linkage=None):
+                  linkage=None,
+                  static_linkage='weak_odr'):
     """Internal implementation of compile decorator.
     
     Uses 4-tuple group_key: (source_file, scope, compile_suffix, effect_suffix)
@@ -887,12 +897,18 @@ def _compile_impl(func_or_class,
         fn_attrs: Set of LLVM function-level attributes for cross-module declares.
         linkage: Normalized linkage kind (None = default external); already
                  validated by the public compile() entry point.
+        static_linkage: Linkage for class-level static members. Defaults to
+                 weak_odr (one program-wide entity, like a C++ inline static
+                 member); 'internal' gives module-private storage instead.
+                 '@compile(linkage=...)' on a class forwards that kind to
+                 every static member.
     """
     if inspect.isclass(func_or_class):
         return _compile_dynamic_class(
             func_or_class,
             suffix=compile_suffix,
             captured_symbols=captured_symbols,
+            static_linkage=static_linkage,
         )
 
     func = func_or_class
@@ -1236,6 +1252,12 @@ def _compile_impl(func_or_class,
         source_file
     )
     compiler = group['compiler']
+    from ..build.cache import fingerprint_function_content
+    content = fingerprint_function_content(func_ast, user_globals)
+    if content.digest:
+        group.setdefault('_ast_content_hashes', []).append(content.digest)
+        if content.captured:
+            output_manager.record_nested_captured_hash(content.digest)
     logger.debug(f"@compile {func.__name__}: group_key={group_key}")
     
     from ..effect import capture_effect_context, capture_effect_override_names

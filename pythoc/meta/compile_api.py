@@ -9,7 +9,6 @@ of a decorated Python function.
 
 import ast
 import copy
-import hashlib
 import inspect
 import os
 from typing import Any, Callable, Dict, List, Optional, Set, Union
@@ -115,17 +114,14 @@ def compile_ast(
         from ..builtin_entities.types import void
         return_type_hint = void
 
-    # #1/#9: Compute content hash of the AST body for cache invalidation.
-    # This catches cases where source_file stays the same but the generated
-    # AST changes (e.g. meta-generated code from different programs).
-    try:
-        _ast_content_hash = hashlib.sha256(
-            ast.dump(fn_ast).encode('utf-8')
-        ).hexdigest()[:12]
-    except Exception:
-        _ast_content_hash = None
-
     user_globals = dict(user_globals) if user_globals else {}
+
+    # Content hash of the AST plus bakeable captured constants, so a
+    # cache hit cannot reuse IR that folded a different Python value
+    # (e.g. a process-local address) into a global initializer.
+    from ..build.cache import fingerprint_function_content
+    _content = fingerprint_function_content(fn_ast, user_globals)
+    _ast_content_hash = _content.digest
     fn_attrs = set(attrs) if attrs else set()
 
     # Synthesize source_file from caller's frame if not provided
@@ -266,6 +262,8 @@ def compile_ast(
     if _ast_content_hash:
         hashes = group.setdefault('_ast_content_hashes', [])
         hashes.append(_ast_content_hash)
+        if _content.captured:
+            output_manager.record_nested_captured_hash(_ast_content_hash)
 
     logger.debug("meta.compile_ast {}: group_key={}".format(func_name, group_key))
 

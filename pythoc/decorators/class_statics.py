@@ -10,14 +10,21 @@ in the class body using the same annotation form as function-local statics:
         buf: static[array[i32, 4]]
 
 Such members are not instance fields: they have static storage duration
-(C++ static member semantics) and lower to one internal-linkage global per
-compilation module, named ``ClassName[_suffix].member`` so generic
-instantiations stay independent. Access goes through the class only
-(``Cls.member``); instance access is intentionally not resolved, keeping
-the instance/class namespace separation used by struct attribute handling.
+(C++ static member semantics) and lower to one LLVM global per compilation
+module, named ``ClassName[_suffix].member`` so generic instantiations stay
+independent. Default linkage is weak_odr: every module that touches the
+member emits a coalescable definition, so the whole program shares one
+entity (C++ inline static member semantics); ``@compile(linkage='internal')``
+on the class opts into module-private storage, and ``@extern`` on a class
+emits a declaration (external, no initializer) so another module's
+definition can provide the storage.
+Access goes through the class only (``Cls.member``); instance access is
+intentionally not resolved, keeping the instance/class namespace
+separation used by struct attribute handling.
 
 Initializers must be link-time constants, matching function-local statics;
-an omitted initializer zero-initializes (C semantics).
+an omitted initializer zero-initializes (C semantics) unless the class is
+an ``@extern`` declaration.
 """
 from __future__ import annotations
 
@@ -87,10 +94,12 @@ def lookup_class_static(decorated_cls, attr_name: str) -> Optional[Tuple[Any, An
 def get_or_create_static_global(visitor, decorated_cls, attr_name: str, node):
     """Return an address-kind ValueRef for a class-level static member.
 
-    Lazily creates one internal-linkage ``ir.GlobalVariable`` per compilation
-    module (same pattern as function-local statics), reusing an existing
-    global of the same name when the member is accessed from several
-    functions in the same module.
+    Lazily creates one ``ir.GlobalVariable`` per compilation module (same
+    pattern as function-local statics), reusing an existing global of the
+    same name when the member is accessed from several functions in the
+    same module. Linkage comes from the owning class (default weak_odr, so
+    all modules share one entity); ``@extern`` classes emit a declaration
+    with no initializer.
     """
     from llvmlite import ir
     from ..valueref import wrap_value
@@ -117,15 +126,23 @@ def get_or_create_static_global(visitor, decorated_cls, attr_name: str, node):
 
     if global_var is None:
         llvm_type = pc_type.get_llvm_type(visitor.module.context)
-        seed = _fold_static_initializer(visitor, pc_type, llvm_type, init_value,
-                                        attr_name, node)
+        is_decl = getattr(owner_cls, '_static_is_decl', False)
+        linkage = getattr(owner_cls, '_static_linkage', 'weak_odr')
 
         global_var = ir.GlobalVariable(visitor.module, llvm_type, global_name)
-        global_var.linkage = 'internal'  # Internal linkage = static in C
         if is_thread_local(pc_type):
             global_var.storage_class = 'thread_local'
-        global_var.initializer = seed
-        global_var.global_constant = False
+        if not is_decl:
+            # A defining global with an initializer already has external
+            # linkage; setting linkage='external' emits invalid
+            # ``external global T <init>`` IR. Only non-default kinds
+            # (internal / weak_odr / ...) are written onto the definition.
+            if linkage != 'external':
+                global_var.linkage = linkage
+            seed = _fold_static_initializer(visitor, pc_type, llvm_type,
+                                            init_value, attr_name, node)
+            global_var.initializer = seed
+            global_var.global_constant = False
 
     return wrap_value(global_var, kind='address', type_hint=pc_type,
                       address=global_var)

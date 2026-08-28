@@ -135,7 +135,8 @@ def add_struct_handle_call(cls):
     return cls
 
 
-def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=None):
+def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=None,
+                          static_linkage='weak_odr'):
     """Compile a @compile decorated class into a unified struct/union type
     
     This function now uses the unified struct type system with structural typing.
@@ -150,6 +151,9 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
                       attach_class_methods so that class-body ``def`` methods can resolve
                       names visible at the decoration site (closure variables, the class
                       itself for self-referential annotations, etc.).
+        static_linkage: LLVM linkage for class-level static members (default
+                      weak_odr: one program-wide entity, like a C++ inline
+                      static member; 'internal' gives module-private storage)
     """
     # Default to struct type factory
     if type_factory is None:
@@ -294,6 +298,7 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
     else:
         cls._anonymous_suffix = None
         cls._compile_suffix = None
+    cls._static_linkage = static_linkage
     
     # Delegate all protocol methods to unified type
     cls.handle_type_call = unified_type.handle_type_call

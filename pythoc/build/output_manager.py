@@ -285,6 +285,25 @@ class OutputManager:
         from ..logger import logger
         logger.debug(f"queue_compilation: {func_info.name}, group_key={group_key}, total_pending={pending_count}")
 
+    def record_nested_captured_hash(self, digest: str):
+        """Fold a nested captured-constant digest into groups currently codegen'ing.
+
+        A nested @compile that bakes process-local scalars (heap addresses)
+        is often created only while lowering a parent.  If the parent cache-
+        hits, that nested decoration never runs again and the stale nested
+        .so is loaded from .deps.  Recording the nested digest on the parent
+        makes the next process's pre-codegen hash disagree with the on-disk
+        object, so the parent is recompiled and re-creates the nested fn.
+        """
+        with self._state_lock:
+            for group_key in self._active_build_groups:
+                group = self._all_groups.get(group_key)
+                if group is None:
+                    continue
+                hashes = group.setdefault('_ast_content_hashes', [])
+                if digest not in hashes:
+                    hashes.append(digest)
+
     def _get_pending_symbols(self, group_key):
         """Return symbol names currently expected to be materialized for a group."""
         with self._state_lock:
@@ -351,14 +370,16 @@ class OutputManager:
                 from .deps import get_dependency_tracker
                 dep_tracker = get_dependency_tracker()
                 cached_deps = dep_tracker.load_deps(obj_file)
-                if cached_deps and cached_deps.ast_content_hash:
-                    if cached_deps.ast_content_hash != current_hash:
-                        from ..logger import logger
-                        logger.debug(
-                            f"Cache miss for {group_key}: AST content hash changed "
-                            f"({cached_deps.ast_content_hash} -> {current_hash})"
-                        )
-                        return False
+                cached_hash = (
+                    cached_deps.ast_content_hash if cached_deps else None
+                )
+                if cached_hash != current_hash:
+                    from ..logger import logger
+                    logger.debug(
+                        f"Cache miss for {group_key}: AST content hash changed "
+                        f"({cached_hash} -> {current_hash})"
+                    )
+                    return False
 
         # Changing debug_info settings must invalidate cached objects, otherwise
         # a previously-built object without DWARF would be reused after enabling
@@ -1428,7 +1449,7 @@ class OutputManager:
 
 
 # Guards lazy check-then-set of the active session's OutputManager.
-_manager_lock = threading.Lock()
+_manager_lock = threading.RLock()
 
 # Track if atexit handler is registered
 _atexit_registered = False

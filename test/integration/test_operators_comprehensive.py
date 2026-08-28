@@ -490,18 +490,25 @@ def test_bitwise_toggle_bit() -> i32:
 @compile
 def test_division_rounding() -> i32:
     """Test integer division rounding (C semantics: toward zero)"""
-    a: i32 = 7 // 3  # 2
-    b: i32 = -7 // 3  # -2 (toward zero, C semantics)
+    # Typed operands: C division semantics live in the LLVM path. Pure
+    # pyconst expressions like ``-7 // 3`` fold with Python meta semantics
+    # (floor), which is a different layer by design.
+    seven: i32 = 7
+    three: i32 = 3
+    a: i32 = seven // three  # 2
+    b: i32 = -seven // three  # -2 (toward zero, C semantics)
     return a + b  # Should be 0
 
 
 @compile
 def test_modulo_sign() -> i32:
     """Test modulo sign follows dividend (C behavior)"""
-    a: i32 = 7 % 3  # 1
-    b: i32 = -7 % 3  # -1
-    c: i32 = 7 % -3  # 1
-    d: i32 = -7 % -3  # -1
+    seven: i32 = 7
+    three: i32 = 3
+    a: i32 = seven % three  # 1
+    b: i32 = -seven % three  # -1
+    c: i32 = seven % -three  # 1
+    d: i32 = -seven % -three  # -1
     return a + b + c + d  # 0
 
 

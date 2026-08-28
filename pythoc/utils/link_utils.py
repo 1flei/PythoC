@@ -120,8 +120,14 @@ def _read_coff_exports(obj_path: str) -> Set[str]:
         storage_class = data[entry_offset + 16]
         num_aux = data[entry_offset + 17]
 
-        # IMAGE_SYM_CLASS_EXTERNAL = 2; section > 0 means defined
-        if storage_class == 2 and section_num > 0:
+        # IMAGE_SYM_CLASS_EXTERNAL = 2: defined if section > 0.
+        # IMAGE_SYM_CLASS_WEAK_EXTERNAL = 105: weak_odr / linkonce_odr
+        # on windows-gnu.  These are typically section 0 (the default
+        # search symbol is the aux record) but still need to appear in
+        # the DLL export table so ctypes can resolve them.
+        is_defined_external = storage_class == 2 and section_num > 0
+        is_weak_external = storage_class == 105
+        if is_defined_external or is_weak_external:
             if name and not name.startswith('.') and not name.startswith('$'):
                 exports.add(name)
 

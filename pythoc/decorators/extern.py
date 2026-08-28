@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import inspect
 import sys
 
 
@@ -86,9 +87,23 @@ class ExternFunctionWrapper:
         return f"ExternFunctionWrapper({self.func_name}, lib={self.lib})"
 
 
+def _extern_class(cls):
+    """Treat a decorated class as a declaration of its static members.
+
+    ``@extern`` class statics lower to external-linkage LLVM globals with no
+    initializer, matching a C ``extern`` object declaration.  The class is
+    still processed as a ``@compile`` struct so ``Cls.member`` access works.
+    """
+    from .structs import compile_dynamic_class
+    compile_dynamic_class(cls, static_linkage='external')
+    cls._static_is_decl = True
+    return cls
+
+
 def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
     def decorator(f):
-        import inspect
+        if inspect.isclass(f):
+            return _extern_class(f)
         sig = inspect.signature(f)
         resolved_annotations = {}
         if getattr(f, '__annotations__', None):

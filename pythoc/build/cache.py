@@ -9,8 +9,76 @@ Each layer updates ONLY when its input (previous layer) changes.
 .ll is just an intermediate artifact, not a cache layer.
 """
 
+import ast
+import hashlib
 import os
-from typing import List
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+
+_MISSING = object()
+
+
+class FunctionContentFingerprint(NamedTuple):
+    digest: Optional[str]
+    captured: Tuple[str, ...]
+
+
+def fingerprint_function_content(
+    fn_ast, user_globals: Optional[Dict[str, Any]] = None
+) -> FunctionContentFingerprint:
+    """Fingerprint a function AST plus bakeable captured constants.
+
+    Python scalars referenced by name (for example a ctypes.addressof
+    result assigned to a local and then used as ``ptr[T](addr)``) are
+    folded into IR at compile time.  The source file mtime does not
+    change when those values change across processes, so they have to
+    participate in the cache key; otherwise a cached .o embeds a
+    stale, process-local address.
+
+    ``captured`` is non-empty when the digest includes such scalars.
+    Nested @compile created during a parent's codegen must fold that
+    digest into the parent: the parent is the artefact that dlopens the
+    nested .so, and a parent cache hit would skip re-decoration of the
+    nested function entirely.
+    """
+    user_globals = user_globals or {}
+    try:
+        dumped = ast.dump(fn_ast)
+    except Exception:
+        return FunctionContentFingerprint(None, ())
+
+    params = set()
+    if isinstance(fn_ast, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = fn_ast.args
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
+            params.add(arg.arg)
+        if args.vararg:
+            params.add(args.vararg.arg)
+        if args.kwarg:
+            params.add(args.kwarg.arg)
+
+    captured = []
+    for node in ast.walk(fn_ast):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            continue
+        if node.id in params:
+            continue
+        value = user_globals.get(node.id, _MISSING)
+        if value is _MISSING:
+            continue
+        if isinstance(value, (int, float, bytes, str)) or value is None:
+            captured.append(f"{node.id}={value!r}")
+
+    captured_entries = tuple(sorted(set(captured)))
+    payload = dumped
+    if captured_entries:
+        payload = dumped + '\n' + '|'.join(captured_entries)
+    digest = hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]
+    return FunctionContentFingerprint(digest, captured_entries)
+
+
+def function_content_hash(fn_ast, user_globals: Optional[Dict[str, Any]] = None):
+    """Hash a function AST plus bakeable captured constants."""
+    return fingerprint_function_content(fn_ast, user_globals).digest
 
 
 class BuildCache:

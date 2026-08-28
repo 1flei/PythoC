@@ -1019,7 +1019,7 @@ class MultiSOExecutor:
 
 
 # Guards lazy check-then-set of the active session's MultiSOExecutor.
-_executor_lock = threading.Lock()
+_executor_lock = threading.RLock()
 
 
 def get_multi_so_executor() -> MultiSOExecutor:

@@ -13,11 +13,14 @@ import os
 import sys
 
 from pythoc import (
-    i32, i64, f64, ptr, array, compile, union, static, const, seq,
+    i32, i64, f64, ptr, array, compile, extern, union, static, const,
+    volatile, seq,
 )
 from pythoc.libc.stdio import printf
 from pythoc.logger import set_raise_on_error
-from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
+from pythoc.build.output_manager import (
+    flush_all_pending_outputs, clear_failed_group, get_output_manager,
+)
 
 # Enable exception raising for tests that expect to catch exceptions
 set_raise_on_error(True)
@@ -194,6 +197,46 @@ def test_generic_class_static() -> i32:
 
 
 # ---------------------------------------------------------------------------
+# external-linkage class static (C-like exported object)
+# ---------------------------------------------------------------------------
+
+@compile(linkage='external')
+class ExtCounter:
+    n: static[i32] = 7
+
+
+@compile
+def test_class_static_external_linkage() -> i32:
+    if ExtCounter.n != i32(7):
+        printf("FAIL: external static seed, got %d\n", ExtCounter.n)
+        return 1
+    ExtCounter.n = ExtCounter.n + 1
+    if ExtCounter.n != i32(8):
+        printf("FAIL: external static write, got %d\n", ExtCounter.n)
+        return 1
+    printf("class static external linkage: ok\n")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# internal-linkage class static (explicit opt-in, module-private storage)
+# ---------------------------------------------------------------------------
+
+@compile(linkage='internal')
+class LocalCounter:
+    # volatile defeats constant folding: an internal global that folds away
+    # legitimately disappears from the optimised IR, leaving nothing to
+    # inspect for the linkage test below.
+    n: static[volatile[i32]] = 5
+
+
+@compile
+def read_local_counter() -> i32:
+    LocalCounter.n = LocalCounter.n + 1
+    return LocalCounter.n
+
+
+# ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
@@ -213,6 +256,11 @@ def main() -> i32:
     if test_union_class_static() != i32(0):
         return 1
     if test_generic_class_static() != i32(0):
+        return 1
+    if test_class_static_external_linkage() != i32(0):
+        return 1
+    if read_local_counter() != i32(6):
+        printf("FAIL: internal static read, got %d\n", read_local_counter())
         return 1
     printf("=== All Class Static Tests Complete ===\n")
     return 0
@@ -249,10 +297,68 @@ def test_error_static_const_member() -> bool:
         clear_failed_group(group_key)
 
 
+def _global_line(ir_text: str, class_name: str, member: str):
+    import re
+    name = f"{class_name}.{member}"
+    # llvmlite prints IR identifiers unquoted when they only contain
+    # [a-zA-Z$._0-9-], so accept both @Name.member and @"Name.member".
+    pattern = re.compile(rf'@"?{re.escape(name)}"?\s*=')
+    for line in ir_text.splitlines():
+        if pattern.search(line):
+            return line.strip()
+    return None
+
+
+def test_class_static_linkage_ir() -> bool:
+    """Default class statics are weak_odr (one shared entity); 'internal'
+    opts into module-private storage; linkage='external' is exported."""
+    @extern
+    class ExternSlot:
+        x: static[i32]
+
+    @compile(suffix="read_extern_slot")
+    def read_extern_slot() -> i32:
+        return ExternSlot.x
+
+    flush_all_pending_outputs()
+    default_ir = get_output_manager().get_ir_text(bump._group_key)
+    default_line = _global_line(default_ir, "Counter", "count")
+    if default_line is None or "weak_odr" not in default_line:
+        print(f"FAIL test_class_static_linkage_ir: default not weak_odr: {default_line}")
+        return False
+
+    internal_line = _global_line(default_ir, "LocalCounter", "n")
+    if internal_line is None or "internal" not in internal_line:
+        print(f"FAIL test_class_static_linkage_ir: explicit internal missing: {internal_line}")
+        return False
+
+    ext_ir = get_output_manager().get_ir_text(test_class_static_external_linkage._group_key)
+    ext_line = _global_line(ext_ir, "ExtCounter", "n")
+    if ext_line is None or "internal" in ext_line:
+        print(f"FAIL test_class_static_linkage_ir: external still internal: {ext_line}")
+        return False
+
+    decl_ir = get_output_manager().get_ir_text(read_extern_slot._group_key)
+    decl_line = _global_line(decl_ir, "ExternSlot", "x")
+    if decl_line is None or "external" not in decl_line:
+        print(f"FAIL test_class_static_linkage_ir: extern decl missing: {decl_line}")
+        return False
+    # A declaration ends at the type ("@x = external global i32"); a
+    # definition appends an initializer ("... global i32 41").
+    if not decl_line.rstrip().endswith(" i32"):
+        print(f"FAIL test_class_static_linkage_ir: extern decl has initializer: {decl_line}")
+        return False
+
+    print("OK test_class_static_linkage_ir passed")
+    return True
+
+
 def run_error_tests() -> bool:
     all_passed = True
     print("\n=== Class Static Error Tests ===\n")
     if not test_error_static_const_member():
+        all_passed = False
+    if not test_class_static_linkage_ir():
         all_passed = False
     print("\n=== Error Tests Complete ===\n")
     return all_passed

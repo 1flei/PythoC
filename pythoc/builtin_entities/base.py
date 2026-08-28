@@ -512,19 +512,21 @@ class BuiltinType(BuiltinEntity):
     
     @classmethod
     def handle_div(cls, visitor, left, right, node: ast.BinOp):
-        """Handle division for numeric types (always returns float)"""
-        from ..valueref import wrap_value, ensure_ir, get_type
+        """Handle division for numeric types.
+
+        C semantics: integer/integer is truncating ``sdiv``; float division
+        only when at least one operand has a float type.
+        """
+        from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        from llvmlite import ir
-        from ..builtin_entities import f64
-        
-        # Division always promotes to float
-        if not (hasattr(left.type_hint, '_is_float') and left.type_hint._is_float):
-            left = visitor._promote_to_float(left, f64)
-        if not (hasattr(right.type_hint, '_is_float') and right.type_hint._is_float):
-            right = visitor._promote_to_float(right, f64)
-        
-        result = visitor.builder.fdiv(ensure_ir(left), ensure_ir(right))
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+
+        if is_float:
+            result = visitor.builder.fdiv(ensure_ir(left), ensure_ir(right))
+        elif getattr(left.type_hint, '_is_signed', True):
+            result = visitor.builder.sdiv(ensure_ir(left), ensure_ir(right))
+        else:
+            result = visitor.builder.udiv(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
@@ -539,8 +541,10 @@ class BuiltinType(BuiltinEntity):
             result = visitor.builder.fdiv(ensure_ir(left), ensure_ir(right))
             # Use f64 intrinsic for floor (since we promote to f64)
             result = visitor.builder.call(visitor._get_floor_intrinsic(ir.DoubleType()), [result])
-        else:
+        elif getattr(left.type_hint, '_is_signed', True):
             result = visitor.builder.sdiv(ensure_ir(left), ensure_ir(right))
+        else:
+            result = visitor.builder.udiv(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod
@@ -552,8 +556,10 @@ class BuiltinType(BuiltinEntity):
         
         if is_float:
             result = visitor.builder.frem(ensure_ir(left), ensure_ir(right))
-        else:
+        elif getattr(left.type_hint, '_is_signed', True):
             result = visitor.builder.srem(ensure_ir(left), ensure_ir(right))
+        else:
+            result = visitor.builder.urem(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
     
     @classmethod

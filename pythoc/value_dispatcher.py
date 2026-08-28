@@ -224,19 +224,21 @@ class ValueRefDispatcher:
         """Evaluate a binary operation for two Python-backed values."""
         from .builtin_entities.python_type import PythonType
 
-        def c_style_floordiv(a, b):
-            return int(a / b)
-
-        def c_style_mod(a, b):
-            return a - int(a / b) * b
-
+        # pyconst binops are the Python meta layer: they fold with Python
+        # semantics by design (truediv, floor division, sign-follows-divisor
+        # modulo), exactly as if the expression ran in the interpreter.
+        # C truncating division lives in the typed path
+        # (BuiltinType.handle_div/handle_floordiv/handle_mod). Do NOT "align"
+        # this layer with C: it already keeps Python semantics for unbounded
+        # ints (no 64-bit wrap on + - * <<), and a literal expression must
+        # mean the same thing inside and outside @compile.
         python_binary_ops = {
             ast.Add: operator.add,
             ast.Sub: operator.sub,
             ast.Mult: operator.mul,
             ast.Div: operator.truediv,
-            ast.FloorDiv: c_style_floordiv,
-            ast.Mod: c_style_mod,
+            ast.FloorDiv: operator.floordiv,
+            ast.Mod: operator.mod,
             ast.Pow: operator.pow,
             ast.LShift: operator.lshift,
             ast.RShift: operator.rshift,

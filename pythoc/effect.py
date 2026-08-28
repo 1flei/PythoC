@@ -1019,7 +1019,7 @@ class Effect:
 
 
 # Guards lazy check-then-set of the active session's Effect instance.
-_effect_creation_lock = threading.Lock()
+_effect_creation_lock = threading.RLock()
 
 
 def _current_effect() -> Effect:
