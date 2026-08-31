@@ -15,7 +15,7 @@ matching the alignment the C library expects for these objects.
 """
 
 from ..decorators import compile, extern
-from ..builtin_entities import i8, i32, i64, ptr, array, void
+from ..builtin_entities import i8, i32, i64, u64, ptr, array, void
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX
 from .sys_types import pthread_t
@@ -85,6 +85,17 @@ def pthread_equal(t1: pthread_t, t2: pthread_t) -> i32:
     pass
 
 
+# Darwin-specific (libSystem); only referenced by __APPLE__ code paths.
+@extern(lib="c")
+def pthread_get_stackaddr_np(t: pthread_t) -> ptr[void]:
+    pass
+
+
+@extern(lib="c")
+def pthread_get_stacksize_np(t: pthread_t) -> u64:
+    pass
+
+
 @extern(lib="c")
 def pthread_mutex_init(mutex: ptr[pthread_mutex_t], attr: ptr[pthread_mutexattr_t]) -> i32:
     pass
@@ -127,6 +138,7 @@ def pthread_mutexattr_destroy(attr: ptr[pthread_mutexattr_t]) -> i32:
 
 __all__ = [
     "pthread_t",
+    "pthread_get_stackaddr_np", "pthread_get_stacksize_np",
     "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t",
     "PTHREAD_MUTEX_INITIALIZER", "PTHREAD_MUTEX_RECURSIVE",
     "pthread_self", "pthread_equal",

@@ -183,6 +183,14 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
         cls._struct_fields = []
         if hasattr(cls, '__annotations__'):
             for field_name, field_type in cls.__annotations__.items():
+                # Undo Python's private-name mangling: a field written as
+                # __x in the class body is stored as _ClassName__x, but C
+                # struct fields keep their literal name (e.g. Darwin's
+                # struct sigaction.__sigaction_u).
+                mangled_prefix = f'_{original_cls_name}'
+                if (field_name.startswith(mangled_prefix + '__')
+                        and not field_name.endswith('__')):
+                    field_name = field_name[len(mangled_prefix):]
                 cls._struct_fields.append((field_name, field_type))
     
     # Mark as struct BEFORE parsing field types (critical for self-referential types)

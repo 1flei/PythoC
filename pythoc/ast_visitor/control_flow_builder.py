@@ -769,6 +769,15 @@ class ControlFlowBuilder:
         phi_nodes: List[Tuple[VRegPhi, Any]] = []  # (vphi, real_phi) pairs
         switch_nodes: List[Tuple[VRegSwitch, Any]] = []  # (vswitch, real_switch) pairs
 
+        # A CFG block's replay usually stays inside its one real block, but
+        # instructions whose lowering emits control flow (e.g. va_arg on the
+        # emulated AArch64/Darwin ABI path) split it, leaving the block's
+        # terminator in a *later* real block. Phi incoming edges reference the
+        # CFG block as predecessor, so they must resolve to that final real
+        # block (the one that actually branches to the phi's parent), while
+        # branch/switch targets keep resolving to the block's entry real block.
+        phi_pred_map: Dict[int, ir.Block] = dict(real_block_map)
+
         for block_id in sorted(self._cfg.blocks.keys()):
             if block_id == self._exit_block.id:
                 continue
@@ -784,11 +793,14 @@ class ControlFlowBuilder:
             for inst in cfg_block.pcir:
                 self._replay_inst(inst, real_block_map, phi_nodes, switch_nodes)
 
+            if self._real_builder.block is not None:
+                phi_pred_map[block_id] = self._real_builder.block
+
         # Step 4: Replay PHI incoming edges
         for vphi, real_phi in phi_nodes:
             for value, block in vphi._incomings:
                 resolved_value = resolve_arg(value, real_block_map)
-                resolved_block = resolve_arg(block, real_block_map)
+                resolved_block = resolve_arg(block, phi_pred_map)
                 real_phi.add_incoming(resolved_value, resolved_block)
 
         # Step 5: Replay switch cases

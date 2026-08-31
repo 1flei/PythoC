@@ -395,10 +395,13 @@ class ptr(BuiltinType):
         if base.type_hint:
             pointee_type_hint = propagate_qualifiers(base.type_hint, pointee_type_hint)
 
-        # For array, let the result decay to pointer as in C
+        # For array, let the result decay to pointer as in C.
+        # Keep the address: `p[i]` where the element is an array is still an
+        # lvalue in C, so &p[i] / ptr(p[i]) must work (e.g. pcc-emitted
+        # ptr(call()[0][idx]) for &row_of_2d_array).
         if hasattr(pointee_type_hint, "is_array") and pointee_type_hint.is_array():
             base_ir = ensure_ir(base)
-            return wrap_value(base_ir, kind="value", type_hint=pointee_type_hint)
+            return wrap_value(base_ir, kind="address", type_hint=pointee_type_hint, address=base_ir)
         # Load the value from the pointer
         base_ir = ensure_ir(base)
         pointee_llvm = pointee_type_hint.get_llvm_type(visitor.module.context)

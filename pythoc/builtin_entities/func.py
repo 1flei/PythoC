@@ -203,8 +203,10 @@ class func(BuiltinType):
                 )
 
         if not is_varargs and len(args) != len(cls.param_types):
+            import ast as _ast
             logger.error(
-                f"Function expects {len(cls.param_types)} arguments, got {len(args)}",
+                f"Function expects {len(cls.param_types)} arguments, got {len(args)}: "
+                f"{_ast.unparse(node) if node is not None else '?'}",
                 node=node,
                 exc_type=TypeError,
             )
