@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787923467921,
+  "lastUpdate": 1788193529126,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2749,6 +2749,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.53,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "5ab79513acd719e380cbdd6e8334cd2c8a8b0919",
+          "message": "Fix phi node and introduce some libc func",
+          "timestamp": "2026-09-01T00:20:48+08:00",
+          "tree_id": "f1dc68d934a530ab7724361d9dee9d3d50044a5f",
+          "url": "https://github.com/1flei/PythoC/commit/5ab79513acd719e380cbdd6e8334cd2c8a8b0919"
+        },
+        "date": 1788193528068,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.6,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.651,
             "unit": "seconds/test"
           }
         ]
