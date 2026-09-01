@@ -11,6 +11,7 @@ from ..decorators import extern
 from ..builtin_entities import array, func, i16, i32, i64, i8, ptr, u32, u64, union, void
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX, IS_WINDOWS, IS_X86_64, IS_ARM64
+from .stddef import size_t
 
 
 if IS_MACOS:
@@ -45,6 +46,14 @@ if IS_MACOS:
         ]
         sa_mask: sigset_t
         sa_flags: i32
+
+    # macOS __darwin_stack_t for sigaltstack.  Note the field order differs
+    # from glibc: size comes before flags here.
+    @compile
+    class stack_t:
+        ss_sp: ptr[void]
+        ss_size: size_t
+        ss_flags: i32
 
 elif IS_LINUX:
     # glibc siginfo_t layout (bits/types/siginfo_t.h).  The layout is the
@@ -92,6 +101,13 @@ elif IS_LINUX:
         sa_flags: i32
         sa_restorer: func[void, void]
 
+    # glibc stack_t (bits/types/stack_t.h) for sigaltstack.
+    @compile
+    class stack_t:
+        ss_sp: ptr[void]
+        ss_flags: i32
+        ss_size: size_t
+
 else:
     # Windows and unsupported platforms: keep the types defined so that
     # declarations compile, but field access will fail until a proper layout
@@ -99,15 +115,23 @@ else:
     siginfo_t = i8
     sigset_t = i8
     sigaction = i8
+    stack_t = i8
 
 mark_type_defined("siginfo_t", siginfo_t)
 mark_type_defined("sigset_t", sigset_t)
 mark_type_defined("sigaction", sigaction)
+mark_type_defined("stack_t", stack_t)
+
+# sig_atomic_t: the integer type a signal handler may write atomically
+# (C11 7.14/2, POSIX requires at least ``int``).
+sig_atomic_t = i32
 
 __all__ = [
     'siginfo_t',
     'sigset_t',
     'sigaction',
+    'stack_t',
+    'sig_atomic_t',
     'signal',
     'raise_',
     'sigaction_',

@@ -77,11 +77,41 @@ else:
     pthread_t = ptr[void]
 
 
+if IS_LINUX:
+    # Kernel fixed-width/byte-order typedefs (asm-generic/int-ll64.h),
+    # reachable through <sys/types.h> and headers such as bits/statx.h.
+    # The byte-order aliases assume little-endian, which holds for the
+    # x86_64 / aarch64 targets PythoC supports.
+    __s8 = i8
+    __u8 = u8
+    __s16 = i16
+    __u16 = u16
+    __s32 = i32
+    __u32 = u32
+    __s64 = i64
+    __u64 = u64
+    __le16 = __u16
+    __be16 = __u16
+    __le32 = __u32
+    __be32 = __u32
+    __le64 = __u64
+    __be64 = __u64
+    __sum16 = __u16
+    __wsum = __u32
+
+_KERNEL_TYPEDEFS = [
+    "__s8", "__u8", "__s16", "__u16", "__s32", "__u32", "__s64", "__u64",
+    "__le16", "__be16", "__le32", "__be32", "__le64", "__be64",
+    "__sum16", "__wsum",
+]
+
+
 for _name in (
     "dev_t", "ino_t", "mode_t", "nlink_t", "uid_t", "gid_t",
     "off_t", "blkcnt_t", "blksize_t", "pid_t", "pthread_t", "time_t",
     "__int8_t", "__uint8_t", "__int16_t", "__uint16_t",
     "__int32_t", "__uint32_t", "__int64_t", "__uint64_t",
+    *_KERNEL_TYPEDEFS,
 ):
     if _name in globals():
         mark_type_defined(_name, globals()[_name])
@@ -93,3 +123,5 @@ __all__ = [
     "__int8_t", "__uint8_t", "__int16_t", "__uint16_t",
     "__int32_t", "__uint32_t", "__int64_t", "__uint64_t",
 ]
+if IS_LINUX:
+    __all__ = __all__ + _KERNEL_TYPEDEFS

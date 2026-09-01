@@ -15,7 +15,7 @@ matching the alignment the C library expects for these objects.
 """
 
 from ..decorators import compile, extern
-from ..builtin_entities import i8, i32, i64, u64, ptr, array, void
+from ..builtin_entities import i8, i32, i64, u32, u64, ptr, array, void
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX
 from .sys_types import pthread_t
@@ -71,7 +71,32 @@ class pthread_cond_t:
     _opaque: array[i64, 6]
 
 
-for _name in ("pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t"):
+if IS_MACOS:
+    @compile
+    class pthread_condattr_t:
+        """Opaque pthread condition-variable attributes (macOS, 8 bytes)."""
+        _opaque: i64
+elif IS_LINUX:
+    @compile
+    class pthread_condattr_t:
+        """pthread condition-variable attributes (glibc, 4 bytes: one int)."""
+        _opaque: i32
+else:
+    @compile
+    class pthread_condattr_t:
+        _opaque: i32
+
+
+# pthread_key_t: TSS key handle.  glibc <bits/pthreadtypes.h> defines it as
+# ``unsigned int``; macOS as ``__darwin_pthread_key_t`` (unsigned long).
+if IS_LINUX:
+    pthread_key_t = u32
+else:
+    pthread_key_t = u64
+
+
+for _name in ("pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t",
+              "pthread_condattr_t"):
     mark_type_defined(_name, globals()[_name])
 
 
@@ -137,9 +162,10 @@ def pthread_mutexattr_destroy(attr: ptr[pthread_mutexattr_t]) -> i32:
 
 
 __all__ = [
-    "pthread_t",
+    "pthread_t", "pthread_key_t",
     "pthread_get_stackaddr_np", "pthread_get_stacksize_np",
     "pthread_mutex_t", "pthread_mutexattr_t", "pthread_cond_t",
+    "pthread_condattr_t",
     "PTHREAD_MUTEX_INITIALIZER", "PTHREAD_MUTEX_RECURSIVE",
     "pthread_self", "pthread_equal",
     "pthread_mutex_init", "pthread_mutex_lock", "pthread_mutex_trylock",

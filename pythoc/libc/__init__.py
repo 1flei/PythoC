@@ -80,7 +80,8 @@ __all__ = [
     '__error',
 
     # signal.h
-    'siginfo_t', 'sigset_t', 'sigaction', 'signal', 'raise_', 'sigaction_',
+    'siginfo_t', 'sigset_t', 'sigaction', 'stack_t', 'sig_atomic_t',
+    'signal', 'raise_', 'sigaction_',
     'sigemptyset', 'sigfillset', 'sigprocmask',
 
     # setjmp.h
