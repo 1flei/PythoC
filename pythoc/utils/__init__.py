@@ -23,6 +23,7 @@ from .link_utils import (
     link_files, build_link_command, try_link_with_linkers,
     archive_files, build_archive_command, try_archive_with_archivers,
     get_shared_lib_extension, get_executable_extension, get_static_lib_extension,
+    linklibrary,
 )
 
 __all__ = [
@@ -57,6 +58,7 @@ __all__ = [
     'get_shared_lib_extension',
     'get_executable_extension',
     'get_static_lib_extension',
+    'linklibrary',
     # Test/analysis utilities
     'analyze_function',
     'get_llvm_version',

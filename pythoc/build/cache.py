@@ -7,6 +7,10 @@ Implements the layered invalidation model:
 
 Each layer updates ONLY when its input (previous layer) changes.
 .ll is just an intermediate artifact, not a cache layer.
+
+Additionally, every cached artifact must be newer than the pythoc
+compiler itself (see utils.compiler_stamp): an artifact built by an
+older compiler is stale even when its source is untouched.
 """
 
 import ast
@@ -93,14 +97,21 @@ class BuildCache:
     
     @staticmethod
     def check_obj_uptodate(obj_file: str, source_file: str) -> bool:
-        """Check if `.o` file is up-to-date."""
+        """Check if `.o` file is up-to-date.
+
+        The artifact must be newer than both its source and the pythoc
+        compiler itself: an .o built by an older compiler is stale even
+        when the source is untouched.
+        """
         if not os.path.exists(source_file):
             return False
         if not os.path.exists(obj_file):
             return False
+        from ..utils.compiler_stamp import get_compiler_mtime
         source_mtime = os.path.getmtime(source_file)
         obj_mtime = os.path.getmtime(obj_file)
-        return obj_mtime >= source_mtime
+        return (obj_mtime >= source_mtime
+                and obj_mtime >= get_compiler_mtime())
 
     
     @staticmethod
@@ -116,6 +127,14 @@ class BuildCache:
             bool: True if .so needs re-linking, False if up-to-date
         """
         if not os.path.exists(so_file):
+            return True
+
+        # Shared-link schema versioning: outputs linked before the current
+        # schema (e.g. with registry link objects statically copied in) must
+        # be relinked once.  No-op unless the process registered link
+        # objects, so non-cimport sessions never pay for this.
+        from ..utils.link_utils import shared_link_schema_stale
+        if shared_link_schema_stale(so_file):
             return True
 
         # Windows-specific: after linker changes, older DLLs may lack a generated

@@ -97,5 +97,70 @@ class TestX86_64WindowsThreshold(unittest.TestCase):
         self.assertFalse(a.is_return)
 
 
+class TestAArch64HFAPrecedence(unittest.TestCase):
+    """AAPCS64 HFA rule takes precedence over the 16-byte indirect rule:
+    a homogeneous float aggregate with up to 4 members is register-passed
+    even when it is 24 or 32 bytes.
+    """
+
+    def setUp(self):
+        from pythoc.builder.abi.aarch64 import AArch64ABI
+        self.abi = AArch64ABI()
+
+    def test_three_double_hfa_is_register_passed(self):
+        # {f64, f64, f64} = 24 bytes but HFA(3) -> [3 x double], not sret.
+        hfa3 = ir.LiteralStructType(
+            [ir.DoubleType(), ir.DoubleType(), ir.DoubleType()])
+        r = self.abi.classify_return_type(hfa3)
+        a = self.abi.classify_argument_type(hfa3)
+        self.assertEqual(r.kind, PassingKind.COERCE)
+        self.assertEqual(a.kind, PassingKind.COERCE)
+        self.assertEqual(r.coerced_type, ir.ArrayType(ir.DoubleType(), 3))
+        self.assertEqual(a.coerced_type, ir.ArrayType(ir.DoubleType(), 3))
+        self.assertTrue(r.is_return)
+        self.assertFalse(a.is_return)
+
+    def test_four_double_hfa_is_register_passed(self):
+        # {f64 x 4} = 32 bytes but HFA(4) -> [4 x double].
+        hfa4 = ir.LiteralStructType([ir.DoubleType()] * 4)
+        r = self.abi.classify_return_type(hfa4)
+        a = self.abi.classify_argument_type(hfa4)
+        self.assertEqual(r.kind, PassingKind.COERCE)
+        self.assertEqual(a.kind, PassingKind.COERCE)
+        self.assertEqual(r.coerced_type, ir.ArrayType(ir.DoubleType(), 4))
+
+    def test_five_double_aggregate_is_indirect(self):
+        # HFA membership is capped at 4: {f64 x 5} -> memory.
+        hfa5 = ir.LiteralStructType([ir.DoubleType()] * 5)
+        r = self.abi.classify_return_type(hfa5)
+        a = self.abi.classify_argument_type(hfa5)
+        self.assertEqual(r.kind, PassingKind.INDIRECT)
+        self.assertEqual(a.kind, PassingKind.INDIRECT)
+
+    def test_large_integer_struct_stays_indirect(self):
+        # {i64, i64, i64} = 24 bytes, not an HFA -> memory (unchanged).
+        large = ir.LiteralStructType([ir.IntType(64)] * 3)
+        r = self.abi.classify_return_type(large)
+        a = self.abi.classify_argument_type(large)
+        self.assertEqual(r.kind, PassingKind.INDIRECT)
+        self.assertEqual(a.kind, PassingKind.INDIRECT)
+
+    def test_small_hfa_unchanged(self):
+        # {f64, f64} = 16 bytes was already register-passed before.
+        hfa2 = ir.LiteralStructType([ir.DoubleType(), ir.DoubleType()])
+        r = self.abi.classify_return_type(hfa2)
+        a = self.abi.classify_argument_type(hfa2)
+        self.assertEqual(r.kind, PassingKind.COERCE)
+        self.assertEqual(a.kind, PassingKind.COERCE)
+        self.assertEqual(r.coerced_type, ir.ArrayType(ir.DoubleType(), 2))
+
+    def test_mixed_float_struct_is_not_hfa(self):
+        # {f32, f64} mixes base types -> not an HFA; 16 bytes -> integers.
+        mixed = ir.LiteralStructType([ir.FloatType(), ir.DoubleType()])
+        r = self.abi.classify_return_type(mixed)
+        self.assertEqual(r.kind, PassingKind.COERCE)
+        self.assertNotEqual(r.coerced_type, ir.ArrayType(ir.FloatType(), 2))
+
+
 if __name__ == "__main__":
     unittest.main()

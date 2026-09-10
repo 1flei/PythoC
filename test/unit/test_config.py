@@ -20,7 +20,7 @@ class TestConfigSchema(unittest.TestCase):
             'fail_on_build_time_queue',
             'cimport_backend',
             'cimport_target', 'cimport_sysroot', 'libclang_path',
-            'cimport_clang_args',
+            'cimport_clang_args', 'cimport_include_path',
         }
         self.assertEqual(expected, set(_SCHEMA))
 

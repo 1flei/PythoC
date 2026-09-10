@@ -705,6 +705,10 @@ class UnifiedCompilationRegistry:
     def clear_link_objects(self):
         """Clear all registered link objects"""
         self._link_objects.clear()
+
+    def clear_link_libraries(self):
+        """Clear all registered link libraries"""
+        self._link_libraries.clear()
     
     # ========== Utility Methods ==========
 

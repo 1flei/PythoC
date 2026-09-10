@@ -30,13 +30,12 @@ import hashlib
 import importlib.util
 import subprocess
 import warnings
-import shlex
 from typing import Optional, List, Any
 from types import ModuleType
 
 from .registry import get_unified_registry
 from .utils.cc_utils import compile_c_to_object, compile_c_sources, find_available_cc
-from .utils.link_utils import file_lock
+from .utils.link_utils import file_lock, linklibrary
 
 
 _VALID_CIMPORT_BACKENDS = {"auto", "clang"}
@@ -73,13 +72,6 @@ def _normalize_lib_for_generated_source(lib: str) -> str:
     return lib
 
 
-def _env_list(value: Optional[str]) -> List[str]:
-    """Shell-tokenise a whitespace-separated config string."""
-    if not value:
-        return []
-    return shlex.split(value)
-
-
 def _generate_bindings_clang(
     path: str,
     lib: str,
@@ -91,13 +83,10 @@ def _generate_bindings_clang(
     target: Optional[str],
     sysroot: Optional[str],
     clang_args: Optional[List[str]],
+    enable_wrappers: bool = True,
+    stub_path: Optional[str] = None,
 ) -> None:
     from .cimport_clang import generate_bindings_to_file
-    from .config import config
-
-    effective_clang_args = _env_list(config.cimport_clang_args)
-    if clang_args:
-        effective_clang_args.extend(clang_args)
 
     # Write to a temp file and atomically rename so concurrent processes
     # never observe a partially written bindings module.
@@ -110,14 +99,63 @@ def _generate_bindings_clang(
             cflags=cflags,
             include_dirs=include_dirs,
             defines=defines,
-            target=target or config.cimport_target,
-            sysroot=sysroot or config.cimport_sysroot,
-            clang_args=effective_clang_args,
+            target=target,
+            sysroot=sysroot,
+            clang_args=clang_args,
+            enable_wrappers=enable_wrappers,
+            stub_path=stub_path,
         )
         os.replace(tmp_path, bindings_path)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+def _hash_parse_options(backend: str, lib: str, target: Optional[str],
+                        parse_args: List[str], cc: Optional[str]) -> str:
+    """Short hash of every input that changes generated bindings output.
+
+    Two cimport() calls for the same header with different flags must not
+    share cached bindings, so the effective parse arguments (which already
+    include defines/include_dirs/cflags/clang_args/sysroot, the env
+    PC_CIMPORT_* knobs, and discovered system include dirs) go into the
+    cache file name, along with the backend and ``lib`` (embedded in the
+    generated @extern decorators).  ``cc`` is included because it drives
+    compilation of the wrapper stub and compile_sources objects cached
+    next to the bindings.  The pythoc compiler stamp is included so that
+    editing pythoc itself (bindings generator or wrapper emission)
+    invalidates all artifacts derived from it.
+    """
+    from .utils.compiler_stamp import get_compiler_mtime
+    hasher = hashlib.sha256()
+    hasher.update(backend.encode())
+    hasher.update((lib or '').encode())
+    hasher.update((target or '').encode())
+    hasher.update((cc or '').encode())
+    hasher.update(repr(get_compiler_mtime()).encode())
+    for arg in parse_args:
+        hasher.update(b'\x00')
+        hasher.update(arg.encode())
+    return hasher.hexdigest()[:8]
+
+
+def _resolve_via_include_dirs(name: str, include_dirs: Optional[List[str]],
+                              target: Optional[str],
+                              sysroot: Optional[str]) -> Optional[str]:
+    """Resolve a header name (e.g. 'stdio.h') through the include path.
+
+    Searches explicit include_dirs first, then PC_CIMPORT_INCLUDE_PATH,
+    then the host compiler's built-in system include dirs.
+    """
+    from .cimport_clang import default_include_search_dirs
+
+    search_dirs = list(include_dirs or [])
+    search_dirs.extend(default_include_search_dirs(target, sysroot))
+    for directory in search_dirs:
+        candidate = os.path.join(directory, name)
+        if os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return None
 
 
 def _compute_cache_key(path: str, lib: str, sources: Optional[List[str]] = None,
@@ -242,6 +280,7 @@ def cimport(path: str, *,
             lib: Optional[str] = None,
             sources: Optional[List[str]] = None,
             objects: Optional[List[str]] = None,
+            libraries: Optional[List[str]] = None,
             compile_sources: bool = False,
             cc: Optional[str] = None,
             cflags: Optional[List[str]] = None,
@@ -255,13 +294,19 @@ def cimport(path: str, *,
             export_all: bool = False,
             prefix: Optional[str] = None) -> ModuleType:
     """Import C header/source and return a pythoc bindings module.
-    
+
     Args:
-        path: Path to .h or .c file
+        path: Path to .h or .c file, or a header name resolved through the
+            include search path (include_dirs, PC_CIMPORT_INCLUDE_PATH,
+            then the host compiler's system include dirs).
         kind: 'auto' (infer from extension), 'header', or 'source'
         lib: Library name for @extern(lib='...'). If contains '/' treated as path.
         sources: Additional .c sources to compile
         objects: Explicit .o files to register for linking
+        libraries: Extra libraries to link, loaded via linklibrary():
+            shared libraries are dlopen'ed RTLD_GLOBAL (JIT + Python-side
+            extern resolution) and registered for AOT linking; static
+            archives are registered as link objects.
         compile_sources: If True, compile .c sources to .o
         cc: C compiler to use (auto-detect if None)
         cflags: Additional compiler flags
@@ -274,10 +319,10 @@ def cimport(path: str, *,
         export: Symbol names to export to caller globals (explicit opt-in)
         export_all: If True, export all symbols to caller globals
         prefix: Optional symbol prefix
-    
+
     Returns:
         Module object containing the generated bindings
-        
+
     Raises:
         FileNotFoundError: If input file doesn't exist
         RuntimeError: If parsing or compilation fails
@@ -298,8 +343,15 @@ def cimport(path: str, *,
                     candidate = os.path.join(caller_dir, path)
                     if os.path.exists(candidate):
                         path = candidate
+            if not os.path.exists(path):
+                # Header given by name only (e.g. 'stdio.h' or
+                # 'sys/stat.h'): resolve through the include search path.
+                resolved = _resolve_via_include_dirs(
+                    path, include_dirs, target, sysroot)
+                if resolved is not None:
+                    path = resolved
             path = os.path.abspath(path)
-    
+
     if not os.path.exists(path):
         raise FileNotFoundError(f"C file not found: {path}")
     
@@ -332,6 +384,11 @@ def cimport(path: str, *,
     if kind == 'source' and compile_sources:
         if path not in sources:
             sources.insert(0, path)
+
+    # Extra libraries: load into the process now so JIT and Python-side
+    # extern calls resolve their symbols, and register them for AOT links.
+    for library in libraries or []:
+        linklibrary(library)
     
     # Create cache directory based on file path structure
     # This ensures same files always use same cache location
@@ -350,17 +407,38 @@ def cimport(path: str, *,
     cache_dir = os.path.join(base_cache_dir, os.path.dirname(path_rel))
     os.makedirs(cache_dir, exist_ok=True)
     
-    # Generate bindings module path
-    basename = os.path.splitext(os.path.basename(path))[0]
-    if prefix:
-        module_name = f"_cimport_{prefix}_{basename}"
-    else:
-        module_name = f"_cimport_{basename}"
-
     backend_request = _normalize_cimport_backend(backend)
     # clang is the only backend; 'auto' resolves to 'clang'
     selected_backend = "clang" if backend_request == "auto" else backend_request
-    bindings_path = _bindings_path_for_backend(cache_dir, basename, selected_backend)
+
+    # The bindings cache is keyed on the effective parse options, not just
+    # the file path: re-importing the same header with different
+    # target/defines/cflags/include_dirs/clang_args (or different
+    # PC_CIMPORT_* env configuration) must not reuse stale bindings.
+    from .cimport_clang import resolve_parse_options
+    effective_target, _effective_sysroot, parse_args = resolve_parse_options(
+        cflags=cflags, include_dirs=include_dirs, defines=defines,
+        target=target, sysroot=sysroot, clang_args=clang_args,
+    )
+    options_hash = _hash_parse_options(selected_backend, lib or '',
+                                       effective_target, parse_args, cc)
+
+    # Generate bindings module path
+    basename = os.path.splitext(os.path.basename(path))[0]
+    cached_name = f"{basename}_{options_hash}"
+    if prefix:
+        module_name = f"_cimport_{prefix}_{cached_name}"
+    else:
+        module_name = f"_cimport_{cached_name}"
+    bindings_path = _bindings_path_for_backend(cache_dir, cached_name, selected_backend)
+
+    # Header-defined functions without an external symbol (static / C99
+    # inline) get forwarding wrappers compiled from a generated stub.
+    # A .c imported with compile_sources=True is compiled as its own
+    # translation unit, so wrapping it would duplicate its symbols.
+    enable_wrappers = not (kind == 'source' and compile_sources)
+    from .cimport_wrappers import stub_paths
+    stub_c_path, stub_obj_path = stub_paths(cache_dir, cached_name)
 
     # Generate bindings if needed.  A lock file next to the bindings
     # serializes concurrent regeneration across processes; re-check
@@ -377,6 +455,8 @@ def cimport(path: str, *,
                 target=target,
                 sysroot=sysroot,
                 clang_args=clang_args,
+                enable_wrappers=enable_wrappers,
+                stub_path=stub_c_path,
             )
     
     # Compile sources if requested
@@ -396,7 +476,7 @@ def cimport(path: str, *,
             obj_cache_dir = os.path.join(base_cache_dir, os.path.dirname(src_rel))
             os.makedirs(obj_cache_dir, exist_ok=True)
             
-            obj_name = os.path.splitext(os.path.basename(src_rel))[0] + '.o'
+            obj_name = os.path.splitext(os.path.basename(src_rel))[0] + f'_{options_hash}.o'
             obj_path = os.path.join(obj_cache_dir, obj_name)
 
             # Only compile if object doesn't exist or source is newer.
@@ -411,7 +491,6 @@ def cimport(path: str, *,
                         needs_compile = False
 
                 if needs_compile:
-                    from .utils.cc_utils import compile_c_to_object
                     compile_c_to_object(
                         src, obj_path, cc=cc, cflags=cflags,
                         include_dirs=include_dirs, defines=defines
@@ -420,6 +499,30 @@ def cimport(path: str, *,
             compiled_objects.append(obj_path)
         
         objects.extend(compiled_objects)
+
+    # Compile the inline-wrapper stub produced alongside the bindings, with
+    # the same include_dirs/defines/cflags so the header resolves identically.
+    # The object is stale when it is older than the stub or the header itself
+    # (a header edit that leaves the stub text unchanged must still rebuild).
+    if os.path.exists(stub_c_path):
+        with file_lock(stub_obj_path + '.lock'):
+            needs_compile = True
+            if os.path.exists(stub_obj_path):
+                obj_mtime = os.path.getmtime(stub_obj_path)
+                if (obj_mtime >= os.path.getmtime(stub_c_path)
+                        and obj_mtime >= os.path.getmtime(path)):
+                    needs_compile = False
+            if needs_compile:
+                from .config import config
+                effective_sysroot = sysroot or config.cimport_sysroot
+                stub_cflags = list(cflags or [])
+                if effective_sysroot:
+                    stub_cflags.append(f'--sysroot={effective_sysroot}')
+                compile_c_to_object(
+                    stub_c_path, stub_obj_path, cc=cc, cflags=stub_cflags,
+                    include_dirs=include_dirs, defines=defines
+                )
+        objects.append(stub_obj_path)
     
     # Register objects for linking
     registry = get_unified_registry()

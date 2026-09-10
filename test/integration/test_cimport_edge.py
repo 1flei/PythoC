@@ -248,10 +248,20 @@ enum ErrorCode {
     ERR_NONE = 0,
     ERR_NOT_FOUND = -1,
     ERR_DENIED = -2,
+    ERR_AFTER,
 };
 """)
         mod = cimport(header, lib="c")
         self.assertTrue(hasattr(mod, "ErrorCode"))
+        # Value correctness: negative tags must survive, and the following
+        # auto-numbered constant continues from the negative tag.
+        self.assertEqual(mod.ErrorCode.ERR_NONE, 0)
+        self.assertEqual(mod.ErrorCode.ERR_NOT_FOUND, -1)
+        self.assertEqual(mod.ErrorCode.ERR_DENIED, -2)
+        self.assertEqual(mod.ErrorCode.ERR_AFTER, -1)
+        # C enum constants are also visible in the enclosing (module) scope
+        self.assertEqual(mod.ERR_NOT_FOUND, -1)
+        self.assertEqual(mod.ERR_AFTER, -1)
 
     def test_enum_with_large_values(self):
         """Enum with large unsigned-like values"""
@@ -266,6 +276,10 @@ enum Flags {
 """)
         mod = cimport(header, lib="c")
         self.assertTrue(hasattr(mod, "Flags"))
+        # Module-level constants mirror the clang-folded enum values
+        self.assertEqual(mod.FLAG_A, 1)
+        self.assertEqual(mod.FLAG_B, 0x100)
+        self.assertIn(mod.FLAG_C, (0xFFFFFFFF, -1))
 
 
 class TestCimportNestedStruct(unittest.TestCase):
@@ -337,7 +351,12 @@ class TestCimportBitfields(unittest.TestCase):
         return path
 
     def test_struct_with_bitfield(self):
-        """Struct with bitfield fields should be parseable"""
+        """Struct with bitfield fields degrades to opaque storage.
+
+        Bitfields cannot be expressed as pythoc fields without producing a
+        wrong ABI layout, so the struct degrades to an opaque record with
+        matching size: no full-width fields are emitted, field access fails,
+        and the type stays usable as a pointer pointee."""
         from pythoc.cimport import cimport
 
         header = self._write("bitfield.h", """
@@ -346,9 +365,157 @@ struct Flags {
     unsigned int b : 3;
     unsigned int c : 4;
 };
+struct Flags *flags_make(void);
 """)
         mod = cimport(header, lib="c")
         self.assertTrue(hasattr(mod, "Flags"))
+        # No wrong full-width fields are emitted
+        self.assertFalse(mod.Flags.has_field("a"))
+        self.assertFalse(mod.Flags.has_field("b"))
+        self.assertFalse(mod.Flags.has_field("c"))
+        self.assertTrue(mod.Flags.has_field("_storage"))
+        # Opaque layout still matches clang's size
+        self.assertEqual(mod.Flags.get_size_bytes(), 4)
+        # Functions taking ptr to the record are still bound
+        self.assertTrue(hasattr(mod, "flags_make"))
+
+
+class TestCimportMacros(unittest.TestCase):
+    """Test cimport extraction of numeric macro constants."""
+
+    def setUp(self):
+        if not _clang_backend_available():
+            self.skipTest("clang/libclang Python bindings are not available")
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write(self, name: str, content: str) -> str:
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def test_numeric_macros(self):
+        """Simple numeric macros become module-level Python constants"""
+        from pythoc.cimport import cimport
+
+        header = self._write("macros.h", """
+#define FOO 42
+#define NEG -3.4
+#define HEX 0x1F
+#define BIG 1UL
+#define OCT 010
+""")
+        mod = cimport(header, lib="c")
+        self.assertEqual(mod.FOO, 42)
+        self.assertAlmostEqual(mod.NEG, -3.4)
+        self.assertEqual(mod.HEX, 0x1F)
+        self.assertEqual(mod.BIG, 1)
+        self.assertEqual(mod.OCT, 8)
+
+    def test_undef_redefine_uses_final_value(self):
+        """A macro redefined after #undef uses the final definition"""
+        from pythoc.cimport import cimport
+
+        header = self._write("redef.h", """
+#define REDEF_VALUE 1
+#undef REDEF_VALUE
+#define REDEF_VALUE 2
+""")
+        mod = cimport(header, lib="c")
+        self.assertEqual(mod.REDEF_VALUE, 2)
+
+    def test_non_numeric_macros_skipped(self):
+        """Expression, string, empty and function-like macros are skipped"""
+        from pythoc.cimport import cimport
+
+        header = self._write("skip_macros.h", """
+#define EXPR (1 << 2)
+#define STR "hello"
+#define EMPTY
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define KEPT 7
+""")
+        mod = cimport(header, lib="c")
+        self.assertFalse(hasattr(mod, "EXPR"))
+        self.assertFalse(hasattr(mod, "STR"))
+        self.assertFalse(hasattr(mod, "EMPTY"))
+        self.assertFalse(hasattr(mod, "MAX"))
+        self.assertEqual(mod.KEPT, 7)
+
+    def test_declaration_wins_over_macro(self):
+        """A macro whose name collides with a declaration is skipped"""
+        from pythoc.cimport import cimport
+
+        header = self._write("collision.h", """
+int collide_fn(void);
+#define collide_fn 123
+""")
+        mod = cimport(header, lib="c")
+        self.assertFalse(isinstance(mod.collide_fn, int))
+
+
+class TestCimportLongDouble(unittest.TestCase):
+    """Test cimport handling of long double across targets."""
+
+    def setUp(self):
+        if not _clang_backend_available():
+            self.skipTest("clang/libclang Python bindings are not available")
+        self.temp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _write(self, name: str, content: str) -> str:
+        path = os.path.join(self.temp_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    _HEADER = """
+long double ld_identity(long double x);
+typedef long double ld_t;
+struct LDBox {
+    int tag;
+    long double val;
+};
+int ld_plain_fn(int x);
+"""
+
+    def test_long_double_unsupported_on_x86_64(self):
+        """x86_64 long double (fp80) yields lazy errors, not wrong bindings"""
+        from pythoc.cimport import cimport
+
+        header = self._write("ld_x86_64.h", self._HEADER)
+        mod = cimport(header, lib="c", target="x86_64-unknown-linux-gnu")
+
+        # Import itself succeeds; unsupported symbols fail lazily on access
+        self.assertTrue(hasattr(mod, "ld_plain_fn"))
+        with self.assertRaises(RuntimeError) as ctx:
+            mod.ld_identity
+        self.assertIn("long double", str(ctx.exception))
+        with self.assertRaises(RuntimeError) as ctx:
+            mod.ld_t
+        self.assertIn("long double", str(ctx.exception))
+
+        # Structs with unsupported fields degrade to opaque storage
+        self.assertTrue(hasattr(mod, "LDBox"))
+        self.assertFalse(mod.LDBox.has_field("val"))
+        self.assertTrue(mod.LDBox.has_field("_storage"))
+        self.assertEqual(mod.LDBox.get_size_bytes(), 32)
+
+    def test_long_double_fp128_on_aarch64(self):
+        """aarch64 long double (fp128) maps to pythoc f128"""
+        from pythoc.cimport import cimport
+
+        header = self._write("ld_aarch64.h", self._HEADER)
+        mod = cimport(header, lib="c", target="aarch64-unknown-linux-gnu")
+        self.assertTrue(hasattr(mod, "ld_identity"))
+        self.assertTrue(hasattr(mod, "ld_t"))
+        # Struct with an f128 field keeps real fields
+        self.assertTrue(mod.LDBox.has_field("val"))
 
 
 class TestCimportGlobals(unittest.TestCase):
@@ -369,16 +536,19 @@ class TestCimportGlobals(unittest.TestCase):
         return path
 
     def test_extern_global(self):
-        """Extern global variables should appear as comments in bindings"""
+        """Extern global variables become extern_global bindings"""
         from pythoc.cimport import cimport
+        from pythoc.decorators.extern import ExternGlobal
 
         header = self._write("globals.h", """
 extern int global_counter;
 extern void *global_handle;
 """)
-        # Globals are emitted as comments, so no attribute check
-        # Just verify no crash
         mod = cimport(header, lib="c")
+        self.assertIsInstance(mod.global_counter, ExternGlobal)
+        self.assertEqual(mod.global_counter.c_name, "global_counter")
+        self.assertIsInstance(mod.global_handle, ExternGlobal)
+        self.assertEqual(mod.global_handle.c_name, "global_handle")
 
 
 class TestCimportClangArgs(unittest.TestCase):

@@ -5,15 +5,68 @@ Provides unified linker functionality for both executables and shared libraries.
 Supports multiple linkers including gcc, clang, and zig for cross-platform compatibility.
 """
 
+import ctypes
+import hashlib
 import os
 import sys
 import struct
 import shutil
 import subprocess
+import threading
 import time
 from functools import lru_cache
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 from contextlib import ExitStack, contextmanager
+
+
+# Version marker for shared-library link semantics.  Written to a
+# ``<output>.linkschema`` sidecar when a shared library is linked; an
+# existing output whose stamp is missing or older is relinked once.
+# v2: registry link objects (cimport compile_sources products) are no
+# longer statically linked into every JIT group .so on POSIX; they are
+# provided by the process-global extern-objects bundle instead (see
+# ensure_link_objects_loaded).
+LINK_SCHEMA_VERSION = '2'
+
+
+def _link_schema_stamp_path(output_file: str) -> str:
+    return output_file + '.linkschema'
+
+
+def read_link_schema_stamp(output_file: str) -> Optional[str]:
+    try:
+        with open(_link_schema_stamp_path(output_file), 'r',
+                  encoding='utf-8') as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def write_link_schema_stamp(output_file: str) -> None:
+    try:
+        with open(_link_schema_stamp_path(output_file), 'w',
+                  encoding='utf-8') as f:
+            f.write(LINK_SCHEMA_VERSION)
+    except OSError:
+        pass
+
+
+def shared_link_schema_stale(output_file: str) -> bool:
+    """Return whether a shared-library output predates the link schema.
+
+    Only relevant while the process has registered link objects (e.g. from
+    cimport compile_sources): those are no longer statically linked into
+    every group .so on POSIX, so older outputs that may still contain a
+    private copy of the object definitions must be relinked once.
+    Processes without registered link objects are unaffected and never
+    trigger relinks through this check.
+    """
+    if sys.platform == 'win32':
+        return False
+    from ..registry import get_unified_registry
+    if not get_unified_registry().get_link_objects():
+        return False
+    return read_link_schema_stamp(output_file) != LINK_SCHEMA_VERSION
 
 
 @lru_cache(maxsize=None)
@@ -618,6 +671,25 @@ def build_link_command(
     all_obj_files = [os.path.abspath(p) for p in all_obj_files]
     output_file = os.path.abspath(output_file)
 
+    # Static archives normally contribute only objects that resolve an
+    # undefined symbol.  When linking a shared library (e.g. the
+    # process-global extern-objects bundle), force-load them so all of
+    # their symbols become available to the dynamic loader
+    # (linklibrary('.a') semantics).  Executable links keep normal archive
+    # semantics: referenced members are pulled on demand.
+    if shared:
+        wrapped_objs: List[str] = []
+        for p in all_obj_files:
+            if os.path.splitext(p)[1].lower() in ('.a', '.lib'):
+                if sys.platform == 'darwin':
+                    wrapped_objs.append(f'-Wl,-force_load,{p}')
+                else:
+                    wrapped_objs.extend(
+                        ['-Wl,--whole-archive', p, '-Wl,--no-whole-archive'])
+            else:
+                wrapped_objs.append(p)
+        all_obj_files = wrapped_objs
+
 
 
 
@@ -773,6 +845,11 @@ def link_files(
                     implib = os.path.splitext(output_file)[0] + '.lib'
                     if os.path.exists(exports_def) and os.path.exists(implib):
                         return output_file
+                elif shared and shared_link_schema_stale(output_file):
+                    # Output predates the current shared-link schema
+                    # (e.g. still has registry link objects statically
+                    # linked in); relink it once.
+                    pass
                 else:
                     # Output is up-to-date, skip linking
                     return output_file
@@ -783,7 +860,7 @@ def link_files(
         else:
             linkers = get_default_linkers()
 
-        return try_link_with_linkers(
+        result = try_link_with_linkers(
             obj_files,
             output_file,
             shared=shared,
@@ -791,6 +868,199 @@ def link_files(
             link_objects=link_objects,
             link_libraries=link_libraries,
         )
+        if shared:
+            write_link_schema_stamp(output_file)
+        return result
+
+
+_extern_objects_lock = threading.Lock()
+_loaded_extern_object_paths: Set[str] = set()
+# Keep the dlopen handles alive for the process lifetime (path -> handle).
+_extern_object_bundles: Dict[str, object] = {}
+
+
+def dlopen_global(path: str):
+    """dlopen a shared library into the process-global symbol namespace.
+
+    Symbols become visible to subsequently loaded JIT group libraries
+    (``-undefined dynamic_lookup`` / ``--unresolved-symbols=ignore-all``)
+    and to ``ctypes.CDLL(None)`` lookups.
+
+    On macOS, ctypes.CDLL forces RTLD_NOW even when RTLD_LAZY is requested,
+    so call libc dlopen directly (mirrors
+    MultiSOExecutor._load_library_macos_lazy).
+
+    Returns an opaque handle; the caller must keep it alive for the process
+    lifetime.
+    """
+    if sys.platform == 'darwin':
+        libc = ctypes.CDLL(None)
+        libc.dlopen.argtypes = [ctypes.c_char_p, ctypes.c_int]
+        libc.dlopen.restype = ctypes.c_void_p
+        libc.dlerror.argtypes = []
+        libc.dlerror.restype = ctypes.c_char_p
+        RTLD_LAZY = 0x1
+        RTLD_GLOBAL = 0x8
+        handle = libc.dlopen(os.fsencode(path), RTLD_LAZY | RTLD_GLOBAL)
+        if not handle:
+            error = libc.dlerror()
+            msg = error.decode('utf-8') if error else 'unknown error'
+            raise OSError(f"dlopen failed for {path}: {msg}")
+        return handle
+    if sys.platform == 'win32':
+        return ctypes.CDLL(path)
+    return ctypes.CDLL(path, mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
+
+
+def _bare_library_candidates(name: str) -> List[str]:
+    """Candidate dlopen names for a bare library name like 'm'."""
+    candidates = []
+    try:
+        from ctypes.util import find_library
+        found = find_library(name)
+        if found:
+            candidates.append(found)
+    except Exception:
+        pass
+    if sys.platform == 'win32':
+        candidates.append(f'{name}.dll')
+    elif sys.platform == 'darwin':
+        candidates.append(f'lib{name}.dylib')
+    else:
+        candidates.append(f'lib{name}.so')
+    return candidates
+
+
+_linklibrary_lock = threading.Lock()
+# Keep linklibrary dlopen handles alive for the process lifetime.
+_linklibrary_handles: Dict[str, object] = {}
+
+
+def linklibrary(path: str) -> str:
+    """Load a library into the current process and register it for linking.
+
+    Shared libraries (``.so``/``.dylib``/``.dll``, or a bare library name
+    like ``'m'``) are dlopen'ed with RTLD_GLOBAL so JIT-compiled code and
+    Python-side ``@extern`` calls resolve their symbols immediately, and
+    registered with the compile session so AOT builds
+    (``compile_to_executable`` / ``compile_to_dynamic_library``) link
+    against them.  Static archives (``.a``/``.lib``) cannot be dlopen'ed;
+    they are registered as link objects instead, so JIT code resolves their
+    symbols through the process-global extern-objects bundle and AOT
+    artifacts link them directly.
+
+    LLVM bitcode (``.bc``/``.ll``) is rejected: pythoc has no bitcode
+    linking support (no linkllvm equivalent); compile it to a shared
+    library or static archive first.
+
+    Returns the resolved library path (or the bare name that was loaded).
+    """
+    from ..registry import get_unified_registry
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext in ('.bc', '.ll'):
+        raise ValueError(
+            f"linklibrary() does not accept LLVM bitcode ('{path}'): "
+            "bitcode linking is not supported by pythoc; compile it to a "
+            "shared library or static archive first"
+        )
+
+    registry = get_unified_registry()
+
+    if ext in ('.a', '.lib'):
+        archive = os.path.abspath(path)
+        if not os.path.exists(archive):
+            raise FileNotFoundError(f"Static library not found: {path}")
+        registry.add_link_object(archive)
+        return archive
+
+    is_bare_name = (
+        not os.path.isabs(path)
+        and os.sep not in path and '/' not in path
+        and not os.path.exists(path)
+    )
+    if is_bare_name:
+        registry.add_link_library(path)
+        candidates = _bare_library_candidates(path)
+        key = f'name:{path}'
+    else:
+        resolved = os.path.abspath(path)
+        if not os.path.exists(resolved):
+            raise FileNotFoundError(f"Shared library not found: {path}")
+        registry.add_link_library(resolved)
+        candidates = [resolved]
+        key = resolved
+
+    with _linklibrary_lock:
+        if key in _linklibrary_handles:
+            return path
+        errors = []
+        for candidate in candidates:
+            try:
+                _linklibrary_handles[key] = dlopen_global(candidate)
+                return path
+            except OSError as e:
+                errors.append(str(e))
+    raise OSError(
+        f"linklibrary() failed to load '{path}': " + '; '.join(errors))
+
+
+def ensure_link_objects_loaded() -> Optional[str]:
+    """Link registry link objects into one shared bundle and load it.
+
+    On POSIX, JIT group .so files do not statically link registry link
+    objects (cimport ``compile_sources`` products).  Statically linking
+    them gave every group .so a private copy of each extern global's
+    storage (on macOS the two-level namespace binds intra-image references
+    to the local copy), so compiled code and ``ctypes.CDLL(None)`` access
+    could observe different copies.  Instead the objects are linked once
+    per process into a bundle shared library that is dlopen'ed
+    RTLD_GLOBAL before any group .so that may reference their symbols;
+    group .so files resolve those symbols from the process-global
+    namespace at load time (``-undefined dynamic_lookup`` on macOS,
+    ``--unresolved-symbols=ignore-all`` on Linux).
+
+    Each object path is linked into exactly one bundle per process;
+    objects registered later go into a new, additional bundle.  An object
+    recompiled in place after being loaded stays stale, matching the
+    existing no-reload semantics of group .so files.
+
+    Returns the bundle path when a new bundle was loaded, else None.
+    On Windows this is a no-op: PE requires symbols resolved at link
+    time, so group DLLs keep statically linking the objects.
+    """
+    if sys.platform == 'win32':
+        return None
+
+    from ..registry import get_unified_registry
+    objects = [
+        os.path.abspath(p)
+        for p in get_unified_registry().get_link_objects()
+        if os.path.exists(p)
+    ]
+    if not objects:
+        return None
+
+    with _extern_objects_lock:
+        new_objects = [p for p in objects if p not in _loaded_extern_object_paths]
+        if not new_objects:
+            return None
+
+        digest = hashlib.sha256(
+            '\n'.join(sorted(new_objects)).encode('utf-8')
+        ).hexdigest()[:16]
+        bundle = os.path.join(
+            'build', 'cimport',
+            f'_link_objects_{digest}{get_shared_lib_extension()}',
+        )
+        link_files(new_objects, bundle, shared=True, link_objects=[])
+
+        abs_bundle = os.path.abspath(bundle)
+        handle = dlopen_global(abs_bundle)
+
+        _extern_object_bundles[abs_bundle] = handle
+        _loaded_extern_object_paths.update(new_objects)
+        return bundle
 
 
 def build_archive_command(obj_files: List[str], output_file: str,

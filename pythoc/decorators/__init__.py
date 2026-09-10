@@ -18,7 +18,9 @@ from .structs import (
 )
 from .extern import (
     extern,
+    extern_global,
     ExternFunctionWrapper,
+    ExternGlobal,
 )
 from .inline import inline
 from .jit import jit

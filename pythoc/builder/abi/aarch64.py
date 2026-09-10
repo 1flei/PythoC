@@ -59,15 +59,10 @@ class AArch64ABI(ABIInfo):
                 is_return=True
             )
         
-        # > 16 bytes: use sret (indirect)
-        if size > 16:
-            return CoercedType(
-                kind=PassingKind.INDIRECT,
-                original_type=llvm_type,
-                is_return=True
-            )
-        
-        # Check for HFA (Homogeneous Floating-point Aggregate)
+        # Check for HFA (Homogeneous Floating-point Aggregate).  The HFA
+        # rule takes precedence over the size-based indirect rule: an HFA
+        # of 3-4 doubles is 24/32 bytes but is still returned in SIMD
+        # registers per AAPCS64.
         hfa_type, hfa_count = self._check_hfa(llvm_type)
         if hfa_type is not None and hfa_count <= 4:
             # Return as array of floats/doubles
@@ -81,7 +76,15 @@ class AArch64ABI(ABIInfo):
                 original_type=llvm_type,
                 is_return=True
             )
-        
+
+        # > 16 bytes: use sret (indirect)
+        if size > 16:
+            return CoercedType(
+                kind=PassingKind.INDIRECT,
+                original_type=llvm_type,
+                is_return=True
+            )
+
         # <= 16 bytes integer-like struct: coerce to integer(s)
         if size <= 8:
             coerced = ir.IntType(size * 8)
@@ -123,16 +126,10 @@ class AArch64ABI(ABIInfo):
                 is_return=False
             )
         
-        # > 16 bytes: pass by reference (caller copies, callee gets pointer)
-        # This is different from sret - the callee receives a pointer to a copy
-        if size > 16:
-            return CoercedType(
-                kind=PassingKind.INDIRECT,
-                original_type=llvm_type,
-                is_return=False
-            )
-        
-        # Check for HFA (Homogeneous Floating-point Aggregate)
+        # Check for HFA (Homogeneous Floating-point Aggregate).  The HFA
+        # rule takes precedence over the size-based indirect rule: an HFA
+        # of 3-4 doubles is 24/32 bytes but is still passed in SIMD
+        # registers per AAPCS64.
         hfa_type, hfa_count = self._check_hfa(llvm_type)
         if hfa_type is not None and hfa_count <= 4:
             # Pass as array of floats/doubles in SIMD regs
@@ -146,7 +143,16 @@ class AArch64ABI(ABIInfo):
                 original_type=llvm_type,
                 is_return=False
             )
-        
+
+        # > 16 bytes: pass by reference (caller copies, callee gets pointer)
+        # This is different from sret - the callee receives a pointer to a copy
+        if size > 16:
+            return CoercedType(
+                kind=PassingKind.INDIRECT,
+                original_type=llvm_type,
+                is_return=False
+            )
+
         # <= 16 bytes integer-like: coerce to integer(s)
         if size <= 8:
             coerced = ir.IntType(size * 8)

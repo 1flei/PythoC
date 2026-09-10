@@ -21,6 +21,7 @@ class CTypeIR:
     return_type: Optional["CTypeIR"] = None
     params: list["CParamIR"] = field(default_factory=list)
     is_variadic: bool = False
+    reason: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -34,6 +35,9 @@ class CFieldIR:
     name: Optional[str]
     type: CTypeIR
     bit_width: Optional[int] = None
+    # Byte offset of the field within its record as observed by clang
+    # (None when unknown, e.g. for bitfields or incomplete records).
+    offset_bytes: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -51,6 +55,16 @@ class CDeclIR:
     values: list[CEnumValueIR] = field(default_factory=list)
     storage: Optional[str] = None
     is_definition: bool = False
+    is_thread_local: bool = False
+    # Function defined in the imported file with no guaranteed external
+    # symbol (static / C99 inline); callable only through a generated wrapper.
+    needs_wrapper: bool = False
+    size_bytes: Optional[int] = None
+    value: object = None
+    # Assembly label of the symbol (from __asm__("label") / __REDIRECT) when
+    # it differs from the C spelling; the binding keeps the C name while the
+    # linked symbol uses the label (glibc fopen -> fopen64 scenario).
+    symbol: Optional[str] = None
 
 
 @dataclass(slots=True)

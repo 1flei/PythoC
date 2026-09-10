@@ -30,6 +30,23 @@ from ..valueref import ValueRef, wrap_value, extract_constant_index
 from ..logger import logger
 
 
+def _parse_explicit_tag_value(expr) -> Optional[int]:
+    """Parse an explicit enum tag from a class-body assignment RHS.
+
+    Accepts integer constants and unary +/- applied to them (e.g. `X = -1`,
+    which parses as UnaryOp(USub, Constant(1)) rather than a plain Constant).
+    """
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, int):
+        return expr.value
+    if (isinstance(expr, ast.UnaryOp)
+            and isinstance(expr.op, (ast.USub, ast.UAdd))
+            and isinstance(expr.operand, ast.Constant)
+            and isinstance(expr.operand.value, int)):
+        value = expr.operand.value
+        return -value if isinstance(expr.op, ast.USub) else value
+    return None
+
+
 def _create_enum_type(variants, tag_type, class_name=None):
     """Unified factory function to create enum types
 
@@ -697,8 +714,8 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
                     
                     # Parse explicit tag
                     explicit_tag = None
-                    if stmt.value is not None and isinstance(stmt.value, ast.Constant):
-                        explicit_tag = stmt.value.value
+                    if stmt.value is not None:
+                        explicit_tag = _parse_explicit_tag_value(stmt.value)
                     
                     variants.append((var_name, payload_type, explicit_tag))
                 
@@ -709,9 +726,7 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
                             var_name = target.id
                             if not var_name.startswith('_'):
                                 # No payload, but has explicit tag
-                                explicit_tag = None
-                                if isinstance(stmt.value, ast.Constant):
-                                    explicit_tag = stmt.value.value
+                                explicit_tag = _parse_explicit_tag_value(stmt.value)
                                 variants.append((var_name, None, explicit_tag))
                 
                 # Bare name: VarName (no payload, no explicit tag)

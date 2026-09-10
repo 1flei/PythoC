@@ -317,6 +317,19 @@ class LLVMIRVisitor(ast.NodeVisitor):
         from ..builtin_entities import BuiltinEntity, BuiltinType, BuiltinFunction
         from ..builtin_entities.python_type import PythonType
 
+        if getattr(python_obj, '_is_extern_global', False):
+            # Extern global variable: declare the raw C symbol in the module
+            # and bind the name directly to its address (lvalue).
+            value_ref = python_obj.lower_to_module(self, binding_name=name)
+            return VariableInfo(
+                name=name,
+                value_ref=value_ref,
+                alloca=None,
+                source=source,
+                is_global=True,
+                is_mutable=True,
+            )
+
         if isinstance(python_obj, type):
             try:
                 if issubclass(python_obj, BuiltinEntity):

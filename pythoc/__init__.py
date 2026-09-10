@@ -26,7 +26,7 @@ from .builtin_entities import (
 )
 
 # Provide lowercase alias for convenience
-from .decorators import compile, jit, extern, inline, get_compiler, clear_registry
+from .decorators import compile, jit, extern, extern_global, inline, get_compiler, clear_registry
 from .effect import effect
 from .decorators.compile import flush_all_pending_outputs
 from .compiler import LLVMCompiler
@@ -46,6 +46,7 @@ from .utils.build_utils import (
     export_c_headers,
 )
 from .cimport import cimport, cimport_header, cimport_source
+from .utils.link_utils import linklibrary
 from .config import config
 from .forward_ref import mark_type_defined, register_forward_ref_callback
 from .session import CompileSession
@@ -113,7 +114,7 @@ __all__ = [
     'pyconst',
     
     # Decorators
-    'compile', 'jit', 'extern', 'inline',
+    'compile', 'jit', 'extern', 'extern_global', 'inline',
     
     # Effect system
     'effect',
@@ -180,6 +181,7 @@ __all__ = [
     'cimport',
     'cimport_header',
     'cimport_source',
+    'linklibrary',
     
     # Metadata
     '__version__',

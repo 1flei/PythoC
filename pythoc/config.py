@@ -247,6 +247,13 @@ _register(
     'Shell-tokenised via shlex; e.g. "-I/usr/local/include -DFOO=1".',
     'Read on every clang-backed cimport call.',
 )
+_register(
+    'cimport_include_path', 'PC_CIMPORT_INCLUDE_PATH', '', _to_str,
+    'Extra include directories for the clang cimport backend, separated '
+    'by os.pathsep or ";".  Appended as '
+    '-I dirs, after the explicit include_dirs argument.',
+    'Read on every clang-backed cimport call.',
+)
 
 
 # ---------------------------------------------------------------------------

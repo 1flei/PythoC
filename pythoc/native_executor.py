@@ -64,7 +64,19 @@ class MultiSOExecutor:
                 if p and p not in all_objs:
                     all_objs.append(p)
 
-        result = link_files(all_objs, so_file, shared=True, link_libraries=extra_link_libraries)
+        # Registry link objects (cimport compile_sources products) are not
+        # statically linked into group .so files on POSIX: every group .so
+        # would get a private copy of each extern global's storage (macOS
+        # two-level namespace binds intra-image references to the local
+        # copy), diverging from other groups and from ctypes access.  They
+        # are provided once per process by the extern-objects bundle (see
+        # ensure_link_objects_loaded) and resolved from the process-global
+        # namespace at load time.  Windows keeps static linking: PE
+        # requires all symbols resolved at link time.
+        link_objects = None if sys.platform == 'win32' else []
+
+        result = link_files(all_objs, so_file, shared=True, link_objects=link_objects,
+                            link_libraries=extra_link_libraries)
         return result
 
     def _shared_dependency_link_mode(self) -> str:
@@ -435,8 +447,13 @@ class MultiSOExecutor:
         """Load a single shared library"""
         if not os.path.exists(so_file):
             raise FileNotFoundError(f"Shared library not found: {so_file}")
-        
-        from .utils.link_utils import file_lock
+
+        # Group .so files reference registry link objects (cimport compiled
+        # sources) as undefined symbols resolved from the process-global
+        # namespace, so the extern-objects bundle must be loaded first.
+        from .utils.link_utils import ensure_link_objects_loaded, file_lock
+        ensure_link_objects_loaded()
+
         lockfile_path = so_file + '.lock'
         
         with file_lock(lockfile_path):

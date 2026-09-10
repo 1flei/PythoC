@@ -197,7 +197,13 @@ class AssignmentsMixin:
             # Check if variable exists in var_registry (not user_globals)
             existing_in_registry = self.scope_manager.lookup_variable(var_name)
             
-            if existing_in_registry is None:
+            # An extern global is a mutable lvalue: `g = 5` must store through
+            # the global's address, not bind a local Python value.
+            user_globals = self.ctx.user_globals or {}
+            is_extern_global = getattr(
+                user_globals.get(var_name), '_is_extern_global', False)
+
+            if existing_in_registry is None and not is_extern_global:
                 # New variable OR shadowing a user_globals variable
                 # Either way, declare it in var_registry
                 pc_type = pc_type or rvalue.get_pc_type()
@@ -217,7 +223,7 @@ class AssignmentsMixin:
                 )
                 self.scope_manager.declare_variable(var_info, allow_shadow=True)
                 return
-            else:
+            elif existing_in_registry is not None:
                 # Variable exists in var_registry - if it's also a Python value, update it
                 if existing_in_registry.alloca is None:
                     existing_in_registry.value_ref = rvalue

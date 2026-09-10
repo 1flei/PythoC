@@ -184,6 +184,14 @@ class SimpleEnum:
     A: None
     B: None
 
+# Test 5: Enum with negative explicit tags (X = -1 parses as UnaryOp, not Constant)
+@enum(i32)
+class NegativeTags:
+    Low: None = -3
+    Mid: None
+    High: None = 10
+    After: None
+
 @enum(i32)
 class ComplexEnum:
     Int: i32
@@ -205,6 +213,28 @@ def test_enum_layout() -> i32:
     printf("ComplexEnum instances created\n")
     
     printf("All enum layout tests passed\n")
+    return 0
+
+@compile
+def test_negative_tags() -> i32:
+    printf("NegativeTags: Low=%d, Mid=%d, High=%d, After=%d\n",
+           NegativeTags.Low, NegativeTags.Mid, NegativeTags.High, NegativeTags.After)
+
+    # Low=-3 (explicit), Mid=-2 (auto), High=10 (explicit), After=11 (auto)
+    if NegativeTags.Low != -3:
+        printf("ERROR: NegativeTags.Low should be -3\n")
+        return 1
+    if NegativeTags.Mid != -2:
+        printf("ERROR: NegativeTags.Mid should be -2\n")
+        return 1
+    if NegativeTags.High != 10:
+        printf("ERROR: NegativeTags.High should be 10\n")
+        return 1
+    if NegativeTags.After != 11:
+        printf("ERROR: NegativeTags.After should be 11\n")
+        return 1
+
+    printf("PASS: negative tags\n")
     return 0
 
 @compile
@@ -236,6 +266,9 @@ def main() -> i32:
     test_status_enum()
 
     test_enum_layout()
+
+    if test_negative_tags() != 0:
+        return 1
     return 0
 
 if __name__ == "__main__":
