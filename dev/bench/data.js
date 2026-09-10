@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788279580994,
+  "lastUpdate": 1789054003879,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2828,6 +2828,40 @@ window.BENCHMARK_DATA = {
             "name": "compile_speed",
             "value": 0.733,
             "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "6587c5491737699ad32c5114cf65dd2ac75db28e",
+          "message": "Update cimport impl and test",
+          "timestamp": "2026-09-10T23:22:05+08:00",
+          "tree_id": "d77465e434fc40995722ecfa43ebed2e7b818ef5",
+          "url": "https://github.com/1flei/PythoC/commit/6587c5491737699ad32c5114cf65dd2ac75db28e"
+        },
+        "date": 1789054002909,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.84,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.06,
+            "unit": "PC/C ratio"
           }
         ]
       }
