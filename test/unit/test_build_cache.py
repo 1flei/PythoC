@@ -51,5 +51,46 @@ class TestCheckObjUptodateCompilerStamp(unittest.TestCase):
         )
 
 
+class TestPinWin32DllImplib(unittest.TestCase):
+    """The win32 DLL link line must pin -implib to <output>.lib.
+
+    Regression: zig derives the import library name from an input file
+    when source files (e.g. .S) appear on the link line, so <output>.lib
+    was never written and check_so_needs_relink kept reporting the DLL as
+    stale.  A second execute_function call for the same group then tried
+    to relink a DLL already loaded in the process, and lld-link failed
+    with Permission denied (test_runtime_mem_pool on Windows CI).
+    """
+
+    def _expected_flag(self, output_file):
+        implib = os.path.splitext(os.path.abspath(output_file))[0] + '.lib'
+        return f'-Wl,-implib,{implib}'
+
+    def test_flag_inserted_before_output(self):
+        from pythoc.utils.link_utils import _pin_win32_dll_implib
+        cmd = ['zig', 'cc', '-shared', 'a.o', 'a.exports.def', '-o',
+               'a.dll', 'dep.lib', 'ctx.S']
+        out = _pin_win32_dll_implib(cmd, 'a.dll')
+        flag = self._expected_flag('a.dll')
+        self.assertIn(flag, out)
+        self.assertLess(out.index(flag), out.index('-o'))
+        # Original arguments are preserved.
+        for arg in cmd:
+            self.assertIn(arg, out)
+
+    def test_idempotent(self):
+        from pythoc.utils.link_utils import _pin_win32_dll_implib
+        cmd = ['zig', 'cc', '-shared', 'a.o', '-o', 'a.dll']
+        once = _pin_win32_dll_implib(cmd, 'a.dll')
+        twice = _pin_win32_dll_implib(once, 'a.dll')
+        self.assertEqual(once, twice)
+
+    def test_appended_when_no_output_flag(self):
+        from pythoc.utils.link_utils import _pin_win32_dll_implib
+        cmd = ['zig', 'cc', '-shared', 'a.o']
+        out = _pin_win32_dll_implib(cmd, 'a.dll')
+        self.assertEqual(out[-1], self._expected_flag('a.dll'))
+
+
 if __name__ == '__main__':
     unittest.main()

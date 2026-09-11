@@ -528,6 +528,29 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
 
 
 
+def _pin_win32_dll_implib(link_cmd: List[str], output_file: str) -> List[str]:
+    """Pin the import library path of a win32 DLL link.
+
+    zig derives the import library name from one of the input files when
+    source files (e.g. ``.S``) appear on the link line, so
+    ``<output>.lib`` may never be written.  Both the freshness check in
+    ``BuildCache.check_so_needs_relink`` and downstream links rely on that
+    exact path; without it a DLL looks permanently stale and every
+    follow-up call tries to relink it, which fails on Windows once the
+    DLL is loaded in the process (loaded images are locked).
+    """
+    implib = os.path.splitext(os.path.abspath(output_file))[0] + '.lib'
+    flag = f'-Wl,-implib,{implib}'
+    if flag in link_cmd:
+        return link_cmd
+    try:
+        out_idx = link_cmd.index('-o')
+    except ValueError:
+        return [*link_cmd, flag]
+    return [*link_cmd[:out_idx], flag, *link_cmd[out_idx:]]
+
+
+
 def _write_exports_def(def_file: str, dll_name: str, obj_files: List[str]) -> bool:
     """Write a Windows `.def` file exporting global symbols from `obj_files`.
 
@@ -748,6 +771,7 @@ def try_link_with_linkers(
             # Passing the `.def` as an input file works with zig (windows-gnu)
             # and avoids MSVC-style `/DEF:` flags.
             if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
+                link_cmd = _pin_win32_dll_implib(link_cmd, output_file)
                 try:
                     out_idx = link_cmd.index('-o')
                     obj_candidates = [a for a in link_cmd[:out_idx] if a.lower().endswith(('.o', '.obj'))]

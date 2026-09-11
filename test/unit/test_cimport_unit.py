@@ -1,6 +1,7 @@
 """Unit tests for cimport/extern platform helpers that integration tests
 cannot reach on the local platform (Windows-specific branches)."""
 
+import os
 import sys
 import unittest
 from unittest.mock import patch
@@ -13,7 +14,10 @@ class TestNormalizeLibForGeneratedSource(unittest.TestCase):
 
     def test_bare_names_pass_through_on_windows(self):
         from pythoc.cimport import _normalize_lib_for_generated_source
-        with patch("pythoc.cimport.os.name", "nt"):
+        # Patch the real os module: 'pythoc.cimport.os' is not importable
+        # (pythoc.cimport is a module, not a package), so mock cannot
+        # resolve it as a patch target.
+        with patch("os.name", "nt"):
             self.assertEqual(_normalize_lib_for_generated_source('c'), 'c')
             self.assertEqual(_normalize_lib_for_generated_source('m'), 'm')
             self.assertEqual(_normalize_lib_for_generated_source('mylib'),
@@ -22,14 +26,17 @@ class TestNormalizeLibForGeneratedSource(unittest.TestCase):
 
     def test_paths_normalized_on_windows(self):
         from pythoc.cimport import _normalize_lib_for_generated_source
-        with patch("pythoc.cimport.os.name", "nt"):
+        with patch("os.name", "nt"):
             out = _normalize_lib_for_generated_source('subdir\\mylib')
             self.assertNotIn('\\', out)
             self.assertIn('/', out)
 
     def test_posix_passthrough(self):
         from pythoc.cimport import _normalize_lib_for_generated_source
-        # Not Windows: everything passes through unchanged.
+        if os.name == 'nt':
+            # A relative path with a backslash separator IS path-like on
+            # Windows and gets normalized; passthrough is POSIX-only.
+            self.skipTest('POSIX behavior')
         self.assertEqual(
             _normalize_lib_for_generated_source('some\\name'), 'some\\name')
 

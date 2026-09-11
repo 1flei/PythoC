@@ -25,6 +25,10 @@ Platform notes:
   for malloc/free); the default main-file-only emission would miss them.
 - math functions need lib='m' on Linux (libm is separate from libc);
   on macOS libm is folded into libSystem so lib='c' is used.
+- plain C char is unsigned on ARM64 Linux and signed on x86/macOS, so
+  libc 'char *' parameters bind as ptr[u8] or ptr[i8] depending on the
+  target; wrappers that pass typed pointer values across that boundary
+  use the derived _cchar_ptr type (see below) to compile either way.
 - The whole file is skipped on Windows: the pip libclang cannot parse
   zig's bundled mingw libc headers (any-windows-any/stdlib.h), so real
   libc headers are not importable there.
@@ -119,21 +123,31 @@ if _BACKEND_AVAILABLE:
 
     SEEK_SET_C = _stdio.SEEK_SET
 
+    # Plain C char is unsigned on some targets (ARM64 Linux) and signed on
+    # others (x86, macOS); the bindings mirror the target ABI, so a libc
+    # 'char *' parameter is ptr[u8] on some targets and ptr[i8] on others.
+    # Derive the char pointer type from a real declaration and use it for
+    # wrapper parameters/locals that cross a libc 'char *' boundary, so
+    # the wrappers compile with either signedness.  (Arrays and string
+    # literals adapt to the parameter type on their own; only typed
+    # pointer values need this.)
+    _cchar_ptr = atoi.param_types[0][1]
+
     # ------------------------------------------------------------------
     # stdlib: numeric conversions
     # ------------------------------------------------------------------
 
     @compile
-    def atoi_of(s: ptr[i8]) -> i32:
+    def atoi_of(s: _cchar_ptr) -> i32:
         return atoi(s)
 
     @compile
-    def atof_doubled(s: ptr[i8]) -> i32:
+    def atof_doubled(s: _cchar_ptr) -> i32:
         return i32(atof(s) * 2.0)
 
     @compile
-    def strtol_base16(s: ptr[i8]) -> i32:
-        endp: ptr[i8] = nullptr
+    def strtol_base16(s: _cchar_ptr) -> i32:
+        endp: _cchar_ptr = nullptr
         v: i64 = strtol(s, ptr(endp), 16)
         consumed: i64 = i64(endp) - i64(s)
         return i32(v) + i32(consumed)
@@ -159,7 +173,7 @@ if _BACKEND_AVAILABLE:
 
     @compile
     def strerror_enoent() -> i32:
-        msg: ptr[i8] = strerror(2)  # ENOENT on both macOS and Linux
+        msg: _cchar_ptr = strerror(2)  # ENOENT on both macOS and Linux
         if msg == nullptr:
             return 1
         if i32(strlen(msg)) == 0:
@@ -169,7 +183,7 @@ if _BACKEND_AVAILABLE:
         return 0
 
     @compile
-    def strlen_of(s: ptr[i8]) -> i32:
+    def strlen_of(s: _cchar_ptr) -> i32:
         return i32(strlen(s))
 
     # ------------------------------------------------------------------
@@ -219,7 +233,7 @@ if _BACKEND_AVAILABLE:
         return n
 
     @compile
-    def file_roundtrip(path: ptr[i8]) -> i32:
+    def file_roundtrip(path: _cchar_ptr) -> i32:
         f = fopen(path, "w+")
         if f == nullptr:
             return 1
@@ -327,7 +341,7 @@ if _BACKEND_AVAILABLE:
     # ------------------------------------------------------------------
 
     @compile
-    def pipeline(a: ptr[i8], b: ptr[i8], expect: ptr[i8]) -> i32:
+    def pipeline(a: _cchar_ptr, b: _cchar_ptr, expect: _cchar_ptr) -> i32:
         va: i32 = atoi(a)
         vb: i32 = atoi(b)
         product: i32 = va * vb
