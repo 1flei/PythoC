@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -167,6 +168,10 @@ class CimportGlobalsBase(unittest.TestCase):
 class TestCimportGlobalReadWrite(CimportGlobalsBase):
     """Read/write an extern global from @compile code."""
 
+    @unittest.skipIf(sys.platform == 'win32',
+                     "the final assertion calls the C function Python-side, "
+                     "and Python-side access to process-global symbols "
+                     "(lib='') is not supported on Windows")
     def test_compiled_read_write_visible_to_c(self):
         reset_counter(10)
         self.assertEqual(bump_counter(), 111)
@@ -181,6 +186,9 @@ class TestCimportGlobalReadWrite(CimportGlobalsBase):
         self.assertEqual(bump_counter(), 108)
 
 
+@unittest.skipIf(sys.platform == 'win32',
+                 "Python-side access to process-global symbols (lib='') "
+                 "is not supported on Windows")
 class TestCimportHeaderExternGlobal(CimportGlobalsBase):
     """Header-declared extern global backed by a compiled source."""
 
@@ -192,6 +200,9 @@ class TestCimportHeaderExternGlobal(CimportGlobalsBase):
         self.assertEqual(read_gvar(), 42)
 
 
+@unittest.skipIf(sys.platform == 'win32',
+                 "Python-side access to process-global symbols (lib='') "
+                 "is not supported on Windows")
 class TestCimportGlobalPythonSide(CimportGlobalsBase):
     """Python-side read/write of the global via the module attribute."""
 
@@ -213,6 +224,10 @@ class TestCimportGlobalPythonSide(CimportGlobalsBase):
         self.assertEqual(_case3_mod.pyside_value.value, 66)
 
 
+@unittest.skipIf(sys.platform == 'win32',
+                 "on Windows each group DLL statically links its own copy "
+                 "of registry link objects, so two groups cannot share one "
+                 "storage copy of an extern global")
 class TestCimportCrossGroupSingleCopy(CimportGlobalsBase):
     """Two group .so files share one storage copy of the same extern global.
 

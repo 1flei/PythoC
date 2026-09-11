@@ -265,6 +265,29 @@ class TestMultiSOExecutor(unittest.TestCase):
         self.assertEqual(libs, [])
         self.assertEqual(task_deps, ())
 
+    def test_windows_stub_mode_merges_registry_path_libraries(self):
+        """On Windows (stub link mode), path-like libraries registered via
+        linklibrary()/cimport(libraries=...) must appear on the group DLL
+        link line (PE resolves all symbols at link time); bare library
+        names must not (zig links its libc itself, and get_link_flags
+        filters 'c'/'m')."""
+        executor = MultiSOExecutor()
+        fake_registry = SimpleNamespace(
+            get_link_libraries=lambda: [
+                'c',
+                'gcc_s',
+                '/tmp/libs/libpc_merge_test.so',
+            ],
+        )
+        with patch("pythoc.native_executor.sys.platform", "win32"), patch(
+                "pythoc.registry.get_unified_registry",
+                return_value=fake_registry):
+            libs, task_deps = executor._dependency_link_plan(
+                "/tmp/pc_merge_test.o", "/tmp/pc_merge_test.dll", [])
+
+        self.assertEqual(libs, ['/tmp/libs/libpc_merge_test.so'])
+        self.assertEqual(task_deps, ())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -125,6 +125,26 @@ class MultiSOExecutor:
             link_libs.append(dep_so)
 
         link_libs.extend(lib for lib in persisted_libs if lib not in link_libs)
+
+        if link_mode == 'stub':
+            # PE requires every referenced symbol resolved at link time.
+            # Libraries registered via linklibrary()/cimport(libraries=...)
+            # live only in the global registry (not in per-group .deps), so
+            # merge them here.  Bare names are skipped: they would turn into
+            # -l flags that zig cannot reliably resolve on Windows ('c'/'m'
+            # are already filtered by get_link_flags, and zig links its libc
+            # automatically).
+            from .registry import get_unified_registry
+            for lib in get_unified_registry().get_link_libraries():
+                if lib in link_libs:
+                    continue
+                is_path_like = (
+                    os.path.isabs(lib) or '/' in lib or os.sep in lib
+                    or os.path.splitext(lib)[1].lower()
+                    in ('.a', '.so', '.dll', '.lib')
+                )
+                if is_path_like:
+                    link_libs.append(lib)
         return link_libs, tuple(sorted(set(task_deps)))
 
     def _dependency_path_exists(

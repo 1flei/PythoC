@@ -97,6 +97,63 @@ class TestX86_64WindowsThreshold(unittest.TestCase):
         self.assertFalse(a.is_return)
 
 
+class TestX86_64WindowsPow2Sizes(unittest.TestCase):
+    """Windows x64 passes an aggregate by value in an integer register only
+    when its size is exactly 1, 2, 4 or 8 bytes; every other size (3, 5, 6,
+    7, and > 8) is passed by reference.  SysV has no such restriction.
+    """
+
+    def setUp(self):
+        self.abi = X86_64ABI(
+            max_register_size=8,
+            use_byval_for_indirect_args=False,
+            pow2_register_sizes=True,
+        )
+
+    def test_three_byte_struct_is_indirect(self):
+        # {i8, i8, i8} = 3 bytes: register-passed on SysV, by-reference on
+        # Windows x64.  Getting this wrong makes the C callee dereference
+        # the register value as a pointer.
+        three = ir.LiteralStructType([ir.IntType(8)] * 3)
+        r = self.abi.classify_return_type(three)
+        a = self.abi.classify_argument_type(three)
+        self.assertEqual(r.kind, PassingKind.INDIRECT)
+        self.assertEqual(a.kind, PassingKind.INDIRECT)
+        self.assertTrue(r.is_return)
+        self.assertFalse(a.is_return)
+
+    def test_pow2_sizes_stay_coerced(self):
+        for size, width in ((1, 8), (2, 16), (4, 32), (8, 64)):
+            ty = ir.LiteralStructType([ir.IntType(8)] * size)
+            r = self.abi.classify_return_type(ty)
+            a = self.abi.classify_argument_type(ty)
+            self.assertEqual(r.kind, PassingKind.COERCE, f"size={size}")
+            self.assertEqual(a.kind, PassingKind.COERCE, f"size={size}")
+            self.assertEqual(r.coerced_type, ir.IntType(width))
+
+    def test_sysv_three_byte_struct_unaffected(self):
+        # Without the pow2 rule (SysV), a 3-byte struct still coerces to i32.
+        sysv = X86_64ABI()
+        three = ir.LiteralStructType([ir.IntType(8)] * 3)
+        self.assertEqual(
+            sysv.classify_argument_type(three).kind, PassingKind.COERCE)
+        self.assertEqual(
+            sysv.classify_return_type(three).kind, PassingKind.COERCE)
+
+    def test_get_target_abi_sets_pow2_rule_on_windows(self):
+        from pythoc.builder.abi import get_target_abi
+        abi = get_target_abi('x86_64-pc-windows-gnu')
+        self.assertTrue(getattr(abi, '_pow2_register_sizes', False))
+        three = ir.LiteralStructType([ir.IntType(8)] * 3)
+        self.assertEqual(
+            abi.classify_argument_type(three).kind, PassingKind.INDIRECT)
+        # Linux x86_64 keeps SysV rules.
+        abi_sysv = get_target_abi('x86_64-unknown-linux-gnu')
+        self.assertFalse(getattr(abi_sysv, '_pow2_register_sizes', False))
+        self.assertEqual(
+            abi_sysv.classify_argument_type(three).kind, PassingKind.COERCE)
+
+
 class TestAArch64HFAPrecedence(unittest.TestCase):
     """AAPCS64 HFA rule takes precedence over the 16-byte indirect rule:
     a homogeneous float aggregate with up to 4 members is register-passed

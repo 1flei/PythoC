@@ -19,11 +19,15 @@ Covers:
 - a combined scenario: parse -> compute -> format -> compare
 
 Platform notes:
-- malloc/free live in <malloc/_malloc.h> in the macOS SDK (stdlib.h only
-  includes it), and cimport binds main-file declarations only, so macOS
-  imports that header directly; glibc declares them in stdlib.h itself.
+- System headers are imported with includes=True because they delegate
+  declarations to private sub-headers (glibc math.h -> bits/mathcalls.h,
+  macOS string.h/stdio.h -> _string.h/_stdio.h, stdlib.h -> malloc/_malloc.h
+  for malloc/free); the default main-file-only emission would miss them.
 - math functions need lib='m' on Linux (libm is separate from libc);
   on macOS libm is folded into libSystem so lib='c' is used.
+- The whole file is skipped on Windows: the pip libclang cannot parse
+  zig's bundled mingw libc headers (any-windows-any/stdlib.h), so real
+  libc headers are not importable there.
 
 Note: @compile wrappers are defined at module level because pythoc requires
 all @compile definitions to precede the first native call from this module.
@@ -40,7 +44,6 @@ from pythoc import (
     compile, i8, i32, i64, u64, f64, ptr, array, sizeof, nullptr, void,
 )
 
-IS_DARWIN = sys.platform == 'darwin'
 IS_LINUX = sys.platform.startswith('linux')
 
 
@@ -61,7 +64,12 @@ def _cc_available() -> bool:
     return True
 
 
-_BACKEND_AVAILABLE = _clang_backend_available() and _cc_available()
+_BACKEND_AVAILABLE = (
+    _clang_backend_available()
+    and _cc_available()
+    # The pip libclang cannot parse zig's bundled mingw libc headers.
+    and sys.platform != 'win32'
+)
 
 # =============================================================================
 # Module-level fixtures: cimport of real system headers + @compile wrappers
@@ -70,17 +78,15 @@ _BACKEND_AVAILABLE = _clang_backend_available() and _cc_available()
 if _BACKEND_AVAILABLE:
     from pythoc.cimport import cimport
 
-    _stdlib = cimport('stdlib.h', lib='c')
-    _string = cimport('string.h', lib='c')
-    _stdio = cimport('stdio.h', lib='c')
+    _stdlib = cimport('stdlib.h', lib='c', includes=True)
+    _string = cimport('string.h', lib='c', includes=True)
+    _stdio = cimport('stdio.h', lib='c', includes=True)
     # libm is a separate library on Linux; on macOS it is part of libSystem.
-    _math = cimport('math.h', lib='m' if IS_LINUX else 'c')
-    if IS_DARWIN:
-        # The macOS SDK declares malloc/free in <malloc/_malloc.h>, which
-        # stdlib.h includes; cimport binds main-file declarations only.
-        _malloc_mod = cimport('malloc/_malloc.h', lib='c')
-    else:
-        _malloc_mod = _stdlib
+    _math = cimport('math.h', lib='m' if IS_LINUX else 'c', includes=True)
+    # malloc/free are declared in malloc/_malloc.h in the macOS SDK and
+    # reached through stdlib.h via includes=True; glibc declares them in
+    # stdlib.h itself.
+    _malloc_mod = _stdlib
 
     atoi = _stdlib.atoi
     atof = _stdlib.atof

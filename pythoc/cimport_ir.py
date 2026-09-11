@@ -65,6 +65,8 @@ class CDeclIR:
     # it differs from the C spelling; the binding keeps the C name while the
     # linked symbol uses the label (glibc fopen -> fopen64 scenario).
     symbol: Optional[str] = None
+    # For kind == "error": why the declaration could not be converted.
+    reason: Optional[str] = None
 
 
 @dataclass(slots=True)

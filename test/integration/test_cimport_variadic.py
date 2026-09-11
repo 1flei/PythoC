@@ -69,8 +69,10 @@ def _write_fixture(name: str, content: str) -> str:
 if _BACKEND_AVAILABLE:
     from pythoc.cimport import cimport
 
-    _stdio = cimport('stdio.h', lib='c')
-    _string = cimport('string.h', lib='c')
+    # includes=True: system stdio.h/string.h delegate to private
+    # sub-headers on some SDKs (macOS _stdio.h/_string.h).
+    _stdio = cimport('stdio.h', lib='c', includes=True)
+    _string = cimport('string.h', lib='c', includes=True)
     snprintf = _stdio.snprintf
     sprintf = _stdio.sprintf
     strcmp = _string.strcmp

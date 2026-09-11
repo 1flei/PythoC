@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+import sys
 import tempfile
 import unittest
 
@@ -128,6 +129,9 @@ class TestLinklibrary(unittest.TestCase):
     def test_shared_lib_jit_call(self):
         self.assertEqual(call_link_add(1, 2), 4)
 
+    @unittest.skipIf(sys.platform == 'win32',
+                     "Python-side access to process-global symbols (lib='') "
+                     "is not supported on Windows")
     def test_shared_lib_python_side_call(self):
         self.assertEqual(_add_mod.pc_link_add(3, 4), 8)
 
@@ -145,6 +149,9 @@ class TestLinklibrary(unittest.TestCase):
     def test_static_archive_jit_call(self):
         self.assertEqual(call_link_mul(6, 7), 42)
 
+    @unittest.skipIf(sys.platform == 'win32',
+                     "Python-side access to process-global symbols (lib='') "
+                     "is not supported on Windows")
     def test_static_archive_python_side_call(self):
         self.assertEqual(_mul_mod.pc_link_mul(2, 5), 10)
 
@@ -170,8 +177,13 @@ class TestSystemIncludes(unittest.TestCase):
         else:
             os.environ['PC_CIMPORT_INCLUDE_PATH'] = self._saved_env
 
+    @unittest.skipIf(sys.platform == 'win32',
+                     "the pip libclang cannot parse zig's bundled mingw "
+                     "libc headers reliably on Windows")
     def test_system_header_by_name(self):
-        mod = cimport('stdio.h', lib='c')
+        # includes=True: system stdio.h delegates to _stdio.h on newer
+        # macOS SDKs.
+        mod = cimport('stdio.h', lib='c', includes=True)
         self.assertTrue(hasattr(mod, 'puts'))
         self.assertTrue(hasattr(mod, 'printf'))
 
@@ -187,6 +199,48 @@ class TestSystemIncludes(unittest.TestCase):
             self.assertTrue(hasattr(mod, 'env_only_fn'))
         finally:
             shutil.rmtree(custom_dir, ignore_errors=True)
+
+
+@unittest.skipUnless(_BACKEND_AVAILABLE, 'clang backend or C compiler unavailable')
+class TestIncludesOption(unittest.TestCase):
+    """cimport(..., includes=True) also emits declarations from files the
+    imported file includes; the default stays main-file-only."""
+
+    def test_default_is_main_file_only(self):
+        _write_fixture('inc_sub.h',
+                       'int inc_sub_fn(int x);\n#define INC_SUB_MAGIC 77\n')
+        main = _write_fixture(
+            'inc_main.h',
+            '#include "inc_sub.h"\nint inc_main_fn(int x);\n'
+            '#define INC_MAIN_MAGIC 5\n')
+        mod = cimport(main, lib='c', include_dirs=[_fixture_dir])
+        self.assertTrue(hasattr(mod, 'inc_main_fn'))
+        self.assertEqual(mod.INC_MAIN_MAGIC, 5)
+        self.assertFalse(hasattr(mod, 'inc_sub_fn'))
+        self.assertFalse(hasattr(mod, 'INC_SUB_MAGIC'))
+
+    def test_includes_emits_included_decls(self):
+        _write_fixture('inc_sub2.h',
+                       'int inc_sub2_fn(int x);\n#define INC_SUB2_MAGIC 78\n')
+        main = _write_fixture(
+            'inc_main2.h',
+            '#include "inc_sub2.h"\nint inc_main2_fn(int x);\n')
+        mod = cimport(main, lib='c', include_dirs=[_fixture_dir],
+                      includes=True)
+        self.assertTrue(hasattr(mod, 'inc_main2_fn'))
+        self.assertTrue(hasattr(mod, 'inc_sub2_fn'))
+        self.assertEqual(mod.INC_SUB2_MAGIC, 78)
+
+    def test_includes_main_file_wins_dedup(self):
+        # A same-named macro in the main file wins over the included-file
+        # one (macro redefinition is only a warning in C).
+        _write_fixture('inc_win_sub.h', '#define INC_WIN_MAGIC 1\n')
+        main = _write_fixture(
+            'inc_win_main.h',
+            '#include "inc_win_sub.h"\n#define INC_WIN_MAGIC 2\n')
+        mod = cimport(main, lib='c', include_dirs=[_fixture_dir],
+                      includes=True)
+        self.assertEqual(mod.INC_WIN_MAGIC, 2)
 
 
 @unittest.skipUnless(_BACKEND_AVAILABLE, 'clang backend or C compiler unavailable')

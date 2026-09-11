@@ -51,19 +51,26 @@ class X86_64ABI(ABIInfo):
         self,
         max_register_size: int = 16,
         use_byval_for_indirect_args: bool = True,
+        pow2_register_sizes: bool = False,
     ):
         """Initialize x86-64 ABI.
-        
+
         Args:
             max_register_size: Maximum struct size that can be passed in registers.
                               16 for System V (Linux/macOS), 8 for Windows x64.
             use_byval_for_indirect_args: Whether indirect aggregate arguments
                               should be marked with LLVM's byval attribute.
                               SysV uses byval; Windows x64 passes a plain pointer.
+            pow2_register_sizes: Whether only power-of-two-sized aggregates
+                              (1, 2, 4, 8 bytes) may be passed in an integer
+                              register.  Windows x64 requires this; SysV
+                              passes any aggregate up to 16 bytes in
+                              registers (e.g. a 3-byte struct).
         """
         super().__init__()
         self.max_register_size = max_register_size
         self._use_byval_for_indirect_args = use_byval_for_indirect_args
+        self._pow2_register_sizes = pow2_register_sizes
 
     def uses_byval_for_indirect_args(self) -> bool:
         return self._use_byval_for_indirect_args
@@ -135,6 +142,16 @@ class X86_64ABI(ABIInfo):
         # on ABIs that don't use byval (controlled by
         # uses_byval_for_indirect_args()).
         if size > self.max_register_size:
+            return CoercedType(
+                kind=PassingKind.INDIRECT,
+                original_type=llvm_type,
+                is_return=is_return,
+            )
+
+        # Windows x64 passes an aggregate by value in an integer register
+        # only when its size is exactly 1, 2, 4 or 8 bytes; every other
+        # size (3, 5, 6, 7) is passed by reference like larger aggregates.
+        if self._pow2_register_sizes and size not in (1, 2, 4, 8):
             return CoercedType(
                 kind=PassingKind.INDIRECT,
                 original_type=llvm_type,

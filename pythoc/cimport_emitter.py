@@ -131,6 +131,11 @@ def _decl_unsupported_reason(decl: CDeclIR,
                              wrapper_symbol: str | None) -> str | None:
     """Classify one declaration: None when emittable, else the lazy-error
     reason.  Mirrors the checks the emit helpers used to apply inline."""
+    if decl.kind == "error":
+        # The frontend failed to convert this declaration (e.g. a libclang
+        # version that does not know a TypeKind the SDK uses); degrade to a
+        # lazy error instead of aborting the whole import.
+        return decl.reason or "declaration could not be converted"
     if decl.kind == "typedef":
         return _unsupported_reason(decl.type)
     if decl.kind == "var":
@@ -421,7 +426,14 @@ def _emit_struct(lines: list[str], decl: CDeclIR,
     else:
         for index, field in enumerate(decl.fields):
             field_name = _ident(field.name, f"_field{index}")
-            lines.append(f"    {field_name}: {_type_expr(field.type, renames)}")
+            # Quote the type expression: C identifiers like __foo are
+            # subject to Python's class-body name mangling when evaluated
+            # directly, while a string annotation is resolved later by
+            # pythoc against the module namespace (which also keeps
+            # self-references working).  The field target itself is
+            # un-mangled by pythoc's struct compilation.
+            lines.append(
+                f"    {field_name}: {_type_expr(field.type, renames)!r}")
     lines.append("")
 
 

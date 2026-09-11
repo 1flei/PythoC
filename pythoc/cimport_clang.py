@@ -69,6 +69,7 @@ def generate_bindings_to_file(
     clang_args: Optional[list[str]] = None,
     enable_wrappers: bool = True,
     stub_path: Optional[str] = None,
+    includes: bool = False,
 ) -> None:
     module = parse_to_ir(
         path,
@@ -79,6 +80,7 @@ def generate_bindings_to_file(
         sysroot=sysroot,
         clang_args=clang_args,
         enable_wrappers=enable_wrappers,
+        includes=includes,
     )
     prefix = wrapper_prefix_for_path(path) if enable_wrappers else None
     write_pythoc_module(module, lib, output_path, wrapper_prefix=prefix)
@@ -119,6 +121,7 @@ def parse_to_ir(
     sysroot: Optional[str] = None,
     clang_args: Optional[list[str]] = None,
     enable_wrappers: bool = True,
+    includes: bool = False,
 ) -> CModuleIR:
     cindex = _load_cindex()
     effective_target, _effective_sysroot, args = resolve_parse_options(
@@ -147,35 +150,76 @@ def parse_to_ir(
 
     module = CModuleIR()
     seen: dict[tuple[str, str], int] = {}
+    seen_is_main: dict[tuple[str, str], bool] = {}
     macro_slots: dict[str, int] = {}
+    macro_is_main: dict[str, bool] = {}
     target_arch = _resolve_target_arch(effective_target)
     main_file = os.path.abspath(path)
+
+    # Main-file declarations are always emitted.  With includes=True,
+    # declarations pulled in transitively from included files are emitted
+    # too (system headers frequently delegate to private sub-headers:
+    # glibc math.h -> bits/mathcalls.h, macOS string.h -> _string.h).
+    # The walk follows TU order, which matches C's declaration-before-use
+    # order (an included file's declarations precede the includer's), so
+    # the emitted module can bind names sequentially; dedup keeps the
+    # first-seen slot and a main-file declaration wins the slot over an
+    # included-file one.
     for cursor in tu.cursor.get_children():
-        if not _is_from_main_file(cursor, main_file):
+        is_main = _is_from_main_file(cursor, main_file)
+        if not is_main:
+            if not includes:
+                continue
+            location = cursor.location
+            if location is None or location.file is None:
+                continue
+        try:
+            decl = _cursor_to_decl(cindex, tu, cursor, target_arch,
+                                   enable_wrappers, main_file, includes)
+        except Exception as exc:
+            # One unconvertible declaration must not abort the whole import
+            # (e.g. python-clang not knowing a TypeKind the platform SDK
+            # uses).  Degrade it to a lazy error via _unsupported_symbols,
+            # the same way unsupported types are handled.
+            name = cursor.spelling or f"_unparsed_{len(module.declarations)}"
+            key = ("error", name)
+            if key not in seen:
+                seen[key] = len(module.declarations)
+                seen_is_main[key] = is_main
+                module.declarations.append(CDeclIR(
+                    "error", name,
+                    reason=f"declaration could not be converted: {exc}"))
             continue
-        decl = _cursor_to_decl(cindex, tu, cursor, target_arch,
-                               enable_wrappers, main_file)
         if decl is None:
             continue
         if decl.kind == "macro":
             # A redefinition after #undef replaces the earlier definition,
-            # matching the preprocessor's final value.
+            # matching the preprocessor's final value.  A main-file macro
+            # wins over a same-named macro from an included file.
             slot = macro_slots.get(decl.name)
-            if slot is not None:
-                module.declarations[slot] = decl
-            else:
+            if slot is None:
                 macro_slots[decl.name] = len(module.declarations)
+                macro_is_main[decl.name] = is_main
                 module.declarations.append(decl)
+            elif is_main or not macro_is_main[decl.name]:
+                module.declarations[slot] = decl
+                macro_is_main[decl.name] = is_main or macro_is_main[decl.name]
             continue
         key = (decl.kind, decl.name)
         slot = seen.get(key)
         if slot is not None:
-            # A later definition carries strictly more information than the
-            # declaration seen first (e.g. needs_wrapper detection).
-            if decl.is_definition and not module.declarations[slot].is_definition:
+            old = module.declarations[slot]
+            old_is_main = seen_is_main[key]
+            # A definition carries strictly more information than a plain
+            # declaration (e.g. needs_wrapper detection); otherwise a
+            # main-file declaration wins over an included-file one.
+            if ((decl.is_definition and not old.is_definition)
+                    or (is_main and not old_is_main and not old.is_definition)):
                 module.declarations[slot] = decl
+                seen_is_main[key] = is_main
             continue
         seen[key] = len(module.declarations)
+        seen_is_main[key] = is_main
         module.declarations.append(decl)
     return module
 
@@ -349,19 +393,30 @@ def _is_from_main_file(cursor, main_file: str) -> bool:
     return os.path.abspath(str(location.file)) == main_file
 
 
+def _is_from_emitted_file(cursor, main_file: str, include_all: bool) -> bool:
+    """True when the cursor's file is part of the emitted declaration set."""
+    location = cursor.location
+    if location is None or location.file is None:
+        return False
+    if include_all:
+        return True
+    return os.path.abspath(str(location.file)) == main_file
+
+
 def _cursor_to_decl(cindex, tu, cursor, target_arch: str,
-                    enable_wrappers: bool, main_file: str) -> CDeclIR | None:
+                    enable_wrappers: bool, main_file: str,
+                    include_all: bool = False) -> CDeclIR | None:
     kind = cursor.kind
     if kind == cindex.CursorKind.FUNCTION_DECL:
         if not cursor.spelling:
             return None
         params = [
-            CParamIR(arg.spelling or None, _type_to_ir(cindex, arg.type, target_arch, main_file))
+            CParamIR(arg.spelling or None, _type_to_ir(cindex, arg.type, target_arch, main_file, include_all))
             for arg in cursor.get_arguments()
         ]
         func_ty = CTypeIR(
             "function",
-            return_type=_type_to_ir(cindex, cursor.result_type, target_arch, main_file),
+            return_type=_type_to_ir(cindex, cursor.result_type, target_arch, main_file, include_all),
             params=params,
             is_variadic=_is_function_variadic(cindex, cursor.type),
         )
@@ -397,7 +452,7 @@ def _cursor_to_decl(cindex, tu, cursor, target_arch: str,
         return CDeclIR(
             "struct",
             name,
-            fields=_fields_to_ir(cindex, cursor, target_arch, main_file),
+            fields=_fields_to_ir(cindex, cursor, target_arch, main_file, include_all),
             size_bytes=_complete_type_size(cursor.type),
         )
 
@@ -406,7 +461,7 @@ def _cursor_to_decl(cindex, tu, cursor, target_arch: str,
         return CDeclIR(
             "union",
             name,
-            fields=_fields_to_ir(cindex, cursor, target_arch, main_file),
+            fields=_fields_to_ir(cindex, cursor, target_arch, main_file, include_all),
             size_bytes=_complete_type_size(cursor.type),
         )
 
@@ -421,7 +476,7 @@ def _cursor_to_decl(cindex, tu, cursor, target_arch: str,
     if kind == cindex.CursorKind.TYPEDEF_DECL:
         if not cursor.spelling:
             return None
-        return CDeclIR("typedef", cursor.spelling, _type_to_ir(cindex, cursor.underlying_typedef_type, target_arch, main_file))
+        return CDeclIR("typedef", cursor.spelling, _type_to_ir(cindex, cursor.underlying_typedef_type, target_arch, main_file, include_all))
 
     if kind == cindex.CursorKind.VAR_DECL:
         if not cursor.spelling:
@@ -438,7 +493,7 @@ def _cursor_to_decl(cindex, tu, cursor, target_arch: str,
         return CDeclIR(
             "var",
             cursor.spelling,
-            _type_to_ir(cindex, cursor.type, target_arch, main_file),
+            _type_to_ir(cindex, cursor.type, target_arch, main_file, include_all),
             storage=storage,
             is_definition=cursor.is_definition(),
             is_thread_local=is_thread_local,
@@ -588,7 +643,8 @@ def _field_offset_bytes(cindex, cursor) -> Optional[int]:
     return offset_bits // 8
 
 
-def _fields_to_ir(cindex, cursor, target_arch: str, main_file: str) -> list[CFieldIR]:
+def _fields_to_ir(cindex, cursor, target_arch: str, main_file: str,
+                  include_all: bool = False) -> list[CFieldIR]:
     fields: list[CFieldIR] = []
     for child in cursor.get_children():
         if child.kind != cindex.CursorKind.FIELD_DECL:
@@ -601,30 +657,31 @@ def _fields_to_ir(cindex, cursor, target_arch: str, main_file: str) -> list[CFie
             offset_bytes = _field_offset_bytes(cindex, child)
         fields.append(CFieldIR(
             child.spelling or None,
-            _type_to_ir(cindex, child.type, target_arch, main_file),
+            _type_to_ir(cindex, child.type, target_arch, main_file, include_all),
             bit_width,
             offset_bytes,
         ))
     return fields
 
 
-def _type_to_ir(cindex, typ, target_arch: str, main_file: str) -> CTypeIR:
+def _type_to_ir(cindex, typ, target_arch: str, main_file: str,
+                include_all: bool = False) -> CTypeIR:
     kind = typ.kind
     tk = cindex.TypeKind
 
     if kind == tk.ELABORATED:
-        return _type_to_ir(cindex, typ.get_named_type(), target_arch, main_file)
+        return _type_to_ir(cindex, typ.get_named_type(), target_arch, main_file, include_all)
     if kind == tk.TYPEDEF:
-        # A typedef declared in the main file is emitted by the emitter, so
-        # keep the name reference.  A typedef from an included header is
-        # never emitted (only main-file declarations are), so resolve
-        # through to the underlying type to avoid dangling references.
+        # A typedef declared in an emitted file is emitted by the emitter,
+        # so keep the name reference.  A typedef from a non-emitted header
+        # is never emitted, so resolve through to the underlying type to
+        # avoid dangling references.
         decl = typ.get_declaration()
-        if decl is not None and _is_from_main_file(decl, main_file):
+        if decl is not None and _is_from_emitted_file(decl, main_file, include_all):
             return CTypeIR("typedef", name=typ.spelling)
         if decl is not None:
             return _type_to_ir(
-                cindex, decl.underlying_typedef_type, target_arch, main_file)
+                cindex, decl.underlying_typedef_type, target_arch, main_file, include_all)
         return CTypeIR("typedef", name=typ.spelling)
     if kind == tk.POINTER:
         pointee = typ.get_pointee()
@@ -632,19 +689,19 @@ def _type_to_ir(cindex, typ, target_arch: str, main_file: str) -> CTypeIR:
             # A C function pointer is a single indirection and pythoc's
             # func[...] is already a function-pointer value, so map
             # directly instead of double-wrapping as ptr[func[...]].
-            return _type_to_ir(cindex, pointee, target_arch, main_file)
-        return CTypeIR("pointer", pointee=_type_to_ir(cindex, pointee, target_arch, main_file))
+            return _type_to_ir(cindex, pointee, target_arch, main_file, include_all)
+        return CTypeIR("pointer", pointee=_type_to_ir(cindex, pointee, target_arch, main_file, include_all))
     if kind in (tk.CONSTANTARRAY, tk.INCOMPLETEARRAY, tk.VARIABLEARRAY):
         size = typ.element_count if kind == tk.CONSTANTARRAY else -1
-        return CTypeIR("array", element=_type_to_ir(cindex, typ.element_type, target_arch, main_file), size=size)
+        return CTypeIR("array", element=_type_to_ir(cindex, typ.element_type, target_arch, main_file, include_all), size=size)
     if kind in (tk.FUNCTIONPROTO, tk.FUNCTIONNOPROTO):
         params = [
-            CParamIR(None, _type_to_ir(cindex, arg_type, target_arch, main_file))
+            CParamIR(None, _type_to_ir(cindex, arg_type, target_arch, main_file, include_all))
             for arg_type in _argument_types(typ)
         ]
         return CTypeIR(
             "function",
-            return_type=_type_to_ir(cindex, typ.get_result(), target_arch, main_file),
+            return_type=_type_to_ir(cindex, typ.get_result(), target_arch, main_file, include_all),
             params=params,
             is_variadic=_is_function_variadic(cindex, typ),
         )

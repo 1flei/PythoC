@@ -26,6 +26,7 @@ all @compile definitions to precede the first native call from this module.
 from __future__ import annotations
 
 import os
+import sys
 import unittest
 
 from pythoc import compile, i32, f64, ptr, nullptr, void
@@ -228,7 +229,9 @@ const char *vs_last_log(void) { return vs_log_buf; }
 
     _vs = cimport(_header, sources=[_core, _util],
                   compile_sources=True, include_dirs=[_fixture_dir])
-    _string = cimport('string.h', lib='c')
+    # includes=True: system string.h delegates to _string.h on newer
+    # macOS SDKs.
+    _string = cimport('string.h', lib='c', includes=True)
 
     vec3 = _vs.vec3
     vs_store = _vs.vs_store
@@ -418,6 +421,9 @@ class TestCimportProjectIntegration(unittest.TestCase):
     def test_full_geometry_roundtrip(self):
         self.assertEqual(app_full_roundtrip(), 0)
 
+    @unittest.skipIf(sys.platform == 'win32',
+                     "Python-side access to process-global symbols (lib='') "
+                     "is not supported on Windows")
     def test_globals_persist_across_calls(self):
         before = _vs.vs_total_allocs.value
         self.assertEqual(app_store_lifecycle(), 0)

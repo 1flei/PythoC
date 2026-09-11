@@ -236,32 +236,32 @@ c1_factorial = _case1_mod.c1_factorial
 
 # Define @compile wrappers at module level
 @compile
-def test_c1_add(a: i32, b: i32) -> i32:
+def pc_test_c1_add(a: i32, b: i32) -> i32:
     return c1_add(a, b)
 
 
 @compile
-def test_c1_sub(a: i32, b: i32) -> i32:
+def pc_test_c1_sub(a: i32, b: i32) -> i32:
     return c1_sub(a, b)
 
 
 @compile
-def test_c1_mul(a: i32, b: i32) -> i32:
+def pc_test_c1_mul(a: i32, b: i32) -> i32:
     return c1_mul(a, b)
 
 
 @compile
-def test_c1_square(x: i32) -> i32:
+def pc_test_c1_square(x: i32) -> i32:
     return c1_square(x)
 
 
 @compile
-def test_c1_factorial(n: i32) -> i32:
+def pc_test_c1_factorial(n: i32) -> i32:
     return c1_factorial(n)
 
 
 @compile
-def test_c1_complex() -> i32:
+def pc_test_c1_complex() -> i32:
     """Complex expression using multiple C functions"""
     a: i32 = c1_add(10, 5)   # 15
     b: i32 = c1_mul(a, 2)    # 30
@@ -273,30 +273,30 @@ class TestCimportSourceActualCalls(unittest.TestCase):
     """Test Case 1: cimport C source -> compile to .o -> actually call functions"""
     
     def test_add(self):
-        self.assertEqual(test_c1_add(3, 5), 8)
-        self.assertEqual(test_c1_add(-10, 10), 0)
-        self.assertEqual(test_c1_add(100, 200), 300)
+        self.assertEqual(pc_test_c1_add(3, 5), 8)
+        self.assertEqual(pc_test_c1_add(-10, 10), 0)
+        self.assertEqual(pc_test_c1_add(100, 200), 300)
     
     def test_sub(self):
-        self.assertEqual(test_c1_sub(10, 3), 7)
-        self.assertEqual(test_c1_sub(5, 10), -5)
+        self.assertEqual(pc_test_c1_sub(10, 3), 7)
+        self.assertEqual(pc_test_c1_sub(5, 10), -5)
     
     def test_mul(self):
-        self.assertEqual(test_c1_mul(3, 4), 12)
-        self.assertEqual(test_c1_mul(-2, 5), -10)
+        self.assertEqual(pc_test_c1_mul(3, 4), 12)
+        self.assertEqual(pc_test_c1_mul(-2, 5), -10)
     
     def test_square(self):
-        self.assertEqual(test_c1_square(5), 25)
-        self.assertEqual(test_c1_square(-3), 9)
+        self.assertEqual(pc_test_c1_square(5), 25)
+        self.assertEqual(pc_test_c1_square(-3), 9)
     
     def test_factorial(self):
-        self.assertEqual(test_c1_factorial(0), 1)
-        self.assertEqual(test_c1_factorial(1), 1)
-        self.assertEqual(test_c1_factorial(5), 120)
-        self.assertEqual(test_c1_factorial(10), 3628800)
+        self.assertEqual(pc_test_c1_factorial(0), 1)
+        self.assertEqual(pc_test_c1_factorial(1), 1)
+        self.assertEqual(pc_test_c1_factorial(5), 120)
+        self.assertEqual(pc_test_c1_factorial(10), 3628800)
     
     def test_complex_expression(self):
-        self.assertEqual(test_c1_complex(), 20)
+        self.assertEqual(pc_test_c1_complex(), 20)
 
 
 # =============================================================================
@@ -347,17 +347,17 @@ c2_double = _case2_mod.c2_double
 
 
 @compile
-def test_c2_add(a: i32, b: i32) -> i32:
+def pc_test_c2_add(a: i32, b: i32) -> i32:
     return c2_add(a, b)
 
 
 @compile
-def test_c2_sub(a: i32, b: i32) -> i32:
+def pc_test_c2_sub(a: i32, b: i32) -> i32:
     return c2_sub(a, b)
 
 
 @compile
-def test_c2_double(x: i32) -> i32:
+def pc_test_c2_double(x: i32) -> i32:
     return c2_double(x)
 
 
@@ -365,15 +365,15 @@ class TestCimportHeaderWithSource(unittest.TestCase):
     """Test Case 2: cimport header with C source files"""
     
     def test_add(self):
-        self.assertEqual(test_c2_add(10, 20), 30)
-        self.assertEqual(test_c2_add(-5, 5), 0)
+        self.assertEqual(pc_test_c2_add(10, 20), 30)
+        self.assertEqual(pc_test_c2_add(-5, 5), 0)
     
     def test_sub(self):
-        self.assertEqual(test_c2_sub(100, 30), 70)
+        self.assertEqual(pc_test_c2_sub(100, 30), 70)
     
     def test_double(self):
-        self.assertEqual(test_c2_double(21), 42)
-        self.assertEqual(test_c2_double(-5), -10)
+        self.assertEqual(pc_test_c2_double(21), 42)
+        self.assertEqual(pc_test_c2_double(-5), -10)
 
 
 # =============================================================================
@@ -457,22 +457,22 @@ c3_negate = _case3_mod.c3_negate
 
 
 @compile
-def test_c3_add(a: i32, b: i32) -> i32:
+def pc_test_c3_add(a: i32, b: i32) -> i32:
     return c3_add(a, b)
 
 
 @compile
-def test_c3_mul(a: i32, b: i32) -> i32:
+def pc_test_c3_mul(a: i32, b: i32) -> i32:
     return c3_mul(a, b)
 
 
 @compile
-def test_c3_negate(x: i32) -> i32:
+def pc_test_c3_negate(x: i32) -> i32:
     return c3_negate(x)
 
 
 @compile
-def test_c3_complex() -> i32:
+def pc_test_c3_complex() -> i32:
     """Complex expression using shared library functions"""
     a: i32 = c3_add(5, 3)      # 8
     b: i32 = c3_mul(a, 2)      # 16
@@ -484,19 +484,19 @@ class TestCimportHeaderWithSharedLib(unittest.TestCase):
     """Test Case 3: cimport header with pre-compiled shared library"""
     
     def test_add(self):
-        self.assertEqual(test_c3_add(7, 8), 15)
-        self.assertEqual(test_c3_add(-100, 100), 0)
+        self.assertEqual(pc_test_c3_add(7, 8), 15)
+        self.assertEqual(pc_test_c3_add(-100, 100), 0)
     
     def test_mul(self):
-        self.assertEqual(test_c3_mul(6, 7), 42)
-        self.assertEqual(test_c3_mul(-3, 4), -12)
+        self.assertEqual(pc_test_c3_mul(6, 7), 42)
+        self.assertEqual(pc_test_c3_mul(-3, 4), -12)
     
     def test_negate(self):
-        self.assertEqual(test_c3_negate(42), -42)
-        self.assertEqual(test_c3_negate(-10), 10)
+        self.assertEqual(pc_test_c3_negate(42), -42)
+        self.assertEqual(pc_test_c3_negate(-10), 10)
     
     def test_complex_expression(self):
-        self.assertEqual(test_c3_complex(), -16)
+        self.assertEqual(pc_test_c3_complex(), -16)
 
 
 # =============================================================================

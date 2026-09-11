@@ -26,7 +26,7 @@ import inspect
 import os
 import unittest
 
-from pythoc import compile, i32, ptr
+from pythoc import compile, i32, nullptr, ptr
 
 
 def _clang_backend_available() -> bool:
@@ -231,6 +231,33 @@ int knr_noargs(void) { return 42; }
     def call_knr() -> i32:
         return knr_noargs()
 
+    # =================================================================
+    # Item 6: double-underscore names (C reserved namespace, ubiquitous in
+    # system headers) survive Python's class-body name mangling
+    # =================================================================
+    _dunder_header = _write_fixture('dunder.h', '''
+struct __node {
+    struct __node *__next;
+    int __val;
+};
+int __node_val(struct __node *p);
+''')
+    _dunder_source = _write_fixture('dunder.c', '''
+#include "dunder.h"
+int __node_val(struct __node *p) { return p->__val + (p->__next ? 1 : 0); }
+''')
+    _dunder_mod = cimport(_dunder_header, sources=[_dunder_source],
+                          compile_sources=True, include_dirs=[_fixture_dir])
+    dunder_node = _dunder_mod.__node
+    dunder_node_val = _dunder_mod.__node_val
+
+    @compile
+    def dunder_roundtrip(v: i32) -> i32:
+        s: dunder_node
+        s.__val = v
+        s.__next = nullptr
+        return dunder_node_val(ptr(s))
+
     @compile
     def normal_offsets() -> i32:
         return (offsetof(Normal, "a") + offsetof(Normal, "b") * 16
@@ -391,6 +418,20 @@ class TestCimportNoProto(unittest.TestCase):
 
     def test_no_proto_callable(self):
         self.assertEqual(call_knr(), 42)
+
+
+@unittest.skipUnless(_BACKEND_AVAILABLE, "clang backend or cc not available")
+class TestCimportDunderNames(unittest.TestCase):
+    """__-prefixed C names: emitted field type expressions are quoted so
+    class-body name mangling never applies, and pythoc un-mangles the
+    field targets back to their literal C names."""
+
+    def test_dunder_struct_keeps_literal_fields(self):
+        self.assertTrue(dunder_node.has_field("__next"))
+        self.assertTrue(dunder_node.has_field("__val"))
+
+    def test_dunder_struct_abi_roundtrip(self):
+        self.assertEqual(dunder_roundtrip(41), 41)
 
 
 if __name__ == "__main__":

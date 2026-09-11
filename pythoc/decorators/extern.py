@@ -21,6 +21,19 @@ def _load_lib_handle(lib):
         # products) live in the process-global extern-objects bundle; make
         # sure it is linked and dlopen'ed before resolving through the
         # global namespace so this works before any @compile call.
+        if sys.platform == 'win32':
+            # Windows has no process-global dynamic symbol namespace that
+            # ctypes can reach (ctypes.CDLL(None) is not the global symbol
+            # table, and on Python 3.12+ it raises TypeError outright), and
+            # registry link objects are statically linked into each group
+            # DLL instead of a shared bundle.  Python-side access to such
+            # symbols is therefore unsupported; @compile code is unaffected
+            # (it links the objects directly).
+            raise RuntimeError(
+                "Python-side access to process-global symbols (lib='') is "
+                "not supported on Windows; call the function from @compile "
+                "code instead"
+            )
         from ..utils.link_utils import ensure_link_objects_loaded
         ensure_link_objects_loaded()
         return ctypes.CDLL(None)
@@ -287,9 +300,11 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
             param_type = resolved_annotations.get(name, param.annotation)
             param_types.append((name, param_type))
         # Note: No longer registering in registry - info is stored on wrapper
+        # Preserve an explicit lib='' (process-global symbols from registered
+        # object files); only a missing lib defaults to 'c'.
         wrapper = ExternFunctionWrapper(
             func=f,
-            lib=lib or 'c',
+            lib=lib if lib is not None else 'c',
             calling_convention=calling_convention,
             return_type=return_type,
             param_types=param_types,
@@ -297,7 +312,7 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
         )
         wrapper._is_extern = True
         wrapper._extern_config = {
-            'lib': lib or 'c',
+            'lib': lib if lib is not None else 'c',
             'calling_convention': calling_convention,
             'signature': sig,
             'function': f,

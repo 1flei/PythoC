@@ -13,7 +13,8 @@ The single fixture library covers: numeric macros, enum constants
 inline header function (wrapper stub), a compiled .c source function, a
 struct-by-value call, and a variadic libc call (printf/snprintf).
 
-Skipped cleanly when no C compiler/linker is available.
+Skipped cleanly when no C compiler/linker is available, and on Windows
+(the pip libclang cannot parse zig's bundled mingw libc headers).
 
 Note: @compile wrappers are defined at module level because pythoc requires
 all @compile definitions to precede the first native call from this module.
@@ -43,7 +44,13 @@ def _cc_available() -> bool:
     return True
 
 
-_BACKEND_AVAILABLE = _clang_backend_available() and _cc_available()
+_BACKEND_AVAILABLE = (
+    _clang_backend_available()
+    and _cc_available()
+    # The program imports real libc headers, which the pip libclang cannot
+    # parse from zig's bundled mingw headers on Windows.
+    and sys.platform != 'win32'
+)
 
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -98,8 +105,10 @@ from pythoc.cimport import cimport
 D = {fixture_dir!r}
 lib = cimport(D + '/aot_lib.h', sources=[D + '/aot_lib.c'],
               compile_sources=True, include_dirs=[D])
-stdio = cimport('stdio.h', lib='c')
-stdlib = cimport('stdlib.h', lib='c')
+# includes=True: system headers delegate to private sub-headers on some
+# SDKs (macOS _stdio.h, glibc stdlib.h sub-headers).
+stdio = cimport('stdio.h', lib='c', includes=True)
+stdlib = cimport('stdlib.h', lib='c', includes=True)
 
 AotPair = lib.AotPair
 aot_counter = lib.aot_counter

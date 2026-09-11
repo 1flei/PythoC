@@ -257,5 +257,42 @@ int exp_fn(int x);
         self.assertEqual(g["exp_fn"].c_name, "exp_fn")
 
 
+class TestCimportConversionResilience(CimportErrorsBase):
+    """A declaration that fails IR conversion degrades to a lazy error
+    instead of aborting the whole import (e.g. a python-clang/libclang
+    version skew raising ValueError on an SDK declaration)."""
+
+    def test_unconvertible_decl_becomes_lazy_error(self):
+        import pythoc.cimport_clang as clang_backend
+        from pythoc.cimport import cimport
+
+        header = self._write(
+            "mixed_conv.h",
+            "int conv_ok_fn(int x);\nint conv_bad_fn(int x);\n")
+        original = clang_backend._cursor_to_decl
+
+        def _flaky(*args, **kwargs):
+            cursor = args[2]
+            if cursor.spelling == "conv_bad_fn":
+                raise ValueError("Unknown template argument kind 32")
+            return original(*args, **kwargs)
+
+        try:
+            clang_backend._cursor_to_decl = _flaky
+            mod = cimport(header, lib="c")
+        finally:
+            clang_backend._cursor_to_decl = original
+
+        # The good declaration is unaffected...
+        self.assertTrue(hasattr(mod, "conv_ok_fn"))
+        self.assertEqual(mod.conv_ok_fn.c_name, "conv_ok_fn")
+        # ...and the bad one is a descriptive lazy error, not a crash.
+        with self.assertRaises(RuntimeError) as ctx:
+            mod.conv_bad_fn
+        self.assertIn("conv_bad_fn", str(ctx.exception))
+        self.assertIn("could not be converted", str(ctx.exception))
+        self.assertIn("Unknown template argument kind 32", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

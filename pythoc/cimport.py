@@ -67,7 +67,11 @@ def _normalize_lib_for_generated_source(lib: str) -> str:
     # If those are embedded into generated Python source like
     # `@extern(lib='C:\\Users\\...')`, sequences like `\U` can be parsed as
     # unicode escapes and break import. Normalize to forward slashes.
-    if os.name == 'nt' and lib:
+    # Bare library names ('c', 'm', 'mylib', ...) are NOT paths: never
+    # abspath them, or 'c' would turn into '<cwd>/c' and end up as a bogus
+    # file argument on the linker command line.
+    if (os.name == 'nt' and lib
+            and (os.path.isabs(lib) or '/' in lib or '\\' in lib)):
         return os.path.abspath(lib).replace('\\', '/')
     return lib
 
@@ -85,6 +89,7 @@ def _generate_bindings_clang(
     clang_args: Optional[List[str]],
     enable_wrappers: bool = True,
     stub_path: Optional[str] = None,
+    includes: bool = False,
 ) -> None:
     from .cimport_clang import generate_bindings_to_file
 
@@ -104,6 +109,7 @@ def _generate_bindings_clang(
             clang_args=clang_args,
             enable_wrappers=enable_wrappers,
             stub_path=stub_path,
+            includes=includes,
         )
         os.replace(tmp_path, bindings_path)
     finally:
@@ -112,7 +118,8 @@ def _generate_bindings_clang(
 
 
 def _hash_parse_options(backend: str, lib: str, target: Optional[str],
-                        parse_args: List[str], cc: Optional[str]) -> str:
+                        parse_args: List[str], cc: Optional[str],
+                        includes: bool = False) -> str:
     """Short hash of every input that changes generated bindings output.
 
     Two cimport() calls for the same header with different flags must not
@@ -122,8 +129,9 @@ def _hash_parse_options(backend: str, lib: str, target: Optional[str],
     cache file name, along with the backend and ``lib`` (embedded in the
     generated @extern decorators).  ``cc`` is included because it drives
     compilation of the wrapper stub and compile_sources objects cached
-    next to the bindings.  The pythoc compiler stamp is included so that
-    editing pythoc itself (bindings generator or wrapper emission)
+    next to the bindings.  ``includes`` widens the emitted declaration set
+    to the whole translation unit.  The pythoc compiler stamp is included
+    so that editing pythoc itself (bindings generator or wrapper emission)
     invalidates all artifacts derived from it.
     """
     from .utils.compiler_stamp import get_compiler_mtime
@@ -132,6 +140,7 @@ def _hash_parse_options(backend: str, lib: str, target: Optional[str],
     hasher.update((lib or '').encode())
     hasher.update((target or '').encode())
     hasher.update((cc or '').encode())
+    hasher.update(b'\x01' if includes else b'\x00')
     hasher.update(repr(get_compiler_mtime()).encode())
     for arg in parse_args:
         hasher.update(b'\x00')
@@ -290,6 +299,7 @@ def cimport(path: str, *,
             target: Optional[str] = None,
             sysroot: Optional[str] = None,
             clang_args: Optional[List[str]] = None,
+            includes: bool = False,
             export: Optional[List[str]] = None,
             export_all: bool = False,
             prefix: Optional[str] = None) -> ModuleType:
@@ -316,6 +326,11 @@ def cimport(path: str, *,
         target: Optional clang target triple for the clang backend.
         sysroot: Optional sysroot for the clang backend.
         clang_args: Additional raw clang parse arguments.
+        includes: If True, also emit declarations pulled in transitively
+            from files the imported file includes (default: only
+            declarations written in the imported file itself).  Needed for
+            system headers that delegate to private sub-headers (glibc
+            math.h -> bits/mathcalls.h, macOS string.h -> _string.h).
         export: Symbol names to export to caller globals (explicit opt-in)
         export_all: If True, export all symbols to caller globals
         prefix: Optional symbol prefix
@@ -421,7 +436,8 @@ def cimport(path: str, *,
         target=target, sysroot=sysroot, clang_args=clang_args,
     )
     options_hash = _hash_parse_options(selected_backend, lib or '',
-                                       effective_target, parse_args, cc)
+                                       effective_target, parse_args, cc,
+                                       includes=includes)
 
     # Generate bindings module path
     basename = os.path.splitext(os.path.basename(path))[0]
@@ -457,6 +473,7 @@ def cimport(path: str, *,
                 clang_args=clang_args,
                 enable_wrappers=enable_wrappers,
                 stub_path=stub_c_path,
+                includes=includes,
             )
     
     # Compile sources if requested
