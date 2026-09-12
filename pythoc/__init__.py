@@ -9,8 +9,8 @@ providing C-equivalent capabilities with Python syntax.
 from __future__ import annotations
 
 from .builtin_entities import (
-    i8, i16, i32, i64,
-    u8, u16, u32, u64,
+    i8, i16, i32, i64, i128,
+    u8, u16, u32, u64, u128,
     f16, bf16, f32, f64, f128, bool,
     ptr, array, struct, union, func, enum,
     const, static, thread_local, volatile,
@@ -23,6 +23,10 @@ from .builtin_entities import (
     pc_literal,
     llvm_asm,
     param,
+    atomic_load, atomic_store, atomic_fetch_add, atomic_cas, atomic_fence,
+    atomic_fetch_and, atomic_fetch_or, atomic_exchange,
+    inf, inff, nan, nanf,
+    bswap, popcount, ctlz, cttz,
 )
 
 # Provide lowercase alias for convenience
@@ -162,6 +166,28 @@ __all__ = [
     'va_arg',
     'va_end',
 
+    # Generic-width atomic intrinsics
+    'atomic_load',
+    'atomic_store',
+    'atomic_fetch_add',
+    'atomic_cas',
+    'atomic_fence',
+    'atomic_fetch_and',
+    'atomic_fetch_or',
+    'atomic_exchange',
+
+    # IEEE-754 float constants
+    'inf',
+    'inff',
+    'nan',
+    'nanf',
+
+    # Integer bit operations
+    'bswap',
+    'popcount',
+    'ctlz',
+    'cttz',
+
     # PC literal carrier
     'pc_literal',
 
@@ -190,7 +216,7 @@ __all__ = [
 
 # Auto-export dynamic iN/uN types from unified registry
 from .builtin_entities import get_builtin_entity
-for _w in _py.range(1, 65):
+for _w in _py.range(1, 129):
     for _p in ('i', 'u'):
         _n = f'{_p}{_w}'
         _ent = get_builtin_entity(_n)

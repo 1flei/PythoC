@@ -215,6 +215,16 @@ class pc_literal:
             return cls(builtins_bool(ctypes_result), pc_type)
 
         if _is_integer(pc_type):
+            # >64-bit integers cross the FFI line as a two-uint64 struct
+            # (no scalar ctypes equivalent); reassemble the full value.
+            if isinstance(ctypes_result, ct.Structure) \
+                    and hasattr(ctypes_result, 'lo') \
+                    and hasattr(ctypes_result, 'hi'):
+                value = ctypes_result.lo | (ctypes_result.hi << 64)
+                if getattr(pc_type, '_is_signed', False) \
+                        and value >> 127:
+                    value -= 1 << 128
+                return cls(value, pc_type)
             return cls(int(ctypes_result), pc_type)
 
         if _is_float(pc_type):
@@ -460,6 +470,16 @@ class pc_literal:
             return param_type(*vals)
 
         if _is_integer(self._pc_type) or _is_bool_type(self._pc_type):
+            # >64-bit integers pass as a two-uint64 struct; param_type is
+            # the _Int128Struct-derived class from get_ctypes_type().
+            if issubclass(param_type, ct.Structure) \
+                    and hasattr(param_type, '_fields_') \
+                    and len(param_type._fields_) == 2 \
+                    and param_type._fields_[0][0] == 'lo':
+                v = int(self._value)
+                if v < 0:
+                    v += 1 << 128
+                return param_type(v & 0xFFFFFFFFFFFFFFFF, v >> 64)
             return param_type(int(self._value))
         if _is_float(self._pc_type):
             return param_type(float(self._value))

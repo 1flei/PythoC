@@ -608,6 +608,16 @@ class MultiSOExecutor:
                 # pointer, and live-struct cases including c_void_p).
                 if hasattr(arg, '_to_ctypes'):
                     c_args.append(arg._to_ctypes(param_type))
+                elif (isinstance(arg, int)
+                        and isinstance(param_type, type)
+                        and issubclass(param_type, ctypes.Structure)
+                        and [f[0] for f in param_type._fields_] == ['lo', 'hi']):
+                    # >64-bit integer (i128/u128): split into the two-uint64
+                    # FFI carrier; a bare int would only fill the low word.
+                    v = arg
+                    if v < 0:
+                        v += 1 << 128
+                    c_args.append(param_type(v & 0xFFFFFFFFFFFFFFFF, v >> 64))
                 elif param_type == ctypes.c_void_p:
                     if isinstance(arg, int):
                         c_args.append(arg)

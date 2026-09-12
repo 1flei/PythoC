@@ -21,9 +21,9 @@ from .base import (
 # Import basic types from types.py
 from .types import (
     # Signed integer types
-    i8, i16, i32, i64,
+    i8, i16, i32, i64, i128,
     # Unsigned integer types
-    u8, u16, u32, u64,
+    u8, u16, u32, u64, u128,
     # Floating point types (f32, f64 only; f16/bf16/f128 moved to std)
     f32, f64,
     # Special types
@@ -56,6 +56,8 @@ from .qualifiers import const, static, thread_local, volatile
 
 # Built-in functions
 from .intrinsics import sizeof, offsetof, nullptr, seq, consume, assume, refine, typeof, char, defer, instantiate
+from .float_constants import inf, inff, nan, nanf
+from .bitops import bswap, popcount, ctlz, cttz
 from .intrinsics import va_start, va_arg, va_end
 # Scoped goto/label (user-facing API)
 from .intrinsics import label, goto, goto_begin, goto_end
@@ -65,6 +67,8 @@ from .llvm_asm import llvm_asm
 
 # Atomic operation intrinsics
 from .atomic import (
+    atomic_load, atomic_store, atomic_fetch_add, atomic_cas, atomic_fence,
+    atomic_fetch_and, atomic_fetch_or, atomic_exchange,
     atomic_load_i64, atomic_store_i64, atomic_fetch_add_i64, atomic_cas_i64, atomic_cas_i32,
     atomic_load_i32, atomic_store_i32,
 )
@@ -113,10 +117,10 @@ __all__ = [
     'BuiltinFunction',
     
     # Signed integer types
-    'i8', 'i16', 'i32', 'i64',
+    'i8', 'i16', 'i32', 'i64', 'i128',
     
     # Unsigned integer types
-    'u8', 'u16', 'u32', 'u64',
+    'u8', 'u16', 'u32', 'u64', 'u128',
     
     # Floating point types
     'f16', 'bf16', 'f32', 'f64', 'f128',
@@ -179,9 +183,23 @@ __all__ = [
 
     # Inline assembly intrinsic
     'llvm_asm',
+    'atomic_load', 'atomic_store', 'atomic_fetch_add', 'atomic_cas',
+    'atomic_fence', 'atomic_fetch_and', 'atomic_fetch_or', 'atomic_exchange',
     'atomic_load_i64', 'atomic_store_i64',
     'atomic_fetch_add_i64', 'atomic_cas_i64', 'atomic_cas_i32',
     'atomic_load_i32', 'atomic_store_i32',
+
+    # IEEE-754 float constants
+    'inf',
+    'inff',
+    'nan',
+    'nanf',
+
+    # Integer bit operations
+    'bswap',
+    'popcount',
+    'ctlz',
+    'cttz',
     
     # Python type wrapper
     'PythonType',

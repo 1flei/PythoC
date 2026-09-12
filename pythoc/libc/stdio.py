@@ -2,7 +2,7 @@
 Standard I/O Library Functions (stdio.h)
 """
 
-from ..decorators import extern
+from ..decorators import extern, extern_global
 from ..builtin_entities import ptr, i8, i32, i64, void
 from ..forward_ref import mark_type_defined
 
@@ -18,6 +18,7 @@ __all__ = [
     'fopen', 'fclose', 'freopen', 'remove', 'fdopen',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
     'fileno',
+    'stdin', 'stdout', 'stderr',
     '__stdinp', '__stdoutp', '__stderrp',
     'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
     'setvbuf', 'setbuf', 'fgetc', 'fputc', 'ungetc',
@@ -134,6 +135,16 @@ def fflush(stream: ptr[i8]) -> i32:
 def fileno(stream: ptr[i8]) -> i32:
     """Return the integer file descriptor underlying a stream"""
     pass
+
+# Linux (glibc/musl) exposes stdin/stdout/stderr as global FILE* *data*
+# symbols (``extern FILE *stderr;``).  Reading one is a load from the
+# external global, not a call; extern_global binds each name to the
+# global's address, so uses inside @compile load the FILE* value.
+# On macOS these symbol names do not exist -- use __stdinp/__stdoutp/
+# __stderrp below instead.
+stdin = extern_global(ptr[FILE], 'stdin', lib='c')
+stdout = extern_global(ptr[FILE], 'stdout', lib='c')
+stderr = extern_global(ptr[FILE], 'stderr', lib='c')
 
 # macOS exposes stdin/stdout/stderr as global FILE* variables.  The C
 # preprocessor turns references to `stdin`, `stdout`, and `stderr` into the

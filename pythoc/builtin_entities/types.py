@@ -23,7 +23,7 @@ except ImportError:
 # Integer Types
 # ============================================================================
 
-for _w in range(1, 65):
+for _w in range(1, 129):
     _name = f'i{_w}'
     _attrs = {
         '_llvm_type': ir.IntType(_w),
@@ -137,13 +137,15 @@ class ptr(BuiltinType):
         if cls.pointee_type is not None:
             pointee = cls.pointee_type
             
-            # Resolve forward reference if pointee_type is a string
+            # Resolve forward reference if pointee_type is a string.
+            # A name the registry never saw is an incomplete type behind a
+            # pointer (legal in C); use the name itself as the identity
+            # token so such pointers keep a stable type ID.
             if isinstance(pointee, str):
                 from ..forward_ref import get_defined_type
                 resolved = get_defined_type(pointee)
                 if resolved is None:
-                    logger.error(f"ptr.get_type_id: unresolved forward reference '{pointee}'", node=None, exc_type=TypeError)
-                pointee = resolved
+                    return f'P{len(pointee)}{pointee}'
                 pointee = resolved
             
             from ..type_id import get_type_id
@@ -161,10 +163,21 @@ class ptr(BuiltinType):
             if isinstance(pointee, str):
                 from ..forward_ref import get_defined_type
                 resolved = get_defined_type(pointee)
-                if resolved is None:
-                    logger.error(f"ptr.get_llvm_type: unresolved forward reference '{pointee}'", node=None, exc_type=TypeError)
-                pointee = resolved
-                pointee = resolved
+                if resolved is not None:
+                    pointee = resolved
+
+            # A pointee that is STILL an unresolvable name is an incomplete
+            # type behind a pointer -- exactly C's ``struct S *`` with no
+            # visible definition.  C accepts pointers to incomplete types;
+            # materialize a stable opaque identified struct named after the
+            # tag so pointer identity is consistent without needing a layout.
+            if isinstance(pointee, str):
+                if module_context is None:
+                    logger.error(
+                        f"ptr.get_llvm_type: unresolved forward reference '{pointee}' without module context",
+                        node=None, exc_type=TypeError)
+                pointee_llvm = module_context.get_identified_type(pointee)
+                return ir.PointerType(pointee_llvm)
 
             # ptr[void] -> i8* (same as unspecialized ptr)
             if pointee is void:
@@ -484,7 +497,18 @@ class ptr(BuiltinType):
         class SpecializedPtr(ptr):
             _pc_specialized = True
             pointee_type = inner_type
-        
+
+        # Normalize a quoted pointee (``ptr["T"]``) through the session
+        # forward-ref registry.  A resolvable name binds the real defining
+        # class now, so conversion checks and IR materialization compare
+        # identical classes; an unresolvable name stays a lazy string
+        # (resolved -- or materialized as an incomplete opaque type -- later).
+        if isinstance(inner_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(inner_type)
+            if resolved is not None and not isinstance(resolved, str):
+                SpecializedPtr.pointee_type = resolved
+
         return SpecializedPtr
 
     @classmethod

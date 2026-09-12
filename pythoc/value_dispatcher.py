@@ -422,7 +422,8 @@ class ValueRefDispatcher:
                 self._zero_constant_for(value),
             )
         if self._has_type_flag(pc_type, "_is_float"):
-            return self.visitor.builder.fcmp_ordered(
+            # C semantics: NaN converts to true (NaN != 0.0 is unordered-true).
+            return self.visitor.builder.fcmp_unordered(
                 "!=",
                 value_ir,
                 self._zero_constant_for(value),
@@ -546,11 +547,21 @@ class ValueRefDispatcher:
         from .builtin_entities import bool as bool_type
 
         if is_float_cmp:
-            result = self.visitor.builder.fcmp_ordered(
-                predicate,
-                ensure_ir(left),
-                ensure_ir(right),
-            )
+            # C semantics: != is true when either operand is NaN
+            # (unordered), while == and the relational operators are
+            # ordered (false when unordered).
+            if isinstance(op, (ast.NotEq, ast.IsNot)):
+                result = self.visitor.builder.fcmp_unordered(
+                    predicate,
+                    ensure_ir(left),
+                    ensure_ir(right),
+                )
+            else:
+                result = self.visitor.builder.fcmp_ordered(
+                    predicate,
+                    ensure_ir(left),
+                    ensure_ir(right),
+                )
             return wrap_value(result, kind="value", type_hint=bool_type)
 
         left_ir = ensure_ir(left)

@@ -52,7 +52,13 @@ class array(BuiltinType):
         """Generate unique type ID for array types."""
         if cls.element_type and cls.dimensions:
             from ..type_id import get_type_id
-            elem_id = get_type_id(cls.element_type, _visited)
+            element_type = cls.element_type
+            if isinstance(element_type, str):
+                from ..forward_ref import get_defined_type
+                resolved = get_defined_type(element_type)
+                if resolved is not None:
+                    element_type = resolved
+            elem_id = get_type_id(element_type, _visited)
             dims_str = '_'.join(str(d) for d in cls.dimensions)
             return f'A{elem_id}_{dims_str}'
         return 'Ax'  # unknown array
@@ -67,17 +73,30 @@ class array(BuiltinType):
         if cls.element_type is None or cls.dimensions is None:
             logger.error("array type requires element type and dimensions", node=None, exc_type=TypeError)
         
-        # Get element LLVM type
-        if hasattr(cls.element_type, 'get_llvm_type'):
-            elem_llvm = cls.element_type.get_llvm_type(module_context)
-        elif isinstance(cls.element_type, ir.Type):
+        # Get element LLVM type.  A string element type is an unresolved
+        # forward-ref name kept by handle_type_subscript; resolve it here
+        # (same lazy resolution as ptr's string pointee), failing loudly if
+        # the name was never defined.
+        element_type = cls.element_type
+        if isinstance(element_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(element_type)
+            if resolved is None:
+                logger.error(
+                    f"array: unresolved forward reference '{element_type}'",
+                    node=None, exc_type=NameError,
+                )
+            element_type = resolved
+        if hasattr(element_type, 'get_llvm_type'):
+            elem_llvm = element_type.get_llvm_type(module_context)
+        elif isinstance(element_type, ir.Type):
             # ANTI-PATTERN: element_type should be BuiltinEntity, not ir.Type
             logger.error(
-                f"array.get_llvm_type: element_type is raw LLVM type {cls.element_type}. "
+                f"array.get_llvm_type: element_type is raw LLVM type {element_type}. "
                 f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
                 node=None, exc_type=TypeError)
         else:
-            logger.error(f"array.get_llvm_type: unknown element type {cls.element_type}",
+            logger.error(f"array.get_llvm_type: unknown element type {element_type}",
                         node=None, exc_type=TypeError)
         
         # Build nested array type for multi-dimensional arrays
@@ -327,6 +346,15 @@ class array(BuiltinType):
             logger.error("array requires at least element type and one dimension", node=None, exc_type=TypeError)
         # First item is element type
         elem_name_opt, element_type = items[0]
+        # A quoted element type name (``array["T", 8]``) arrives as a plain
+        # string.  Resolve it through the forward-ref registry when the name
+        # is already defined; otherwise keep the string and let get_llvm_type
+        # resolve it lazily, mirroring how ptr keeps a string pointee.
+        if isinstance(element_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(element_type)
+            if resolved is not None:
+                element_type = resolved
         # Remaining items are dimensions
         dimensions = []
         for name_opt, dim in items[1:]:

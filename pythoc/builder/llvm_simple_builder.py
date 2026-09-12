@@ -164,6 +164,9 @@ class LLVMBuilder(AbstractBuilder):
             op, ptr, value, ordering=ordering, name=name,
         )
 
+    def fence(self, ordering: str) -> Any:
+        return self._builder.fence(ordering)
+
     def cmpxchg(
         self, ptr: Any, cmp: Any, value: Any, ordering: str,
         failordering: str = None, name: str = "",

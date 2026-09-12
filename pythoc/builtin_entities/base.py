@@ -12,6 +12,18 @@ import ctypes
 from ..logger import logger
 
 
+class _Int128Struct(ctypes.Structure):
+    """FFI carrier for >64-bit integers (no scalar ctypes equivalent).
+
+    Little-endian layout: lo holds bits 0..63, hi holds bits 64..127.  On
+    x86-64 System V and AArch64 an i128 value crosses the FFI boundary in
+    a register pair, which ctypes collects into this struct; arguments
+    pass by value with the same layout.  pc_literal reassembles the
+    Python int on the way back.
+    """
+    _fields_ = [("lo", ctypes.c_uint64), ("hi", ctypes.c_uint64)]
+
+
 def _get_unified_registry():
     """Lazy import to avoid circular dependency.
 
@@ -176,8 +188,13 @@ class BuiltinType(BuiltinEntity):
                     return ctypes.c_int16
                 elif size <= 4:
                     return ctypes.c_int32
-                else:
+                elif size <= 8:
                     return ctypes.c_int64
+                else:
+                    # >64-bit integers have no scalar ctypes type; the
+                    # two-uint64 struct captures the register pair so the
+                    # full value crosses the FFI boundary.
+                    return _Int128Struct
             else:
                 if size == 1:
                     return ctypes.c_uint8
@@ -185,8 +202,10 @@ class BuiltinType(BuiltinEntity):
                     return ctypes.c_uint16
                 elif size <= 4:
                     return ctypes.c_uint32
-                else:
+                elif size <= 8:
                     return ctypes.c_uint64
+                else:
+                    return _Int128Struct
         
         # Float types
         if cls._is_float:
@@ -291,7 +310,16 @@ class BuiltinType(BuiltinEntity):
         if len(elements) != 2:
             return False
 
-        return isinstance(unwrap_literal_item(elements[0]), str)
+        if not isinstance(unwrap_literal_item(elements[0]), str):
+            return False
+
+        # A quoted type name plus an integer dimension (``array["T", 8]``)
+        # unwraps to (str, int) and is a subscript form, not a named field:
+        # a named field's type part is a type object, never an integer.
+        if isinstance(unwrap_literal_item(elements[1]), int):
+            return False
+
+        return True
 
     @classmethod
     def _extract_named_item_carrier(cls, item):

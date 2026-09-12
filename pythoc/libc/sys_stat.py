@@ -166,5 +166,7 @@ def mkdir(path: ptr[i8], mode: mode_t) -> i32:
 
 
 __all__ = [
+    "dev_t", "ino_t", "mode_t", "nlink_t", "uid_t", "gid_t",
+    "off_t", "blkcnt_t", "blksize_t", "time_t",
     "timespec", "stat", "stat_", "lstat", "fstat", "chmod", "mkdir",
 ]
