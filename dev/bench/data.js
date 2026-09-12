@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789218270462,
+  "lastUpdate": 1789229124914,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -2978,6 +2978,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.471,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "d49708cb28e0fda73c6e2a2417c3ae41a05eb8cf",
+          "message": "Address nanem conflict and some tests on windows",
+          "timestamp": "2026-09-13T00:01:18+08:00",
+          "tree_id": "80cc5e48d893a20439ef085628f2701a25efd863",
+          "url": "https://github.com/1flei/PythoC/commit/d49708cb28e0fda73c6e2a2417c3ae41a05eb8cf"
+        },
+        "date": 1789229124143,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.98,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.524,
             "unit": "seconds/test"
           }
         ]
