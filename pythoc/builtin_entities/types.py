@@ -387,15 +387,26 @@ class ptr(BuiltinType):
         if base.type_hint and hasattr(base.type_hint, 'pointee_type'):
             pointee_type_hint = base.type_hint.pointee_type
 
-        # Resolve forward reference if pointee_type_hint is a string
+        # Resolve forward reference if pointee_type_hint is a string.
+        # The visible module namespace wins (plain ``A = SomeType`` aliases
+        # reachable from the compiling function), then the session registry.
         if isinstance(pointee_type_hint, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(pointee_type_hint)
+            from .base import lookup_ctx_type_name
+            resolved = lookup_ctx_type_name(getattr(visitor, 'ctx', None), pointee_type_hint)
+            if resolved is None:
+                from ..forward_ref import get_defined_type
+                resolved = get_defined_type(pointee_type_hint)
             if resolved is not None:
                 pointee_type_hint = resolved
 
         if pointee_type_hint is None:
             logger.error(f"Cannot infer pointee type for pointer subscript {base}", node=node, exc_type=TypeError)
+
+        if isinstance(pointee_type_hint, str):
+            logger.error(
+                f"Cannot dereference pointer to incomplete type '{pointee_type_hint}' "
+                f"(no visible binding or registered type by that name)",
+                node=node, exc_type=TypeError)
 
         # ptr[void] cannot be dereferenced (like C: must cast to concrete type first)
         if pointee_type_hint is void:

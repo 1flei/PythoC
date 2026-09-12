@@ -9,11 +9,37 @@ Key concept: pyconst[value] encodes constant values in the type system,
 enabling zero-overhead conditional struct layouts.
 """
 
-from .base import BuiltinEntity
+from .base import BuiltinEntity, lookup_ctx_type_name
 from typing import Any, Optional
 from ..valueref import wrap_value
 from ..logger import logger
 import ast
+
+
+def _resolve_visible_type_names(visitor, normalized):
+    """Resolve quoted type names in subscript items against the visible
+    namespace.
+
+    A quoted name in type-subscript position (``ptr["A"]``) may denote a
+    plain module-level binding such as ``A = SomeType`` -- the natural
+    typedef-style alias, no registration needed.  Visible bindings take
+    precedence; names not visible here (or bound to non-types) keep the
+    string and fall through to the forward-ref registry / lazy resolution
+    inside handle_type_subscript.
+    """
+    ctx = getattr(visitor, 'ctx', None)
+    if ctx is None:
+        return normalized
+    items = []
+    changed = False
+    for name_opt, payload in normalized:
+        if isinstance(payload, str):
+            candidate = lookup_ctx_type_name(ctx, payload)
+            if candidate is not None:
+                payload = candidate
+                changed = True
+        items.append((name_opt, payload))
+    return tuple(items) if changed else normalized
 
 
 class _PythonTypeBase(BuiltinEntity):
@@ -380,6 +406,7 @@ class PythonType(_PythonTypeBase):
                 )
 
             normalized = self._python_object.normalize_subscript_items(index.value)
+            normalized = _resolve_visible_type_names(visitor, normalized)
             result_type = self._python_object.handle_type_subscript(normalized)
             return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
 

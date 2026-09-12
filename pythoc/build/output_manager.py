@@ -43,6 +43,36 @@ class _CompileResult:
     compiled_symbols: Set[str] = field(default_factory=set)
 
 
+def _rebind_func_info_signature(func_info):
+    """Rebind quoted (string) pointees in a function's stored signature types.
+
+    Runs at group-compile time, when the whole defining module has executed:
+    names that were not visible at decoration time (module-level aliases
+    defined later) now resolve through the live globals carried by the
+    compilation snapshot, then the session registry.  Unresolvable names
+    stay lazy strings and keep their forward-ref / opaque-type semantics.
+    """
+    from ..builtin_entities.base import (
+        lookup_type_name_in_globals, rebind_lazy_type_names,
+    )
+    from ..forward_ref import get_defined_type
+    globals_dict = getattr(func_info, 'compilation_globals', None)
+
+    def lookup(name):
+        resolved = lookup_type_name_in_globals(globals_dict, name)
+        if resolved is not None:
+            return resolved
+        return get_defined_type(name)
+
+    hints = getattr(func_info, 'param_type_hints', None)
+    if hints:
+        for key, pc_type in list(hints.items()):
+            hints[key] = rebind_lazy_type_names(pc_type, lookup)
+    if getattr(func_info, 'return_type_hint', None) is not None:
+        func_info.return_type_hint = rebind_lazy_type_names(
+            func_info.return_type_hint, lookup)
+
+
 @dataclass
 class _GroupObjectTaskResult:
     """Worker result for one group-object build task."""
@@ -629,6 +659,13 @@ class OutputManager:
 
         group_scope = self._build_group_scope(iteration)
         self._inject_group_scope(iteration, group_scope)
+
+        # Rebind lazy (quoted) signature names now that the defining module
+        # has fully executed, so declarations, bodies, and callers all
+        # materialize the same concrete types.
+        for _callback, func_info in iteration.items:
+            _rebind_func_info_signature(func_info)
+
         logger.debug(
             f"Injected group scope with {len(group_scope)} functions: {list(group_scope.keys())}"
         )
@@ -1274,6 +1311,19 @@ class OutputManager:
                         f"All @compile decorators must be executed before calling any compiled functions."
                     )
         
+        # Rebind lazy (quoted) signature names in every pending function up
+        # front: a caller group may materialize a callee's signature (cross-
+        # group declare / argument coercion) before the callee's own group
+        # compiles, so waiting for each group's iteration would be too late.
+        with self._state_lock:
+            pending_items = [
+                item
+                for items in self._pending_compilations.values()
+                for item in items
+            ]
+        for _callback, _func_info in pending_items:
+            _rebind_func_info_signature(_func_info)
+
         # Process groups through the scheduler.  New groups may be added during
         # compilation; task commit callbacks feed them back into the same run.
         logger.debug(f"flush_all: _pending_groups={[k for k, _ in pending_groups]}")

@@ -24,6 +24,103 @@ class _Int128Struct(ctypes.Structure):
     _fields_ = [("lo", ctypes.c_uint64), ("hi", ctypes.c_uint64)]
 
 
+def _is_type_like(obj) -> bool:
+    """Whether obj can serve as a PC type (builtin entity class or a
+    processed struct/enum/union class)."""
+    if not isinstance(obj, type):
+        return False
+    if issubclass(obj, BuiltinEntity):
+        return obj.can_be_type()
+    return bool(
+        getattr(obj, '_is_struct', False)
+        or getattr(obj, '_is_enum', False)
+        or getattr(obj, '_is_union', False)
+    )
+
+
+def lookup_type_name_in_globals(user_globals, name):
+    """Resolve a quoted type name against a visible-namespaces mapping.
+
+    The (decoration-time) snapshot is authoritative for every name it
+    contains; names absent from it fall back to the defining module's live
+    globals (the ``live_globals`` attribute carried by AccessibleSymbols),
+    matching the lazy-compilation rule that a quoted name resolves if
+    defined anywhere at module level before the first native call.
+    Returns the type object, or None when not visibly bound to a type.
+    """
+    if not user_globals:
+        return None
+    if name in user_globals:
+        candidate = user_globals[name]
+        return candidate if _is_type_like(candidate) else None
+    live = getattr(user_globals, 'live_globals', None)
+    if live is not None and name in live:
+        candidate = live[name]
+        if _is_type_like(candidate):
+            return candidate
+    return None
+
+
+def lookup_ctx_type_name(ctx, name):
+    """Resolve a quoted type name against the visible namespaces carried by
+    a compilation context.  Returns the type object or None."""
+    return lookup_type_name_in_globals(getattr(ctx, 'user_globals', None), name)
+
+
+def rebind_lazy_type_names(pc_type, lookup):
+    """Rebind quoted (string) components of an already-formed PC type.
+
+    Handles the dominant shape: a ptr specialization whose pointee is still
+    a lazy string.  ``lookup`` maps a name to a type object or None.  The
+    original object is returned unchanged when nothing rebinds, preserving
+    the lazy/opaque semantics for genuinely unresolved names.
+    """
+    pointee = getattr(pc_type, 'pointee_type', None)
+    if not isinstance(pointee, str):
+        return pc_type
+    resolved = lookup(pointee)
+    if resolved is None or isinstance(resolved, str):
+        return pc_type
+    from .types import ptr as _ptr
+    return _ptr[resolved]
+
+
+def _resolve_caller_type_names(normalized):
+    """Resolve quoted type-name payloads against the caller's namespace.
+
+    ``Type["A"]`` written in user code may name a plain module-level binding
+    such as ``A = SomeType`` -- the natural typedef-style alias.  Walk out to
+    the first frame outside the pythoc package and bind visible type-like
+    names eagerly; unresolvable names keep the string and fall through to
+    the forward-ref registry / lazy resolution inside handle_type_subscript.
+    """
+    if not any(isinstance(payload, str) for _, payload in normalized):
+        return normalized
+    import inspect
+    frame = inspect.currentframe()
+    try:
+        frame = frame.f_back  # skip this helper's frame
+        while frame is not None and str(
+                frame.f_globals.get('__name__', '')).startswith('pythoc'):
+            frame = frame.f_back
+        if frame is None:
+            return normalized
+        namespace = dict(frame.f_globals)
+        namespace.update(frame.f_locals)
+    finally:
+        del frame
+    items = []
+    changed = False
+    for name_opt, payload in normalized:
+        if isinstance(payload, str) and payload in namespace:
+            candidate = namespace[payload]
+            if _is_type_like(candidate):
+                payload = candidate
+                changed = True
+        items.append((name_opt, payload))
+    return tuple(items) if changed else normalized
+
+
 def _get_unified_registry():
     """Lazy import to avoid circular dependency.
 
@@ -370,6 +467,8 @@ class BuiltinType(BuiltinEntity):
         """
         # Normalize slice objects to standard format
         normalized = cls.normalize_subscript_items(item)
+        # Bind quoted names visible at the call site (typedef-style aliases)
+        normalized = _resolve_caller_type_names(normalized)
         # Delegate to type-specific handler
         return cls.handle_type_subscript(normalized)
     

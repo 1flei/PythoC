@@ -1527,6 +1527,18 @@ class ImplicitCoercer:
     def __init__(self, type_converter: TypeConverter):
         self._tc = type_converter
 
+    def _resolve_lazy_type_name(self, name):
+        """Resolve a quoted type name against the compiling module's visible
+        namespace (plain ``A = SomeType`` aliases), then the session
+        forward-ref registry.  Returns None when unresolvable."""
+        from .builtin_entities.base import lookup_ctx_type_name
+        visitor = getattr(self._tc, '_visitor', None)
+        resolved = lookup_ctx_type_name(getattr(visitor, 'ctx', None), name)
+        if resolved is not None:
+            return resolved
+        from .forward_ref import get_defined_type
+        return get_defined_type(name)
+
     def coerce(self, value: ValueRef, target_type, node=None) -> ValueRef:
         """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""
         source_type = value.type_hint
@@ -1571,7 +1583,9 @@ class ImplicitCoercer:
             if self.is_void_pointer(base_source) or self.is_void_pointer(base_target):
                 return self._tc.convert(value, target_type, node)
             # Same pointee type: allowed
-            if self.are_compatible_pointers(base_source, base_target):
+            if self.are_compatible_pointers(
+                    base_source, base_target,
+                    resolve_name=self._resolve_lazy_type_name):
                 return self._tc.convert(value, target_type, node)
             # Incompatible pointers
             source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
@@ -1637,12 +1651,17 @@ class ImplicitCoercer:
         return False
 
     @staticmethod
-    def are_compatible_pointers(source_type, target_type) -> bool:
+    def are_compatible_pointers(source_type, target_type, resolve_name=None) -> bool:
         """True if two pointer types have the same pointee (by identity or type_id).
 
         Function pointer types (func[...]) are compared by their lowered LLVM
         function type so that differently-named but structurally identical
         signatures are still compatible.
+
+        ``resolve_name`` (optional) maps a lazy string pointee (quoted type
+        name) to its type object; callers with access to the compiling
+        module's namespace pass one so typedef-style aliases compare equal
+        to their target type.
         """
         from .builtin_entities.func import func as func_type_cls
         if (isinstance(source_type, type) and issubclass(source_type, func_type_cls)
@@ -1657,6 +1676,17 @@ class ImplicitCoercer:
         # should be compatible with ptr[T].
         src_pointee = strip_qualifiers(src_pointee)
         tgt_pointee = strip_qualifiers(tgt_pointee)
+        # Resolve lazy string pointees (quoted names) when a resolver with
+        # namespace access is provided.
+        if resolve_name is not None:
+            if isinstance(src_pointee, str):
+                resolved = resolve_name(src_pointee)
+                if resolved is not None and not isinstance(resolved, str):
+                    src_pointee = resolved
+            if isinstance(tgt_pointee, str):
+                resolved = resolve_name(tgt_pointee)
+                if resolved is not None and not isinstance(resolved, str):
+                    tgt_pointee = resolved
         # Identity check
         if src_pointee is tgt_pointee:
             return True

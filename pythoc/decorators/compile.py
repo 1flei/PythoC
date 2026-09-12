@@ -30,6 +30,7 @@ from .structs import (
     add_struct_handle_call as _add_struct_handle_call,
     compile_dynamic_class as _compile_dynamic_class,
 )
+from .visible import AccessibleSymbols
 from .mangling import mangle_function_name as _mangle_function_name
 
 # Import new utility modules
@@ -1283,7 +1284,10 @@ def _compile_impl(func_or_class,
         captured_effect_context=_captured_effect_context,
         effect_override_names=_effect_override_names,
         captured_symbols=captured_symbols,
-        compilation_globals=dict(user_globals),
+        compilation_globals=AccessibleSymbols(
+            user_globals,
+            live_globals=getattr(user_globals, 'live_globals', None),
+        ),
         wrapper=wrapper,
         session=session,
     )

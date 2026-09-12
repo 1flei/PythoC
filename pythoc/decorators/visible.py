@@ -100,6 +100,23 @@ def capture_user_caller_symbols() -> Dict[str, Any]:
     return symbols
 
 
+class AccessibleSymbols(dict):
+    """Decoration-time symbol snapshot with a live reference to the defining
+    module's globals.
+
+    The snapshot takes precedence for every name it contains (closure and
+    decoration-time captured symbols keep their priority).  Names absent
+    from the snapshot -- e.g. module-level aliases defined after decoration
+    -- fall back to the live module namespace at compile time, matching the
+    lazy-compilation rule: a quoted name resolves if it is defined anywhere
+    at module level before the first native call.
+    """
+
+    def __init__(self, *args, live_globals: Optional[Dict[str, Any]] = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.live_globals = live_globals
+
+
 def get_all_accessible_symbols(
     func,
     include_builtins: bool = False,
@@ -132,11 +149,14 @@ def get_all_accessible_symbols(
     Returns:
         Dictionary of all accessible symbols
     """
-    symbols = {}
-    
+    symbols = AccessibleSymbols()
+
     # Start with function's globals
     if hasattr(func, '__globals__'):
         symbols.update(func.__globals__)
+        # Live reference for names defined after decoration (compile is lazy,
+        # so by first call the whole module has executed).
+        symbols.live_globals = func.__globals__
     
     # Add closure variables
     if include_closure:
