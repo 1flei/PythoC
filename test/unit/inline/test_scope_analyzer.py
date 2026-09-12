@@ -6,7 +6,7 @@ Tests variable classification (captured/local/param)
 
 import ast
 import unittest
-from pythoc.inline.scope_analyzer import ScopeAnalyzer, ScopeContext
+from pythoc._inline.scope_analyzer import ScopeAnalyzer, ScopeContext
 
 
 class TestScopeContext(unittest.TestCase):

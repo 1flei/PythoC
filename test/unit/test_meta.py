@@ -442,9 +442,9 @@ class TestQuote(unittest.TestCase):
 class TestMetaInlineRequest(unittest.TestCase):
 
     def test_construction(self):
-        from pythoc.inline.kernel import MetaInlineRequest
-        from pythoc.inline.exit_rules import ReturnExitRule
-        from pythoc.inline.scope_analyzer import ScopeContext
+        from pythoc._inline.kernel import MetaInlineRequest
+        from pythoc._inline.exit_rules import ReturnExitRule
+        from pythoc._inline.scope_analyzer import ScopeContext
 
         callee_ast = ast.FunctionDef(
             name="foo",

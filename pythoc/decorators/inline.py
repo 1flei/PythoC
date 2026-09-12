@@ -114,7 +114,7 @@ def inline(func=None, *, cls_method=False, method=False):
             
             # Execute inline to generate IR using unified kernel
             # Pass merged globals (module + closure + captured caller locals)
-            from ..inline import InlineAdapter
+            from .._inline import InlineAdapter
             adapter = InlineAdapter(visitor, param_bindings, func_globals=merged_func_globals)
             result = adapter.execute_inline(func_ast)
             return result

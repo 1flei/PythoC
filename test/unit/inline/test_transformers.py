@@ -6,8 +6,8 @@ Tests body transformation with variable renaming and exit point handling
 
 import ast
 import unittest
-from pythoc.inline.transformers import InlineBodyTransformer
-from pythoc.inline.exit_rules import ReturnExitRule, YieldExitRule
+from pythoc._inline.transformers import InlineBodyTransformer
+from pythoc._inline.exit_rules import ReturnExitRule, YieldExitRule
 
 
 class TestInlineBodyTransformer(unittest.TestCase):

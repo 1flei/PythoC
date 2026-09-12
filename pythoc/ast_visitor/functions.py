@@ -43,6 +43,13 @@ class _ClosureWrapper:
 
     _pc_compile_level_callable = True
 
+    # NOTE: defer_linear_transfer is deliberately NOT a class attribute.
+    # _ClosureWrapper also serves PLAIN (non-yield) closures, whose call
+    # sites must keep transferring linear argument ownership. Only yield
+    # closures go through the for-loop inline path where the param-binding
+    # template moves each argument exactly once (see yield_transform
+    # placeholder), so the flag is set per-instance in __init__ below.
+
     def __init__(self, func_ast, visitor, func_globals, capture_bindings,
                  capture_runtime, param_names, n_required, default_vrefs):
         self.func_ast = func_ast
@@ -55,6 +62,11 @@ class _ClosureWrapper:
         self._n_required = n_required
         self._default_vrefs = default_vrefs
         self._has_yield = _contains_yield(func_ast)
+        # Yield closures are inlined by the for-loop visitor; the param-
+        # binding template transfers argument ownership via move() exactly
+        # once. The call site must not transfer as well. Plain closures
+        # keep the default (False): their call sites own the transfer.
+        self.defer_linear_transfer = self._has_yield
 
     def handle_call(self, visitor, func_ref, args, call_node):
         """Execute closure inline, or hand it to the yield-inline path."""
@@ -76,7 +88,7 @@ class _ClosureWrapper:
             }
             return result
 
-        from ..inline import ClosureAdapter
+        from .._inline import ClosureAdapter
 
         n_provided = len(args)
         n_params = len(self._param_names)
@@ -231,8 +243,8 @@ class FunctionsMixin:
     def _make_closure_wrapper(self, node: ast.FunctionDef, param_names,
                               n_required, default_vrefs):
         """Build the callable wrapper for a closure/lambda AST."""
-        from ..inline.scope_analyzer import analyze_function_scope, build_caller_context
-        from ..inline.closure_capture import build_closure_capture_plan
+        from .._inline.scope_analyzer import analyze_function_scope, build_caller_context
+        from .._inline.closure_capture import build_closure_capture_plan
 
         # Capture the current user_globals at closure definition time
         # This is the caller's globals context

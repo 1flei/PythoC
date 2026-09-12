@@ -99,7 +99,11 @@ elif IS_LINUX:
         ]
         sa_mask: sigset_t
         sa_flags: i32
-        sa_restorer: func[void, void]
+        # PythoC cannot render func[void, void] as an LLVM function-pointer
+        # field type (void is not a valid parameter type), and nothing in the
+        # tree touches the restorer. Keep the glibc layout width with an
+        # opaque pointer instead.
+        sa_restorer: ptr[void]
 
     # glibc stack_t (bits/types/stack_t.h) for sigaltstack.
     @compile

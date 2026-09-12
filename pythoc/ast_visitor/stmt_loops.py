@@ -239,7 +239,7 @@ class LoopsMixin:
     def _attach_genexp_yield_inline_info(self, for_node: ast.For, iter_val, genexp_ast: ast.GeneratorExp):
         """Attach replay-by-expansion yield-inline metadata for generator expressions."""
         from ..utils import get_next_id
-        from ..inline.genexpr_builder import build_genexpr_yield_function_ast
+        from .._inline.genexpr_builder import build_genexpr_yield_function_ast
 
         func_name = f"__pc_genexp_inline_{get_next_id()}"
         func_ast = build_genexpr_yield_function_ast(
@@ -282,8 +282,8 @@ class LoopsMixin:
         - continue in loop body -> goto_end("_yield_{id}")
         - After all yields and else, place with label("_for_after_else_{id}"): pass
         """
-        from ..inline.yield_adapter import YieldInlineAdapter
-        from ..inline.kernel import inline_globals_scope
+        from .._inline.yield_adapter import YieldInlineAdapter
+        from .._inline.kernel import inline_globals_scope
 
         cf = self._get_cf_builder()
         adapter = YieldInlineAdapter(self)
@@ -330,7 +330,7 @@ class LoopsMixin:
 
             # Place the after_else label as a scoped label (break jumps here to skip else)
             if after_else_label:
-                from ..inline.exit_rules import _empty_label_block
+                from .._inline.exit_rules import _empty_label_block
                 label_stmt = _empty_label_block(
                     ast.Constant(value=after_else_label)
                 ).stmt
@@ -408,8 +408,8 @@ class LoopsMixin:
         - break transforms to goto_begin(exit_label)
         - continue transforms to goto_end(iter_label)
         """
-        from ..inline.constant_loop_adapter import ConstantLoopAdapter
-        from ..inline.kernel import InlineResult, inline_globals_scope
+        from .._inline.constant_loop_adapter import ConstantLoopAdapter
+        from .._inline.kernel import InlineResult, inline_globals_scope
 
         cf = self._get_cf_builder()
 

@@ -13,7 +13,7 @@ import unittest
 
 from pythoc import (
     i8, i32, i64, u8, u32, u64, i128, u128, f32, f64, bool, ptr, array, compile,
-    void,
+    void, static,
     atomic_load, atomic_store, atomic_fetch_add, atomic_cas, atomic_fence,
     atomic_fetch_and, atomic_fetch_or, atomic_exchange,
     inf, inff, nan, nanf,
@@ -213,6 +213,25 @@ class QuotedPoint:
 
 
 @compile
+class QuotedStaticHolder:
+    """Class-level static member whose inner type is a quoted forward
+    reference; the qualifier must resolve the string lazily (registry)
+    instead of crashing attribute forwarding at materialization."""
+    box: static["QuotedStaticBox"]
+
+
+@compile
+class QuotedStaticBox:
+    v: i64
+
+
+@compile
+def quoted_static_member() -> i64:
+    QuotedStaticHolder.box.v = 40
+    return QuotedStaticHolder.box.v + i64(2)  # 42
+
+
+@compile
 def quoted_array_element() -> i32:
     """array["T", N] keeps the element type as a lazy name and resolves it
     through the forward-ref registry at compile time."""
@@ -228,13 +247,18 @@ def quoted_array_element() -> i32:
 # libc per-platform accessors
 # ============================================================
 
-@compile
-def errno_slot_macos() -> i32:
-    return __error()[0]
+# Platform-specific symbols: defining these unconditionally would leave
+# undefined symbols in the module's shared object.  ELF tolerates them at
+# link time and lazy binding never resolves them when uncalled, but Windows
+# DLLs require every symbol resolved at link time, so each accessor is only
+# compiled on its own platform.
+if platform.system() == 'Darwin':
+
+    @compile
+    def errno_slot_macos() -> i32:
+        return __error()[0]
 
 
-# glibc-only symbols: defining these unconditionally would leave undefined
-# symbols in the module's shared object and break dlopen on other platforms.
 if platform.system() == 'Linux':
 
     @compile
@@ -306,6 +330,9 @@ class TestForwardRefForms(unittest.TestCase):
 
     def test_quoted_array_element(self):
         self.assertEqual(quoted_array_element(), 33)
+
+    def test_quoted_static_member(self):
+        self.assertEqual(quoted_static_member(), 42)
 
 
 class TestLibcAccessors(unittest.TestCase):

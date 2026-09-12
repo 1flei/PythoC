@@ -2,8 +2,8 @@ import ast
 import unittest
 
 from pythoc import i32
-from pythoc.inline.closure_capture import build_closure_capture_plan
-from pythoc.inline.state_field_rewriter import (
+from pythoc._inline.closure_capture import build_closure_capture_plan
+from pythoc._inline.state_field_rewriter import (
     StateFieldRewriter,
     StateFieldRewritePolicy,
 )

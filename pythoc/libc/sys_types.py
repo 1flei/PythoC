@@ -105,6 +105,11 @@ _KERNEL_TYPEDEFS = [
     "__sum16", "__wsum",
 ]
 
+_FIXED_WIDTH_MACOS = [
+    "__int8_t", "__uint8_t", "__int16_t", "__uint16_t",
+    "__int32_t", "__uint32_t", "__int64_t", "__uint64_t",
+]
+
 
 for _name in (
     "dev_t", "ino_t", "mode_t", "nlink_t", "uid_t", "gid_t",
@@ -120,8 +125,8 @@ for _name in (
 __all__ = [
     "dev_t", "ino_t", "mode_t", "nlink_t", "uid_t", "gid_t",
     "off_t", "blkcnt_t", "blksize_t", "pid_t", "pthread_t", "time_t",
-    "__int8_t", "__uint8_t", "__int16_t", "__uint16_t",
-    "__int32_t", "__uint32_t", "__int64_t", "__uint64_t",
 ]
+if IS_MACOS:
+    __all__ = __all__ + _FIXED_WIDTH_MACOS
 if IS_LINUX:
     __all__ = __all__ + _KERNEL_TYPEDEFS

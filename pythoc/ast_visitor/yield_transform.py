@@ -49,7 +49,7 @@ def analyze_yield_function(func_ast: ast.FunctionDef) -> Optional[YieldAnalyzer]
 
 def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
     """Create a yield placeholder with explicit callee globals."""
-    from ..inline.perform_desugar import desugar_effect_performs
+    from .._inline.perform_desugar import desugar_effect_performs
     func_ast = desugar_effect_performs(func_ast)
 
     def placeholder_wrapper(*args, **kwargs):
@@ -60,6 +60,14 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
 
     placeholder_wrapper._is_yield_generated = True
     placeholder_wrapper._pc_compile_level_callable = True
+    # The yield placeholder is never actually called at runtime: the for-loop
+    # visitor splices the body in and the param-binding template moves each
+    # argument into its renamed local (prf -> prf_inline_N). Ownership must
+    # therefore be transferred EXACTLY ONCE -- by that move(), not by the
+    # for-iter call site. Without this flag, handle_call transfers ownership
+    # at the call node AND the inlined move(arg) transfers it again, so any
+    # linear argument fails CFG checking with "already consumed".
+    placeholder_wrapper.defer_linear_transfer = True
     placeholder_wrapper.__name__ = func.__name__
     placeholder_wrapper._original_ast = func_ast
     placeholder_wrapper._yield_func_obj = func

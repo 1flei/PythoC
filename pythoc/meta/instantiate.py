@@ -33,19 +33,19 @@ from ..builtin_entities.types import i32, void
 from ..builtin_entities.types import bool as pc_bool
 from ..builtin_entities import ptr as pc_ptr
 
-from ..inline.scope_analyzer import ScopeAnalyzer, ScopeContext, analyze_function_scope
-from ..inline._intrinsics import _PC_INTRINSICS
-from ..inline.genexpr_builder import build_genexpr_yield_function_ast
-from ..inline.closure_capture import (
+from .._inline.scope_analyzer import ScopeAnalyzer, ScopeContext, analyze_function_scope
+from .._inline._intrinsics import _PC_INTRINSICS
+from .._inline.genexpr_builder import build_genexpr_yield_function_ast
+from .._inline.closure_capture import (
     RuntimeCapture,
     extract_value_from_vref,
     normalize_runtime_captures,
 )
-from ..inline.state_field_rewriter import (
+from .._inline.state_field_rewriter import (
     StateFieldRewriter,
     StateFieldRewritePolicy,
 )
-from ..inline.yield_state_machine import (
+from .._inline.yield_state_machine import (
     YieldStateMachineRequest, lower_yield_state_machine,
     inline_yield_function_iterators,
 )

@@ -13,6 +13,7 @@ class TypeQualifierMeta(BuiltinEntityMeta):
         'is_const', 'is_static', 'is_thread_local', 'is_volatile', 'get_name',
         '_normalize_qualifiers', '__init__', '__new__', '__init_subclass__',
         '__mro__', '__bases__', '__dict__', '__module__', '__qualname__',
+        'get_llvm_type', 'get_size_bytes', 'get_type_id',
     })
     
     def __getattribute__(cls, name):
@@ -25,9 +26,17 @@ class TypeQualifierMeta(BuiltinEntityMeta):
         if name in cls.__dict__:
             return super().__getattribute__(name)
         
-        # Try to forward to qualified_type
+        # Try to forward to qualified_type.  A string inner type (quoted
+        # forward reference like static["Box"]) resolves through the
+        # forward-ref registry before the attribute is forwarded, mirroring
+        # the lazy resolution in _resolve_qualified_type.
         try:
             qualified_type = super().__getattribute__('qualified_type')
+            if isinstance(qualified_type, str):
+                from ..forward_ref import get_defined_type
+                resolved = get_defined_type(qualified_type)
+                if resolved is not None:
+                    qualified_type = resolved
             if qualified_type is not None and hasattr(qualified_type, name):
                 return getattr(qualified_type, name)
         except AttributeError:
@@ -89,6 +98,62 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
             base_type = base_type.qualified_type
         
         return base_type, flags
+    
+    @classmethod
+    def _resolve_qualified_type(cls):
+        """Resolve ``qualified_type``, lazily dereferencing forward refs.
+
+        A quoted inner annotation (``static["Box"]``) may resolve to a plain
+        string when the type name is not yet bound at class-decoration time.
+        Like ``ptr`` (which keeps the string in ``pointee_type`` and resolves
+        it inside ``get_llvm_type``), the qualifier resolves the string
+        through the forward-ref registry at use time.
+        """
+        base_type = cls.qualified_type
+        if isinstance(base_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(base_type)
+            if resolved is None:
+                logger.error(
+                    f"{cls.get_qualifier_name()}: unresolved forward "
+                    f"reference '{base_type}'",
+                    node=None, exc_type=NameError,
+                )
+            base_type = resolved
+        return base_type
+
+    @classmethod
+    def get_llvm_type(cls, module_context=None) -> ir.Type:
+        """Get the LLVM type of the qualified (inner) type.
+
+        Defined locally so the metaclass does not forward it to
+        ``qualified_type``: a string inner type (unresolved forward ref)
+        would make the forwarding return ``None`` and crash IR materialization
+        with llvmlite's ``assert isinstance(typ, types.Type)``.  An
+        unspecialized qualifier (no inner type) falls back to the base
+        implementation, as the forwarding did before.
+        """
+        base_type = cls._resolve_qualified_type()
+        if base_type is None:
+            return super().get_llvm_type(module_context)
+        return base_type.get_llvm_type(module_context)
+
+    @classmethod
+    def get_size_bytes(cls):
+        """Size of the qualified (inner) type; resolved locally for the
+        same reason as get_llvm_type."""
+        base_type = cls._resolve_qualified_type()
+        if base_type is None:
+            return super().get_size_bytes()
+        return base_type.get_size_bytes()
+
+    @classmethod
+    def get_type_id(cls, _visited=None) -> str:
+        base_type = cls._resolve_qualified_type()
+        if base_type is None:
+            return super().get_type_id(_visited)
+        from ..type_id import get_type_id
+        return get_type_id(base_type, _visited)
     
     @classmethod
     def handle_type_subscript(cls, item):
