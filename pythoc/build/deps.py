@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 12  # Increment when scheduler/cache/effect planning semantics change
+DEPS_VERSION = 13  # Increment when scheduler/cache/effect planning semantics change
 
 
 def _type_source_file(pc_type: Any) -> Optional[str]:

@@ -45,6 +45,19 @@ def u128_shr(a: u128, amount: i32) -> u128:
 
 
 @compile
+def i128_mixed_pos(a: i32, b: i128) -> i128:
+    """Narrow arg before a wide one: on SysV the i128 ABI demands an
+    aligned even-odd register pair here, which the legacy struct carrier
+    got wrong; the pointer trampoline is position-independent."""
+    return i128(a) + b
+
+
+@compile
+def u128_two_wide(a: u128, mid: i64, b: u128) -> u128:
+    return (a + b) >> u128(i64(mid))
+
+
+@compile
 def i128_wide_math() -> i64:
     """Multiply past the 64-bit range, then recover the high word."""
     a: i128 = i128(4611686018427387904) * i128(4)  # 2**62 * 4 = 2**64
@@ -276,27 +289,28 @@ if platform.system() == 'Linux':
 # ============================================================
 
 class TestInt128(unittest.TestCase):
-    # The FFI carrier (a two-uint64 struct standing in for i128) follows the
-    # SysV/AArch64 register-pair ABI.  Windows x64 passes/returns 16-byte
-    # aggregates differently (hidden reference), which does not match
-    # LLVM's i128 lowering there, so Python<->native marshalling of i128
-    # values is not supported on Windows; in-native 128-bit arithmetic
-    # works everywhere.
-    _FFI_OK = platform.system() != 'Windows'
-
-    @unittest.skipUnless(_FFI_OK, "i128 FFI marshalling is SysV/AArch64-only")
+    # i128/u128 cross the FFI boundary through pointer-based trampolines
+    # ("<symbol>$pffi"), which marshal identically on every platform; the
+    # aggregate-ABI pitfalls (SysV even-register pairs, Win64 hidden
+    # references) never reach ctypes.
     def test_ffi_roundtrip(self):
         a = (1 << 70) + 5
         b = (1 << 70) + 7
         self.assertEqual(int(i128_add(a, b)), (1 << 71) + 12)
 
-    @unittest.skipUnless(_FFI_OK, "i128 FFI marshalling is SysV/AArch64-only")
     def test_ffi_negative_result(self):
         self.assertEqual(int(i128_sub_negative(5, 1 << 70)), 5 - (1 << 70))
 
-    @unittest.skipUnless(_FFI_OK, "i128 FFI marshalling is SysV/AArch64-only")
     def test_ffi_u128_shift(self):
         self.assertEqual(int(u128_shr(1 << 100, 3)), 1 << 97)
+
+    def test_ffi_mixed_positions(self):
+        self.assertEqual(int(i128_mixed_pos(3, 1 << 70)), (1 << 70) + 3)
+
+    def test_ffi_two_wide_args(self):
+        a = (1 << 100) + 9
+        b = (1 << 100) + 1
+        self.assertEqual(int(u128_two_wide(a, 2, b)), ((a + b) >> 2))
 
     def test_wide_math(self):
         self.assertEqual(i128_wide_math(), 2000)

@@ -15,6 +15,7 @@ from llvmlite import ir
 
 from .utils.link_utils import get_shared_lib_extension
 from .build import BuildCache, get_dependency_tracker
+from .logger import logger
 
 
 class MultiSOExecutor:
@@ -580,40 +581,94 @@ class MultiSOExecutor:
                 real_param_types.append(pt)
         
         # Get function from library
-        try:
-            native_func = getattr(lib, func_name)
-        except AttributeError:
+        def _find_symbol(sym_name):
+            try:
+                return getattr(lib, sym_name)
+            except AttributeError:
+                pass
             # Try to find in other loaded libraries
             for other_lib in self.loaded_libs.values():
                 try:
-                    native_func = getattr(other_lib, func_name)
-                    break
+                    return getattr(other_lib, sym_name)
                 except AttributeError:
                     continue
-            else:
+            return None
+
+        from .builtin_entities.base import _Int128Struct
+        wide_param = [pt is _Int128Struct for pt in real_param_types]
+        wide_return = return_type is _Int128Struct
+
+        # >64-bit integers (i128/u128) cannot cross ctypes/libffi with their
+        # platform ABI (register-pair alignment on SysV/AArch64, hidden
+        # references on Windows x64).  Compiled modules carry a pointer-based
+        # trampoline "<symbol>$pffi" for such signatures; prefer it.  The
+        # legacy struct-carrier path below remains for objects compiled
+        # before trampolines existed (stale build cache).
+        use_trampoline = any(wide_param) or wide_return
+        native_func = None
+        trampoline = False
+        if use_trampoline:
+            native_func = _find_symbol(func_name + "$pffi")
+            trampoline = native_func is not None
+            if not trampoline:
+                logger.warning(
+                    f"Function {func_name} has >64-bit integer signature but "
+                    f"no FFI trampoline was found (stale build cache?); "
+                    f"falling back to the struct carrier, which is only "
+                    f"ABI-correct on SysV/AArch64 aligned shapes (NOT on "
+                    f"Windows)",
+                    node=None,
+                )
+        if native_func is None:
+            native_func = _find_symbol(func_name)
+            if native_func is None:
                 raise RuntimeError(f"Function {func_name} not found in any loaded library")
-        
+
         # Set function signature (only real types)
-        native_func.restype = return_type
-        native_func.argtypes = real_param_types
-        
+        if trampoline:
+            tramp_argtypes = [
+                ctypes.c_void_p if wide else pt
+                for pt, wide in zip(real_param_types, wide_param)
+            ]
+            if wide_return:
+                # Leading out-pointer for the wide return value.
+                tramp_argtypes = [ctypes.c_void_p] + tramp_argtypes
+            native_func.argtypes = tramp_argtypes
+            native_func.restype = None if wide_return else return_type
+        else:
+            native_func.restype = return_type
+            native_func.argtypes = real_param_types
+
         # Create wrapper that filters out linear args
         def wrapper(*args):
             # Filter args to only include those at real_param_indices
             filtered_args = [args[i] for i in real_param_indices if i < len(args)]
-            
+
             c_args = []
-            for arg, param_type in zip(filtered_args, real_param_types):
+            out_buf = None
+            if trampoline and wide_return:
+                out_buf = _Int128Struct()
+                c_args.append(ctypes.byref(out_buf))
+            for arg, param_type, wide in zip(filtered_args, real_param_types, wide_param):
+                if trampoline and wide:
+                    # Trampoline wide params are pointers to a 16-byte
+                    # little-endian buffer holding the value.
+                    v = int(arg)
+                    if v < 0:
+                        v += 1 << 128
+                    buf = _Int128Struct(v & 0xFFFFFFFFFFFFFFFF, v >> 64)
+                    # byref keeps buf alive for the duration of the call.
+                    c_args.append(ctypes.byref(buf))
                 # pc_literal carries its own conversion (handles scalar,
                 # pointer, and live-struct cases including c_void_p).
-                if hasattr(arg, '_to_ctypes'):
+                elif hasattr(arg, '_to_ctypes'):
                     c_args.append(arg._to_ctypes(param_type))
                 elif (isinstance(arg, int)
                         and isinstance(param_type, type)
                         and issubclass(param_type, ctypes.Structure)
                         and [f[0] for f in param_type._fields_] == ['lo', 'hi']):
-                    # >64-bit integer (i128/u128): split into the two-uint64
-                    # FFI carrier; a bare int would only fill the low word.
+                    # Legacy path: >64-bit integer passed as the two-uint64
+                    # carrier by value; a bare int would only fill the low word.
                     v = arg
                     if v < 0:
                         v += 1 << 128
@@ -629,16 +684,19 @@ class MultiSOExecutor:
                     c_args.append(arg)
                 else:
                     c_args.append(param_type(arg))
-            
+
             result = native_func(*c_args)
-            
+
+            if trampoline and wide_return:
+                from .builtin_entities.pc_literal import pc_literal
+                return pc_literal._from_ctypes_result(out_buf, return_pc_type)
             if return_type is None:
                 return None
             if return_pc_type is not None:
                 from .builtin_entities.pc_literal import pc_literal
                 return pc_literal._from_ctypes_result(result, return_pc_type)
             return result
-        
+
         self.function_cache[cache_key] = wrapper
         return wrapper
     

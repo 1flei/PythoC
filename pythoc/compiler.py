@@ -13,6 +13,70 @@ from .registry import get_unified_registry
 from .type_resolver import TypeResolver
 from .logger import logger
 from .config import config
+
+
+def _emit_wide_int_ffi_trampoline(module, llvm_function):
+    """Emit a pointer-based FFI trampoline for >64-bit integer signatures.
+
+    ctypes/libffi cannot express the platform ABI of i128 correctly:
+    SysV/AArch64 pass i128 arguments in *aligned even-odd register pairs*
+    (a plain two-uint64 struct gets consecutive registers instead), and
+    Windows x64 moves 16-byte aggregates through hidden references.  The
+    trampoline sidesteps aggregate ABIs entirely: every >64-bit integer
+    parameter becomes a pointer to a 16-byte buffer, and a >64-bit integer
+    return becomes a leading out-pointer with void return.  Pointers marshal
+    identically on every platform, so the Python side needs only c_void_p.
+
+    The real symbol keeps its exact C ABI (in-module callers, AOT exports
+    and C interop are unaffected).  The trampoline is named
+    ``<symbol>$pffi`` and is looked up by native_executor only when the
+    ctypes-visible signature contains a >64-bit integer.
+    """
+    ftype = llvm_function.function_type
+    if ftype.var_arg:
+        return
+
+    def _is_wide(ty):
+        return isinstance(ty, ir.IntType) and ty.width > 64
+
+    if not any(_is_wide(t) for t in ftype.args) and not _is_wide(ftype.return_type):
+        return
+
+    tramp_name = llvm_function.name + "$pffi"
+    try:
+        module.get_global(tramp_name)
+        return  # already emitted
+    except KeyError:
+        pass
+
+    wide_return = _is_wide(ftype.return_type)
+    tramp_param_types = []
+    for arg_ty in ftype.args:
+        tramp_param_types.append(
+            ir.PointerType(arg_ty) if _is_wide(arg_ty) else arg_ty)
+    if wide_return:
+        tramp_param_types.insert(0, ir.PointerType(ftype.return_type))
+    tramp_ret = ir.VoidType() if wide_return else ftype.return_type
+
+    tramp = ir.Function(
+        module, ir.FunctionType(tramp_ret, tramp_param_types), tramp_name)
+    arg_offset = 1 if wide_return else 0
+    builder = ir.IRBuilder(tramp.append_basic_block('entry'))
+    call_args = []
+    for i, arg_ty in enumerate(ftype.args):
+        arg = tramp.args[i + arg_offset]
+        if _is_wide(arg_ty):
+            # Trampoline params are PointerType(arg_ty), so the loaded
+            # type is inferred from the pointer.
+            call_args.append(builder.load(arg))
+        else:
+            call_args.append(arg)
+    result = builder.call(llvm_function, call_args)
+    if wide_return:
+        builder.store(result, tramp.args[0])
+        builder.ret_void()
+    else:
+        builder.ret(result)
 from .debug_info import DebugInfoBuilder
 
 # Initialize LLVM
@@ -607,6 +671,8 @@ class LLVMCompiler:
             if func_info is not None:
                 func_info.llvm_function = llvm_function
                 func_info.is_compiled = True
+
+        _emit_wide_int_ffi_trampoline(self.module, llvm_function)
 
         self.compiled_functions.append(llvm_function)
         return llvm_function
