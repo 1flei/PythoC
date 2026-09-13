@@ -1703,6 +1703,13 @@ class ImplicitCoercer:
         tgt_name = tgt_pointee.get_name() if hasattr(tgt_pointee, 'get_name') else None
         if src_name is not None and src_name == tgt_name:
             return True
+        # Nested pointers: ptr[ptr[T]] vs ptr[ptr["AliasT"]] -- recurse so a
+        # lazy name one level down resolves (via resolve_name) to the same
+        # type as its already-bound counterpart.
+        if (getattr(src_pointee, 'pointee_type', None) is not None
+                and getattr(tgt_pointee, 'pointee_type', None) is not None):
+            return ImplicitCoercer.are_compatible_pointers(
+                src_pointee, tgt_pointee, resolve_name=resolve_name)
         # type_id check (handles forward refs etc.)
         from .type_id import get_type_id
         try:

@@ -22,7 +22,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import i32, i64, ptr, array, compile, void
+from pythoc import i8, i32, i64, ptr, array, compile, void
 from pythoc.logger import set_raise_on_error
 
 # Test mode: compile errors raise exceptions instead of sys.exit(1).
@@ -187,6 +187,82 @@ def call_lazy_alias_ptr() -> i64:
     return lazy_alias_ptr_read(ptr(x))  # 42
 
 
+@compile
+class NestNode:
+    v: i64
+    # Field type quotes the alias BEFORE the alias assignment below exists:
+    # the pointee stays a lazy string at class-decoration time.
+    left: ptr["NestNodeAlias"]
+
+
+NestNodeAlias = NestNode
+
+
+@compile(suffix="nested_ptr_alias")
+def nested_ptr_walk(root: ptr[ptr["NestNodeAlias"]]) -> i64:
+    """ptr[ptr["Alias"]] with the alias bound to a class whose own field
+    carries the lazy string: getptr of that field is ptr[ptr[<string>]]
+    and must coerce to the parameter's ptr[ptr[<class>]]."""
+    if root[0] != ptr[void](0):
+        root = ptr(root[0].left)
+    return i64(7)
+
+
+@compile(suffix="nested_ptr_alias")
+def call_nested_ptr_walk() -> i64:
+    n: NestNode
+    n.v = 35
+    n.left = ptr[void](0)
+    r: ptr[NestNode] = ptr(n)
+    return nested_ptr_walk(ptr(r)) + i64(n.v)  # 7 + 35 = 42
+
+
+# ============================================================
+# Registry re-registration between decoration and flush
+# ============================================================
+
+@compile
+class GateAliasPlaceholder:
+    _pad: i8
+
+
+# A placeholder occupies the registry entry first (generated-code pattern:
+# a typedef-forwarding module registers its placeholder before the module
+# with the real layout executes).
+from pythoc import mark_type_defined as _mark_type_defined
+_mark_type_defined("GateAliasTarget", GateAliasPlaceholder)
+
+
+@compile(suffix="gate_retime")
+def gate_retime_fn(op: ptr[void]) -> ptr["GateAliasTarget"]:
+    # Written while the registry holds the placeholder: the annotation must
+    # stay a lazy string and resolve at compile time, NOT bake the
+    # placeholder in at decoration time -- the registry entry is retargeted
+    # to the real class below, and the annotation and the body cast must
+    # agree on the final answer.
+    return ptr["GateAliasTarget"](op)
+
+
+@compile
+class GateAliasReal:
+    v: i64
+
+
+# The module-level name is rebound and the registry entry retargeted to the
+# real class (the defining module's tail mark).  Only now does the name
+# become visible in this module's namespace.
+GateAliasTarget = GateAliasReal
+_mark_type_defined("GateAliasTarget", GateAliasReal)
+
+
+@compile(suffix="gate_retime")
+def call_gate_retime() -> i64:
+    r: GateAliasReal
+    r.v = 42
+    out: ptr["GateAliasTarget"] = gate_retime_fn(ptr[void](ptr(r)))
+    return out.v  # 42; field access proves the real layout won
+
+
 # ============================================================
 # Opaque / incomplete types behind aliases
 # ============================================================
@@ -317,6 +393,12 @@ class TestPtrAliasCornerCases(unittest.TestCase):
 
     def test_lazy_plain_alias_target(self):
         self.assertEqual(call_lazy_alias_ptr(), 42)
+
+    def test_nested_ptr_alias_compat(self):
+        self.assertEqual(call_nested_ptr_walk(), 42)
+
+    def test_registry_retarget_between_decoration_and_flush(self):
+        self.assertEqual(call_gate_retime(), 42)
 
 
 class TestOpaqueAlias(unittest.TestCase):

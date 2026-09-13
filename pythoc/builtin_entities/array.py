@@ -344,17 +344,12 @@ class array(BuiltinType):
             items = (items,)
         if len(items) < 2:
             logger.error("array requires at least element type and one dimension", node=None, exc_type=TypeError)
-        # First item is element type
+        # First item is element type.  A quoted element type name
+        # (``array["T", 8]``) stays a lazy string here and is resolved at
+        # IR materialization, mirroring ptr's string pointee; binding via
+        # the registry at subscript time would bake in a time-of-check
+        # answer from a mutable table.
         elem_name_opt, element_type = items[0]
-        # A quoted element type name (``array["T", 8]``) arrives as a plain
-        # string.  Resolve it through the forward-ref registry when the name
-        # is already defined; otherwise keep the string and let get_llvm_type
-        # resolve it lazily, mirroring how ptr keeps a string pointee.
-        if isinstance(element_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(element_type)
-            if resolved is not None:
-                element_type = resolved
         # Remaining items are dimensions
         dimensions = []
         for name_opt, dim in items[1:]:

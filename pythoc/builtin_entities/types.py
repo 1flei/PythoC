@@ -509,16 +509,12 @@ class ptr(BuiltinType):
             _pc_specialized = True
             pointee_type = inner_type
 
-        # Normalize a quoted pointee (``ptr["T"]``) through the session
-        # forward-ref registry.  A resolvable name binds the real defining
-        # class now, so conversion checks and IR materialization compare
-        # identical classes; an unresolvable name stays a lazy string
-        # (resolved -- or materialized as an incomplete opaque type -- later).
-        if isinstance(inner_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(inner_type)
-            if resolved is not None and not isinstance(resolved, str):
-                SpecializedPtr.pointee_type = resolved
+        # A quoted pointee (``ptr["T"]``) deliberately stays a lazy string
+        # here: the registry is mutable over module-execution time (a later
+        # module may register the real class over a placeholder), so binding
+        # at subscript time would bake in a time-of-check answer.  Compile-
+        # time consumers resolve the string with the full layered lookup
+        # (visible namespace snapshot + live globals + registry).
 
         return SpecializedPtr
 
