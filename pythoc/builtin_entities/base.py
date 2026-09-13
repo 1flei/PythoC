@@ -20,8 +20,30 @@ class _Int128Struct(ctypes.Structure):
     a register pair, which ctypes collects into this struct; arguments
     pass by value with the same layout.  pc_literal reassembles the
     Python int on the way back.
+
+    Windows x64 is NOT covered: 16-byte aggregates pass/return through a
+    hidden reference there, which does not match LLVM's i128 lowering.
     """
     _fields_ = [("lo", ctypes.c_uint64), ("hi", ctypes.c_uint64)]
+
+
+_i128_ffi_win32_warned = False
+
+
+def _warn_i128_ffi_win32():
+    """Windows x64 does not pass/return 16-byte aggregates in register
+    pairs, so the _Int128Struct carrier cannot marshal i128 values there;
+    warn once instead of silently producing garbage."""
+    global _i128_ffi_win32_warned
+    import os
+    if os.name == 'nt' and not _i128_ffi_win32_warned:
+        _i128_ffi_win32_warned = True
+        logger.warning(
+            "i128/u128 across the Python FFI boundary is not supported on "
+            "Windows (aggregate ABI mismatch); in-native 128-bit arithmetic "
+            "is unaffected",
+            node=None,
+        )
 
 
 def _is_type_like(obj) -> bool:
@@ -291,6 +313,7 @@ class BuiltinType(BuiltinEntity):
                     # >64-bit integers have no scalar ctypes type; the
                     # two-uint64 struct captures the register pair so the
                     # full value crosses the FFI boundary.
+                    _warn_i128_ffi_win32()
                     return _Int128Struct
             else:
                 if size == 1:
@@ -302,6 +325,7 @@ class BuiltinType(BuiltinEntity):
                 elif size <= 8:
                     return ctypes.c_uint64
                 else:
+                    _warn_i128_ffi_win32()
                     return _Int128Struct
         
         # Float types

@@ -276,14 +276,25 @@ if platform.system() == 'Linux':
 # ============================================================
 
 class TestInt128(unittest.TestCase):
+    # The FFI carrier (a two-uint64 struct standing in for i128) follows the
+    # SysV/AArch64 register-pair ABI.  Windows x64 passes/returns 16-byte
+    # aggregates differently (hidden reference), which does not match
+    # LLVM's i128 lowering there, so Python<->native marshalling of i128
+    # values is not supported on Windows; in-native 128-bit arithmetic
+    # works everywhere.
+    _FFI_OK = platform.system() != 'Windows'
+
+    @unittest.skipUnless(_FFI_OK, "i128 FFI marshalling is SysV/AArch64-only")
     def test_ffi_roundtrip(self):
         a = (1 << 70) + 5
         b = (1 << 70) + 7
         self.assertEqual(int(i128_add(a, b)), (1 << 71) + 12)
 
+    @unittest.skipUnless(_FFI_OK, "i128 FFI marshalling is SysV/AArch64-only")
     def test_ffi_negative_result(self):
         self.assertEqual(int(i128_sub_negative(5, 1 << 70)), 5 - (1 << 70))
 
+    @unittest.skipUnless(_FFI_OK, "i128 FFI marshalling is SysV/AArch64-only")
     def test_ffi_u128_shift(self):
         self.assertEqual(int(u128_shr(1 << 100, 3)), 1 << 97)
 
