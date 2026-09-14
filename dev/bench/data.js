@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789309628061,
+  "lastUpdate": 1789394652144,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3095,6 +3095,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.691,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "cee5bd6d9494305adce45e338768c26436360c1c",
+          "message": "Fix string type alias and introduce the unreachable builtin",
+          "timestamp": "2026-09-14T21:59:28+08:00",
+          "tree_id": "4701d22e9cf0a743a4c3dec34ed5d4f82429c64c",
+          "url": "https://github.com/1flei/PythoC/commit/cee5bd6d9494305adce45e338768c26436360c1c"
+        },
+        "date": 1789394651150,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.73,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.698,
             "unit": "seconds/test"
           }
         ]
