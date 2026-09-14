@@ -22,7 +22,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import i8, i32, i64, ptr, array, compile, void
+from pythoc import i8, i32, i64, ptr, array, compile, void, func
 from pythoc.logger import set_raise_on_error
 
 # Test mode: compile errors raise exceptions instead of sys.exit(1).
@@ -185,6 +185,23 @@ LaterPlainAlias = i64
 def call_lazy_alias_ptr() -> i64:
     x: i64 = 40
     return lazy_alias_ptr_read(ptr(x))  # 42
+
+
+# A func-type alias whose component is a quoted forward reference to a class
+# defined below -- the _Py_iteritemfunc shape: the string must survive to
+# materialization and resolve through the registry (the class marks itself
+# at decoration).
+FuncCbAlias = func["FuncCbResult", i64, i64]
+
+
+@compile
+class FuncCbResult:
+    v: i64
+
+
+@compile(suffix="func_quoted")
+def func_quoted_param(cb: FuncCbAlias) -> i64:
+    return i64(42)
 
 
 @compile
@@ -399,6 +416,15 @@ class TestPtrAliasCornerCases(unittest.TestCase):
 
     def test_registry_retarget_between_decoration_and_flush(self):
         self.assertEqual(call_gate_retime(), 42)
+
+    def test_func_quoted_component(self):
+        # Compiling a function whose parameter is a func[...] type with a
+        # quoted forward-ref component must materialize through the registry
+        # (pre-fix this failed the flush with "Unknown function type
+        # component").  Compile-only: ctypes cannot synthesize a null
+        # function-pointer argument for a direct call.
+        from pythoc.decorators.compile import flush_all_pending_outputs
+        flush_all_pending_outputs()
 
 
 class TestOpaqueAlias(unittest.TestCase):

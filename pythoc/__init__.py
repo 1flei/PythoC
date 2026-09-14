@@ -18,7 +18,7 @@ from .builtin_entities import (
     sizeof, offsetof, nullptr, typeof, char,
     seq, linear, consume, move, void,
     refined, assume, refine,
-    pyconst, defer, label, goto, goto_end,
+    pyconst, defer, label, goto, goto_end, unreachable,
     va_start, va_arg, va_end,
     pc_literal,
     llvm_asm,
@@ -165,6 +165,7 @@ __all__ = [
     'va_start',
     'va_arg',
     'va_end',
+    'unreachable',
 
     # Generic-width atomic intrinsics
     'atomic_load',

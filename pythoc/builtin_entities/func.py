@@ -54,6 +54,20 @@ class func(BuiltinType):
 
     @classmethod
     def _pc_type_to_llvm(cls, pc_type, module_context=None):
+        # A quoted component name (``func[..., "T"]``) arrives as a plain
+        # string; resolve it through the forward-ref registry at use time,
+        # mirroring ptr's string pointee.  A value component of a func type
+        # must be complete (C agrees: no by-value incomplete types in a
+        # signature), so an unresolvable name is a hard error here.
+        if isinstance(pc_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(pc_type)
+            if resolved is None:
+                logger.error(
+                    f"func: unresolved forward reference '{pc_type}'",
+                    node=None, exc_type=NameError,
+                )
+            pc_type = resolved
         if hasattr(pc_type, 'get_llvm_type'):
             return pc_type.get_llvm_type(module_context)
         if isinstance(pc_type, ir.Type):
@@ -375,5 +389,9 @@ class func(BuiltinType):
 
     def __class_getitem__(cls, item):
         """Python runtime entry point using normalization -> handle_type_subscript"""
+        from .base import _resolve_caller_type_names
         normalized = cls.normalize_subscript_items(item)
+        # Bind quoted names visible at the call site (typedef-style aliases),
+        # same as the base-class entry point.
+        normalized = _resolve_caller_type_names(normalized)
         return cls.handle_type_subscript(normalized)

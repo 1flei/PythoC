@@ -55,7 +55,7 @@ from .refined import refined, RefinedType
 from .qualifiers import const, static, thread_local, volatile
 
 # Built-in functions
-from .intrinsics import sizeof, offsetof, nullptr, seq, consume, assume, refine, typeof, char, defer, instantiate
+from .intrinsics import sizeof, offsetof, nullptr, seq, consume, assume, refine, typeof, char, defer, instantiate, unreachable
 from .float_constants import inf, inff, nan, nanf
 from .bitops import bswap, popcount, ctlz, cttz
 from .intrinsics import va_start, va_arg, va_end
@@ -170,6 +170,7 @@ __all__ = [
     'getptr',
     'seq',
     'consume',
+    'unreachable',
     'assume',
     'refine',
     'char',

@@ -8,6 +8,7 @@ from .offsetof import offsetof
 from .char import char
 from .seq import seq
 from .consume import consume
+from .unreachable import unreachable
 from .assume import assume
 from .refine import refine
 from .defer import defer
@@ -24,6 +25,7 @@ __all__ = [
     'char',
     'seq',
     'consume',
+    'unreachable',
     'assume',
     'refine',
     'nullptr',
