@@ -3,6 +3,7 @@
 Test sizeof in compiled PC functions
 """
 
+import unittest
 from pythoc import i8, i16, i32, i64, u32, f64, ptr, compile, sizeof
 from pythoc.libc.stdio import printf
 
@@ -70,11 +71,38 @@ def main() -> i32:
     printf("test_sizeof_struct3: %d\n", test_sizeof_struct3())
     return 0
 
+@compile(suffix="sizeof_individual")
+def sizeof_struct1() -> i32:
+    """sizeof(TestStruct): 4 + 4(pad) + 8 + 1 + 7(pad)"""
+    return sizeof(TestStruct)
+
+@compile(suffix="sizeof_individual")
+def sizeof_struct2() -> i32:
+    """sizeof(TestStruct2): 24 + 8 + 24 + 8"""
+    return sizeof(TestStruct2)
+
+@compile(suffix="sizeof_individual")
+def sizeof_struct3_only() -> i32:
+    """sizeof(TestStruct3): 24 + 64 + 1 + 3(pad) + 4 + 8"""
+    return sizeof(TestStruct3)
+
+class TestSizeof(unittest.TestCase):
+    def test_basic_types(self):
+        self.assertEqual(test_sizeof_basic(), 21)
+
+    def test_pointer_types(self):
+        self.assertEqual(test_sizeof_pointers(), 16)
+
+    def test_struct_sum(self):
+        self.assertEqual(test_sizeof_struct(), 88)
+
+    def test_struct3(self):
+        self.assertEqual(test_sizeof_struct3(), 104)
+
+    def test_individual_struct_sizes(self):
+        self.assertEqual(sizeof_struct1(), 24)
+        self.assertEqual(sizeof_struct2(), 64)
+        self.assertEqual(sizeof_struct3_only(), 104)
+
 if __name__ == "__main__":
-    main()
-    
-    # Verify results
-    assert test_sizeof_basic() == 21, f"test_sizeof_basic expected 21, got {test_sizeof_basic()}"
-    assert test_sizeof_pointers() == 16, f"test_sizeof_pointers expected 16, got {test_sizeof_pointers()}"
-    
-    print("All sizeof tests passed!")
+    unittest.main()

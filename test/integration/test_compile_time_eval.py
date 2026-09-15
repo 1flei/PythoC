@@ -8,8 +8,15 @@ Note: All @compile functions are defined at module level to ensure
 they are compiled before any native execution happens.
 """
 
+import os
 import unittest
 from pythoc import compile, i32, i64, f64
+from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
+from pythoc.logger import set_raise_on_error
+from test.utils.test_utils import expect_error
+
+# Test mode: compile errors raise exceptions instead of sys.exit(1).
+set_raise_on_error(True)
 
 # Module-level constants for compile-time access
 VALUES = [10, 20, 30, 40, 50]
@@ -94,6 +101,53 @@ def get_last() -> i32:
 
 
 # ============================================================================
+# Compile-time dict / string access and helper function folding
+# ============================================================================
+
+@compile(suffix="cte_dict")
+def dict_sum() -> i32:
+    return DICT_DATA["x"] + DICT_DATA["y"] + DICT_DATA["z"]  # 60
+
+@compile(suffix="cte_dict")
+def dict_in_expression(x: i32) -> i32:
+    return DICT_DATA["z"] * x + DICT_DATA["x"]  # 30 * x + 10
+
+@compile(suffix="cte_string")
+def string_char_code() -> i32:
+    return ord(STRING_DATA[1])  # ord('e') = 101
+
+@compile(suffix="cte_string")
+def string_length() -> i32:
+    return len(STRING_DATA)  # 5
+
+@compile(suffix="cte_helper")
+def helper_folded() -> i32:
+    return add_numbers(3, 4) * multiply(2, 5) + get_max(10, 20)  # 70 + 20 = 90
+
+@compile(suffix="cte_helper")
+def helper_single() -> i32:
+    return multiply(6, 7)  # 42
+
+
+# ============================================================================
+# Error cases (each in its own suffix group so a failing compile does
+# not poison this module's default object file)
+# ============================================================================
+
+@expect_error(["constant index"], suffix="cte_bad_nonconst")
+def run_error_nonconst_index():
+    @compile(suffix="cte_bad_nonconst")
+    def bad_nonconst_index(i: i32) -> i32:
+        return VALUES[i]  # ERROR: index is not a compile-time constant
+
+
+def define_bad_oob_index():
+    @compile(suffix="cte_bad_oob")
+    def bad_oob_index() -> i32:
+        return SMALL_LIST[10]  # ERROR: constant index out of range
+
+
+# ============================================================================
 # Test classes - only call the pre-compiled functions
 # ============================================================================
 
@@ -146,6 +200,57 @@ class TestCompileTimeSubscript(unittest.TestCase):
         """Test subscripting with larger index"""
         result = get_last()
         self.assertEqual(result, 9)
+
+
+class TestCompileTimeDictString(unittest.TestCase):
+    """Test compile-time dict and string constant access"""
+
+    def test_dict_subscript(self):
+        """Test subscripting a Python dict with string keys"""
+        self.assertEqual(dict_sum(), 60)
+
+    def test_dict_in_expression(self):
+        """Test dict constants mixed with runtime values"""
+        self.assertEqual(dict_in_expression(2), 70)
+        self.assertEqual(dict_in_expression(0), 10)
+
+    def test_string_char_code(self):
+        """Test compile-time string indexing folded through ord()"""
+        self.assertEqual(string_char_code(), 101)
+
+    def test_string_length(self):
+        """Test len() on a compile-time string constant"""
+        self.assertEqual(string_length(), 5)
+
+
+class TestCompileTimeHelpers(unittest.TestCase):
+    """Test pure Python helper calls folded at compile time"""
+
+    def test_helpers_folded(self):
+        self.assertEqual(helper_folded(), 90)
+
+    def test_helper_single_call(self):
+        self.assertEqual(helper_single(), 42)
+
+
+class TestCompileTimeSubscriptErrors(unittest.TestCase):
+    """Test rejection of invalid compile-time subscripts"""
+
+    def test_error_nonconst_index_rejected(self):
+        passed, msg = run_error_nonconst_index()
+        self.assertTrue(passed, msg)
+
+    def test_error_out_of_range_index_rejected(self):
+        # The compiler raises IndexError, which expect_error does not
+        # catch, so drive the define/flush cycle directly.
+        group_key = (os.path.abspath(__file__), 'module', 'cte_bad_oob')
+        try:
+            with self.assertRaises(Exception) as ctx:
+                define_bad_oob_index()
+                flush_all_pending_outputs()
+            self.assertIn("out of range", str(ctx.exception))
+        finally:
+            clear_failed_group(group_key)
 
 
 if __name__ == '__main__':

@@ -355,6 +355,186 @@ def test_enum_tag_zero() -> i32:
 
 
 # =============================================================================
+# Enum Payload Extraction via match
+# =============================================================================
+
+@compile(suffix="payload_extract")
+def test_extract_result_ok() -> i32:
+    """Extract i32 payload from ResultI32.Ok"""
+    r: ResultI32 = ResultI32(ResultI32.Ok, 42)
+    match r:
+        case (ResultI32.Ok, v):
+            return v
+        case (ResultI32.Err, e):
+            return -e
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_result_err() -> i32:
+    """Extract i32 payload from ResultI32.Err"""
+    r: ResultI32 = ResultI32(ResultI32.Err, 9)
+    match r:
+        case (ResultI32.Ok, v):
+            return v
+        case (ResultI32.Err, e):
+            return e * 10
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_option_some() -> i32:
+    """Extract i32 payload from Option.Some"""
+    opt: Option = Option(Option.Some, 42)
+    match opt:
+        case (Option.Some, v):
+            return v
+        case (Option.NoneVal):
+            return -1
+        case _:
+            return -2
+
+
+@compile(suffix="payload_extract")
+def test_extract_option_none() -> i32:
+    """Match Option.NoneVal variant"""
+    opt: Option = Option(Option.NoneVal)
+    match opt:
+        case (Option.Some, v):
+            return v
+        case (Option.NoneVal):
+            return -1
+        case _:
+            return -2
+
+
+@compile(suffix="payload_extract")
+def test_extract_mixed_int() -> i32:
+    """Extract i32 payload from MixedPayload.IntVal"""
+    val: MixedPayload = MixedPayload(MixedPayload.IntVal, 42)
+    match val:
+        case (MixedPayload.IntVal, x):
+            return x
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_mixed_float() -> i32:
+    """Extract f64 payload from MixedPayload.FloatVal"""
+    val: MixedPayload = MixedPayload(MixedPayload.FloatVal, 3.5)
+    match val:
+        case (MixedPayload.FloatVal, x):
+            if x > 3.4 and x < 3.6:
+                return 1
+            return 2
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_mixed_ptr() -> i32:
+    """Extract ptr[i8] payload from MixedPayload.PtrVal and read through it"""
+    msg: array[i8, 3] = [65, 66, 67]
+    val: MixedPayload = MixedPayload(MixedPayload.PtrVal, ptr(msg[0]))
+    match val:
+        case (MixedPayload.PtrVal, p):
+            v0: i32 = p[0]
+            v1: i32 = p[1]
+            v2: i32 = p[2]
+            return v0 + v1 + v2  # 65 + 66 + 67 = 198
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_mixed_ptr_write_through() -> i32:
+    """Write through ptr[i8] payload extracted by match"""
+    msg: array[i8, 2] = [1, 2]
+    val: MixedPayload = MixedPayload(MixedPayload.PtrVal, ptr(msg[0]))
+    match val:
+        case (MixedPayload.PtrVal, p):
+            p[0] = 100
+            p[1] = 50
+        case _:
+            pass
+    v0: i32 = msg[0]
+    v1: i32 = msg[1]
+    return v0 + v1  # 150
+
+
+@compile(suffix="payload_extract")
+def test_extract_mixed_none() -> i32:
+    """Match MixedPayload.NoPayload variant"""
+    val: MixedPayload = MixedPayload(MixedPayload.NoPayload)
+    match val:
+        case (MixedPayload.NoPayload):
+            return 77
+        case (MixedPayload.IntVal, x):
+            return x
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_tree_leaf() -> i32:
+    """Extract i32 payload from TreeNode.Leaf"""
+    leaf: TreeNode = TreeNode(TreeNode.Leaf, 42)
+    match leaf:
+        case (TreeNode.Leaf, v):
+            return v
+        case (TreeNode.Branch, (a, b)):
+            return a + b
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_tree_branch() -> i32:
+    """Destructure struct payload of TreeNode.Branch"""
+    branch: TreeNode = TreeNode(TreeNode.Branch, (10, 20))
+    match branch:
+        case (TreeNode.Leaf, v):
+            return v
+        case (TreeNode.Branch, (a, b)):
+            return a + b
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_expr_add() -> i32:
+    """Destructure struct payload of Expression.Add"""
+    e: Expression = Expression(Expression.Add, (10, 20))
+    match e:
+        case (Expression.Const, v):
+            return v
+        case (Expression.Add, (a, b)):
+            return a + b
+        case (Expression.Mul, (a, b)):
+            return a * b
+        case _:
+            return -1
+
+
+@compile(suffix="payload_extract")
+def test_extract_expr_mul() -> i32:
+    """Destructure struct payload of Expression.Mul"""
+    e: Expression = Expression(Expression.Mul, (5, 6))
+    match e:
+        case (Expression.Const, v):
+            return v
+        case (Expression.Add, (a, b)):
+            return a + b
+        case (Expression.Mul, (a, b)):
+            return a * b
+        case _:
+            return -1
+
+
+# =============================================================================
 # Test Runner
 # =============================================================================
 
@@ -450,6 +630,47 @@ class TestComplexEnum(unittest.TestCase):
 class TestEnumArray(unittest.TestCase):
     def test_tag_array(self):
         self.assertEqual(test_enum_tag_array(), 3)
+
+
+class TestEnumPayloadExtraction(unittest.TestCase):
+    def test_result_ok(self):
+        self.assertEqual(test_extract_result_ok(), 42)
+
+    def test_result_err(self):
+        self.assertEqual(test_extract_result_err(), 90)
+
+    def test_option_some(self):
+        self.assertEqual(test_extract_option_some(), 42)
+
+    def test_option_none(self):
+        self.assertEqual(test_extract_option_none(), -1)
+
+    def test_mixed_int(self):
+        self.assertEqual(test_extract_mixed_int(), 42)
+
+    def test_mixed_float(self):
+        self.assertEqual(test_extract_mixed_float(), 1)
+
+    def test_mixed_ptr(self):
+        self.assertEqual(test_extract_mixed_ptr(), 198)
+
+    def test_mixed_ptr_write_through(self):
+        self.assertEqual(test_extract_mixed_ptr_write_through(), 150)
+
+    def test_mixed_none(self):
+        self.assertEqual(test_extract_mixed_none(), 77)
+
+    def test_tree_leaf(self):
+        self.assertEqual(test_extract_tree_leaf(), 42)
+
+    def test_tree_branch(self):
+        self.assertEqual(test_extract_tree_branch(), 30)
+
+    def test_expr_add(self):
+        self.assertEqual(test_extract_expr_add(), 30)
+
+    def test_expr_mul(self):
+        self.assertEqual(test_extract_expr_mul(), 30)
 
 
 class TestEdgeCases(unittest.TestCase):

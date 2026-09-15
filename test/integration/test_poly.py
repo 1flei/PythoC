@@ -33,15 +33,16 @@ def add_str(a: ptr[i8], b: ptr[i8]) -> i32:
     return 42
 
 @compile
-def test_static_poly():
-    add(i32(1), i32(2))
-    add(f64(1.0), f64(2.0))
+def test_static_poly() -> i32:
+    r1: i32 = add(i32(1), i32(2))          # add_i32 -> 3
+    r2: i32 = add(f64(1.0), f64(2.0))      # add_f64 -> 3
+    return r1 * 10 + r2                    # 33
 
 add.append(add_str)
 
 @compile
-def test_static_poly2():
-    add("Hello", "World")
+def test_static_poly2() -> i32:
+    return add("Hello", "World")           # add_str -> 42
 
 @enum(i32)
 class num:
@@ -70,7 +71,7 @@ def mannual_dispatch(n1: num, n2: num) -> i32:
     return ret
 
 @compile
-def test_runtime_poly():
+def test_runtime_poly() -> i32:
     # Test with same enum type - all combinations covered
     a: num = num(num.I32, 1)
     b: num = num(num.I32, 2)
@@ -84,16 +85,31 @@ def test_runtime_poly():
     # mannual_dispatch(c, b)
 
     # Single dispatch
-    add(a, i32(1))  # add_i32(i32, i32)
-    
-    add(a, b)  # Will dispatch to add_i32(i32, i32)
-    add(c, d)  # Will dispatch to add_f64(f64, f64)
-    add(a, c)  # Will dispatch to add_if(i32, f64)
-    add(c, b)  # Will dispatch to add_fi(f64, i32)
-    pass
+    total: i32 = 0
+    total = total * 10 + add(a, i32(1))  # add_i32(i32, i32) -> 2
+
+    total = total * 10 + add(a, b)  # Will dispatch to add_i32(i32, i32) -> 3
+    total = total * 10 + add(c, d)  # Will dispatch to add_f64(f64, f64) -> 3
+    total = total * 10 + add(a, c)  # Will dispatch to add_if(i32, f64) -> 2
+    total = total * 10 + add(c, b)  # Will dispatch to add_fi(f64, i32) -> 3
+    return total                    # digits 2,3,3,2,3 -> 23323
+
+
+import unittest
+
+
+class TestPoly(unittest.TestCase):
+    """Static and dynamic (enum-based) polymorphic dispatch results."""
+
+    def test_static_poly(self):
+        self.assertEqual(test_static_poly(), 33)
+
+    def test_static_poly_str(self):
+        self.assertEqual(test_static_poly2(), 42)
+
+    def test_runtime_poly(self):
+        self.assertEqual(test_runtime_poly(), 23323)
+
 
 if __name__ == "__main__":
-    test_static_poly()
-    test_static_poly2()
-    test_runtime_poly()
-    print("All poly tests passed!")
+    unittest.main()

@@ -2,11 +2,10 @@
 """
 Test yield function with complex control flow
 
-This test reproduces the issue where yield functions with complex control flow
-(multiple if-elif-else branches) fail to inline.
-
-The current limitation is that yield functions must be "inlinable" which means
-they cannot have complex control flow patterns.
+Yield functions with complex control flow (if-elif-else branches, multiple
+yields per iteration, nested ifs) inline correctly; this file pins that with
+hard assertions.  (It previously treated inlining failures as a known
+limitation and skipped on RuntimeError.)
 """
 
 import sys
@@ -16,7 +15,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 import unittest
 
 from pythoc import compile, i32, i8, void, ptr
-from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
 
 
 # =============================================================================
@@ -201,59 +199,34 @@ class TestYieldComplexControlFlow(unittest.TestCase):
         self.assertEqual(result, 10)
     
     def test_if_else(self):
-        """If-else may fail - this tests the limitation"""
-        try:
-            result = test_if_else()
-            # 0 + 2 + 2 + 6 = 10 (0, 1*2, 2, 3*2)
-            self.assertEqual(result, 10)
-        except RuntimeError as e:
-            if "inlining failed" in str(e).lower():
-                self.skipTest(f"Known limitation: {e}")
-            raise
+        """If-else yields inline correctly (hard-pinned; was soft-pinned)."""
+        result = test_if_else()
+        # 0 + 2 + 2 + 6 = 10 (0, 1*2, 2, 3*2)
+        self.assertEqual(result, 10)
     
     def test_if_elif_else(self):
-        """If-elif-else - complex control flow"""
-        try:
-            result = test_if_elif_else()
-            # 0 + 1 + 2 + 3 + 4 = 10 (code=1, so yield i)
-            self.assertEqual(result, 10)
-        except RuntimeError as e:
-            if "inlining failed" in str(e).lower():
-                self.skipTest(f"Known limitation: {e}")
-            raise
+        """If-elif-else yields inline correctly (hard-pinned)."""
+        result = test_if_elif_else()
+        # 0 + 1 + 2 + 3 + 4 = 10 (code=1, so yield i)
+        self.assertEqual(result, 10)
     
     def test_multiple_yields(self):
-        """Multiple yields per iteration"""
-        try:
-            result = test_multiple_yields()
-            # (0 + 100) + (1 + 101) + (2 + 102) = 306
-            self.assertEqual(result, 306)
-        except RuntimeError as e:
-            if "inlining failed" in str(e).lower():
-                self.skipTest(f"Known limitation: {e}")
-            raise
+        """Multiple yields per iteration (hard-pinned)."""
+        result = test_multiple_yields()
+        # (0 + 100) + (1 + 101) + (2 + 102) = 306
+        self.assertEqual(result, 306)
     
     def test_nested_if(self):
-        """Nested if statements"""
-        try:
-            result = test_nested_if()
-            # i=1: 1, i=2: 2, i=3: 6, i=4: 8 = 17
-            self.assertEqual(result, 17)
-        except RuntimeError as e:
-            if "inlining failed" in str(e).lower():
-                self.skipTest(f"Known limitation: {e}")
-            raise
+        """Nested if statements (hard-pinned)."""
+        result = test_nested_if()
+        # i=1: 1, i=2: 2, i=3: 6, i=4: 8 = 17
+        self.assertEqual(result, 17)
     
     def test_dispatch_pattern(self):
-        """Dispatch pattern (simulates parse_declarations)"""
-        try:
-            result = test_dispatch()
-            # i=0: tok=0 -> 10, i=1: tok=1 -> 20, i=2: tok=2 -> 30 = 60
-            self.assertEqual(result, 60)
-        except RuntimeError as e:
-            if "inlining failed" in str(e).lower():
-                self.skipTest(f"Known limitation: {e}")
-            raise
+        """Dispatch pattern (simulates parse_declarations) (hard-pinned)."""
+        result = test_dispatch()
+        # i=0: tok=0 -> 10, i=1: tok=1 -> 20, i=2: tok=2 -> 30 = 60
+        self.assertEqual(result, 60)
 
 
 if __name__ == '__main__':

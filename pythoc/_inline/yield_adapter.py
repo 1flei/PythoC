@@ -12,7 +12,7 @@ import copy
 from typing import List, Optional, Dict, Any
 
 from .scope_analyzer import ScopeContext, build_caller_context
-from .exit_rules import YieldExitRule, _has_break_or_continue
+from .exit_rules import YieldExitRule, _has_break_or_continue, _contains_return
 from .kernel import ReturnValueChecker
 
 
@@ -56,18 +56,18 @@ class YieldInlineAdapter:
                 current scope (module-level yield function semantics).
 
         Returns:
-            (InlineResult, after_else_label) tuple if successful,
-            (None, None) if failed.
+            (InlineResult, after_else_label, gen_done_label) tuple if
+            successful, (None, None, None) if failed.
             Caller owns the full merge/restore lifecycle.
         """
         # Validate basic requirements
         if not self._is_inlinable(func_ast):
-            return (None, None)
+            return (None, None, None)
 
         # Get loop variable name
         loop_var = self._extract_loop_var(for_node)
         if not loop_var:
-            return (None, None)
+            return (None, None, None)
 
         # Extract call arguments from call node
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
@@ -88,12 +88,20 @@ class YieldInlineAdapter:
         from ..utils import get_next_id
         after_else_label = f"_for_after_else_{get_next_id()}" if body_has_break_or_continue else None
 
+        # A return anywhere in the generator body exhausts the iterator: it
+        # jumps to a label placed at the end of the spliced body (before the
+        # consumer's else clause, which runs on normal exhaustion).
+        gen_done_label = None
+        if _contains_return(func_ast.body):
+            gen_done_label = f"_gen_done_{get_next_id()}"
+
         # Create exit rule for yield transformation with type annotation
         exit_rule = YieldExitRule(
             loop_var=loop_var,
             loop_body=loop_body,
             return_type_annotation=return_type_annotation,
-            after_else_label=after_else_label
+            after_else_label=after_else_label,
+            gen_done_label=gen_done_label,
         )
 
         # Get callee's globals for kernel
@@ -118,10 +126,10 @@ class YieldInlineAdapter:
             exit_rule=exit_rule,
         )
         if inline_result is None:
-            return (None, None)
+            return (None, None, None)
 
-        # Return InlineResult and after_else_label for caller to own lifecycle
-        return (inline_result, after_else_label)
+        # Return InlineResult and labels for caller to own lifecycle
+        return (inline_result, after_else_label, gen_done_label)
     
     def _extract_loop_var(self, for_node: ast.For) -> Optional[ast.AST]:
         """Extract loop variable target from for node
@@ -163,18 +171,18 @@ class YieldInlineAdapter:
         
         Current restrictions:
         - Must contain at least one yield
-        - No return statements with values
-        
+
+        Returns (with or without a value) are fine: a return in the
+        generator body exhausts the iterator -- the value is evaluated for
+        side effects and discarded, as a for loop never observes it.
+
         Note: Nested functions are allowed - the InlineBodyTransformer.visit_FunctionDef
         handles variable renaming in nested function bodies correctly.
         """
         checker = _YieldInlinabilityChecker()
         checker.visit(func_ast)
-        
-        return (
-            checker.has_yield and
-            not checker.has_return_value
-        )
+
+        return checker.has_yield
 
 
 class _YieldInlinabilityChecker(ReturnValueChecker):

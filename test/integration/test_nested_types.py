@@ -421,6 +421,68 @@ def test_modify_through_pointer_chain() -> i32:
 
 
 # ============================================================================
+# Write-through nested places (no local copy)
+# ============================================================================
+
+@compile(suffix="nested_write")
+def test_write_nested_struct_direct() -> i32:
+    """Direct assignment into a nested struct place: outer[0][0] = x"""
+    outer: struct[struct[i32, i32], i32] = struct[struct[i32, i32], i32]()
+    outer[0][0] = 11
+    outer[0][1] = 22
+    outer[1] = 33
+    return outer[0][0] + outer[0][1] + outer[1]  # 11 + 22 + 33 = 66
+
+
+@compile(suffix="nested_write")
+def test_write_nested_struct_overwrite() -> i32:
+    """Overwrite a nested struct place in-place"""
+    outer: struct[struct[i32, i32], i32] = struct[struct[i32, i32], i32]()
+    outer[0][0] = 1
+    outer[0][1] = 2
+    outer[0][0] = 99
+    return outer[0][0]  # 99
+
+
+@compile(suffix="nested_write")
+def test_write_nested_place_through_ptr() -> i32:
+    """Address-of nested place ptr(outer[1][0]), write through the pointer"""
+    inner: struct[i32, i32] = (10, 20)
+    outer: struct[i32, struct[i32, i32]] = struct[i32, struct[i32, i32]]()
+    outer[0] = 5
+    outer[1] = inner
+    p: ptr[i32] = ptr(outer[1][0])
+    p[0] = 77
+    return outer[1][0] + outer[1][1]  # 77 + 20 = 97
+
+
+@compile(suffix="nested_write")
+def test_write_nested_place_ptr_second_field() -> i32:
+    """Address-of second field of a nested struct place"""
+    outer: struct[i32, struct[i32, i32]] = struct[i32, struct[i32, i32]]()
+    outer[0] = 1
+    outer[1][0] = 10
+    outer[1][1] = 20
+    p: ptr[i32] = ptr(outer[1][1])
+    p[0] = 88
+    return outer[1][0] + outer[1][1]  # 10 + 88 = 98
+
+
+@compile(suffix="nested_write")
+def test_write_three_level_place() -> i32:
+    """Direct and pointer writes through a three-level nested place"""
+    l3: struct[i32, struct[i32, struct[i32, i32]]] = struct[i32, struct[i32, struct[i32, i32]]]()
+    l3[0] = 1
+    l3[1][0] = 2
+    l3[1][1][0] = 3
+    l3[1][1][1] = 4
+    l3[1][1][0] = 30
+    p: ptr[i32] = ptr(l3[1][1][1])
+    p[0] = 40
+    return l3[0] + l3[1][0] + l3[1][1][0] + l3[1][1][1]  # 1 + 2 + 30 + 40 = 73
+
+
+# ============================================================================
 # Test Classes
 # ============================================================================
 
@@ -544,6 +606,25 @@ class TestPointerChains(unittest.TestCase):
     
     def test_modify(self):
         self.assertEqual(test_modify_through_pointer_chain(), 99)
+
+
+class TestWriteThroughNestedPlace(unittest.TestCase):
+    """Write directly into nested struct places without copying to a local"""
+
+    def test_direct(self):
+        self.assertEqual(test_write_nested_struct_direct(), 66)
+
+    def test_overwrite(self):
+        self.assertEqual(test_write_nested_struct_overwrite(), 99)
+
+    def test_through_ptr(self):
+        self.assertEqual(test_write_nested_place_through_ptr(), 97)
+
+    def test_ptr_second_field(self):
+        self.assertEqual(test_write_nested_place_ptr_second_field(), 98)
+
+    def test_three_level(self):
+        self.assertEqual(test_write_three_level_place(), 73)
 
 
 if __name__ == '__main__':

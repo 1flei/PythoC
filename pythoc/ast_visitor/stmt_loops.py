@@ -303,7 +303,9 @@ class LoopsMixin:
 
         # Get inlined result
         # after_else_label is the label name for break to jump to (skip else)
-        inline_result, after_else_label = adapter.try_inline_for_loop(
+        # gen_done_label is the exhaustion point: a return in the generator
+        # body jumps there (normal completion, so the else still runs).
+        inline_result, after_else_label, gen_done_label = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
             inline_info['call_node'],
@@ -323,6 +325,19 @@ class LoopsMixin:
         with inline_globals_scope(self, inline_result):
             # Visit each inlined statement
             self._visit_stmt_list(inline_result.stmts, add_to_cfg=True)
+
+            # Mark the generator-exhaustion point: a generator-body return
+            # jumps here, landing just before the consumer's else clause.
+            if gen_done_label:
+                from .._inline.exit_rules import _empty_label_block
+                done_stmt = _empty_label_block(
+                    ast.Constant(value=gen_done_label)
+                ).stmt
+                ast.copy_location(done_stmt, node)
+                ast.fix_missing_locations(done_stmt)
+                if not cf.is_terminated():
+                    cf.add_stmt(done_stmt)
+                    self.visit(done_stmt)
 
             # Execute else clause if present (only reached if no break occurred)
             if node.orelse:

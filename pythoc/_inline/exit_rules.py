@@ -290,7 +290,8 @@ class YieldExitRule(ExitPointRule):
         loop_var: ast.AST,  # Can be Name or Tuple
         loop_body: List[ast.stmt],
         return_type_annotation: Optional[ast.expr] = None,
-        after_else_label: Optional[str] = None
+        after_else_label: Optional[str] = None,
+        gen_done_label: Optional[str] = None,
     ):
         """
         Args:
@@ -298,19 +299,24 @@ class YieldExitRule(ExitPointRule):
             loop_body: Statements in the for loop body
             return_type_annotation: Return type annotation from function (optional)
             after_else_label: Label name for after-else (if loop body has break)
+            gen_done_label: Label name marking generator exhaustion (placed at
+                the end of the spliced body, before the consumer's else); a
+                ``return`` in the generator body jumps here.
         """
         self.loop_var = loop_var
         self.loop_body = loop_body
         self.return_type_annotation = return_type_annotation
         self.after_else_label = after_else_label
+        self.gen_done_label = gen_done_label
 
         # Check if loop body has break or continue
         self._body_has_break_or_continue = _has_break_or_continue(loop_body)
 
     def get_exit_node_types(self) -> Tuple[type, ...]:
-        # Only Yield expressions, not all Expr nodes
-        # Expr nodes containing Yield are handled specially in visit_Expr
-        return (ast.Yield,)
+        # Yield expressions, plus Return: a return in the generator body ends
+        # iteration.  Expr nodes containing Yield are handled specially in
+        # visit_Expr.
+        return (ast.Yield, ast.Return)
 
     def transform_exit(
         self,
@@ -319,12 +325,31 @@ class YieldExitRule(ExitPointRule):
     ) -> List[ast.stmt]:
         """
         yield expr → single template call with const guards.
+        return [expr] → (evaluate expr for side effects, then) jump to the
+        generator-done label: a return in the generator body exhausts the
+        iterator, which is normal loop completion (the consumer's else runs).
 
         All branching (tuple/simple target, with/without label, with/without
         type conversion) is handled by the unified ``_yield_exit_template``;
         ``_fold_const_if`` eliminates dead branches at instantiation time.
         """
         from ..utils import get_next_id
+
+        # return [expr] in the generator body -> exhaust the iterator.
+        if isinstance(exit_node, ast.Return):
+            stmts: List[ast.stmt] = []
+            if exit_node.value is not None:
+                # The return value is not observable through a for loop;
+                # evaluate it for side effects, then discard.
+                value_expr = ast.Expr(value=self._rename(exit_node.value, context))
+                ast.copy_location(value_expr, exit_node)
+                ast.fix_missing_locations(value_expr)
+                stmts.append(value_expr)
+            goto = _goto_begin(ast.Constant(value=self.gen_done_label)).stmt
+            ast.copy_location(goto, exit_node)
+            ast.fix_missing_locations(goto)
+            stmts.append(goto)
+            return stmts
 
         # Extract yield value
         if isinstance(exit_node, ast.Expr) and isinstance(exit_node.value, ast.Yield):
@@ -464,6 +489,19 @@ def _has_break_or_continue(body: List[ast.stmt]) -> bool:
                     return True
         # Do NOT recurse into For/While - break/continue inside nested loop
         # doesn't affect the outer loop
+    return False
+
+
+def _contains_return(body: List[ast.stmt]) -> bool:
+    """Whether a body contains any ``return`` at any nesting depth.
+
+    Used for generator bodies: a return at any depth (including inside
+    nested loops) exhausts the iterator, so the generator-done label must
+    exist.  ast.walk covers every nested statement list uniformly.
+    """
+    for node in ast.walk(ast.Module(body=body, type_ignores=[])):
+        if isinstance(node, ast.Return):
+            return True
     return False
 
 

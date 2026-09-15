@@ -22,6 +22,8 @@ sys.path.insert(
 
 from pythoc import compile, i32, i64, f64, struct
 
+from test.utils.test_utils import DeferredTestCase, expect_error
+
 
 # ============================================================================
 # Struct types
@@ -232,6 +234,38 @@ def test_multi_positional_kwargs() -> i32:
 
 
 # ============================================================================
+# 8. Invalid keyword usage (must be REJECTED at compile time)
+# ============================================================================
+
+@expect_error(["unexpected keyword"], suffix="kw_err_unknown_kw")
+def run_error_unknown_keyword():
+    @compile(suffix="kw_err_unknown_kw")
+    def bad_unknown_keyword() -> i32:
+        return add_two(a=i32(10), c=i32(20))
+
+
+@expect_error(["missing fields"], suffix="kw_err_missing_field")
+def run_error_missing_kwargs_field():
+    @compile(suffix="kw_err_missing_field")
+    def bad_missing_kwargs_field() -> i32:
+        return make_rect(width=i32(6))
+
+
+@expect_error(["both as positional"], suffix="kw_err_dup_arg")
+def run_error_duplicate_positional_keyword():
+    @compile(suffix="kw_err_dup_arg")
+    def bad_duplicate_arg() -> i32:
+        return add_two(i32(10), a=i32(20))
+
+
+@expect_error(["not a field"], suffix="kw_err_unknown_field")
+def run_error_unknown_kwargs_field():
+    @compile(suffix="kw_err_unknown_field")
+    def bad_unknown_kwargs_field() -> i32:
+        return make_rect(width=i32(6), depth=i32(7))
+
+
+# ============================================================================
 # Tests
 # ============================================================================
 
@@ -320,6 +354,26 @@ class TestArgsAndKwargs(unittest.TestCase):
     def test_multi_positional_kwargs(self):
         # 2 * (5+1) * 3 = 36
         self.assertEqual(test_multi_positional_kwargs(), 36)
+
+
+class TestKwargsErrors(DeferredTestCase):
+    """Invalid keyword usage must be rejected at compile time."""
+
+    def test_unknown_keyword_rejected(self):
+        passed, msg = run_error_unknown_keyword()
+        self.assertTrue(passed, msg)
+
+    def test_missing_kwargs_field_rejected(self):
+        passed, msg = run_error_missing_kwargs_field()
+        self.assertTrue(passed, msg)
+
+    def test_duplicate_positional_keyword_rejected(self):
+        passed, msg = run_error_duplicate_positional_keyword()
+        self.assertTrue(passed, msg)
+
+    def test_unknown_kwargs_field_rejected(self):
+        passed, msg = run_error_unknown_kwargs_field()
+        self.assertTrue(passed, msg)
 
 
 if __name__ == "__main__":

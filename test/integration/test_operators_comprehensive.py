@@ -8,7 +8,7 @@ import unittest
 from pythoc import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
-    f32, f64, bool, ptr, compile
+    f32, f64, bool, ptr, array, compile
 )
 
 
@@ -683,6 +683,65 @@ def test_float_int_operators() -> i32:
 
 
 # =============================================================================
+# Compound Assignment on Non-Trivial Lvalues
+# =============================================================================
+
+@compile(suffix="compound_lvalue")
+class CompoundAssignStruct:
+    a: i32
+    b: i64
+
+
+@compile(suffix="compound_lvalue")
+def test_arr_subscript_add_assign() -> i32:
+    """Test += on an array element through a variable index"""
+    arr: array[i32, 4] = [1, 2, 3, 4]
+    i: i32 = 1
+    arr[i] += 10
+    return arr[0] + arr[1] * 100 + arr[2] * 10000 + arr[3] * 1000000
+
+
+@compile(suffix="compound_lvalue")
+def test_ptr_deref_mul_assign() -> i32:
+    """Test *= through a pointer dereference"""
+    x: i32 = 7
+    p: ptr[i32] = ptr(x)
+    p[0] *= 6
+    return x  # 42
+
+
+@compile(suffix="compound_lvalue")
+def test_struct_field_add_assign() -> i32:
+    """Test += on struct fields"""
+    s: CompoundAssignStruct = CompoundAssignStruct()
+    s.a = 5
+    s.b = 100
+    s.a += 7
+    s.b += 1
+    return s.a + i32(s.b)  # 12 + 101 = 113
+
+
+@compile(suffix="compound_lvalue")
+def test_ptr_add_assign_scaled() -> i64:
+    """Test += on a pointer (offset scaled by pointee size)"""
+    x: i32 = 42
+    p: ptr[i32] = ptr(x)
+    p0: ptr[i32] = p
+    p += 3
+    diff: i64 = i64(p) - i64(p0)
+    return diff  # 3 * sizeof(i32) = 12
+
+
+@compile(suffix="compound_lvalue")
+def test_ptr_add_assign_deref() -> i32:
+    """Test that pointer += lands on the expected array element"""
+    arr: array[i32, 4] = [10, 20, 30, 40]
+    p: ptr[i32] = ptr(arr[0])
+    p += 2
+    return p[0]  # 30
+
+
+# =============================================================================
 # Test Runner
 # =============================================================================
 
@@ -704,6 +763,19 @@ class TestCompoundAssignment(unittest.TestCase):
     
     def test_compound_chain(self):
         self.assertEqual(test_compound_chain(), 10)
+
+
+class TestCompoundAssignmentLvalues(unittest.TestCase):
+    def test_subscript_and_deref(self):
+        self.assertEqual(test_arr_subscript_add_assign(), 4031201)
+        self.assertEqual(test_ptr_deref_mul_assign(), 42)
+
+    def test_struct_field(self):
+        self.assertEqual(test_struct_field_add_assign(), 113)
+
+    def test_pointer_compound_arithmetic(self):
+        self.assertEqual(test_ptr_add_assign_scaled(), 12)
+        self.assertEqual(test_ptr_add_assign_deref(), 30)
 
 
 class TestPrecedence(unittest.TestCase):

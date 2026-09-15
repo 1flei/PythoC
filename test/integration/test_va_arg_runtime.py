@@ -25,7 +25,7 @@ sys.path.insert(
 )
 
 from pythoc import (
-    compile, i32, i64, f64, u64, ptr, i8, void,
+    compile, i32, i64, f32, f64, u64, ptr, i8, void, struct,
     va_start, va_arg, va_end,
     flush_all_pending_outputs,
 )
@@ -111,6 +111,31 @@ def va_many_i32(dummy: i32, *args) -> i32:
     return s
 
 
+@compile(suffix="va_read_extra")
+def va_read_f32_promoted(dummy: i32, *args) -> f32:
+    """Read an f32 vararg following C default argument promotion.
+
+    C promotes float varargs to double, so the callee must read f64 and
+    narrow back to f32.
+    """
+    ap = va_start()
+    v: f64 = va_arg(ap, f64)
+    va_end(ap)
+    return f32(v)
+
+
+StructPairI64 = struct[i64, i64]
+
+
+@compile(suffix="va_read_extra")
+def va_read_struct_pair(dummy: i32, *args) -> i64:
+    """Read a struct[i64, i64] vararg passed by value."""
+    ap = va_start()
+    s: StructPairI64 = va_arg(ap, StructPairI64)
+    va_end(ap)
+    return s[0] + s[1]
+
+
 # ============================================================================
 # Part 2: pythoc caller wrappers (compile-time IR-level calls)
 # ============================================================================
@@ -149,6 +174,32 @@ def test_call_many_i32() -> i32:
     )
 
 
+@compile(suffix="va_read_extra")
+def test_call_read_ptr() -> i32:
+    """Call va_read_ptr; sum the first two chars of the returned string."""
+    p: ptr[i8] = va_read_ptr(i32(0), "hello")
+    # 'h' + 'e' = 104 + 101
+    return i32(p[0]) + i32(p[1])
+
+
+@compile(suffix="va_read_extra")
+def test_call_read_f32_from_f32() -> f32:
+    return va_read_f32_promoted(i32(0), f32(2.5))
+
+
+@compile(suffix="va_read_extra")
+def test_call_read_f32_from_f64() -> f32:
+    return va_read_f32_promoted(i32(0), f64(2.5))
+
+
+@compile(suffix="va_read_extra")
+def test_call_read_struct_pair() -> i64:
+    p: StructPairI64 = StructPairI64()
+    p[0] = 30
+    p[1] = 12
+    return va_read_struct_pair(i32(0), p)
+
+
 # ============================================================================
 # Part 3: C source that calls pythoc varargs functions
 # ============================================================================
@@ -170,6 +221,7 @@ typedef int64_t (*sum2_i64_fn)(int32_t, ...);
 typedef double  (*sum2_f64_fn)(int32_t, ...);
 typedef double  (*mixed_fn)(int32_t, ...);
 typedef int32_t (*many_i32_fn)(int32_t, ...);
+typedef char*   (*read_ptr_fn)(int32_t, ...);
 
 EXPORT int32_t c_call_sum3_i32(sum3_i32_fn fn) {
     return fn(3, 10, 20, 30);
@@ -193,6 +245,10 @@ EXPORT double c_call_mixed(mixed_fn fn) {
 
 EXPORT int32_t c_call_many_i32(many_i32_fn fn) {
     return fn(0, 1, 2, 3, 4, 5, 6, 7, 8);
+}
+
+EXPORT const char* c_call_read_ptr(read_ptr_fn fn) {
+    return fn(0, "cside");
 }
 
 /* C sanity check */
@@ -298,6 +354,21 @@ class TestVaArgPythocCallsPythoc(unittest.TestCase):
         """8 i32 varargs: first 5 in registers, rest on stack (x86_64 SysV)."""
         self.assertEqual(test_call_many_i32(), 36)  # 1+2+3+4+5+6+7+8
 
+    def test_read_ptr(self):
+        """ptr[i8] vararg round-trips; 'h' + 'e' = 205."""
+        self.assertEqual(test_call_read_ptr(), 205)
+
+    def test_read_f32_from_f32(self):
+        """f32 caller arg is promoted to f64 (C default argument promotion)."""
+        self.assertAlmostEqual(test_call_read_f32_from_f32(), 2.5, places=5)
+
+    def test_read_f32_from_f64(self):
+        self.assertAlmostEqual(test_call_read_f32_from_f64(), 2.5, places=5)
+
+    def test_read_struct_pair(self):
+        """struct[i64, i64] passed by value through varargs."""
+        self.assertEqual(test_call_read_struct_pair(), 42)
+
 
 # ============================================================================
 # Tests: C -> pythoc varargs (via function pointer)
@@ -350,6 +421,12 @@ class TestVaArgCCallsPythoc(unittest.TestCase):
         self.c_lib.c_call_many_i32.argtypes = [ctypes.c_void_p]
         self.c_lib.c_call_many_i32.restype = ctypes.c_int32
         self.assertEqual(self.c_lib.c_call_many_i32(fn_ptr), 36)
+
+    def test_c_calls_read_ptr(self):
+        fn_ptr = _get_pythoc_func_ptr(va_read_ptr)
+        self.c_lib.c_call_read_ptr.argtypes = [ctypes.c_void_p]
+        self.c_lib.c_call_read_ptr.restype = ctypes.c_char_p
+        self.assertEqual(self.c_lib.c_call_read_ptr(fn_ptr), b"cside")
 
 
 if __name__ == "__main__":

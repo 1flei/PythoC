@@ -97,6 +97,36 @@ def test_constant_loop_with_continue() -> i32:
             sum = sum + i * 10 + j
     return sum
 
+@compile(suffix="clist_ctrl")
+def test_unrolled_list_with_break() -> i32:
+    """Test break inside an unrolled constant list loop"""
+    sum: i32 = 0
+    for i in [1, 2, 3, 4, 5]:
+        if i == 3:
+            break
+        sum = sum + i
+    return sum
+
+@compile(suffix="clist_ctrl")
+def test_unrolled_list_with_continue() -> i32:
+    """Test continue inside an unrolled constant list loop"""
+    sum: i32 = 0
+    for i in [1, 2, 3, 4, 5]:
+        if i == 3:
+            continue
+        sum = sum + i
+    return sum
+
+@compile(suffix="clist_ctrl")
+def test_unrolled_list_with_return() -> i32:
+    """Test early return inside an unrolled constant list loop"""
+    sum: i32 = 0
+    for i in [1, 2, 3, 4, 5]:
+        sum = sum + i
+        if i == 3:
+            return sum
+    return -1
+
 import unittest
 
 
@@ -148,6 +178,18 @@ class TestConstantForLoop(unittest.TestCase):
         result = test_constant_loop_with_return()
         self.assertIsInstance(int(result), int)
         self.assertEqual(result, 1020)
+
+    def test_unrolled_list_with_break(self):
+        """Break in unrolled constant list loop: 1+2 = 3"""
+        self.assertEqual(test_unrolled_list_with_break(), 3)
+
+    def test_unrolled_list_with_continue(self):
+        """Continue in unrolled constant list loop: 1+2+4+5 = 12"""
+        self.assertEqual(test_unrolled_list_with_continue(), 12)
+
+    def test_unrolled_list_with_return(self):
+        """Early return in unrolled constant list loop: 1+2+3 = 6"""
+        self.assertEqual(test_unrolled_list_with_return(), 6)
 
 
 if __name__ == '__main__':

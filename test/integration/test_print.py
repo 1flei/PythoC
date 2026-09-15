@@ -24,7 +24,7 @@ def testprint() -> i32:
     # Allocate array
     ps10 = ptr[TestStruct](malloc(10 * sizeof(TestStruct)))
     printf("After ptrcast: ps10 = %p\n", ps10)
-    
+
     # Get pointer to second element
     print(TestStruct)
     myprint(TestStruct)
@@ -32,6 +32,14 @@ def testprint() -> i32:
     myprint(ps10)
     return 0
 
+import unittest
+
+
+class TestPrint(unittest.TestCase):
+    """print/myprint inside compiled code must not affect the return value."""
+
+    def test_testprint(self):
+        self.assertEqual(testprint(), 0)
+
 if __name__ == "__main__":
-    testprint()
-    print("test_print passed!")
+    unittest.main()

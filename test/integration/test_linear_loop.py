@@ -477,6 +477,60 @@ class TestLinearLoop(unittest.TestCase):
         """Test multiple tokens with loop"""
         test_multiple_tokens_loop(5)
 
+    def test_valid_consume_early_break(self):
+        """Token consumed before break; code after break is unreachable"""
+        result = test_consume_early_break()
+        self.assertEqual(result, 0)
+
+    def test_valid_while_break(self):
+        """Both tokens consumed before unconditional break"""
+        test_while_break(0)
+        test_while_break(5)
+
+    def test_valid_while_reassign(self):
+        """Token consumed and recreated each iteration; break consumes it
+
+        Note: n <= 0 loops forever by construction, so only n > 0 is called.
+        """
+        test_while_reassign(1)
+        test_while_reassign(5)
+
+    def test_valid_while_if_compile_only(self):
+        """while True with dead break (if False) must still compile
+
+        The loop never exits at runtime (the break is dead code), so this
+        is compile-only: the function is part of the default compile group
+        and flushing must not raise. Calling it would hang forever.
+        """
+        flush_all_pending_outputs()
+
+    def test_valid_while_never_end_compile_only(self):
+        """while True: pass with consumes after the loop must still compile
+
+        Same rationale as test_valid_while_if_compile_only: infinite loop,
+        verified for compilation only.
+        """
+        flush_all_pending_outputs()
+
+    def test_valid_while_pred(self):
+        """Tokens consumed on the pred-guarded break path (pred > 0)
+
+        Note: pred <= 0 loops forever by construction, so only pred > 0.
+        """
+        test_while_pred(0, 1)
+        test_while_pred(0, 5)
+
+    def test_valid_while_pred2(self):
+        """Break path returns t1, early-return path returns t2
+
+        A linear return value crosses the Python boundary as None; both
+        ownership paths must compile and run.
+        """
+        # pred > 100: break, consume(t2), return t1
+        self.assertIsNone(test_while_pred2(0, 200))
+        # 0 < pred <= 100: consume(t1), return t2
+        self.assertIsNone(test_while_pred2(0, 5))
+
     def test_error_for_consume_in_body(self):
         """Test error: consume in for body"""
         passed, msg = test_for_consume_in_body_error()

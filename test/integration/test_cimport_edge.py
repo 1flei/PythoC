@@ -680,3 +680,118 @@ int vec2_dot(struct Vec2 a, struct Vec2 b) {
         mod = cimport(source, lib="c")
         self.assertTrue(hasattr(mod, "Vec2"))
         self.assertTrue(hasattr(mod, "vec2_dot"))
+
+    def test_cimport_double_pointer_roundtrip(self):
+        """int** binding: C writes through a double pointer, reads it back"""
+        from pythoc import compile, i32, ptr
+        from pythoc.cimport import cimport
+        from pythoc.registry import get_unified_registry
+
+        saved = list(get_unified_registry().get_link_objects())
+        source = self._write("pp_rt.c", """
+void pp_rt_write(int **pp, int v) { **pp = v; }
+int pp_rt_read(int **pp) { return **pp + 1; }
+""")
+        try:
+            mod = cimport(source, compile_sources=True)
+            pp_rt_write = mod.pp_rt_write
+            pp_rt_read = mod.pp_rt_read
+
+            @compile(suffix="cimport_e2e_pp")
+            def pp_roundtrip() -> i32:
+                x: i32 = 10
+                p: ptr[i32] = ptr(x)
+                pp: ptr[ptr[i32]] = ptr(p)
+                pp_rt_write(pp, 77)
+                return pp_rt_read(pp)
+
+            self.assertEqual(pp_roundtrip(), 78)
+        finally:
+            get_unified_registry().clear_link_objects()
+            for obj in saved:
+                get_unified_registry().add_link_object(obj)
+
+    def test_cimport_opaque_struct_pointer_roundtrip(self):
+        """Opaque struct pointer created in C, handed back to C functions"""
+        from pythoc import compile, i32, ptr
+        from pythoc.cimport import cimport
+        from pythoc.registry import get_unified_registry
+
+        saved = list(get_unified_registry().get_link_objects())
+        header = self._write("opaque_rt.h", """
+struct OpaqueRt;
+struct OpaqueRt *opaque_rt_create(int seed);
+int opaque_rt_get(struct OpaqueRt *ctx);
+void opaque_rt_destroy(struct OpaqueRt *ctx);
+""")
+        source = self._write("opaque_rt.c", """
+#include <stdlib.h>
+#include "opaque_rt.h"
+struct OpaqueRt { int v; };
+struct OpaqueRt *opaque_rt_create(int seed) {
+    struct OpaqueRt *ctx = malloc(sizeof(struct OpaqueRt));
+    ctx->v = seed * 3;
+    return ctx;
+}
+int opaque_rt_get(struct OpaqueRt *ctx) { return ctx->v; }
+void opaque_rt_destroy(struct OpaqueRt *ctx) { free(ctx); }
+""")
+        try:
+            mod = cimport(header, sources=[source], compile_sources=True,
+                          include_dirs=[self.temp_dir])
+            OpaqueRt = mod.OpaqueRt
+            opaque_rt_create = mod.opaque_rt_create
+            opaque_rt_get = mod.opaque_rt_get
+            opaque_rt_destroy = mod.opaque_rt_destroy
+
+            @compile(suffix="cimport_e2e_opaque")
+            def opaque_roundtrip(seed: i32) -> i32:
+                ctx: ptr[OpaqueRt] = opaque_rt_create(seed)
+                v: i32 = opaque_rt_get(ctx)
+                opaque_rt_destroy(ctx)
+                return v
+
+            self.assertEqual(opaque_roundtrip(7), 21)
+        finally:
+            get_unified_registry().clear_link_objects()
+            for obj in saved:
+                get_unified_registry().add_link_object(obj)
+
+    def test_cimport_fnptr_typedef_callback(self):
+        """fn-ptr typedef: C applies an @compile callback through it"""
+        from pythoc import compile, i32
+        from pythoc.cimport import cimport
+        from pythoc.registry import get_unified_registry
+
+        saved = list(get_unified_registry().get_link_objects())
+        header = self._write("cb_rt.h", """
+typedef int (*cb_rt_t)(int);
+int cb_rt_apply(cb_rt_t fn, int x);
+""")
+        source = self._write("cb_rt.c", """
+#include "cb_rt.h"
+int cb_rt_apply(cb_rt_t fn, int x) { return fn(x) + fn(x + 1); }
+""")
+        try:
+            mod = cimport(header, sources=[source], compile_sources=True,
+                          include_dirs=[self.temp_dir])
+            cb_rt_apply = mod.cb_rt_apply
+
+            @compile(suffix="cimport_e2e_cb_inner")
+            def cb_double(x: i32) -> i32:
+                return x * 2
+
+            @compile(suffix="cimport_e2e_cb")
+            def cb_roundtrip(x: i32) -> i32:
+                return cb_rt_apply(cb_double, x)
+
+            # fn(5) + fn(6) = 10 + 12
+            self.assertEqual(cb_roundtrip(5), 22)
+        finally:
+            get_unified_registry().clear_link_objects()
+            for obj in saved:
+                get_unified_registry().add_link_object(obj)
+
+
+if __name__ == "__main__":
+    unittest.main()

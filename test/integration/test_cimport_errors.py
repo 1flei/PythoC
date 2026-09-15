@@ -257,6 +257,52 @@ int exp_fn(int x);
         self.assertEqual(g["exp_fn"].c_name, "exp_fn")
 
 
+class TestCimportLinkAndCacheErrors(CimportErrorsBase):
+    """Library-path and bindings-cache failure handling."""
+
+    def test_lib_path_to_nonexistent_so_fails_at_call(self):
+        """lib= pointing at a missing .so imports lazily; calling the
+        binding raises OSError from dlopen instead of a crash."""
+        from pythoc.cimport import cimport
+
+        header = self._write("badlib.h", "int badlib_fn(int x);\n")
+        mod = cimport(
+            header, lib=os.path.join(self.temp_dir, "no_such_lib_xyz.so"))
+        self.assertTrue(hasattr(mod, "badlib_fn"))
+        with self.assertRaises(OSError) as ctx:
+            mod.badlib_fn(1)
+        self.assertIn("no_such_lib_xyz", str(ctx.exception))
+
+    def test_source_compile_failure_clear_error(self):
+        """A source listed in sources= that fails cc compilation raises a
+        RuntimeError carrying the compiler diagnostics."""
+        from pythoc.cimport import cimport
+
+        header = self._write("good_hdr.h", "int good_hdr_fn(int x);\n")
+        source = self._write(
+            "bad_src.c",
+            "int bad_src_fn(int x) { return x + ; }\n")
+        with self.assertRaises(RuntimeError) as ctx:
+            cimport(header, sources=[source], compile_sources=True)
+        msg = str(ctx.exception)
+        self.assertIn("Compilation failed", msg)
+        self.assertIn("bad_src.c", msg)
+
+    def test_cache_recovery_after_header_fix(self):
+        """A failed import does not poison the bindings cache: fixing the
+        header and re-importing the same path succeeds."""
+        from pythoc.cimport import cimport
+        from pythoc.cimport_clang import ClangCImportError
+
+        header = self._write("recov.h", "int recov_fn(\n")
+        with self.assertRaises(ClangCImportError):
+            cimport(header, lib="c")
+        with open(header, "w", encoding="utf-8") as f:
+            f.write("int recov_fn(int x);\n")
+        mod = cimport(header, lib="c")
+        self.assertTrue(hasattr(mod, "recov_fn"))
+
+
 class TestCimportConversionResilience(CimportErrorsBase):
     """A declaration that fails IR conversion degrades to a lazy error
     instead of aborting the whole import (e.g. a python-clang/libclang

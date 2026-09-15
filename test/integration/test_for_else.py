@@ -172,6 +172,86 @@ def test_for_else_empty_yield() -> i32:
     return sum  # 100
 
 
+# =============================================================================
+# while-else tests (same semantics: else runs unless the loop broke)
+# =============================================================================
+
+# Test 9: while-else with normal completion (no break)
+@compile(suffix="while_else")
+def test_while_else_normal(n: i32) -> i32:
+    """While loop completes normally, else executes"""
+    sum: i32 = 0
+    i: i32 = 0
+    while i < n:
+        sum = sum + i
+        i = i + 1
+    else:
+        sum = sum + 100  # Should execute
+    return sum  # n=5: 0+1+2+3+4+100 = 110
+
+
+# Test 10: while-else with conditional break
+@compile(suffix="while_else")
+def test_while_else_with_break(target: i32) -> i32:
+    """Break only if target found"""
+    found: i32 = 0
+    i: i32 = 0
+    while i < 10:
+        if i == target:
+            found = 1
+            break
+        i = i + 1
+    else:
+        found = -1  # Not found
+    return found
+
+
+# Test 11: while-else with condition false on entry (else executes)
+@compile(suffix="while_else")
+def test_while_else_empty() -> i32:
+    """Loop body never runs, else still executes"""
+    sum: i32 = 0
+    i: i32 = 0
+    while i < 0:
+        sum = sum + 1  # Never runs
+        i = i + 1
+    else:
+        sum = sum + 100  # Should execute
+    return sum  # 100
+
+
+# Test 12: while-else with continue (else still executes)
+@compile(suffix="while_else")
+def test_while_else_with_continue() -> i32:
+    """Continue doesn't prevent else execution"""
+    sum: i32 = 0
+    i: i32 = 0
+    while i < 5:
+        i = i + 1
+        if i == 3:
+            continue  # Skip 3
+        sum = sum + i
+    else:
+        sum = sum + 100  # Should execute (no break)
+    return sum  # 1+2+4+5+100 = 112
+
+
+# Test 13: while-else with early return (else skips)
+@compile(suffix="while_else")
+def test_while_else_with_return() -> i32:
+    """Return exits function, else doesn't execute"""
+    sum: i32 = 0
+    i: i32 = 0
+    while i < 5:
+        sum = sum + i
+        if i == 3:
+            return sum  # Early return
+        i = i + 1
+    else:
+        sum = sum + 100  # Should NOT execute
+    return sum
+
+
 def main():
     """Run all tests"""
     print("Testing for-else statements...")
@@ -229,7 +309,42 @@ def main():
     result = test_for_else_empty_yield()
     print(f"test_for_else_empty_yield: {'PASS' if result == 100 else 'FAIL'} (result={result}, expected=100)")
     assert result == 100
-    
+
+    # Test while-else: normal completion
+    result = test_while_else_normal(5)
+    print(f"test_while_else_normal(5): {'PASS' if result == 110 else 'FAIL'} (result={result}, expected=110)")
+    assert result == 110
+
+    # Test while-else: normal completion with n=0 (body never runs)
+    result = test_while_else_normal(0)
+    print(f"test_while_else_normal(0): {'PASS' if result == 100 else 'FAIL'} (result={result}, expected=100)")
+    assert result == 100
+
+    # Test while-else: break - found
+    result = test_while_else_with_break(4)
+    print(f"test_while_else_with_break(4): {'PASS' if result == 1 else 'FAIL'} (result={result}, expected=1)")
+    assert result == 1
+
+    # Test while-else: no break - not found
+    result = test_while_else_with_break(99)
+    print(f"test_while_else_with_break(99): {'PASS' if result == -1 else 'FAIL'} (result={result}, expected=-1)")
+    assert result == -1
+
+    # Test while-else: condition false on entry
+    result = test_while_else_empty()
+    print(f"test_while_else_empty: {'PASS' if result == 100 else 'FAIL'} (result={result}, expected=100)")
+    assert result == 100
+
+    # Test while-else: continue
+    result = test_while_else_with_continue()
+    print(f"test_while_else_with_continue: {'PASS' if result == 112 else 'FAIL'} (result={result}, expected=112)")
+    assert result == 112
+
+    # Test while-else: early return
+    result = test_while_else_with_return()
+    print(f"test_while_else_with_return: {'PASS' if result == 6 else 'FAIL'} (result={result}, expected=6)")
+    assert result == 6
+
     print()
     print("All for-else tests passed!")
     return 0

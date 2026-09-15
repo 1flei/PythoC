@@ -18,7 +18,11 @@ import os
 # Add project root to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from pythoc import compile, i32, i64, f64, ptr, nullptr
+from pythoc import compile, i32, i64, f64, ptr, nullptr, sizeof
+from pythoc.libc.stdlib import malloc, free
+from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
+
+from test.utils.test_utils import DeferredTestCase
 
 # Define constants that will be used in compiled functions
 DEFAULT_VALUE = 42
@@ -37,6 +41,10 @@ NEGATIVE_VALUE = -50
 
 # Zero constant
 ZERO = 0
+
+# Function renaming: module-level aliases of imported libc functions
+my_malloc = malloc
+my_free = free
 
 
 # ============================================================================
@@ -96,6 +104,25 @@ def get_zero() -> i32:
     return ZERO
 
 
+@compile(suffix="user_globals_ext")
+def allocate_with_renamed() -> i32:
+    """Use renamed malloc/free from module globals"""
+    p = ptr[i32](my_malloc(sizeof(i32)))
+    p[0] = 77
+    v: i32 = p[0]
+    my_free(p)
+    return v
+
+
+@compile(suffix="user_globals_ext")
+def check_nullptr() -> i32:
+    """nullptr imported into the user module works in compiled code"""
+    p: ptr[i32] = nullptr
+    if p == nullptr:
+        return 1
+    return 0
+
+
 # ============================================================================
 # Test classes - only call the pre-compiled functions
 # ============================================================================
@@ -123,15 +150,15 @@ class TestUserGlobals(unittest.TestCase):
         result = use_type_alias(5)
         self.assertEqual(result, 15)
     
-    @unittest.skip("DISABLED: Return value semantics changed - need to investigate pointer return handling")
     def test_function_renaming(self):
         """Test using renamed functions from module globals"""
-        pass
-    
-    @unittest.skip("DISABLED: Return value semantics changed - need to investigate pointer return handling")
+        result = allocate_with_renamed()
+        self.assertEqual(result, 77)
+
     def test_nullptr_from_import(self):
         """Test that nullptr works when imported in user module"""
-        pass
+        result = check_nullptr()
+        self.assertEqual(result, 1)
     
     def test_constant_in_expression(self):
         """Test using constants in complex expressions"""
@@ -152,18 +179,37 @@ class TestUserGlobals(unittest.TestCase):
         self.assertEqual(result, expected)
 
 
-class TestUserGlobalsEdgeCases(unittest.TestCase):
+class TestUserGlobalsEdgeCases(DeferredTestCase):
     """Test edge cases and error handling for user globals"""
-    
-    @unittest.skip("DISABLED: Exception handling semantics changed - @compile now wraps errors in RuntimeError")
+
     def test_undefined_constant_error(self):
         """Test that using undefined constant raises NameError"""
-        pass
-    
-    @unittest.skip("DISABLED: Exception handling semantics changed - @compile now wraps errors in RuntimeError")
+        source_file = os.path.abspath(__file__)
+        group_key = (source_file, 'module', 'ug_undefined_const')
+        try:
+            with self.assertRaises((NameError, RuntimeError)) as ctx:
+                @compile(suffix="ug_undefined_const")
+                def use_undefined() -> i32:
+                    return UNDEFINED_CONSTANT_XYZ
+                flush_all_pending_outputs()
+            self.assertIn("not defined", str(ctx.exception))
+        finally:
+            clear_failed_group(group_key)
+
     def test_type_as_value_error(self):
         """Test that using type as value raises TypeError"""
-        pass
+        source_file = os.path.abspath(__file__)
+        group_key = (source_file, 'module', 'ug_type_as_value')
+        try:
+            with self.assertRaises((TypeError, RuntimeError)) as ctx:
+                @compile(suffix="ug_type_as_value")
+                def use_type_as_value() -> i32:
+                    x: i32 = i32
+                    return x
+                flush_all_pending_outputs()
+            self.assertIn("promote", str(ctx.exception))
+        finally:
+            clear_failed_group(group_key)
 
 
 class TestConstantDefinitions(unittest.TestCase):

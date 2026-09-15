@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from pythoc import i32, compile
 import unittest
 
+from test.utils.test_utils import DeferredTestCase, expect_error
+
 
 @compile
 class Point:
@@ -415,6 +417,34 @@ def test_struct_tuple_3d() -> i32:
             return x + y + z
 
 
+# =============================================================================
+# Non-exhaustive match (must be rejected at compile time)
+# =============================================================================
+
+@expect_error(["non-exhaustive"], suffix="ms_single_case")
+def run_error_struct_single_case():
+    @compile(suffix="ms_single_case")
+    def match_single_case() -> i32:
+        p: Point = make_point(1, 1)
+        match p:
+            case (0, 0):
+                return 0
+
+
+@expect_error(["non-exhaustive"], suffix="ms_no_catch_all")
+def run_error_struct_no_catch_all():
+    @compile(suffix="ms_no_catch_all")
+    def match_no_catch_all() -> i32:
+        p: Point3D = make_point3d(1, 2, 3)
+        match p:
+            case (0, 0, 0):
+                return 0
+            case (x, 0, 0):
+                return 1
+            case (0, y, 0):
+                return 2
+
+
 class TestMatchStructDestructuring(unittest.TestCase):
     """Test struct destructuring feature"""
     
@@ -496,6 +526,18 @@ class TestMatchStructTupleSyntax(unittest.TestCase):
     
     def test_tuple_3d(self):
         self.assertEqual(test_struct_tuple_3d(), 6)
+
+
+class TestMatchStructNonExhaustive(DeferredTestCase):
+    """Non-exhaustive struct matches must be rejected at compile time"""
+
+    def test_single_literal_case_rejected(self):
+        passed, msg = run_error_struct_single_case()
+        self.assertTrue(passed, msg)
+
+    def test_literal_cases_without_catch_all_rejected(self):
+        passed, msg = run_error_struct_no_catch_all()
+        self.assertTrue(passed, msg)
 
 
 if __name__ == '__main__':

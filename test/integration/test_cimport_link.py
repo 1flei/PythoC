@@ -200,6 +200,32 @@ class TestSystemIncludes(unittest.TestCase):
         finally:
             shutil.rmtree(custom_dir, ignore_errors=True)
 
+    def test_env_include_path_multi_dir(self):
+        # Two dirs on PC_CIMPORT_INCLUDE_PATH: the header resolves by name
+        # from the second dir, and its #include resolves from the first.
+        first_dir = tempfile.mkdtemp(dir=_fixture_dir)
+        second_dir = tempfile.mkdtemp(dir=_fixture_dir)
+        try:
+            with open(os.path.join(first_dir, 'env_multi_dep.h'), 'w',
+                      encoding='utf-8') as f:
+                f.write('#define ENV_MULTI_DEP_MAGIC 31\n')
+            with open(os.path.join(second_dir, 'env_multi_hdr.h'), 'w',
+                      encoding='utf-8') as f:
+                f.write('#include "env_multi_dep.h"\n'
+                        '#define ENV_MULTI_MAGIC 97\n'
+                        'int env_multi_fn(int x);\n')
+            os.environ['PC_CIMPORT_INCLUDE_PATH'] = (
+                first_dir + os.pathsep + second_dir)
+            mod = cimport('env_multi_hdr.h', lib='c')
+            self.assertEqual(mod.ENV_MULTI_MAGIC, 97)
+            self.assertTrue(hasattr(mod, 'env_multi_fn'))
+            # The first dir is searched by name too.
+            mod_first = cimport('env_multi_dep.h', lib='c')
+            self.assertEqual(mod_first.ENV_MULTI_DEP_MAGIC, 31)
+        finally:
+            shutil.rmtree(first_dir, ignore_errors=True)
+            shutil.rmtree(second_dir, ignore_errors=True)
+
 
 @unittest.skipUnless(_BACKEND_AVAILABLE, 'clang backend or C compiler unavailable')
 class TestIncludesOption(unittest.TestCase):

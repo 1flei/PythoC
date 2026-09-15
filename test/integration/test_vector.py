@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import sys
+import unittest
 
 from pythoc import i16, i32, i64, ptr, compile, seq
 from pythoc.libc.stdio import printf
@@ -261,20 +261,37 @@ def test_i64vec_spill_pop() -> i32:
     return bad
 
 
+class TestVector(unittest.TestCase):
+    """All compiled vector scenarios return 0 on success.
+
+    The base tests always return 0; boundary/spill tests return a 'bad'
+    counter that must be 0.
+    """
+
+    def test_intvec_base(self):
+        self.assertEqual(test_intvec_base(), 0)
+
+    def test_i16vec_base(self):
+        self.assertEqual(test_i16vec_base(), 0)
+
+    def test_i64vec_base(self):
+        self.assertEqual(test_i64vec_base(), 0)
+
+    def test_intvec_boundary(self):
+        self.assertEqual(test_intvec_boundary(), 0)
+
+    def test_i16vec_boundary(self):
+        self.assertEqual(test_i16vec_boundary(), 0)
+
+    def test_i64vec_boundary(self):
+        self.assertEqual(test_i64vec_boundary(), 0)
+
+    def test_intvec_spill_pop(self):
+        self.assertEqual(test_intvec_spill_pop(), 0)
+
+    def test_i64vec_spill_pop(self):
+        self.assertEqual(test_i64vec_spill_pop(), 0)
+
+
 if __name__ == "__main__":
-    test_intvec_base()
-    test_i16vec_base()
-    test_i64vec_base()
-
-    failures = 0
-    failures += int(test_intvec_boundary())
-    failures += int(test_i16vec_boundary())
-    failures += int(test_i64vec_boundary())
-    failures += int(test_intvec_spill_pop())
-    failures += int(test_i64vec_spill_pop())
-
-    if failures:
-        print("Vector boundary regression FAILED")
-        sys.exit(1)
-
-    print("All vector tests passed!")
+    unittest.main()

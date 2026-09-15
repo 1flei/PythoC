@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 from pythoc import i32, compile, array
 import unittest
 
+from test.utils.test_utils import DeferredTestCase, expect_error
+
 
 @compile
 def test_array_literal_123() -> i32:
@@ -250,6 +252,38 @@ def test_array_larger_general() -> i32:
             return a + e
 
 
+# =============================================================================
+# Non-exhaustive match (must be rejected at compile time)
+# =============================================================================
+
+@expect_error(["non-exhaustive"], suffix="ma_single_case")
+def run_error_array_single_case():
+    @compile(suffix="ma_single_case")
+    def match_single_case() -> i32:
+        arr: array[i32, 3] = array[i32, 3]()
+        arr[0] = 9
+        arr[1] = 8
+        arr[2] = 7
+        match arr:
+            case [1, 2, 3]:
+                return 123
+
+
+@expect_error(["non-exhaustive"], suffix="ma_no_catch_all")
+def run_error_array_no_catch_all():
+    @compile(suffix="ma_no_catch_all")
+    def match_no_catch_all() -> i32:
+        arr: array[i32, 3] = array[i32, 3]()
+        arr[0] = 0
+        arr[1] = 0
+        arr[2] = 0
+        match arr:
+            case [1, 2, 3]:
+                return 123
+            case [0, 0, 0]:
+                return 0
+
+
 class TestMatchArrayPatterns(unittest.TestCase):
     """Test array pattern feature"""
     
@@ -294,6 +328,18 @@ class TestMatchArrayPatterns(unittest.TestCase):
     
     def test_array_larger_general(self):
         self.assertEqual(test_array_larger_general(), 60)
+
+
+class TestMatchArrayNonExhaustive(DeferredTestCase):
+    """Non-exhaustive array matches must be rejected at compile time"""
+
+    def test_single_literal_case_rejected(self):
+        passed, msg = run_error_array_single_case()
+        self.assertTrue(passed, msg)
+
+    def test_literal_cases_without_catch_all_rejected(self):
+        passed, msg = run_error_array_no_catch_all()
+        self.assertTrue(passed, msg)
 
 
 if __name__ == '__main__':

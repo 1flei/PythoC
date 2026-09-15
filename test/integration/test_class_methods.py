@@ -55,7 +55,8 @@ def test_struct_methods() -> i32:
 
     printf("Point sum: (%d, %d)\n", sum_pt.x, sum_pt.y)
     printf("Point magnitude_sq(a): %d\n", msq)
-    return 0
+    # (4, 6) and 25 -> 4*100 + 6*10 + 25
+    return sum_pt.x * 100 + sum_pt.y * 10 + msq
 
 
 @compile
@@ -111,7 +112,8 @@ def test_union_methods() -> i32:
     pn = ptr(n)
     f: f64 = Number.reinterpret_as_float(pn)
     printf("Union reinterpret: int=%lld -> float=%f\n", n.as_int, f)
-    return 0
+    # 0x4045000000000000 is the f64 bit pattern of 42.0
+    return i32(f)
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +148,8 @@ def test_enum_methods() -> i32:
     printf("Color is_red(Red)=%d\n", Color.is_red(r))
     printf("Color is_red(Green)=%d\n", Color.is_red(g))
     printf("Color to_code(Blue)=%d\n", Color.to_code(b))
-    return 0
+    # 1, 0, 300 -> 1*1000 + 0*100 + 300
+    return Color.is_red(r) * 1000 + Color.is_red(g) * 100 + Color.to_code(b)
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +190,9 @@ def test_generic_box() -> i32:
     IntBox.set(pa, 999)
     printf("IntBox: %d\n", IntBox.get(pa))
     printf("LongBox: %lld\n", LongBox.get(pb))
-    return 0
+    if LongBox.get(pb) != 45678901234:
+        return -1
+    return IntBox.get(pa)
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +220,8 @@ def test_explicit_method_suffix() -> i32:
     p.b = 3
     pp = ptr(p)
     printf("Pair sum=%d, diff=%d\n", Pair.sum(pp), Pair.diff(pp))
-    return 0
+    # 13 and 7 -> 137
+    return Pair.sum(pp) * 10 + Pair.diff(pp)
 
 
 # ---------------------------------------------------------------------------
@@ -260,26 +266,66 @@ def test_self_calls() -> i32:
     IntStack.init(sp)
     for i in seq(5):
         IntStack.push(sp, i + 10)
-    printf("Stack top=%d\n", IntStack.top(sp))
-    printf("Stack pop=%d\n", IntStack.pop_top(sp))
-    printf("Stack pop=%d\n", IntStack.pop_top(sp))
+    t: i32 = IntStack.top(sp)
+    p1: i32 = IntStack.pop_top(sp)
+    p2: i32 = IntStack.pop_top(sp)
+    printf("Stack top=%d\n", t)
+    printf("Stack pop=%d\n", p1)
+    printf("Stack pop=%d\n", p2)
     IntStack.destroy(sp)
-    return 0
+    # 14, 14, 13 -> 141413
+    return t * 10000 + p1 * 100 + p2
 
 
 @compile
 def main() -> i32:
-    test_struct_methods()
+    if test_struct_methods() != 485:
+        return 1
     if test_same_method_name_different_classes() != 37:
         return 1
-    test_union_methods()
-    test_enum_methods()
-    test_generic_box()
-    test_explicit_method_suffix()
-    test_self_calls()
+    if test_union_methods() != 42:
+        return 1
+    if test_enum_methods() != 1300:
+        return 1
+    if test_generic_box() != 999:
+        return 1
+    if test_explicit_method_suffix() != 137:
+        return 1
+    if test_self_calls() != 141413:
+        return 1
     return 0
 
 
+import unittest
+
+
+class TestClassMethods(unittest.TestCase):
+    """Per-scenario assertions for class-body methods."""
+
+    def test_struct_methods(self):
+        self.assertEqual(test_struct_methods(), 485)
+
+    def test_same_method_name_different_classes(self):
+        self.assertEqual(test_same_method_name_different_classes(), 37)
+
+    def test_union_methods(self):
+        self.assertEqual(test_union_methods(), 42)
+
+    def test_enum_methods(self):
+        self.assertEqual(test_enum_methods(), 1300)
+
+    def test_generic_box(self):
+        self.assertEqual(test_generic_box(), 999)
+
+    def test_explicit_method_suffix(self):
+        self.assertEqual(test_explicit_method_suffix(), 137)
+
+    def test_self_calls(self):
+        self.assertEqual(test_self_calls(), 141413)
+
+    def test_main(self):
+        self.assertEqual(main(), 0)
+
+
 if __name__ == "__main__":
-    main()
-    print("All class method tests passed!")
+    unittest.main()

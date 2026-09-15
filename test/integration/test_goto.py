@@ -30,9 +30,13 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
+import unittest
+
 from pythoc import compile, i32, ptr, void
 from pythoc.builtin_entities import label, goto, goto_end, defer
 from pythoc.libc.stdio import printf
+
+from test.utils.test_utils import DeferredTestCase, expect_error
 
 
 # =============================================================================
@@ -619,6 +623,76 @@ def test_if_else_chain_with_goto() -> i32:
 
 
 # =============================================================================
+# 8. Compile-time rejection of invalid goto/label usage
+# =============================================================================
+
+# ERROR 1: goto to a label that is never defined
+@expect_error(["undefined label"], suffix="goto_undef_label")
+def run_error_goto_undefined_label():
+    @compile(suffix="goto_undef_label")
+    def bad_goto_undefined() -> i32:
+        with label("a"):
+            goto("nonexistent")  # ERROR: no such label
+        return 0
+
+
+# ERROR 2: goto_end to a label that is never defined
+@expect_error(["not visible", "undefined label"], suffix="gotoend_undef_label")
+def run_error_goto_end_undefined_label():
+    @compile(suffix="gotoend_undef_label")
+    def bad_goto_end_undefined() -> i32:
+        with label("a"):
+            goto_end("nonexistent")  # ERROR: no such label
+        return 0
+
+
+# ERROR 3: duplicate label names (sibling scopes)
+@expect_error(["already defined"], suffix="goto_dup_label")
+def run_error_duplicate_label():
+    @compile(suffix="goto_dup_label")
+    def bad_duplicate_label() -> i32:
+        x: i32 = 0
+        with label("dup"):
+            x = x + 1
+        with label("dup"):  # ERROR: label already defined
+            x = x + 10
+        return x
+
+
+# ERROR 4: duplicate label names (nested scopes)
+@expect_error(["already defined"], suffix="goto_dup_nested")
+def run_error_duplicate_label_nested():
+    @compile(suffix="goto_dup_nested")
+    def bad_duplicate_label_nested() -> i32:
+        x: i32 = 0
+        with label("dup"):
+            x = x + 1
+            with label("dup"):  # ERROR: label already defined
+                x = x + 10
+        return x
+
+
+class TestGotoErrors(DeferredTestCase):
+    """Invalid goto/label usage must be rejected at compile time"""
+
+    def test_error_goto_undefined_label(self):
+        passed, msg = run_error_goto_undefined_label()
+        self.assertTrue(passed, msg)
+
+    def test_error_goto_end_undefined_label(self):
+        passed, msg = run_error_goto_end_undefined_label()
+        self.assertTrue(passed, msg)
+
+    def test_error_duplicate_label(self):
+        passed, msg = run_error_duplicate_label()
+        self.assertTrue(passed, msg)
+
+    def test_error_duplicate_label_nested(self):
+        passed, msg = run_error_duplicate_label_nested()
+        self.assertTrue(passed, msg)
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -816,3 +890,6 @@ def main() -> i32:
 if __name__ == '__main__':
     result = main()
     print(f"main() returned: {result}")
+    if result != 0:
+        sys.exit(result)
+    unittest.main()
