@@ -1254,7 +1254,14 @@ def _compile_impl(func_or_class,
     )
     compiler = group['compiler']
     from ..build.cache import fingerprint_function_content
-    content = fingerprint_function_content(func_ast, user_globals)
+    # File-backed functions (source parsed from source_file) need no AST
+    # component in the fingerprint: the file's mtime already keys its
+    # content.  The fingerprint then only covers captured environment
+    # values.  Functions with pre-stored source (__pc_source__, e.g.
+    # yield-generated wrappers) may not match the file's current text, so
+    # they keep the full AST digest.
+    content = fingerprint_function_content(
+        func_ast, user_globals, include_ast=hasattr(func, '__pc_source__'))
     if content.digest:
         group.setdefault('_ast_content_hashes', []).append(content.digest)
         if content.captured:
@@ -1480,19 +1487,22 @@ def _try_reuse_cached_wrapper(
         return None, None
 
     # Tier 1 – .o cache hit (object file on disk is fresh).
-    # We still record type-layout dependencies from the current globals so
-    # source_embed edges are not lost across registration-phase reuse.
-    if output_manager._group_object_cache_hit(group_key, group):
-        existing, binding = _find_match()
-        if existing is not None:
-            _clone_binding_to_wrapper(binding, existing, wrapper)
-            from ..build.deps import get_dependency_tracker
-            get_dependency_tracker().record_type_layout_deps_from_globals(
-                tuple(group_key), wrapper._binding.compilation_globals,
-            )
-            output_manager.add_wrapper_to_group(group_key, wrapper)
-            return wrapper
-        return None
+    # Look for an in-process match first: without one the cache check
+    # cannot produce a wrapper, and running it mid-registration would
+    # compare the group's *partial* content-hash list against the complete
+    # cached one, producing guaranteed-miss noise (plus a deps-file read)
+    # for every decorated function.
+    existing, binding = _find_match()
+    if existing is not None and output_manager._group_object_cache_hit(group_key, group):
+        _clone_binding_to_wrapper(binding, existing, wrapper)
+        # We still record type-layout dependencies from the current globals so
+        # source_embed edges are not lost across registration-phase reuse.
+        from ..build.deps import get_dependency_tracker
+        get_dependency_tracker().record_type_layout_deps_from_globals(
+            tuple(group_key), wrapper._binding.compilation_globals,
+        )
+        output_manager.add_wrapper_to_group(group_key, wrapper)
+        return wrapper
 
     # Tier 2 – in-process cache: the same group was already registered
     # in this process (no on-disk .o yet, and possibly not flushed).

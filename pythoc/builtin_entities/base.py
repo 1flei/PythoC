@@ -31,7 +31,7 @@ def _is_type_like(obj) -> bool:
     processed struct/enum/union class)."""
     if not isinstance(obj, type):
         return False
-    if issubclass(obj, BuiltinEntity):
+    if getattr(obj, '_is_builtin_entity', False):
         return obj.can_be_type()
     return bool(
         getattr(obj, '_is_struct', False)
@@ -204,7 +204,12 @@ class BuiltinEntityMeta(ABCMeta):
 
 class BuiltinEntity(ABC, metaclass=BuiltinEntityMeta):
     """Base class for all built-in entities (types, functions, etc.)"""
-    
+
+    # MRO-inherited marker for O(1) subclass probes in hot paths; equivalent
+    # to issubclass(x, BuiltinEntity) because pythoc never uses ABC virtual
+    # subclass registration.
+    _is_builtin_entity = True
+
     @classmethod
     @abstractmethod
     def get_name(cls) -> str:
@@ -253,7 +258,9 @@ class BuiltinEntity(ABC, metaclass=BuiltinEntityMeta):
 
 class BuiltinType(BuiltinEntity):
     """Base class for built-in type entities"""
-    
+
+    _is_builtin_type = True
+
     # Subclasses should define these
     _llvm_type: ir.Type = None
     _size_bytes: int = None
@@ -772,7 +779,9 @@ class BuiltinType(BuiltinEntity):
 
 class BuiltinFunction(BuiltinEntity):
     """Base class for built-in function entities"""
-    
+
+    _is_builtin_function = True
+
     # If True, arguments to this function do NOT have their linear ownership transferred.
     # This is used for functions like ptr() that borrow rather than consume.
     # Default is False (normal behavior: arguments are consumed).

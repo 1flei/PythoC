@@ -40,11 +40,12 @@ def inline(func=None, *, cls_method=False, method=False):
     """
     def decorator(f):
         try:
-            source = inspect.getsource(f)
+            from ..utils.inspect_utils import get_object_source, get_object_sourcelines
+            source = get_object_source(f)
             source = textwrap.dedent(source)
             # Get function start line for accurate error messages
             try:
-                _, start_line = inspect.getsourcelines(f)
+                _, start_line = get_object_sourcelines(f)
                 source_file = inspect.getfile(f)
                 set_source_context(source_file, start_line - 1)
             except (OSError, TypeError):

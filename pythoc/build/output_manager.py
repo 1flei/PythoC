@@ -211,7 +211,8 @@ class OutputManager:
 
             if group_key in self._all_groups:
                 return self._all_groups[group_key]
-            
+
+            created = False
             if group_key not in self._pending_groups:
                 group = {
                     'compiler': compiler,
@@ -224,8 +225,15 @@ class OutputManager:
                 }
                 self._pending_groups[group_key] = group
                 self._all_groups[group_key] = group
-            
-            return self._pending_groups[group_key]
+                created = True
+
+            result = self._pending_groups[group_key]
+        if created:
+            # Enables the import-edge recorder fast path for this file and
+            # backfills edges for imports that ran before this first group.
+            from ..effect import register_group_owner
+            register_group_owner(source_file)
+        return result
     
     def add_wrapper_to_group(self, group_key, wrapper):
         """
@@ -440,14 +448,12 @@ class OutputManager:
             return True
 
         from .deps import get_dependency_tracker
-        from ..utils.link_utils import get_shared_lib_extension
 
         dep_tracker = get_dependency_tracker()
         deps = dep_tracker.load_deps(obj_file)
         if not deps:
             return True
 
-        lib_ext = get_shared_lib_extension()
         cwd = os.getcwd()
 
         for group_dep in deps.group_dependencies:
@@ -472,11 +478,16 @@ class OutputManager:
             file_base = f"{base_name}.{file_suffix}" if file_suffix else base_name
 
             dep_obj_file = os.path.join(build_dir, f"{file_base}.o")
-            dep_so_file = os.path.join(build_dir, f"{file_base}{lib_ext}")
-            if not os.path.exists(dep_obj_file) or not os.path.exists(dep_so_file):
+            # Only the dependency's .o matters here: it is the compile
+            # artifact this group links against, and each group validates
+            # its own .o independently.  The .so is a runtime artifact that
+            # is only produced on first native execution; requiring it
+            # would make compile-only flows (no function ever called)
+            # recompile every dependent group on every run.
+            if not os.path.exists(dep_obj_file):
                 from ..logger import logger
                 logger.debug(
-                    f"Cache miss for {group.get('source_file')}: dependent group output missing {dep_obj_file} / {dep_so_file}"
+                    f"Cache miss for {group.get('source_file')}: dependent group output missing {dep_obj_file}"
                 )
                 return False
 

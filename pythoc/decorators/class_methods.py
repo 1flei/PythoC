@@ -42,7 +42,8 @@ def extract_class_method_defs(source_cls) -> List[Tuple[str, ast.FunctionDef]]:
     order so that registration ordering is deterministic.
     """
     try:
-        raw_source = inspect.getsource(source_cls)
+        from ..utils.inspect_utils import get_object_source
+        raw_source = get_object_source(source_cls)
     except (OSError, TypeError):
         return []
 

@@ -169,7 +169,8 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
     
     # Set source context for error messages
     try:
-        _, start_line = inspect.getsourcelines(cls)
+        from ..utils.inspect_utils import get_object_sourcelines
+        _, start_line = get_object_sourcelines(cls)
         source_file = inspect.getfile(cls)
         set_source_context(source_file, start_line - 1)
     except (OSError, TypeError):

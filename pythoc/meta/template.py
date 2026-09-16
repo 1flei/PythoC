@@ -552,7 +552,8 @@ def _primary_position_for(param_name: str, body: List[ast.stmt]) -> str:
 
 def _make_template(func, debug_source=True) -> MetaTemplate:
     """Create a :class:`MetaTemplate` from a decorated Python function."""
-    source = textwrap.dedent(inspect.getsource(func))
+    from ..utils.inspect_utils import get_object_source, get_object_sourcelines
+    source = textwrap.dedent(get_object_source(func))
     tree = ast.parse(source)
     # The first top-level stmt is the function. If the user wrote a
     # decorated function, ``inspect.getsource`` returns the source with
@@ -585,7 +586,7 @@ def _make_template(func, debug_source=True) -> MetaTemplate:
     origin_line = None
     try:
         origin_file = inspect.getfile(func)
-        _, origin_line = inspect.getsourcelines(func)
+        _, origin_line = get_object_sourcelines(func)
     except (OSError, TypeError):
         pass
 

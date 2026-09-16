@@ -332,8 +332,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
         if isinstance(python_obj, type):
             try:
-                if issubclass(python_obj, BuiltinEntity):
-                    if issubclass(python_obj, (BuiltinType, BuiltinFunction)):
+                if getattr(python_obj, '_is_builtin_entity', False):
+                    if (getattr(python_obj, '_is_builtin_type', False)
+                            or getattr(python_obj, '_is_builtin_function', False)):
                         python_type = PythonType.wrap(python_obj, is_constant=True)
                         return VariableInfo(
                             name=name,

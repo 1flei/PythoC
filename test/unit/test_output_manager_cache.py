@@ -122,6 +122,49 @@ class TestFunctionContentHash(unittest.TestCase):
         )
         self.assertEqual(fp.captured, ())
 
+    def test_captured_tuple_constant_is_part_of_hash(self):
+        src = "def f():\n    return offs[1]\n"
+        h1 = self._hash(src, {'offs': (4, 8)})
+        h2 = self._hash(src, {'offs': (4, 16)})
+        self.assertIsNotNone(h1)
+        self.assertNotEqual(h1, h2)
+
+    def test_captured_dict_constant_is_order_insensitive(self):
+        src = "def f():\n    return table[1]\n"
+        h1 = self._hash(src, {'table': {'a': 1, 'b': 2}})
+        h2 = self._hash(src, {'table': {'b': 2, 'a': 1}})
+        self.assertEqual(h1, h2)
+
+    def test_nested_constant_container_is_captured(self):
+        src = "def f():\n    return cfg[0][1]\n"
+        h1 = self._hash(src, {'cfg': [(1, (2, 3))]})
+        h2 = self._hash(src, {'cfg': [(1, (2, 4))]})
+        self.assertNotEqual(h1, h2)
+
+    def test_unfingerprintable_values_are_not_captured(self):
+        from pythoc.build.cache import fingerprint_function_content
+        src = "def f():\n    return obj\n"
+        fn_ast = ast.parse(src).body[0]
+        fp = fingerprint_function_content(fn_ast, {'obj': object()})
+        self.assertEqual(fp.captured, ())
+
+    def test_file_backed_fingerprint_ignores_ast(self):
+        # include_ast=False: the group's source-file mtime keys the AST, so
+        # two different bodies with identical captures fingerprint equally.
+        g = {'addr': 7}
+        h1 = self._hash("def f():\n    return addr\n", g)
+        h2 = self._hash("def f():\n    return addr + 1\n", g)
+        self.assertNotEqual(h1, h2)  # default include_ast=True differs
+        from pythoc.build.cache import fingerprint_function_content
+        a1 = fingerprint_function_content(
+            ast.parse("def f():\n    return addr\n").body[0], g,
+            include_ast=False)
+        a2 = fingerprint_function_content(
+            ast.parse("def f():\n    return addr + 1\n").body[0], g,
+            include_ast=False)
+        self.assertEqual(a1.digest, a2.digest)
+        self.assertEqual(a1.captured, ('addr=7',))
+
 
 class TestNestedCapturedHashFoldsIntoParent(unittest.TestCase):
     def setUp(self):

@@ -24,6 +24,7 @@ with the overridden effect context. This produces new versions of functions
 with the specified suffix (e.g., func_custom).
 """
 
+import os
 import threading
 import sys
 import builtins
@@ -1197,6 +1198,121 @@ def restore_effect_context(captured: Dict[str, Any]):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Group-owner tracking
+#
+# Import edges are only ever queried with caller nodes derived from real
+# group keys, so recording imports issued by files that own no compiled
+# group is wasted work.  Group creation registers the owning file here; the
+# recorder below fast-path skips every other caller (this keeps pythoc's
+# own function-local lazy imports, executed millions of times during
+# compilation, out of the recorder).  Imports a file issued *before* its
+# first group existed are backfilled at registration time by scanning the
+# module namespace.
+# ---------------------------------------------------------------------------
+
+_group_owner_files: Set[str] = set()
+# Negative cache for the recorder fast path: files probed and found to own no
+# group.  register_group_owner discards entries here when a file gains its
+# first group.
+_non_owner_files: Set[str] = set()
+_group_owner_lock = threading.Lock()
+
+
+def register_group_owner(source_file):
+    """Mark *source_file* as owning at least one compiled group.
+
+    Called when a compilation group is created.  The first registration for
+    a file backfills import edges for wrappers already visible in the file's
+    module namespace (imports that ran before the first @compile).
+    """
+    if not source_file:
+        return
+    files = {source_file}
+    try:
+        files.add(os.path.abspath(source_file))
+    except Exception:
+        pass
+    with _group_owner_lock:
+        if not files - _group_owner_files:
+            return
+        _group_owner_files.update(files)
+        _non_owner_files.difference_update(files)
+    _backfill_import_edges(source_file)
+
+
+def _resolve_active_output_manager():
+    """Best-effort handle to the active output manager (mirrors the recorder)."""
+    session = CompileSession.active()
+    om = session.output_manager if session is not None else None
+    if om is None:
+        om_module = sys.modules.get(__name__.rsplit('.', 1)[0] + '.build.output_manager')
+        if om_module is None:
+            return None
+        om = om_module.get_output_manager()
+    return om
+
+
+def _backfill_import_edges(source_file):
+    """Record edges for compiled wrappers already visible to *source_file*.
+
+    Mirrors what the live recorder records for the module's import
+    statements: names bound directly in the module namespace (from-imports),
+    plus the top level of modules bound there (plain imports), recursing
+    into packages (`import a.b.c` binds the top package but the edges point
+    at wrappers visible in the leaf).
+    """
+    try:
+        om = _resolve_active_output_manager()
+        if om is None:
+            return
+        graph = om._effect_graph
+        module = None
+        try:
+            abs_source = os.path.abspath(source_file)
+        except Exception:
+            abs_source = source_file
+        for mod in list(sys.modules.values()):
+            mod_file = getattr(mod, '__file__', None)
+            if not mod_file:
+                continue
+            if mod_file == source_file or mod_file == abs_source:
+                module = mod
+                break
+            try:
+                if os.path.abspath(mod_file) == abs_source:
+                    module = mod
+                    break
+            except Exception:
+                continue
+        if module is None:
+            return
+        caller_node = (source_file, None, None)
+        visited = set()
+
+        def scan_module(mod, depth):
+            if id(mod) in visited or depth > 8:
+                return
+            visited.add(id(mod))
+            for value in list(vars(mod).values()):
+                if isinstance(value, ModuleType):
+                    if getattr(value, '__path__', None) is not None:
+                        scan_module(value, depth + 1)
+                else:
+                    _record_wrapper_import_edge(graph, caller_node, source_file, value)
+
+        for value in list(vars(module).values()):
+            if isinstance(value, ModuleType):
+                mod_file = getattr(value, '__file__', None)
+                if not mod_file or mod_file == source_file or mod_file == abs_source:
+                    continue
+                scan_module(value, 0)
+            else:
+                _record_wrapper_import_edge(graph, caller_node, source_file, value)
+    except Exception:
+        pass  # Best-effort, same contract as the live recorder.
+
+
 def _record_wrapper_import_edge(graph, caller_node, caller_file, value):
     """Record caller_node -> value's group node if value is a compiled wrapper."""
     if not callable(value) or not getattr(value, '_is_compiled', False):
@@ -1218,6 +1334,21 @@ def _record_import_edges(name, caller_globals, fromlist, level, module):
     caller_file = caller_globals.get('__file__')
     if not caller_file:
         return
+    if caller_file not in _group_owner_files:
+        # Fast path: files that own no compiled group can never be the
+        # source of a planning edge (edges are only queried from real group
+        # nodes).  Imports such a file issued before its first group existed
+        # are backfilled by register_group_owner().
+        if caller_file in _non_owner_files:
+            return
+        if os.path.isabs(caller_file):
+            _non_owner_files.add(caller_file)
+            return
+        abs_file = os.path.abspath(caller_file)
+        if abs_file not in _group_owner_files:
+            _non_owner_files.add(caller_file)
+            return
+        caller_file = abs_file
     # Best-effort: imports may happen before any session is installed
     # (e.g. pythoc's own import chain); skip recording in that case.
     session = CompileSession.active()
@@ -1267,9 +1398,89 @@ def _record_import_edges(name, caller_globals, fromlist, level, module):
             _record_wrapper_import_edge(graph, caller_node, caller_file, value)
 
 
+_relname_cache: dict = {}
+
+
+def _resolve_relative_name(package, level, name):
+    """(package, level, name) -> absolute module name, memoized."""
+    key = (package, level, name)
+    resolved = _relname_cache.get(key, False)
+    if resolved is not False:
+        return resolved
+    bits = package.split('.')
+    result = None
+    if level - 1 <= len(bits):
+        if level > 1:
+            bits = bits[:len(bits) - (level - 1)]
+        base = '.'.join(bits)
+        if base:
+            result = base + '.' + name if name else base
+    if len(_relname_cache) > 100000:
+        _relname_cache.clear()
+    _relname_cache[key] = result
+    return result
+
+
+def _fast_cached_import(name, globals, fromlist, level):
+    """Resolve a __import__ call from sys.modules without the import machinery.
+
+    Returns the module object __import__ would have returned, or None when
+    the call must go through the real import (anything not fully determined
+    by the current sys.modules state).  Only fully-initialized cached
+    modules are served here; a module whose import is still in progress on
+    another thread falls through so the real import can wait on the
+    per-module import lock.
+    """
+    if level:
+        # Relative import: resolve to an absolute name via the caller's
+        # package (mirrors importlib._bootstrap._resolve_name).
+        if not isinstance(globals, dict):
+            return None
+        package = globals.get('__package__')
+        if not package:
+            name_attr = globals.get('__name__')
+            if not name_attr:
+                return None
+            if globals.get('__path__') is not None:
+                package = name_attr
+            else:
+                package = name_attr.rpartition('.')[0]
+                if not package:
+                    return None
+        name = _resolve_relative_name(package, level, name)
+        if name is None:
+            return None
+    if not name:
+        return None
+    mod = sys.modules.get(name)
+    if mod is None:
+        return None
+    spec = getattr(mod, '__spec__', None)
+    if spec is None or getattr(spec, '_initializing', True):
+        return None
+    if fromlist:
+        if '*' in fromlist:
+            return None
+        for attr in fromlist:
+            try:
+                if not hasattr(mod, attr):
+                    # May be a submodule the real import must load.
+                    return None
+            except Exception:
+                return None
+        return mod
+    top = name.partition('.')[0]
+    if top != name:
+        # `import a.b.c` binds/returns the top-level package.
+        return sys.modules.get(top)
+    return mod
+
+
 def _recording_import(name, globals=None, locals=None, fromlist=(), level=0):
     """Process-wide __import__ wrapper that records EffectGraph edges."""
-    module = _original_import(name, globals, locals, fromlist, level)
+    module = _fast_cached_import(name, globals, fromlist, level)
+    if module is None:
+        module = _original_import(name, globals, locals, fromlist, level)
     try:
         _record_import_edges(name, globals, fromlist, level, module)
     except Exception:

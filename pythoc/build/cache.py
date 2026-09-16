@@ -20,6 +20,54 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 _MISSING = object()
 
+# Bounds for _stable_capture_repr: deep or huge containers fall back to
+# "not fingerprintable" (the capture is then simply absent, same as
+# non-constant values).
+_CAPTURE_MAX_DEPTH = 4
+_CAPTURE_MAX_LEN = 65536
+
+
+def _stable_capture_repr(value: Any, _depth: int = 0) -> Optional[str]:
+    """Deterministic repr for fingerprintable constants, else None.
+
+    Scalars use repr directly.  Constant containers are rendered
+    recursively; unordered types (set/frozenset/dict) are sorted by key
+    rendering so the result is independent of iteration order.  Anything
+    else (arbitrary objects, modules, functions, ...) is not
+    fingerprintable and yields None -- such captures stay outside the
+    digest, exactly as non-captured names always have.
+    """
+    if value is None or isinstance(value, (int, float, bytes, str)):
+        return repr(value)
+    if _depth >= _CAPTURE_MAX_DEPTH:
+        return None
+    if isinstance(value, (tuple, list)):
+        parts = [_stable_capture_repr(item, _depth + 1) for item in value]
+        if any(part is None for part in parts):
+            return None
+        open_, close_ = ('(', ')') if isinstance(value, tuple) else ('[', ']')
+        result = open_ + ','.join(parts) + close_
+    elif isinstance(value, (set, frozenset)):
+        parts = [_stable_capture_repr(item, _depth + 1) for item in value]
+        if any(part is None for part in parts):
+            return None
+        result = '{' + ','.join(sorted(parts)) + '}'
+    elif isinstance(value, dict):
+        items = []
+        for k, v in value.items():
+            key_repr = _stable_capture_repr(k, _depth + 1)
+            val_repr = _stable_capture_repr(v, _depth + 1)
+            if key_repr is None or val_repr is None:
+                return None
+            items.append((key_repr, val_repr))
+        items.sort()
+        result = '{' + ','.join(f'{k}:{v}' for k, v in items) + '}'
+    else:
+        return None
+    if len(result) > _CAPTURE_MAX_LEN:
+        return None
+    return result
+
 
 class FunctionContentFingerprint(NamedTuple):
     digest: Optional[str]
@@ -27,28 +75,39 @@ class FunctionContentFingerprint(NamedTuple):
 
 
 def fingerprint_function_content(
-    fn_ast, user_globals: Optional[Dict[str, Any]] = None
+    fn_ast, user_globals: Optional[Dict[str, Any]] = None,
+    include_ast: bool = True,
 ) -> FunctionContentFingerprint:
     """Fingerprint a function AST plus bakeable captured constants.
 
-    Python scalars referenced by name (for example a ctypes.addressof
-    result assigned to a local and then used as ``ptr[T](addr)``) are
-    folded into IR at compile time.  The source file mtime does not
-    change when those values change across processes, so they have to
-    participate in the cache key; otherwise a cached .o embeds a
-    stale, process-local address.
+    Python constants referenced by name (for example a ctypes.addressof
+    result assigned to a module global and then used as ``ptr[T](addr)``,
+    or a ``from config import SIZE`` scalar) are folded into IR at compile
+    time.  The source file mtime does not change when those values change
+    across processes, so they have to participate in the cache key;
+    otherwise a cached .o embeds a stale, process-local address.
 
-    ``captured`` is non-empty when the digest includes such scalars.
+    ``include_ast=False`` is for functions whose AST is provably derived
+    from the group's source file text (the plain @compile path): the file
+    mtime already keys the AST, so the fingerprint only needs to cover
+    captured environment values.  Meta/generated functions (compile_ast,
+    pre-stored ``__pc_source__`` wrappers, ...) must keep the AST
+    component -- their source file does not determine their body.
+
+    ``captured`` is non-empty when the digest includes such constants.
     Nested @compile created during a parent's codegen must fold that
     digest into the parent: the parent is the artefact that dlopens the
     nested .so, and a parent cache hit would skip re-decoration of the
     nested function entirely.
     """
     user_globals = user_globals or {}
-    try:
-        dumped = ast.dump(fn_ast)
-    except Exception:
-        return FunctionContentFingerprint(None, ())
+    if include_ast:
+        try:
+            dumped = ast.dump(fn_ast)
+        except Exception:
+            return FunctionContentFingerprint(None, ())
+    else:
+        dumped = ''
 
     params = set()
     if isinstance(fn_ast, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -69,8 +128,9 @@ def fingerprint_function_content(
         value = user_globals.get(node.id, _MISSING)
         if value is _MISSING:
             continue
-        if isinstance(value, (int, float, bytes, str)) or value is None:
-            captured.append(f"{node.id}={value!r}")
+        value_repr = _stable_capture_repr(value)
+        if value_repr is not None:
+            captured.append(f"{node.id}={value_repr}")
 
     captured_entries = tuple(sorted(set(captured)))
     payload = dumped

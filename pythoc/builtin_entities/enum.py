@@ -694,7 +694,8 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     
     import inspect
     try:
-        src = inspect.getsource(cls)
+        from ..utils.inspect_utils import get_object_source
+        src = get_object_source(cls)
         import textwrap
         src = textwrap.dedent(src)
         tree = ast.parse(src)

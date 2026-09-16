@@ -27,17 +27,32 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 13  # Increment when scheduler/cache/effect planning semantics change
+DEPS_VERSION = 14  # Increment when scheduler/cache/effect planning semantics change
+
+
+# Memo for _type_source_file: id(type) -> (type, source_file).  The strong
+# type reference prevents id reuse while an entry is cached; a type's source
+# file is fixed for the life of the class object.
+_type_source_file_memo: Dict[int, Tuple[Any, Optional[str]]] = {}
+_TYPE_SOURCE_FILE_MEMO_LIMIT = 200000
 
 
 def _type_source_file(pc_type: Any) -> Optional[str]:
     """Best-effort source file where a @compile aggregate/enum type is defined."""
+    key = id(pc_type)
+    ent = _type_source_file_memo.get(key)
+    if ent is not None and ent[0] is pc_type:
+        return ent[1]
     import inspect
     try:
         src = inspect.getsourcefile(pc_type) or inspect.getfile(pc_type)
     except (TypeError, OSError):
-        return None
-    return os.path.abspath(src) if src else None
+        src = None
+    result = os.path.abspath(src) if src else None
+    if len(_type_source_file_memo) >= _TYPE_SOURCE_FILE_MEMO_LIMIT:
+        _type_source_file_memo.clear()
+    _type_source_file_memo[key] = (pc_type, result)
+    return result
 
 
 @dataclass
@@ -293,11 +308,17 @@ class GroupDeps:
     
     def add_group_dependency(self, target_group: GroupKey, dependency_type: str = "function_call"):
         """Add a dependency on another group."""
-        # Check if already exists
-        for dep in self.group_dependencies:
-            if dep.target_group == target_group and dep.dependency_type == dependency_type:
-                return
-        
+        key = (target_group.to_tuple(), dependency_type)
+        dep_set = getattr(self, '_dep_keys', None)
+        if dep_set is None:
+            dep_set = {
+                (dep.target_group.to_tuple(), dep.dependency_type)
+                for dep in self.group_dependencies
+            }
+            self._dep_keys = dep_set
+        if key in dep_set:
+            return
+        dep_set.add(key)
         self.group_dependencies.append(GroupDependency(target_group, dependency_type))
     
     def add_link_library(self, library: str):

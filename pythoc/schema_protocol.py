@@ -25,11 +25,13 @@ def unwrap_python_object(value: Any) -> Any:
     return value
 
 
-def resolve_schema_type(type_hint: Any) -> Any:
-    from .builtin_entities.refined import RefinedType
+def _issubclass_refined(cls) -> bool:
+    return getattr(cls, '_is_refined', False)
 
+
+def resolve_schema_type(type_hint: Any) -> Any:
     resolved = unwrap_python_object(type_hint)
-    if isinstance(resolved, type) and issubclass(resolved, RefinedType):
+    if isinstance(resolved, type) and _issubclass_refined(resolved):
         base_type = getattr(resolved, '_base_type', None)
         if base_type is not None:
             return resolve_schema_type(base_type)

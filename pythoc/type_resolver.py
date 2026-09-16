@@ -24,7 +24,7 @@ Key Features:
 """
 
 import ast
-from typing import Optional, Any
+from typing import Dict, Optional, Any
 from llvmlite import ir
 from .logger import logger
 
@@ -38,6 +38,45 @@ from .builtin_entities import (
 from .registry import get_unified_registry
 from .valueref import ValueRef, wrap_python_constant
 from .type_check import is_python_value
+
+
+# Process-wide memo for string annotation resolution.
+#
+# parse_annotation is called with the same annotation strings (e.g.
+# "ptr[PyObject]") hundreds of times per module, each time paying a full
+# ast.parse + constexpr-visitor evaluation.  Entries are validated by their
+# *dependencies*: the set of root names the annotation reads, together with
+# the object each name was bound to at resolution time.  A hit re-checks
+# every dependency against the current namespace (a couple of dict lookups
+# and identity comparisons), so both namespace growth and rebinding of a
+# type name invalidate affected entries -- this stays sound for modules
+# that redefine a type mid-file (placeholder -> real definition).
+#
+# Results that are None (unresolved) or str (registry forward reference)
+# are never cached: both may legitimately resolve differently as the
+# defining module and the struct registry keep growing.
+#
+# The memo only applies to the visitorless (constexpr) resolution path; a
+# resolver carrying a live visitor may consult function-local bindings that
+# cannot be keyed this way.
+_ANNOTATION_MEMO: Dict[tuple, tuple] = {}
+_ANNOTATION_MEMO_LIMIT = 200000
+_ANNOTATION_DEP_ABSENT = object()
+
+
+def _annotation_root_names(node, out):
+    """Collect the root names an annotation expression reads."""
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name):
+            out.add(child.id)
+        elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+            # Nested string annotations are parsed and resolved recursively
+            # against the same namespace; their roots are dependencies too.
+            try:
+                nested = ast.parse(child.value, mode="eval")
+            except SyntaxError:
+                continue
+            _annotation_root_names(nested, out)
 
 
 class TypeResolver:
@@ -117,9 +156,41 @@ class TypeResolver:
         if annotation is None:
             return None
 
-        # Use visitor.visit_expression() for type evaluation
-        value_ref = self._evaluate_type_expression(annotation)
-        return self._extract_type_from_valueref(value_ref)
+        memo_key = None
+        memo_ns = None
+        parsed_tree = None
+        if isinstance(annotation, str) and self.visitor is None:
+            g = self.user_globals
+            if isinstance(g, dict):
+                memo_ns = g
+                memo_key = (annotation, id(g))
+                ent = _ANNOTATION_MEMO.get(memo_key)
+                if ent is not None and ent[0] is g:
+                    deps, result = ent[1], ent[2]
+                    if all(g.get(name, _ANNOTATION_DEP_ABSENT) is obj
+                           for name, obj in deps):
+                        return result
+
+        if isinstance(annotation, str) and memo_key is not None:
+            # Parse once: the tree feeds both evaluation and (on a memo
+            # miss) dependency extraction below.
+            parsed_tree = ast.parse(annotation, mode="eval")
+            value_ref = self._evaluate_type_expression(parsed_tree.body)
+        else:
+            # Use visitor.visit_expression() for type evaluation
+            value_ref = self._evaluate_type_expression(annotation)
+        result = self._extract_type_from_valueref(value_ref)
+        if memo_key is not None and result is not None and not isinstance(result, str):
+            names = set()
+            _annotation_root_names(parsed_tree, names)
+            deps = tuple(
+                (name, memo_ns.get(name, _ANNOTATION_DEP_ABSENT))
+                for name in names
+            )
+            if len(_ANNOTATION_MEMO) >= _ANNOTATION_MEMO_LIMIT:
+                _ANNOTATION_MEMO.clear()
+            _ANNOTATION_MEMO[memo_key] = (memo_ns, deps, result)
+        return result
 
     def _evaluate_type_expression(self, node):
         """
@@ -183,7 +254,7 @@ class TypeResolver:
         from .builtin_entities import BuiltinEntity
 
         if isinstance(value, type):
-            if issubclass(value, BuiltinEntity):
+            if getattr(value, '_is_builtin_entity', False):
                 if getattr(value, '_is_param', False):
                     raise TypeError("'param' cannot be used as a runtime type")
                 if value.can_be_type():
