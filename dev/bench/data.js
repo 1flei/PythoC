@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1789394652144,
+  "lastUpdate": 1789567748753,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3134,6 +3134,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.698,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "b205cc317b6432b232ffc73e24f589e48861a1dd",
+          "message": "Optimize build speed and update cache strategy",
+          "timestamp": "2026-09-16T22:06:08+08:00",
+          "tree_id": "b3940bc3f8bafa8994587623d0217e35f4e5749b",
+          "url": "https://github.com/1flei/PythoC/commit/b205cc317b6432b232ffc73e24f589e48861a1dd"
+        },
+        "date": 1789567747837,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.55,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.09,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.391,
             "unit": "seconds/test"
           }
         ]
