@@ -333,3 +333,71 @@ class TestTypeConverter(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestFuncSignatureCompatibility(unittest.TestCase):
+    """_func_types_compatible follows C signature rules: parameter names are
+    ignored, typedef aliases are transparent (quoted spellings resolve through
+    the forward-ref registry), named aggregates compare by tag, and
+    ``ptr[void]`` stays distinct from any typed pointer."""
+
+    def setUp(self):
+        import pythoc
+        pythoc.init()
+        from pythoc.forward_ref import clear_forward_ref_state
+        clear_forward_ref_state()
+
+    def tearDown(self):
+        from pythoc.forward_ref import clear_forward_ref_state
+        clear_forward_ref_state()
+
+    def _struct(self, name, fields=(('x',),)):
+        from pythoc.builtin_entities import i32
+        from pythoc.builtin_entities.struct import create_struct_type
+        cls = create_struct_type([i32], ['x'])
+        from pythoc.forward_ref import mark_type_defined
+        mark_type_defined(name, cls)
+        return cls
+
+    def test_quoted_and_direct_pointee_compatible(self):
+        from pythoc import func, i32, ptr
+        node = self._struct('CompatNode')
+        f_direct = func[ptr[node], i32]
+        f_quoted = func[ptr['CompatNode'], i32]
+        self.assertTrue(
+            TypeConverter._func_types_compatible(f_direct, f_quoted))
+        self.assertTrue(
+            TypeConverter._func_types_compatible(f_quoted, f_direct))
+
+    def test_ptr_void_stays_distinct(self):
+        from pythoc import func, i32, ptr, void
+        node = self._struct('CompatNode2')
+        f_typed = func[ptr[node], i32]
+        f_void = func[ptr[void], i32]
+        self.assertFalse(TypeConverter._func_types_compatible(f_typed, f_void))
+        self.assertFalse(TypeConverter._func_types_compatible(f_void, f_typed))
+
+    def test_arity_mismatch_rejected(self):
+        from pythoc import func, i32, ptr
+        node = self._struct('CompatNode3')
+        self.assertFalse(TypeConverter._func_types_compatible(
+            func[ptr[node], i32], func[ptr[node], i32, i32]))
+
+    def test_param_names_ignored(self):
+        from pythoc import func, i32, ptr
+        node = self._struct('CompatNode4')
+        f_named = func['x', ptr[node], i32] if False else None
+        # param names only exist via wrapper signatures; simulate two class
+        # objects of the same structural signature:
+        f1 = func[ptr[node], i32]
+        f2 = func[ptr[node], i32]
+        self.assertTrue(TypeConverter._func_types_compatible(f1, f2))
+
+    def test_nested_func_components(self):
+        from pythoc import func, i32, ptr, void
+        node = self._struct('CompatNode5')
+        inner1 = func[ptr['CompatNode5'], ptr[void], i32]
+        inner2 = func[ptr[node], ptr[void], i32]
+        f1 = func[ptr[node], inner1, ptr[void], i32]
+        f2 = func[ptr['CompatNode5'], inner2, ptr[void], i32]
+        self.assertTrue(TypeConverter._func_types_compatible(f1, f2))

@@ -26,6 +26,19 @@ from typing import Any, Optional, Set
 # the cache.
 _type_id_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
+# Bumped whenever a computation emits a name token for a *currently
+# unresolved* forward reference (ptr.get_type_id is the only producer).
+# Such a result must not be memoized: the name may be defined later in the
+# session, changing the answer.
+_name_token_misses = 0
+
+
+def note_unresolved_name_token():
+    """Record that a just-computed type ID used an unresolved forward-ref
+    name token, so get_type_id must not memoize the enclosing computation."""
+    global _name_token_misses
+    _name_token_misses += 1
+
 
 def _cache_lookup(pc_type: Any) -> Optional[str]:
     try:
@@ -79,11 +92,13 @@ def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
 
     if hasattr(pc_type, 'get_type_id'):
         _visited.add(type_key)
+        misses_before = _name_token_misses
         try:
             result = pc_type.get_type_id(_visited)
         finally:
             _visited.remove(type_key)
-        _cache_store(pc_type, result)
+        if misses_before == _name_token_misses:
+            _cache_store(pc_type, result)
         return result
 
     from llvmlite import ir

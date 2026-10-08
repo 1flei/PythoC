@@ -49,3 +49,38 @@ class TestTypeIdWeakCache(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTypeIdGenerationInvalidation(unittest.TestCase):
+    """Forward-ref state changes must invalidate memoized type IDs."""
+
+    def setUp(self):
+        import pythoc
+        pythoc.init()
+        from pythoc.forward_ref import clear_forward_ref_state
+        clear_forward_ref_state()
+
+    def tearDown(self):
+        from pythoc.forward_ref import clear_forward_ref_state
+        clear_forward_ref_state()
+
+    def test_unresolved_forward_ref_id_not_frozen(self):
+        # A quoted name that is unresolvable today yields a name token;
+        # once the type is defined, the same specialization must resolve.
+        from pythoc.builtin_entities import i32
+        from pythoc.builtin_entities.struct import create_struct_type
+        from pythoc.forward_ref import mark_type_defined
+
+        spec = ptr["GenTestNode"]
+        first = get_type_id(spec)
+        self.assertEqual(first, 'P11GenTestNode')
+        # Unresolved name tokens are never memoized: the name may be
+        # defined later in the session.
+        self.assertIsNone(_cache_lookup(spec))
+
+        node = create_struct_type([i32], ['value'])
+        mark_type_defined("GenTestNode", node)
+        second = get_type_id(spec)
+        self.assertNotEqual(second, first)
+        # Resolved results cache normally.
+        self.assertEqual(_cache_lookup(spec), second)

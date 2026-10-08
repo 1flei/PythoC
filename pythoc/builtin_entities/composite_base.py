@@ -424,7 +424,17 @@ class CompositeType(BuiltinType):
         parsed_field_types = []
         for fname, ftype in target_cls._struct_fields:
             if isinstance(ftype, str):
-                resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
+                # A NameError here means the annotation names a type that is
+                # not visible yet (defined later, or registered by another
+                # module via mark_type_defined).  Keep the annotation as a
+                # string so needs_type_resolution stays True and the lazy
+                # resolution path (forward-ref callbacks plus the session
+                # registry snapshot in _resolve_field_types_locked) can
+                # resolve it once the type is actually defined.
+                try:
+                    resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
+                except NameError:
+                    resolved_type = ftype
                 parsed_field_types.append(resolved_type)
             else:
                 parsed_field_types.append(ftype)

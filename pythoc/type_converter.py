@@ -492,18 +492,17 @@ class TypeConverter:
         if len(source_func_type.param_types) != len(target_func_type.param_types):
             return False
 
-        # Structural comparison ignoring parameter names and qualifiers.
-        # Use canonical type IDs because specialized types such as ptr[T] are
-        # distinct class objects even when they spell the same type.
-        def _type_id(t):
-            return t.get_type_id() if hasattr(t, 'get_type_id') else str(t)
+        # C-nominal comparison: parameter names ignored, typedef aliases
+        # transparent, named aggregates compare by tag.  See
+        # _signature_type_key for why this is not the structural type ID.
+        source_keys = [TypeConverter._sig_component_key(p)
+                       for p in source_func_type.param_types]
+        target_keys = [TypeConverter._sig_component_key(p)
+                       for p in target_func_type.param_types]
+        source_ret = TypeConverter._sig_component_key(source_func_type.return_type)
+        target_ret = TypeConverter._sig_component_key(target_func_type.return_type)
 
-        source_param_ids = [_type_id(p) for p in source_func_type.param_types]
-        target_param_ids = [_type_id(p) for p in target_func_type.param_types]
-        source_ret_id = _type_id(source_func_type.return_type)
-        target_ret_id = _type_id(target_func_type.return_type)
-
-        if source_param_ids == target_param_ids and source_ret_id == target_ret_id:
+        if source_keys == target_keys and source_ret == target_ret:
             return True
 
         # Fall back to the lowered LLVM function type when a module context is
@@ -518,6 +517,57 @@ class TypeConverter:
                 pass
 
         return False
+
+    @staticmethod
+    def _sig_component_key(t):
+        """C-nominal key for one parameter/return type in a signature.
+
+        Typedef aliases are transparent (quoted spellings resolve through
+        the forward-ref registry) and named aggregates compare by tag, so
+        ``ptr["PyObject"]`` and ``ptr[_object]`` key the same while
+        ``ptr[void]`` stays distinct.  Structural type IDs are deliberately
+        not used here: they expand the whole field graph, and cycle-break
+        tokens make the expansion depend on where the walk started.
+        """
+        t = strip_qualifiers(t)
+        if isinstance(t, str):
+            from .forward_ref import get_defined_type
+            resolved = get_defined_type(t)
+            if resolved is None or isinstance(resolved, str):
+                return ('opaque', t)
+            t = strip_qualifiers(resolved)
+        if isinstance(t, type):
+            pointee = getattr(t, 'pointee_type', None)
+            if getattr(t, '_is_pointer', False) and hasattr(t, 'get_function_type'):
+                # func[...] specialization: recurse into the signature
+                if t.param_types is not None and t.return_type is not None:
+                    inner = tuple(TypeConverter._sig_component_key(p)
+                                  for p in t.param_types)
+                    return ('func', inner,
+                            TypeConverter._sig_component_key(t.return_type),
+                            bool(getattr(t, 'has_llvm_varargs', False)),
+                            bool(getattr(t, 'has_varargs', False)),
+                            bool(getattr(t, 'has_kwargs', False)))
+            if getattr(t, '_is_pointer', False):
+                if pointee is None:
+                    return ('ptr', 'void')
+                return ('ptr', TypeConverter._sig_component_key(pointee))
+            if getattr(t, 'is_array', None) is not None and t.is_array():
+                dims = getattr(t, 'dimensions', None) or ()
+                return ('array', TypeConverter._sig_component_key(
+                    getattr(t, 'element_type', None)), tuple(dims))
+            if getattr(t, '_is_struct', False) or getattr(t, '_is_union', False) \
+                    or getattr(t, '_is_enum', False):
+                kind = ('struct' if getattr(t, '_is_struct', False)
+                        else 'union' if getattr(t, '_is_union', False) else 'enum')
+                return ('tag', kind, getattr(t, '_canonical_name', None)
+                        or getattr(t, '__name__', None) or repr(t))
+            if getattr(t, '_is_builtin_entity', False) or hasattr(t, 'get_name'):
+                try:
+                    return ('scalar', t.get_name())
+                except Exception:
+                    pass
+        return ('other', getattr(t, '__name__', None) or str(t))
 
     @staticmethod
     def _is_byte_array_type(pc_type) -> bool:

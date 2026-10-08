@@ -238,7 +238,17 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
     parsed_field_types = []
     for fname, ftype in cls._struct_fields:
         if isinstance(ftype, str):
-            resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
+            # A NameError here means the annotation names a type that is not
+            # visible yet (e.g. defined later in this module, or registered by
+            # another module via mark_type_defined).  Keep the annotation as a
+            # string so the forward-ref callback machinery below and the lazy
+            # _ensure_field_types_resolved path (which folds the session
+            # registry into the namespace) can resolve it once the type is
+            # actually defined.
+            try:
+                resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
+            except NameError:
+                resolved_type = ftype
             parsed_field_types.append(resolved_type)
         else:
             parsed_field_types.append(ftype)

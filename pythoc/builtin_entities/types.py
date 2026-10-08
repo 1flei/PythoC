@@ -145,6 +145,10 @@ class ptr(BuiltinType):
                 from ..forward_ref import get_defined_type
                 resolved = get_defined_type(pointee)
                 if resolved is None:
+                    # Unresolved name token: not memoizable -- the name may
+                    # be defined later in the session.
+                    from ..type_id import note_unresolved_name_token
+                    note_unresolved_name_token()
                     return f'P{len(pointee)}{pointee}'
                 pointee = resolved
             

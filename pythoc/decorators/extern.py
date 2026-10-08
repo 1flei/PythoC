@@ -74,7 +74,7 @@ def _load_lib_handle(lib):
 
 
 class ExternFunctionWrapper:
-    def __init__(self, func, lib, calling_convention, return_type, param_types, **kwargs):
+    def __init__(self, func, lib, calling_convention, **kwargs):
         self.func = func
         self.func_name = func.__name__
         # The C symbol name used for linking and ctypes lookup.  Defaults to
@@ -84,10 +84,93 @@ class ExternFunctionWrapper:
         self.c_name = kwargs.pop('name', func.__name__)
         self.lib = lib
         self.calling_convention = calling_convention
-        self.return_type = return_type
-        self.param_types = param_types
         self.config = kwargs
         self._ctypes_func = None
+        # Signature types are resolved lazily on first access instead of at
+        # decoration time.  C's textual ``#include`` semantics permit two
+        # headers to reference each other's types (a.h defines a typedef,
+        # then includes b.h whose declarations use it); under Python module
+        # semantics such mutual references are unavoidable import cycles, so
+        # a generated ``@extern`` declaration may run while the name it
+        # annotates is bound in neither its own globals nor any importable
+        # module.  Deferring resolution to first use lets the name arrive
+        # through the module globals (once the defining module finishes) or
+        # the session forward-ref registry, mirroring how @compile already
+        # defers annotation handling to flush time.
+        self._raw_annotations = dict(getattr(func, '__annotations__', None) or {})
+        self._signature = inspect.signature(func)
+        self._resolved_types = None
+
+    def _resolve_annotation(self, annotation, owner, func, func_name):
+        """Resolve one string annotation to a type object.
+
+        Plain names that are unbound in the evaluation namespace fall back
+        to the session forward-ref registry (fail-loud with context when
+        the registry cannot help either).
+        """
+        from ..type_resolver import TypeResolver
+        from .annotation_resolver import build_annotation_namespace
+
+        is_dynamic = '.<locals>.' in func.__qualname__
+        type_resolver = TypeResolver(user_globals=func.__globals__)
+        eval_namespace = build_annotation_namespace(
+            func.__globals__, is_dynamic=is_dynamic,
+        )
+        try:
+            return type_resolver.parse_annotation(annotation)
+        except NameError as e:
+            import re as _re
+            if _re.fullmatch(r'[A-Za-z_]\w*', annotation.strip()):
+                from ..forward_ref import get_defined_type
+                defined = get_defined_type(annotation.strip())
+                if defined is not None:
+                    return defined
+            raise NameError(
+                f"@extern '{func_name}': {owner} annotation {annotation!r} "
+                f"is not defined in module {func.__module__!r} nor in the "
+                f"forward-ref registry (original error: {e})"
+            ) from e
+
+    def _ensure_resolved(self):
+        if self._resolved_types is not None:
+            return
+        resolved = {}
+        for name, annotation in self._raw_annotations.items():
+            if isinstance(annotation, str):
+                resolved[name] = self._resolve_annotation(
+                    annotation, f"parameter '{name}'", self.func, self.func_name)
+            else:
+                resolved[name] = annotation
+
+        sig = self._signature
+        return_type = resolved.get('return', sig.return_annotation)
+        if return_type is inspect.Signature.empty:
+            return_type = None
+
+        param_types = []
+        for name, param in sig.parameters.items():
+            if name in resolved:
+                param_type = resolved[name]
+            elif isinstance(param.annotation, str):
+                param_type = self._resolve_annotation(
+                    param.annotation, f"parameter '{name}'",
+                    self.func, self.func_name)
+            else:
+                # Preserve the historical behavior for unannotated params:
+                # the empty marker flows through and consumers report it.
+                param_type = param.annotation
+            param_types.append((name, param_type))
+        self._resolved_types = (return_type, param_types)
+
+    @property
+    def return_type(self):
+        self._ensure_resolved()
+        return self._resolved_types[0]
+
+    @property
+    def param_types(self):
+        self._ensure_resolved()
+        return self._resolved_types[1]
 
     def handle_call(self, visitor, func_ref, args, node):
         """Handle @extern function call by lowering to func type.
@@ -273,32 +356,10 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
     def decorator(f):
         if inspect.isclass(f):
             return _extern_class(f)
-        sig = inspect.signature(f)
-        resolved_annotations = {}
-        if getattr(f, '__annotations__', None):
-            from ..type_resolver import TypeResolver
-            from .annotation_resolver import (
-                build_annotation_namespace,
-                resolve_annotations_dict,
-            )
-
-            is_dynamic = '.<locals>.' in f.__qualname__
-            type_resolver = TypeResolver(user_globals=f.__globals__)
-            eval_namespace = build_annotation_namespace(
-                f.__globals__, is_dynamic=is_dynamic,
-            )
-            resolved_annotations = resolve_annotations_dict(
-                f.__annotations__, eval_namespace, type_resolver,
-            )
-
-        return_type = resolved_annotations.get('return', sig.return_annotation)
-        if return_type == inspect.Signature.empty:
-            return_type = None
-
-        param_types = []
-        for name, param in sig.parameters.items():
-            param_type = resolved_annotations.get(name, param.annotation)
-            param_types.append((name, param_type))
+        # Annotation resolution is deferred to first use of the wrapper's
+        # return_type/param_types (see ExternFunctionWrapper): decoration
+        # time may legitimately run before an annotated name is bound, e.g.
+        # in generated bindings whose headers mutually reference types.
         # Note: No longer registering in registry - info is stored on wrapper
         # Preserve an explicit lib='' (process-global symbols from registered
         # object files); only a missing lib defaults to 'c'.
@@ -306,18 +367,14 @@ def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
             func=f,
             lib=lib if lib is not None else 'c',
             calling_convention=calling_convention,
-            return_type=return_type,
-            param_types=param_types,
             **kwargs
         )
         wrapper._is_extern = True
         wrapper._extern_config = {
             'lib': lib if lib is not None else 'c',
             'calling_convention': calling_convention,
-            'signature': sig,
+            'signature': inspect.signature(f),
             'function': f,
-            'return_type': return_type,
-            'param_types': param_types,
             **kwargs
         }
         return wrapper

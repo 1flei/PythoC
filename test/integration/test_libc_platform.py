@@ -254,6 +254,22 @@ class TestLibcPlatform(unittest.TestCase):
             with self.assertRaises(NotImplementedError):
                 importlib.import_module('pythoc.libc.cassert')
 
+    def test_cassert_cross_platform_shim(self):
+        """Both handler names are exported on macOS and Linux: the
+        foreign-platform name is a @compile shim forwarding to the native
+        handler, so bindings generated on one platform compile on both."""
+        if not (sys.platform == 'darwin' or sys.platform.startswith('linux')):
+            self.skipTest('shim only exists on macOS/Linux')
+        m = importlib.import_module('pythoc.libc.cassert')
+        self.assertIn('__assert_rtn', m.__all__)
+        self.assertIn('__assert_fail', m.__all__)
+        native = '__assert_rtn' if sys.platform == 'darwin' else '__assert_fail'
+        shim = '__assert_fail' if sys.platform == 'darwin' else '__assert_rtn'
+        self.assertEqual(getattr(m, native).c_name, native)
+        shim_fn = getattr(m, shim)
+        self.assertTrue(getattr(shim_fn, '_is_compiled', False))
+
+
 
 if __name__ == '__main__':
     unittest.main()
