@@ -70,8 +70,30 @@ enum {
 
 
 def python_abi_layout() -> dict:
-    """Return sizes and offsets for the interpreter that is running now."""
+    """Return sizes and offsets for the interpreter that is running now.
+
+    Primary reader is libclang (no code execution, cross-friendly).  When
+    libclang is unavailable -- an optional dependency -- fall back to a
+    tiny C probe compiled and run with the same toolchain that links the
+    runtime anyway.
+    """
     include_dirs = _include_dirs()
+    errors = []
+    for reader in (_layout_via_libclang, _layout_via_cc_probe):
+        try:
+            return reader(include_dirs)
+        except Exception as error:
+            errors.append('{}: {}'.format(reader.__name__, error))
+    raise RuntimeError(
+        'cannot read the C API layout of {} {}:\n{}'.format(
+            sys.implementation.name,
+            sys.version.split()[0],
+            '\n'.join(errors),
+        )
+    )
+
+
+def _layout_via_libclang(include_dirs) -> dict:
     source = _write_snippet()
     try:
         tu = _parse(source, include_dirs)
@@ -133,6 +155,97 @@ def python_abi_layout() -> dict:
     return layout
 
 
+_PROBE_MAIN = r"""
+#include <stdio.h>
+#include <stddef.h>
+
+#define P(name, value) printf("%s %llu\n", name, (unsigned long long)(value))
+
+int main(void) {
+    P("pointer", sizeof(void *));
+    P("ssize", sizeof(Py_ssize_t));
+    P("int", sizeof(int));
+    P("have_vectorcall", pc_have_vectorcall);
+    P("flag_default", pc_flag_default);
+    P("flag_gc", pc_flag_gc);
+    P("flag_vectorcall", pc_flag_vectorcall);
+    P("api_version", pc_api_version);
+    P("slot_dealloc", pc_slot_dealloc);
+    P("slot_traverse", pc_slot_traverse);
+    P("slot_clear", pc_slot_clear);
+    P("slot_repr", pc_slot_repr);
+    P("slot_call", pc_slot_call);
+    P("slot_methods", pc_slot_methods);
+    P("slot_getset", pc_slot_getset);
+    P("slot_init", pc_slot_init);
+    P("slot_new", pc_slot_new);
+    P("slot_doc", pc_slot_doc);
+    P("meth_o", pc_meth_o);
+    P("meth_noargs", pc_meth_noargs);
+    P("basicsize", sizeof(struct PcCallableProbe));
+    P("vectorcall", offsetof(struct PcCallableProbe, vectorcall));
+    P("dict", offsetof(struct PcCallableProbe, dict));
+    P("wrapped", offsetof(struct PcCallableProbe, wrapped));
+    P("slow", offsetof(struct PcCallableProbe, slow));
+    P("lock", offsetof(struct PcCallableProbe, lock));
+    P("state", offsetof(struct PcCallableProbe, state));
+    P("tp_dictoffset", offsetof(PyTypeObject, tp_dictoffset));
+    P("tp_flags", offsetof(PyTypeObject, tp_flags));
+    P("tp_flags_size", sizeof(((PyTypeObject *)0)->tp_flags));
+    P("module_size", sizeof(PyModuleDef));
+    P("m_name", offsetof(PyModuleDef, m_name));
+    P("m_size", offsetof(PyModuleDef, m_size));
+    P("type_slot_size", sizeof(PyType_Slot));
+    P("type_spec_size", sizeof(PyType_Spec));
+    P("method_size", sizeof(PyMethodDef));
+    P("getset_size", sizeof(PyGetSetDef));
+#ifdef Py_TPFLAGS_HAVE_VECTORCALL
+    P("tp_vectorcall_offset", offsetof(PyTypeObject, tp_vectorcall_offset));
+#endif
+    return 0;
+}
+"""
+
+
+def _layout_via_cc_probe(include_dirs) -> dict:
+    import subprocess
+
+    from .utils.link_utils import get_default_linkers
+
+    probe_src = _write_snippet(suffix='.c', extra=_PROBE_MAIN)
+    exe = probe_src[:-2] + ('.exe' if sys.platform == 'win32' else '')
+    try:
+        errors = []
+        for linker in get_default_linkers():
+            cmd = linker.split() + [
+                '-I' + d for d in include_dirs
+            ] + [probe_src, '-o', exe]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, check=False,
+            )
+            if result.returncode == 0:
+                break
+            errors.append(result.stderr.strip().splitlines()[-1]
+                          if result.stderr.strip() else str(result.returncode))
+        else:
+            raise RuntimeError('; '.join(errors) or 'no C compiler found')
+        result = subprocess.run(
+            [exe], capture_output=True, text=True, check=True,
+        )
+        layout = {}
+        for line in result.stdout.splitlines():
+            key, _, value = line.partition(' ')
+            layout[key] = int(value)
+        if layout.get('have_vectorcall') and 'tp_vectorcall_offset' not in layout:
+            raise RuntimeError('probe missed tp_vectorcall_offset')
+        _check(layout)
+        return layout
+    finally:
+        for path in (probe_src, exe):
+            if os.path.exists(path):
+                os.remove(path)
+
+
 def _include_dirs():
     found = []
     for key in ('INCLUDEPY', 'CONFINCLUDEPY'):
@@ -150,13 +263,13 @@ def _include_dirs():
     return found
 
 
-def _write_snippet() -> str:
+def _write_snippet(suffix='.c', extra='') -> str:
     handle = tempfile.NamedTemporaryFile(
         prefix='pythoc-callable-layout-',
-        suffix='.c',
+        suffix=suffix,
         delete=False,
     )
-    handle.write(_SNIPPET.encode('ascii'))
+    handle.write((_SNIPPET + extra).encode('ascii'))
     handle.close()
     return handle.name
 

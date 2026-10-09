@@ -658,6 +658,15 @@ def _development_group_entries(wrapper, current_spec):
     return list(unique.values())
 
 
+def _kernel_link_input(lib: str) -> str:
+    """COFF links resolve symbols through the import library, not the DLL."""
+    if sys.platform == 'win32':
+        implib = os.path.splitext(lib)[0] + '.lib'
+        if os.path.exists(implib):
+            return implib
+    return lib
+
+
 def _development_adapter_path(wrapper, specs: List[dict]) -> str:
     so_file = os.path.abspath(wrapper._binding.so_file)
     adapters = tuple(spec['adapter'] for spec in specs)
@@ -675,7 +684,7 @@ def _development_adapter_path(wrapper, specs: List[dict]) -> str:
         binding = getattr(callee, '_binding', getattr(callee, '_state', None))
         lib = getattr(binding, 'so_file', None) if binding is not None else None
         if lib:
-            lib = os.path.abspath(lib)
+            lib = _kernel_link_input(os.path.abspath(lib))
             if lib not in kernel_libs:
                 kernel_libs.append(lib)
     _compile_adapter_library(
@@ -886,7 +895,7 @@ def _write_version_script(output_path: str, init_symbol: str) -> Optional[str]:
 
 
 def _python_libraries() -> List[str]:
-    """Raw linker flags. link_files rewrites bare library names, so keep -l here.
+    """Raw linker flags. Passed through extra_flags verbatim.
 
     The interpreter's symbols resolve from the host process at load time
     (``-undefined dynamic_lookup`` on macOS, the process-global symbol
@@ -894,11 +903,21 @@ def _python_libraries() -> List[str]:
     undefined symbols are not allowed.  Linking it anywhere else can load
     a second, uninitialized copy of the runtime into the process when
     the interpreter itself is statically linked.
+
+    On Windows, ``LIBDIR`` is typically None; the import library lives in
+    ``<prefix>\\libs\\python<py_version_nodot>.lib``.
     """
     if sys.platform != 'win32':
         return []
-    libdir = sysconfig.get_config_var('LIBDIR')
-    version = sysconfig.get_config_var('LDVERSION') or sysconfig.get_config_var('VERSION')
+    libdir = (
+        sysconfig.get_config_var('LIBDIR')
+        or os.path.join(sys.base_prefix, 'libs')
+    )
+    version = (
+        sysconfig.get_config_var('py_version_nodot')
+        or sysconfig.get_config_var('LDVERSION')
+        or sysconfig.get_config_var('VERSION')
+    )
     return ['-L{}'.format(libdir), '-lpython{}'.format(version)]
 
 

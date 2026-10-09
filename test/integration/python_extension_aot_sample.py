@@ -32,6 +32,22 @@ def run_checks():
     # executable link below must still contain only user objects.
     if add(20, 22) != 42:
         raise SystemExit('development call returned the wrong result')
+
+    # The executable link plan must stay free of pythoc's internal groups
+    # (callable runtime, adapter entries) and of libpython: an executable
+    # never links the Python runtime, on any platform.
+    from pythoc.artifact.link_plan import LinkPlan
+    import pythoc
+    pythoc_dir = os.path.dirname(os.path.realpath(pythoc.__file__))
+    plan = LinkPlan.from_all_groups()
+    for obj in plan.obj_files:
+        real = os.path.realpath(obj)
+        if real.startswith(pythoc_dir + os.sep):
+            raise SystemExit('executable plan contains internal object: ' + obj)
+    for lib in plan.link_libraries:
+        if 'python' in os.path.basename(lib).lower():
+            raise SystemExit('executable plan links libpython: ' + lib)
+
     compile_to_executable(output_path=exe)
     native_symbols = _symbols(exe)
     if any(name.startswith('PyInit_') or name.startswith('pythoc_pyadapter_')

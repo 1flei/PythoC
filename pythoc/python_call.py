@@ -63,13 +63,84 @@ def ensure_callable_extension():
         return extension
 
 
+def _cached_extension():
+    """Load the already-built runtime extension; never builds it.
+
+    Returns None when the extension is missing, stale, or the layout
+    probe inputs are unavailable (e.g. no C API headers).  Building is
+    deferred to the first native call (``ensure_callable_extension``),
+    so decorating a @compile function never needs a C toolchain.
+    """
+    global _extension_module
+    if _extension_module is not None:
+        return _extension_module
+    with _extension_lock:
+        if _extension_module is not None:
+            return _extension_module
+        try:
+            output = _extension_output()
+            stamp_path = output + '.stamp'
+            if not (os.path.isfile(output) and os.path.isfile(stamp_path)):
+                return None
+            with open(stamp_path, 'r', encoding='utf-8') as handle:
+                if handle.read().strip() != _runtime_stamp():
+                    return None
+        except OSError:
+            return None
+        _extension_module = _load_runtime_extension(output, fresh=False)
+        return _extension_module
+
+
+class _DeferredCallable:
+    """Python facade for a compiled function whose runtime is not built yet.
+
+    The native wrapper type lives in the callable runtime extension, which
+    needs a C toolchain to build.  AOT-only flows never call their wrappers
+    and must not pay that; the facade defers the build to the first call,
+    then shares its attribute dict with the native object so state written
+    before or after the first call is visible on both.
+    """
+
+    def __init__(self, func):
+        self.__dict__['_deferred_func'] = func
+        self.__dict__['_native_self'] = None
+        _set_callable_metadata(self, func)
+
+    def _bootstrap(self):
+        native = self.__dict__.get('_native_self')
+        if native is not None:
+            return native
+        func = self.__dict__.pop('_deferred_func')
+        self.__dict__.pop('_native_self')
+        native = _native_callable(ensure_callable_extension(), func)
+        native.__dict__.update(self.__dict__)
+        self.__dict__ = native.__dict__
+        self._native_self = native
+        return native
+
+    def __call__(self, *args, **kwargs):
+        return self._bootstrap()(*args, **kwargs)
+
+    def __getattr__(self, name):
+        native = self.__dict__.get('_native_self')
+        if native is not None:
+            return getattr(native, name)
+        if name == 'is_fast_bound':
+            return lambda: False
+        raise AttributeError(name)
+
+
 def create_compiled_callable(func):
     """Return a vectorcall callable that preserves compile-time metadata."""
     if _building_runtime:
         return _runtime_anchor(func)
-    extension = ensure_callable_extension()
-    wrapper = extension.PythoCCallable(func)
-    resolve_done = threading.Event()
+    extension = _cached_extension()
+    if extension is None:
+        return _DeferredCallable(func)
+    return _native_callable(extension, func)
+
+
+def _set_callable_metadata(wrapper, func):
     wrapper.__name__ = func.__name__
     wrapper.__qualname__ = getattr(func, '__qualname__', func.__name__)
     wrapper.__module__ = getattr(func, '__module__', None)
@@ -81,6 +152,12 @@ def create_compiled_callable(func):
         wrapper.__signature__ = inspect.signature(func)
     except (TypeError, ValueError):
         pass
+
+
+def _native_callable(extension, func):
+    wrapper = extension.PythoCCallable(func)
+    resolve_done = threading.Event()
+    _set_callable_metadata(wrapper, func)
 
     def _pythoc_resolve(bound=wrapper):
         bound._pythoc_resolve_owner = threading.get_ident()
@@ -138,6 +215,10 @@ def try_bind_installed_adapter(wrapper) -> bool:
     manifest_path = _find_manifest(wrapper)
     if manifest_path is None:
         return False
+    if isinstance(wrapper, _DeferredCallable):
+        # An installed manifest means this wrapper must bind at decoration
+        # time, which requires the native runtime; build it now.
+        wrapper = wrapper._bootstrap()
     manifest = _read_manifest(manifest_path)
     export_id = python_export_id(wrapper)
     export = manifest.get('exports', {}).get(export_id)
@@ -347,6 +428,7 @@ def _build_callable_extension() -> bool:
         obj = _runtime_object(callable_type.__file__)
         if os.path.isfile(output):
             os.remove(output)
+        from .python_adapter import _python_libraries
         from .utils.link_utils import link_files
 
         link_files(
@@ -355,6 +437,9 @@ def _build_callable_extension() -> bool:
             shared=True,
             link_objects=[],
             link_libraries=[],
+            # Posix resolves the CPython symbols from the host process at
+            # load time; Windows needs the pythonXY import library.
+            extra_flags=_python_libraries(),
         )
     finally:
         _building_runtime = False
