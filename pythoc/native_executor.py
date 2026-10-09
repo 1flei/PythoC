@@ -498,8 +498,15 @@ class MultiSOExecutor:
                 # breaking circular dependencies. Use libc.dlopen directly.
                 if sys.platform == 'darwin' and hasattr(os, 'RTLD_LAZY'):
                     lib = self._load_library_macos_lazy(so_file)
-                elif hasattr(os, 'RTLD_LAZY') and hasattr(os, 'RTLD_GLOBAL'):
-                    lib = ctypes.CDLL(so_file, mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
+                elif hasattr(os, 'RTLD_NOW') and hasattr(os, 'RTLD_GLOBAL'):
+                    # Bind eagerly: glibc's lazy PLT resolver clobbers errno
+                    # (leaves EAGAIN) when a kernel's first libc call is
+                    # resolved mid-call, and JIT kernels observe it.  Fall
+                    # back to LAZY for circularly dependent libraries.
+                    try:
+                        lib = ctypes.CDLL(so_file, mode=os.RTLD_NOW | os.RTLD_GLOBAL)
+                    except OSError:
+                        lib = ctypes.CDLL(so_file, mode=os.RTLD_LAZY | os.RTLD_GLOBAL)
                 elif hasattr(ctypes, 'RTLD_GLOBAL'):
                     lib = ctypes.CDLL(so_file, mode=ctypes.RTLD_GLOBAL)
                 else:

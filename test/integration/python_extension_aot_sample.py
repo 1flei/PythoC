@@ -50,12 +50,23 @@ def run_checks():
             raise SystemExit('executable plan links libpython: ' + lib)
 
     compile_to_executable(output_path=exe)
-    native_symbols = _symbols(exe)
-    if any(name.startswith('PyInit_') or name.startswith('pythoc_pyadapter_')
-           for name in native_symbols):
-        raise SystemExit('native executable contains a Python adapter symbol')
-    if 'add' not in native_symbols:
-        raise SystemExit('native executable is missing the kernel symbol')
+    if sys.platform == 'win32':
+        # PE images carry no nm-readable symbol table; check the kernel
+        # made it into the executable by running it instead.  main()
+        # returns non-zero unless add(20, 22) == 42.
+        import subprocess
+        ran = subprocess.run([exe], capture_output=True)
+        if ran.returncode != 0:
+            raise SystemExit(
+                'native executable exited with ' + str(ran.returncode)
+            )
+    else:
+        native_symbols = _symbols(exe)
+        if any(name.startswith('PyInit_') or name.startswith('pythoc_pyadapter_')
+               for name in native_symbols):
+            raise SystemExit('native executable contains a Python adapter symbol')
+        if 'add' not in native_symbols:
+            raise SystemExit('native executable is missing the kernel symbol')
 
     compile_to_python_extension(
         add,
