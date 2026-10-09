@@ -37,7 +37,7 @@ def _inst(lib, w):
 pc.install_library = _inst
 
 err().contents.value = 0
-nop._pythoc_resolve()
+pc.resolve_compiled_callable(nop)
 show('after manual resolve')
 err().contents.value = 0
 nop()
