@@ -361,27 +361,20 @@ class pc_literal:
         from ..valueref import wrap_value
 
         owner = object.__getattribute__(self, '_ctypes_owner')
-        if owner is not None:
-            field_names = object.__getattribute__(self, '_field_names') or []
-            if field_names:
-                # Live struct owner.  Capture is supported only when
-                # every field is a value type that can be safely pinned
-                # into IR.  A pointer field would mean baking a
-                # process-local heap address into a cacheable artefact
-                # -- a contract pythoc deliberately refuses (capture a
-                # pointer back into Python-side state instead, then
-                # pass it as an explicit argument).
-                self._reject_pointer_fields(self._pc_type)
-                pt = PythonType.wrap(self, is_constant=True,
-                                     preferred_pc_type=self._pc_type)
-                return wrap_value(self, kind='python', type_hint=pt)
+        field_names = object.__getattribute__(self, '_field_names') or []
+        if field_names:
+            # Value-typed compounds lower field by field. A pointer
+            # field is rejected whether the bytes live in a ctypes
+            # owner or in _fields.
+            self._reject_pointer_fields(self._pc_type)
+            pt = PythonType.wrap(self, is_constant=True,
+                                 preferred_pc_type=self._pc_type)
+            return wrap_value(self, kind='python', type_hint=pt)
 
-            # Pointer-shaped owner: capturing a runtime pointer value
-            # into a compiled function is intentionally unsupported.
-            # The address is a process-local heap handle; pinning it
-            # into IR couples the cached artefact to one specific
-            # process.  Pass the pointer as an explicit argument
-            # instead -- that path is fully supported via _to_ctypes.
+        if owner is not None or getattr(self._pc_type, '_is_pointer', False):
+            # Pointer-shaped value: capturing a runtime pointer into a
+            # compiled function is intentionally unsupported. Pass it as
+            # an explicit argument instead.
             from ..logger import logger
             type_name = (self._pc_type.get_name()
                          if hasattr(self._pc_type, 'get_name')
@@ -397,7 +390,6 @@ class pc_literal:
             )
 
         if self._fields is not None:
-            # Compound type: wrap the dict/list as python constant
             pt = PythonType.wrap(self._value, is_constant=True,
                                  preferred_pc_type=self._pc_type)
             return wrap_value(self._value, kind='python', type_hint=pt)
@@ -547,7 +539,9 @@ class pc_literal:
 
         owner = object.__getattribute__(self, '_ctypes_owner')
         field_names = object.__getattribute__(self, '_field_names') or []
-        if owner is None or not field_names:
+        fields = object.__getattribute__(self, '_fields')
+        has_field = isinstance(fields, dict) and attr_name in fields
+        if not field_names or (owner is None and not has_field):
             logger.error(
                 f"pc_literal of type "
                 f"'{self._pc_type.get_name() if self._pc_type else '?'}'"
@@ -566,8 +560,11 @@ class pc_literal:
         field_types = getattr(self._pc_type, '_field_types', None) or []
         field_pc_type = field_types[idx] if idx < len(field_types) else None
 
-        # Materialise the live field value through the IR-constant path.
-        fval = self._materialize_field(attr_name)
+        fields = object.__getattribute__(self, '_fields')
+        if isinstance(fields, dict) and attr_name in fields:
+            fval = fields[attr_name]
+        else:
+            fval = self._materialize_field(attr_name)
         ir_const = _lower_field_to_ir_constant(fval, field_pc_type)
         return wrap_value(ir_const, kind='value', type_hint=field_pc_type)
 

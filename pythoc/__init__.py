@@ -47,7 +47,21 @@ from .utils.build_utils import (
     compile_to_executable,
     compile_to_static_library,
     compile_to_dynamic_library,
+    compile_to_python_extension,
     export_c_headers,
+)
+from .artifact import (
+    ArtifactKind,
+    ArtifactPhase,
+    ArtifactPlan,
+    ArtifactStep,
+    ExportSpec,
+    LinkPlan,
+    LinkScope,
+    LoadedArtifact,
+    NativeArtifact,
+    build_artifact,
+    plan_artifact_tasks,
 )
 from .cimport import cimport, cimport_header, cimport_source
 from .utils.link_utils import linklibrary
@@ -69,11 +83,15 @@ def init() -> CompileSession:
     before any @compile decoration executes.  If the current context
     already has an active session it is returned unchanged; otherwise a
     new session is created and activated for the rest of the process.
+    The installed session is also visible to threads that did not copy
+    the calling context.
     """
+    from .session import install_process_session
     session = CompileSession.active()
     if session is None:
         session = CompileSession()
         session.activate()
+    install_process_session(session)
     return session
 
 
@@ -202,7 +220,19 @@ __all__ = [
     'compile_to_executable',
     'compile_to_static_library',
     'compile_to_dynamic_library',
+    'compile_to_python_extension',
     'export_c_headers',
+    'ArtifactKind',
+    'ArtifactPhase',
+    'ArtifactPlan',
+    'ArtifactStep',
+    'ExportSpec',
+    'LinkPlan',
+    'LinkScope',
+    'LoadedArtifact',
+    'NativeArtifact',
+    'build_artifact',
+    'plan_artifact_tasks',
     
     # C Import
     'cimport',

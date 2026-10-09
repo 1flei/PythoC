@@ -22,6 +22,19 @@ from .planner import (
     plan_link_shared_tasks,
     plan_stub_import_library_tasks,
 )
+from ..artifact import (
+    ArtifactKind,
+    ArtifactPhase,
+    ArtifactPlan,
+    ArtifactStep,
+    ExportSpec,
+    LinkPlan,
+    LinkScope,
+    LoadedArtifact,
+    NativeArtifact,
+    build_artifact,
+    plan_artifact_tasks,
+)
 
 __all__ = [
     'BuildCache',
@@ -41,4 +54,15 @@ __all__ = [
     'plan_group_object_tasks',
     'plan_link_shared_tasks',
     'plan_stub_import_library_tasks',
+    'ArtifactKind',
+    'ArtifactPhase',
+    'ArtifactPlan',
+    'ArtifactStep',
+    'ExportSpec',
+    'LinkPlan',
+    'LinkScope',
+    'LoadedArtifact',
+    'NativeArtifact',
+    'build_artifact',
+    'plan_artifact_tasks',
 ]

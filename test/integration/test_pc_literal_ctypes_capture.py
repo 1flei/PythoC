@@ -189,5 +189,38 @@ class TestPcLiteralCtypesCaptureRejected(unittest.TestCase):
             free_tagged_buf(h.p)
 
 
+class TestPcLiteralPythonConstructedCapture(unittest.TestCase):
+    """Struct literals constructed at Python level (no ctypes owner).
+
+    ``Pair(3, 4)`` stores its fields in a plain dict.  Capturing such a
+    literal into @compile is supported when every field is a value
+    type: field reads lower to IR constants just like the ctypes-backed
+    path.  Pointer fields stay rejected.
+    """
+
+    def test_python_constructed_struct_capture(self):
+        p = Pair(3, 4)
+
+        @compile(suffix="capture_python_pair")
+        def sum_python_pair() -> i64:
+            return i64(p.a) + p.b
+
+        self.assertEqual(int(sum_python_pair()), 7)
+
+    def test_python_constructed_struct_positional_and_kwargs(self):
+        p = Pair(1, b=2)
+
+        @compile(suffix="capture_python_pair_kwargs")
+        def read_b() -> i64:
+            return p.b
+
+        self.assertEqual(int(read_b()), 2)
+
+    def test_python_constructed_pointer_field_rejected(self):
+        h = Handle(None, 1)
+        with self.assertRaises((TypeError, SystemExit)):
+            h.get_value()
+
+
 if __name__ == '__main__':
     unittest.main()

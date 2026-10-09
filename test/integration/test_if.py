@@ -50,7 +50,7 @@ if __name__ == "__main__":
 
     # Test compiled functions with different suffixes
     for f, x, exp in zip(fs, xs, expected):
-        result = f(x)
+        result = f()
         assert result == exp, f"const_folding({x}) expected {exp}, got {result}"
         print(f"const_folding({x}) = {result}")
     

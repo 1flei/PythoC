@@ -45,6 +45,7 @@ def compile_ast(
     debug_source=None,
     effect_suffix=None,
     effect_scope=None,
+    group_key=None,
     copy_ast=True,
     debug=False,
 ):
@@ -164,7 +165,11 @@ def compile_ast(
         actual_func_name = mangled_name
 
     # Get compiler instance
-    has_suffix = compile_suffix is not None or effect_suffix is not None
+    has_suffix = (
+        compile_suffix is not None
+        or effect_suffix is not None
+        or group_key is not None
+    )
     compiler = get_compiler(
         source_file=source_file,
         user_globals=user_globals,
@@ -194,10 +199,34 @@ def compile_ast(
     safe_csuffix = sanitize_filename(compile_suffix) if compile_suffix else None
     safe_esuffix = sanitize_filename(effect_suffix) if effect_suffix else None
 
-    group_key = (source_file, safe_scope, safe_csuffix, safe_esuffix)
+    if group_key is None:
+        group_key = (source_file, safe_scope, safe_csuffix, safe_esuffix)
+    else:
+        group_source, group_scope, group_csuffix, group_esuffix = group_key
+        group_source = os.path.realpath(group_source)
+        if group_source != source_file:
+            raise ValueError(
+                'explicit group source must match source_file'
+            )
+        safe_scope = sanitize_filename(group_scope) if group_scope else None
+        safe_csuffix = (
+            sanitize_filename(group_csuffix) if group_csuffix else None
+        )
+        safe_esuffix = (
+            sanitize_filename(group_esuffix) if group_esuffix else None
+        )
+        group_key = (
+            source_file,
+            safe_scope,
+            safe_csuffix,
+            safe_esuffix,
+        )
+    existing = output_manager.existing_flushed_wrapper(group_key, actual_func_name)
+    if existing is not None:
+        return existing
 
     # Build output file paths
-    if compile_suffix or effect_suffix:
+    if safe_scope or safe_csuffix or safe_esuffix:
         cwd = os.getcwd()
         if source_file.startswith(cwd + os.sep) or source_file.startswith(cwd + '/'):
             rel_path = os.path.relpath(source_file, cwd)
@@ -239,18 +268,15 @@ def compile_ast(
         linkage=linkage,
     )
 
-    # Create wrapper
-    from ..native_executor import get_multi_so_executor
-    executor = get_multi_so_executor()
+    from ..python_call import create_compiled_callable, try_bind_installed_adapter
 
-    def wrapper(*args, **kwargs):
-        if not hasattr(wrapper, '_native_func'):
-            # Double-checked under the binding lock: execute_function may
-            # race when the same wrapper is first called on two threads.
-            with binding_state.lock:
-                if not hasattr(wrapper, '_native_func'):
-                    wrapper._native_func = executor.execute_function(wrapper)
-        return wrapper._native_func(*args)
+    def _owner(*_args, **_kwargs):
+        raise RuntimeError('compiled function has no Python body')
+
+    _owner.__name__ = func_name
+    _owner.__qualname__ = func_name
+    _owner.__module__ = user_globals.get('__name__', 'pythoc.meta')
+    wrapper = create_compiled_callable(_owner)
 
     # Get or create group
     group = output_manager.get_or_create_group(
@@ -362,6 +388,7 @@ def compile_ast(
 
     wrapper.handle_call = handle_call
     wrapper._is_compiled = True
+    try_bind_installed_adapter(wrapper)
 
     return wrapper
 
@@ -425,6 +452,7 @@ def compile_generated(
         source_file=source_file,
         source_code=fn.debug_source,
         start_line=fn.start_line,
+        group_key=group_key,
         copy_ast=False,
         debug=debug,
     )

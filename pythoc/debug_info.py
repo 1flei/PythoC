@@ -376,14 +376,27 @@ class DebugInfoBuilder:
             pointee = get_defined_type(pointee)
 
         pointee_di = self.get_debug_type(pointee) if pointee is not None else None
+        if pointee_di is None:
+            pointee_di = self._unspecified_debug_type()
 
         fields: Dict[str, Any] = {
             'tag': ir.DIToken('DW_TAG_pointer_type'),
             'size': 64,
+            'baseType': pointee_di,
         }
-        if pointee_di is not None:
-            fields['baseType'] = pointee_di
         return self.module.add_debug_info('DIDerivedType', fields)
+
+    def _unspecified_debug_type(self) -> ir.DIValue:
+        """Base type for pointers whose pointee has no DWARF type."""
+        cached = getattr(self, '_unspecified_type', None)
+        if cached is not None:
+            return cached
+        cached = self.module.add_debug_info(
+            'DIBasicType',
+            {'name': 'void', 'size': 8, 'encoding': _DW_ATE_unsigned},
+        )
+        self._unspecified_type = cached
+        return cached
 
     def _build_array_debug_type(self, pc_type: Any) -> Optional[ir.DIValue]:
         """Build a DWARF array type for pythoc array[T, dims...]."""

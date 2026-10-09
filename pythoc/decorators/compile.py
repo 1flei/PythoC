@@ -17,7 +17,6 @@ import sys
 import threading
 from typing import Any, List, Optional
 
-from ..call_normalization import pack_native_call_args
 
 # Sentinel value to distinguish "not provided" from "provided as None"
 _SCOPE_NOT_PROVIDED = object()
@@ -51,9 +50,6 @@ from ..logger import logger, set_source_context
 
 
 DEFAULT_EFFECT_KEY = "__default__"
-
-# Fallback lock for wrapper lazy init when no binding state is available
-_wrapper_init_lock = threading.RLock()
 
 
 def _is_parametric_type(pc_type):
@@ -914,27 +910,13 @@ def _compile_impl(func_or_class,
 
     func = func_or_class
 
-    from ..native_executor import get_multi_so_executor
-    executor = get_multi_so_executor()
-
+    from ..python_call import create_compiled_callable, try_bind_installed_adapter
     from ..session import CompileSession
     session = CompileSession.current()
 
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
-        if binding and binding.is_template:
-            materialize_specialization(wrapper, DEFAULT_EFFECT_KEY, {})
+    wrapper = create_compiled_callable(func)
+    wrapper.__wrapped__ = func
 
-        if not hasattr(wrapper, '_native_func'):
-            lock = binding.lock if binding else _wrapper_init_lock
-            with lock:
-                if not hasattr(wrapper, '_native_func'):
-                    wrapper._native_func = executor.execute_function(wrapper)
-
-        args = pack_native_call_args(wrapper, args, kwargs)
-        return wrapper._native_func(*args)
-    
     source_file, source_code = get_function_file_and_source(func)
     
     # Get function start line for accurate error messages
@@ -1229,6 +1211,7 @@ def _compile_impl(func_or_class,
         compile_suffix, effect_suffix,
     )
     if existing_wrapper is not None:
+        try_bind_installed_adapter(existing_wrapper)
         return existing_wrapper
 
     func_info = FunctionInfo(
@@ -1401,6 +1384,7 @@ def _compile_impl(func_or_class,
 
     wrapper.handle_call = handle_call
     wrapper._is_compiled = True
+    try_bind_installed_adapter(wrapper)
     return wrapper
 
 

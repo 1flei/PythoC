@@ -12,6 +12,7 @@ produce correct code on every platform the CI covers:
 - AArch64 Windows:             same as Win64
 - x86_64 SysV (Linux/macOS):   va_list = { i32, i32, i8*, i8* }
 - AArch64 AAPCS (Linux):       va_list = { i8*, i8*, i8*, i32, i32 }
+- arm64-apple-darwin:          va_list = i8* stack cursor, args inline
 
 Reference: clang/lib/CodeGen/Targets/{X86,AArch64}.cpp
 """
@@ -438,6 +439,39 @@ class AArch64AAPCSVAArgLowering(VAArgLowering):
 # =========================================================================
 # Factory
 # =========================================================================
+# Apple Silicon Darwin (arm64-apple-darwin)
+# =========================================================================
+
+class AArch64DarwinVAArgLowering(VAArgLowering):
+    """Apple Silicon Darwin va_arg lowering.
+
+    va_list is a plain ``i8*`` stack cursor.  Every variadic argument is
+    passed inline on the stack in an 8-byte-aligned slot, aggregates
+    included -- there is no AAPCS register save area on this target, and
+    unlike Win64 oversized types are not passed by pointer.
+    """
+
+    def emit_va_start(self, builder) -> Any:
+        alloca = builder.alloca(_i8ptr, name="va_list")
+        ap = builder.bitcast(alloca, _i8ptr)
+        _call_va_start(builder, ap)
+        return ap
+
+    def emit_va_arg(self, builder, va_list_ptr, target_type, name="") -> Any:
+        ap_addr = builder.bitcast(va_list_ptr, ir.PointerType(_i8ptr))
+        cur_ptr = builder.load(ap_addr, name="argp.cur")
+
+        type_sz = _type_size(target_type)
+        advance = (max(type_sz, 8) + 7) // 8 * 8
+        next_ptr = builder.gep(
+            cur_ptr, [ir.Constant(_i32, advance)], name="argp.next")
+        builder.store(next_ptr, ap_addr)
+
+        typed_ptr = builder.bitcast(cur_ptr, ir.PointerType(target_type))
+        return builder.load(typed_ptr, name=name or "va.arg")
+
+
+# =========================================================================
 
 def get_va_arg_lowering(triple: str = None) -> VAArgLowering:
     """Get the appropriate va_arg lowering for the given target triple.
@@ -466,6 +500,8 @@ def get_va_arg_lowering(triple: str = None) -> VAArgLowering:
         return VoidPtrVAArgLowering()
 
     if arch in ('aarch64', 'arm64'):
+        if 'apple' in triple_lower or 'darwin' in triple_lower:
+            return AArch64DarwinVAArgLowering()
         return AArch64AAPCSVAArgLowering()
 
     # x86_64 SysV (Linux, macOS, FreeBSD, ...)

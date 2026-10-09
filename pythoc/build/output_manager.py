@@ -156,18 +156,17 @@ class OutputManager:
         return f"publish-object:{repr(group_key)}:{seq}"
 
     def _reject_if_flushed(self, group_key, context_msg=""):
-        """Reject attempts to add to a flushed group — groups are immutable after flush.
+        """Keep a flushed group closed once its library is loaded.
 
-        This replaces the old group-reopen mechanism. If the group's .so has been
-        dlopen'd, the error is more specific (native execution started). Otherwise
-        it's a code-ordering issue (flush triggered before all @compile defined).
+        A flush that only wrote the object file can still accept more
+        functions: the next flush rewrites that object. After dlopen the
+        object is immutable.
         """
         if group_key not in self._all_groups:
-            return  # Group doesn't exist yet — nothing to reject
+            return
         if group_key in self._pending_groups:
-            return  # Still pending — fine to add
+            return
 
-        # Group was flushed. Reject — no reopen in any case.
         from ..native_executor import get_multi_so_executor
         executor = get_multi_so_executor()
         group = self._all_groups[group_key]
@@ -180,14 +179,23 @@ class OutputManager:
                 f"has started native execution. All @compile functions must be defined "
                 f"before any compiled function is called."
             )
-        raise RuntimeError(
-            f"Cannot add new @compile function to module '{source_file_path}' "
-            f"after flush has already occurred. This typically happens when a "
-            f"module-level statement triggers native execution (e.g. bindgen, "
-            f"calling a compiled function) before all @compile functions are "
-            f"defined. Move all @compile decorators before any code that "
-            f"triggers execution."
-        )
+        self._flushed_groups.discard(group_key)
+        self._pending_groups[group_key] = group
+
+    def existing_flushed_wrapper(self, group_key, func_name):
+        """Return a wrapper already compiled into a flushed group.
+
+        Re-requesting the same symbol after native execution is the same
+        function, not a new definition. A new name still fails in
+        ``_reject_if_flushed``.
+        """
+        if group_key not in self._all_groups or group_key in self._pending_groups:
+            return None
+        group = self._all_groups[group_key]
+        for wrapper in group.get('all_wrappers') or []:
+            if getattr(wrapper, '_actual_func_name', None) == func_name:
+                return wrapper
+        return None
 
     def get_or_create_group(self, group_key, compiler, ir_file, obj_file, so_file, 
                            source_file):
@@ -788,6 +796,42 @@ class OutputManager:
             and BuildCache.check_obj_uptodate(obj_file, source_file)
             and self._cached_source_embed_deps_uptodate(group)
             and self._cached_object_covers_pending_symbols(group_key, group)
+        )
+
+    def group_object_cache_hit(self, group_key, expected_symbols=()) -> bool:
+        """Check a known compilation-group identity before registering work."""
+        from .cache import BuildCache
+        from .deps import get_dependency_tracker
+
+        group_key = tuple(group_key)
+        group = self._all_groups.get(group_key)
+        if group is None:
+            obj_file = get_dependency_tracker().derive_obj_file_from_group_key(
+                group_key
+            )
+            group = {
+                'source_file': group_key[0],
+                'obj_file': obj_file,
+            }
+
+        source_file = group.get('source_file')
+        obj_file = group.get('obj_file')
+        if (
+            not source_file
+            or not obj_file
+            or not BuildCache.check_obj_uptodate(obj_file, source_file)
+            or not self._cached_source_embed_deps_uptodate(group)
+            or not self._cached_dependency_outputs_exist(group)
+        ):
+            return False
+
+        expected = set(expected_symbols)
+        if not expected:
+            return True
+        deps = get_dependency_tracker().load_deps(obj_file)
+        return bool(
+            deps
+            and expected.issubset(set(deps.compiled_symbols))
         )
 
     def _cached_source_embed_deps_uptodate(self, group) -> bool:

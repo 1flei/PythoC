@@ -662,6 +662,7 @@ def build_link_command(
     linker: str = 'gcc',
     link_objects: Optional[List[str]] = None,
     link_libraries: Optional[List[str]] = None,
+    extra_flags: Optional[List[str]] = None,
 ) -> List[str]:
     """Build linker command.
 
@@ -723,7 +724,10 @@ def build_link_command(
         for f in lib_flags
     ]
 
-    return linker_cmd + platform_flags + all_obj_files + ['-o', output_file] + lib_flags
+    command = linker_cmd + platform_flags + all_obj_files + ['-o', output_file] + lib_flags
+    if extra_flags:
+        command.extend(extra_flags)
+    return command
 
 
 def try_link_with_linkers(
@@ -733,6 +737,7 @@ def try_link_with_linkers(
     linkers: Optional[List[str]] = None,
     link_objects: Optional[List[str]] = None,
     link_libraries: Optional[List[str]] = None,
+    extra_flags: Optional[List[str]] = None,
 ) -> str:
     """Try linking with multiple linkers.
 
@@ -762,6 +767,7 @@ def try_link_with_linkers(
                 linker=linker,
                 link_objects=link_objects,
                 link_libraries=link_libraries,
+                extra_flags=extra_flags,
             )
 
 
@@ -822,6 +828,7 @@ def link_files(
     link_objects: Optional[List[str]] = None,
     link_libraries: Optional[List[str]] = None,
     lock_policy: str = 'internal',
+    extra_flags: Optional[List[str]] = None,
 ) -> str:
     """Link object files to executable or shared library
     
@@ -891,6 +898,7 @@ def link_files(
             linkers=linkers,
             link_objects=link_objects,
             link_libraries=link_libraries,
+            extra_flags=extra_flags,
         )
         if shared:
             write_link_schema_stamp(output_file)

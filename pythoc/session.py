@@ -14,7 +14,8 @@ raises RuntimeError when no session is active.
 
 Activation is tracked with a ContextVar (not threading.local) so the
 active session propagates through ``contextvars.copy_context()``, which
-the build scheduler uses when submitting worker tasks.
+the build scheduler uses when submitting worker tasks. ``pythoc.init()``
+also publishes that session for threads that did not copy the context.
 
 This module is intentionally dependency-free so that any pythoc module
 can import it without creating import cycles.  Fields are plain Optional
@@ -22,6 +23,7 @@ attributes; owning modules attach their singletons to the active
 session when they create them.
 """
 
+import threading
 from contextvars import ContextVar, Token
 from typing import Any, List, Optional
 
@@ -65,14 +67,24 @@ class CompileSession:
     def current(cls) -> 'CompileSession':
         """Return the session active in the current context.
 
+        A context-local session wins. Otherwise the session installed by
+        ``pythoc.init()`` is visible to every thread in the process.
+
         Raises:
             RuntimeError: If no session is active.  Activate one with
                 ``pythoc.init()`` or ``with CompileSession():``.
         """
         session = _current_session.get()
-        if session is None:
-            raise RuntimeError(NO_ACTIVE_SESSION_MSG)
-        return session
+        if session is not None:
+            return session
+        # init() is process-wide for other threads. An empty context on the
+        # thread that called init() stays empty (ContextVar semantics).
+        if (
+            _process_session is not None
+            and threading.get_ident() != _process_owner
+        ):
+            return _process_session
+        raise RuntimeError(NO_ACTIVE_SESSION_MSG)
 
     @classmethod
     def active(cls) -> Optional['CompileSession']:
@@ -99,3 +111,15 @@ class CompileSession:
 _current_session: ContextVar[Optional[CompileSession]] = ContextVar(
     'pythoc_current_session', default=None,
 )
+_process_session: Optional[CompileSession] = None
+_process_owner: Optional[int] = None
+_process_session_lock = threading.Lock()
+
+
+def install_process_session(session: CompileSession) -> None:
+    """Publish the first init() session to other threads."""
+    global _process_session, _process_owner
+    with _process_session_lock:
+        if _process_session is None:
+            _process_session = session
+            _process_owner = threading.get_ident()

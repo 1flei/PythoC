@@ -6,24 +6,6 @@ import sys
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-class _LinkPlan:
-    def __init__(self):
-        self.obj_files: List[str] = []
-        self.link_libraries: List[str] = []
-        self._seen_objs: Set[str] = set()
-        self._seen_libs: Set[str] = set()
-
-    def add_obj(self, obj_file: Optional[str]):
-        if obj_file and os.path.exists(obj_file) and obj_file not in self._seen_objs:
-            self._seen_objs.add(obj_file)
-            self.obj_files.append(obj_file)
-
-    def add_library(self, library: str):
-        if library and library not in self._seen_libs:
-            self._seen_libs.add(library)
-            self.link_libraries.append(library)
-
-
 def get_source_file_from_caller(offset: int = 0) -> str:
     """Get the source file path from the calling frame."""
     frame = inspect.currentframe()
@@ -127,15 +109,6 @@ def collect_object_files(source_files: List[str]) -> List[str]:
     return obj_files
 
 
-def _collect_all_group_objects(output_manager: Any) -> List[str]:
-    obj_files: List[str] = []
-    for group in output_manager.get_all_groups().values():
-        obj_file = group.get('obj_file')
-        if obj_file and os.path.exists(obj_file) and obj_file not in obj_files:
-            obj_files.append(obj_file)
-    return obj_files
-
-
 def _caller_frame():
     frame = inspect.currentframe()
     return frame.f_back.f_back if frame and frame.f_back and frame.f_back.f_back else None
@@ -226,71 +199,38 @@ def _resolve_export_symbols(symbols: Sequence[Any], frame) -> List[Any]:
     return resolved
 
 
-def _group_key_for_symbol(symbol: Any) -> Tuple:
-    binding = getattr(symbol, '_binding', None)
-    group_key = getattr(binding, 'group_key', None)
-    if group_key is None:
-        raise RuntimeError(f"Compiled symbol '{symbol}' has no compilation group.")
-    return group_key
+def _collect_group_link_plan(group_keys: Sequence[Tuple]):
+    from ..artifact import LinkPlan
+
+    return LinkPlan.from_group_roots(group_keys, flush=False)
 
 
-def _collect_group_link_plan(group_keys: Sequence[Tuple]) -> _LinkPlan:
-    from ..decorators.compile import get_output_manager
-    from ..build.deps import get_dependency_tracker
+def _build_selected_link_plan(symbols: Sequence[Any]):
+    from ..artifact import LinkPlan
 
-    output_manager = get_output_manager()
-    dep_tracker = get_dependency_tracker()
-    groups = output_manager.get_all_groups()
-    plan = _LinkPlan()
-    visited: Set[Tuple] = set()
-
-    def visit(group_key: Tuple):
-        if group_key in visited:
-            return
-        visited.add(group_key)
-
-        group = groups.get(group_key)
-        obj_file = group.get('obj_file') if group else None
-        if obj_file is None:
-            obj_file = dep_tracker.derive_obj_file_from_group_key(group_key)
-        plan.add_obj(obj_file)
-
-        deps = dep_tracker.get_deps(group_key, obj_file=obj_file) if obj_file else None
-        if deps is None:
-            deps = dep_tracker.get_deps_for_group(group_key)
-        if deps is None:
-            return
-
-        for link_obj in deps.link_objects:
-            plan.add_obj(link_obj)
-        for library in deps.link_libraries:
-            plan.add_library(library)
-        for group_dep in deps.group_dependencies:
-            target_group = getattr(group_dep, 'target_group', None)
-            if target_group is not None:
-                visit(target_group.to_tuple())
-
-    for key in group_keys:
-        visit(key)
-
-    if not plan.obj_files:
-        raise RuntimeError("No object files found for selected @compile symbols.")
-    return plan
-
-
-def _build_selected_link_plan(symbols: Sequence[Any]) -> _LinkPlan:
-    from ..decorators.compile import flush_all_pending_outputs
-
-    flush_all_pending_outputs()
-    group_keys = [_group_key_for_symbol(symbol) for symbol in symbols]
-    return _collect_group_link_plan(group_keys)
+    return LinkPlan.from_compiled_symbols(symbols)
 
 
 def link_executable(obj_files: List[str], output_path: str) -> str:
     """Link object files into a native executable."""
-    from .link_utils import try_link_with_linkers
+    from ..artifact import (
+        ArtifactKind,
+        ArtifactPlan,
+        LinkPlan,
+        LinkScope,
+        build_artifact,
+    )
 
-    result = try_link_with_linkers(obj_files, output_path, shared=False)
+    link = LinkPlan(
+        roots=(),
+        obj_files=tuple(obj_files),
+        scope=LinkScope.OWN_GROUP,
+    )
+    result = build_artifact(ArtifactPlan(
+        kind=ArtifactKind.EXECUTABLE,
+        link=link,
+        output_path=output_path,
+    )).path
     print(f"Successfully compiled to executable: {output_path}")
     print(f"Linked {len(obj_files)} object file(s)")
     return result
@@ -302,23 +242,25 @@ def link_dynamic_library(
     link_libraries: Optional[List[str]] = None,
 ) -> str:
     """Link object files into a dynamic library."""
-    from .link_utils import link_files
-    from ..build.scheduler import BuildScheduler, BuildTask
-
-    task = BuildTask(
-        id=f"link-shared:{os.path.abspath(output_path)}",
-        kind='link_shared_library',
-        inputs=tuple(obj_files) + tuple(link_libraries or []),
-        outputs=(output_path,),
-        run=lambda: link_files(
-            obj_files,
-            output_path,
-            shared=True,
-            link_objects=[],
-            link_libraries=link_libraries or [],
-        ),
+    from ..artifact import (
+        ArtifactKind,
+        ArtifactPlan,
+        LinkPlan,
+        LinkScope,
+        build_artifact,
     )
-    result = BuildScheduler(max_workers=1).run([task])[task.id].value
+
+    link = LinkPlan(
+        roots=(),
+        obj_files=tuple(obj_files),
+        link_libraries=tuple(link_libraries or ()),
+        scope=LinkScope.OWN_GROUP,
+    )
+    result = build_artifact(ArtifactPlan(
+        kind=ArtifactKind.SHARED_LIBRARY,
+        link=link,
+        output_path=output_path,
+    )).path
     print(f"Successfully compiled to dynamic library: {output_path}")
     print(f"Linked {len(obj_files)} object file(s)")
     return result
@@ -326,17 +268,24 @@ def link_dynamic_library(
 
 def link_static_library(obj_files: List[str], output_path: str) -> str:
     """Archive object files into a static library."""
-    from .link_utils import archive_files
-    from ..build.scheduler import BuildScheduler, BuildTask
-
-    task = BuildTask(
-        id=f"archive-static:{os.path.abspath(output_path)}",
-        kind='archive_static_library',
-        inputs=tuple(obj_files),
-        outputs=(output_path,),
-        run=lambda: archive_files(obj_files, output_path),
+    from ..artifact import (
+        ArtifactKind,
+        ArtifactPlan,
+        LinkPlan,
+        LinkScope,
+        build_artifact,
     )
-    result = BuildScheduler(max_workers=1).run([task])[task.id].value
+
+    link = LinkPlan(
+        roots=(),
+        obj_files=tuple(obj_files),
+        scope=LinkScope.OWN_GROUP,
+    )
+    result = build_artifact(ArtifactPlan(
+        kind=ArtifactKind.STATIC_LIBRARY,
+        link=link,
+        output_path=output_path,
+    )).path
     print(f"Successfully compiled to static library: {output_path}")
     print(f"Archived {len(obj_files)} object file(s)")
     return result
@@ -345,22 +294,15 @@ def link_static_library(obj_files: List[str], output_path: str) -> str:
 def compile_to_executable(output_path: Optional[str] = None,
                           source_file: Optional[str] = None) -> str:
     """Compile all @compile decorated functions to a native executable."""
-    from ..decorators.compile import flush_all_pending_outputs
-    from ..decorators.compile import get_output_manager
-
-    flush_all_pending_outputs()
-    output_manager = get_output_manager()
+    from ..artifact import LinkPlan
 
     if source_file is None:
         source_file = get_source_file_from_caller(offset=0)
     source_file = os.path.abspath(source_file)
     output_path = determine_output_path(source_file, output_path)
 
-    obj_files = _collect_all_group_objects(output_manager)
-    if not obj_files:
-        raise RuntimeError("No @compile decorated functions found. Nothing to compile.")
-
-    return link_executable(obj_files, output_path)
+    plan = LinkPlan.from_all_groups()
+    return link_executable(list(plan.obj_files), output_path)
 
 
 def compile_to_static_library(
@@ -403,6 +345,36 @@ def compile_to_dynamic_library(
         use_lib_prefix=sys.platform != 'win32',
     )
     return link_dynamic_library(plan.obj_files, output_path, plan.link_libraries)
+
+
+def compile_to_python_extension(
+    *symbols: Any,
+    output_path: Optional[str] = None,
+    module_name: str = '_pythoc_native',
+    source_file: Optional[str] = None,
+) -> str:
+    """Compile selected @compile symbols into one CPython extension.
+
+    This target adds Python adapters around the existing kernel objects.
+    Executable, static-library, and dynamic-library targets do not use it.
+    """
+    from ..python_adapter import compile_python_extension
+
+    frame = _caller_frame()
+    source_file = _source_file_from_frame(frame, source_file)
+    selected_symbols = _resolve_export_symbols(symbols, frame)
+    if output_path is None:
+        output_path = determine_library_output_path(
+            source_file,
+            None,
+            '',
+            use_lib_prefix=False,
+        )
+        output_path = os.path.join(
+            os.path.dirname(output_path),
+            module_name.split('.')[-1],
+        )
+    return compile_python_extension(selected_symbols, output_path, module_name)
 
 
 def export_c_headers(
