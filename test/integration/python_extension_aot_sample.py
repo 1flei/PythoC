@@ -26,7 +26,8 @@ def run_checks():
 
     out_dir = os.path.join('build', 'python_ext_check')
     os.makedirs(out_dir, exist_ok=True)
-    exe = os.path.join(out_dir, 'add_exe')
+    from pythoc.utils.link_utils import get_executable_extension
+    exe = os.path.join(out_dir, 'add_exe' + get_executable_extension())
     # Exercise the Python call path first: the callable runtime and the
     # development adapter groups now exist in the output manager, and the
     # executable link below must still contain only user objects.

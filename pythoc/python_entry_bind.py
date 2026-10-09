@@ -36,6 +36,8 @@ from pythoc.python_entry import (
     box_u64,
     box_value,
     box_wide,
+    errno_load,
+    errno_store,
     export_item,
     field_item,
     fill_bytes,
@@ -252,6 +254,9 @@ def _kind_flags(form):
 def _entry(slots_n, count, bind_names, tail):
     slots: array[ptr[void], slots_n]
     names: array[ptr[i8], slots_n]
+    # Snapshot the caller's errno before any adapter bookkeeping: the
+    # kernel must observe the same errno as with a direct C call.
+    saved_errno: i32 = errno_load()
     bind_names
     if bind_args(
         args,
@@ -283,12 +288,14 @@ def _tail(loads, linears, returned):
 
 @meta.quote
 def _returned(ret, call, box):
+    errno_store(saved_errno)
     result: ret = call
     box
 
 
 @meta.quote
 def _void_returned(call):
+    errno_store(saved_errno)
     call
     return none_ref()
 
@@ -1268,8 +1275,16 @@ def _development_entry(spec, source_file):
     return generated, user_globals
 
 
-def compile_adapter_object(specs, group_key, init_symbol, module_name):
-    """Compile Python entries for known kernels into one object file."""
+def compile_adapter_object(specs, group_key, init_symbol, module_name,
+                           flush=True):
+    """Compile Python entries for known kernels into one object file.
+
+    With flush=False the entries are only registered into their group;
+    the caller flushes once after all registrations.  Flushing inside
+    each registration would run the global flush from concurrent build
+    steps and can sweep a group that is mid-registration, leaving its
+    object unwritten.
+    """
     source_file = group_key[0]
     wrappers = []
     for spec in specs:
@@ -1333,5 +1348,6 @@ def compile_adapter_object(specs, group_key, init_symbol, module_name):
     from .build.output_manager import flush_all_pending_outputs
     from .build.deps import get_dependency_tracker
 
-    flush_all_pending_outputs()
+    if flush:
+        flush_all_pending_outputs()
     return get_dependency_tracker().derive_obj_file_from_group_key(group_key)

@@ -189,6 +189,46 @@ def _read_coff_exports(obj_path: str) -> Set[str]:
     return exports
 
 
+@lru_cache(maxsize=1)
+def _errno_slot_accessor():
+    """Return a callable reading the current thread's C ``errno`` slot.
+
+    Build helpers retry failed syscalls (e.g. non-blocking ``flock``) and
+    would otherwise leave ``EAGAIN`` behind for JIT-compiled code that
+    reads ``errno`` afterwards.  Returns None when the platform slot
+    cannot be reached.
+    """
+    try:
+        libc = ctypes.CDLL(None)
+        if sys.platform == 'darwin':
+            name = '__error'
+        elif sys.platform == 'win32':
+            name = '_errno'
+        else:
+            name = '__errno_location'
+        accessor = getattr(libc, name, None)
+        if accessor is None:
+            return None
+        accessor.restype = ctypes.POINTER(ctypes.c_int)
+        return accessor
+    except Exception:
+        return None
+
+
+@contextmanager
+def _preserve_c_errno():
+    """Restore the thread's C ``errno`` to its entry value on exit."""
+    accessor = _errno_slot_accessor()
+    if accessor is None:
+        yield
+        return
+    saved = accessor().contents.value
+    try:
+        yield
+    finally:
+        accessor().contents.value = saved
+
+
 # Platform-specific file locking
 if sys.platform == 'win32':
     import msvcrt
@@ -203,25 +243,29 @@ if sys.platform == 'win32':
             lock_dir = os.path.dirname(lockfile_path)
             if lock_dir and not os.path.exists(lock_dir):
                 os.makedirs(lock_dir, exist_ok=True)
-            
-            while True:
-                try:
-                    lockfile = open(lockfile_path, 'a+')
-                    msvcrt.locking(lockfile.fileno(), msvcrt.LK_NBLCK, 1)
-                    break
-                except (IOError, OSError):
-                    if lockfile:
-                        lockfile.close()
-                        lockfile = None
-                    
-                    if time.time() - start_time > timeout:
-                        raise TimeoutError(
-                            f"Failed to acquire lock on {lockfile_path} within {timeout}s"
-                        )
-                    
-                    wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
-                    time.sleep(wait_time)
-            
+
+            # Non-blocking locking failures leave their error in the
+            # thread's errno; JIT code called later observes it as a
+            # spurious error.  Keep the caller's errno intact.
+            with _preserve_c_errno():
+                while True:
+                    try:
+                        lockfile = open(lockfile_path, 'a+')
+                        msvcrt.locking(lockfile.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except (IOError, OSError):
+                        if lockfile:
+                            lockfile.close()
+                            lockfile = None
+
+                        if time.time() - start_time > timeout:
+                            raise TimeoutError(
+                                f"Failed to acquire lock on {lockfile_path} within {timeout}s"
+                            )
+
+                        wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
+                        time.sleep(wait_time)
+
             yield
             
         finally:
@@ -244,25 +288,29 @@ else:
             lock_dir = os.path.dirname(lockfile_path)
             if lock_dir and not os.path.exists(lock_dir):
                 os.makedirs(lock_dir, exist_ok=True)
-            
-            while True:
-                try:
-                    lockfile = open(lockfile_path, 'a')
-                    fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except (IOError, OSError):
-                    if lockfile:
-                        lockfile.close()
-                        lockfile = None
-                    
-                    if time.time() - start_time > timeout:
-                        raise TimeoutError(
-                            f"Failed to acquire lock on {lockfile_path} within {timeout}s"
-                        )
-                    
-                    wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
-                    time.sleep(wait_time)
-            
+
+            # flock(LOCK_NB) failures leave EAGAIN/EWOULDBLOCK in the
+            # thread's errno; JIT code called later observes it as a
+            # spurious error.  Keep the caller's errno intact.
+            with _preserve_c_errno():
+                while True:
+                    try:
+                        lockfile = open(lockfile_path, 'a')
+                        fcntl.flock(lockfile.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except (IOError, OSError):
+                        if lockfile:
+                            lockfile.close()
+                            lockfile = None
+
+                        if time.time() - start_time > timeout:
+                            raise TimeoutError(
+                                f"Failed to acquire lock on {lockfile_path} within {timeout}s"
+                            )
+
+                        wait_time = min(0.01 * (2 ** min((time.time() - start_time) / 0.1, 5)), 0.5)
+                        time.sleep(wait_time)
+
             yield
             
         finally:
@@ -528,6 +576,17 @@ def get_platform_link_flags(shared: bool = False, linker: str = 'gcc') -> List[s
 
 
 
+def _win32_dll_usable(output_file: str) -> bool:
+    """A win32 DLL is usable downstream only with its sidecar export
+    definition and import library in place."""
+    base = os.path.splitext(output_file)[0]
+    return (
+        os.path.exists(output_file)
+        and os.path.exists(base + '.exports.def')
+        and os.path.exists(base + '.lib')
+    )
+
+
 def _pin_win32_dll_implib(link_cmd: List[str], output_file: str) -> List[str]:
     """Pin the import library path of a win32 DLL link.
 
@@ -604,6 +663,39 @@ def _write_exports_def(def_file: str, dll_name: str, obj_files: List[str]) -> bo
 
 
 
+def _dlltool_cmd() -> Optional[List[str]]:
+    """Resolve a dlltool invocation (llvm-dlltool or zig's dlltool)."""
+    dlltool = _which_cached('llvm-dlltool')
+    if dlltool:
+        return [dlltool]
+    return _zig_tool_cmd('dlltool')
+
+
+def _run_dlltool_implib(def_file: str, dll_name: str, implib_path: str) -> bool:
+    """Build an import library from a `.def` file via dlltool.
+
+    Unlike lld's ``-implib`` output, a dlltool-generated library preserves
+    weak (weak_odr/linkonce_odr) export names: lld rewrites them to the
+    internal ``.weak.<name>.default.<owner>`` alias, which either breaks
+    downstream links with "undefined symbol" or imports a name the DLL
+    does not export (WinError 127 at load time).
+    """
+    dlltool_cmd = _dlltool_cmd()
+    if not dlltool_cmd:
+        return False
+
+    try:
+        cmd = dlltool_cmd + ['-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
+
+        subprocess.run(
+            cmd, check=True, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=30,
+        )
+        return os.path.exists(implib_path)
+    except Exception:
+        return False
+
+
 def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> bool:
     """Generate a stub import library (`.lib`) from an object file's exports.
 
@@ -627,30 +719,12 @@ def _generate_stub_implib(obj_file: str, dll_name: str, implib_path: str) -> boo
         if os.path.getmtime(implib_path) >= os.path.getmtime(obj_file):
             return True
 
-    # We need dlltool to create .lib (def generation is now pure Python)
-    dlltool_cmd = _which_cached('llvm-dlltool')
-    if dlltool_cmd:
-        dlltool_cmd = [dlltool_cmd]
-    else:
-        dlltool_cmd = _zig_tool_cmd('dlltool')
-    if not dlltool_cmd:
-        return False
-
     # Generate .def file using pure-Python COFF parsing (no subprocess)
     def_file = os.path.splitext(implib_path)[0] + '.exports.def'
     if not _write_exports_def(def_file, dll_name, [obj_file]):
         return False
 
-    try:
-        cmd = dlltool_cmd + ['-d', def_file, '-l', implib_path, '-m', 'i386:x86-64']
-
-        subprocess.run(
-            cmd, check=True, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=30,
-        )
-        return os.path.exists(implib_path)
-    except Exception:
-        return False
+    return _run_dlltool_implib(def_file, dll_name, implib_path)
 
 
 def build_link_command(
@@ -776,13 +850,15 @@ def try_link_with_linkers(
             # On Windows, force an explicit exports list via a `.def` file.
             # Passing the `.def` as an input file works with zig (windows-gnu)
             # and avoids MSVC-style `/DEF:` flags.
+            def_file = None
             if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
                 link_cmd = _pin_win32_dll_implib(link_cmd, output_file)
                 try:
                     out_idx = link_cmd.index('-o')
                     obj_candidates = [a for a in link_cmd[:out_idx] if a.lower().endswith(('.o', '.obj'))]
-                    def_file = os.path.splitext(os.path.abspath(output_file))[0] + '.exports.def'
-                    if _write_exports_def(def_file, os.path.basename(output_file), obj_candidates):
+                    candidate = os.path.splitext(os.path.abspath(output_file))[0] + '.exports.def'
+                    if _write_exports_def(candidate, os.path.basename(output_file), obj_candidates):
+                        def_file = candidate
                         if def_file not in link_cmd:
                             link_cmd.insert(out_idx, def_file)
                 except Exception:
@@ -799,6 +875,15 @@ def try_link_with_linkers(
                 timeout=180,
                 stdin=subprocess.DEVNULL,
             )
+            if def_file is not None:
+                # lld's -implib output rewrites weak exports to their
+                # internal .weak.<name>.default.<owner> alias, breaking
+                # downstream links; regenerate the import library with
+                # dlltool, which preserves the .def names.
+                implib = os.path.splitext(os.path.abspath(output_file))[0] + '.lib'
+                _run_dlltool_implib(
+                    def_file, os.path.basename(output_file), implib,
+                )
             return output_file
 
         except subprocess.TimeoutExpired:
@@ -872,9 +957,7 @@ def link_files(
             obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
             if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
                 if sys.platform == 'win32' and shared and output_file.lower().endswith('.dll'):
-                    exports_def = os.path.splitext(output_file)[0] + '.exports.def'
-                    implib = os.path.splitext(output_file)[0] + '.lib'
-                    if os.path.exists(exports_def) and os.path.exists(implib):
+                    if _win32_dll_usable(output_file):
                         return output_file
                 elif shared and shared_link_schema_stale(output_file):
                     # Output predates the current shared-link schema
@@ -891,15 +974,25 @@ def link_files(
         else:
             linkers = get_default_linkers()
 
-        result = try_link_with_linkers(
-            obj_files,
-            output_file,
-            shared=shared,
-            linkers=linkers,
-            link_objects=link_objects,
-            link_libraries=link_libraries,
-            extra_flags=extra_flags,
-        )
+        try:
+            result = try_link_with_linkers(
+                obj_files,
+                output_file,
+                shared=shared,
+                linkers=linkers,
+                link_objects=link_objects,
+                link_libraries=link_libraries,
+                extra_flags=extra_flags,
+            )
+        except RuntimeError:
+            if (sys.platform == 'win32' and shared
+                    and output_file.lower().endswith('.dll')
+                    and _win32_dll_usable(output_file)):
+                # Windows denies overwriting a DLL that another process
+                # holds loaded (parallel test runs).  The on-disk image is
+                # usable; adopt it instead of failing the build.
+                return output_file
+            raise
         if shared:
             write_link_schema_stamp(output_file)
         return result

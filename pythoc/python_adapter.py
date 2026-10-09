@@ -727,33 +727,37 @@ def _compile_adapter_library(
         build_artifact,
     )
     objects = []
-    steps = []
     for spec in specs:
         entry_specs = [spec]
         adapter_key = _adapter_object_path(output_path, entry_specs)
         adapter_group = _adapter_group_key(adapter_key)
         object_path = _adapter_group_object(adapter_group)
         objects.append(object_path)
-        steps.append(ArtifactStep(
-            id='compile-python-entry:{}'.format(
-                os.path.abspath(object_path)
-            ),
-            kind='compile_generated_entry',
+        # Registration is cheap Python work; the object is materialized by
+        # the single flush step below.  A per-entry flush here would run
+        # the global flush from concurrent build steps and can sweep a
+        # group mid-registration, leaving its object unwritten.
+        _write_and_compile(
+            entry_specs,
+            adapter_group,
+            init_symbol=None,
+            module_name=None,
+            flush=False,
+        )
+
+    def _flush_entries():
+        from .build.output_manager import flush_all_pending_outputs
+        flush_all_pending_outputs()
+
+    steps = [
+        ArtifactStep(
+            id='flush-python-entries:{}'.format(os.path.abspath(output_path)),
+            kind='flush_pending_outputs',
             phase=ArtifactPhase.PRE_LINK,
-            outputs=(object_path,),
-            run=lambda entry_specs=entry_specs, adapter_group=adapter_group: (
-                _write_and_compile(
-                    entry_specs,
-                    adapter_group,
-                    init_symbol=None,
-                    module_name=None,
-                )
-            ),
-            cache_check=(
-                lambda entry_specs=entry_specs, adapter_group=adapter_group:
-                _adapter_group_cache_hit(adapter_group, entry_specs)
-            ),
-        ))
+            outputs=tuple(objects),
+            run=_flush_entries,
+        ),
+    ]
     plan = ArtifactPlan(
         kind=ArtifactKind.SHARED_LIBRARY,
         link=LinkPlan(roots=(), obj_files=()),
@@ -766,13 +770,15 @@ def _compile_adapter_library(
     build_artifact(plan)
 
 
-def _write_and_compile(specs, group_key, init_symbol, module_name) -> str:
+def _write_and_compile(specs, group_key, init_symbol, module_name,
+                       flush=True) -> str:
     from .python_entry_bind import compile_adapter_object
     return compile_adapter_object(
         specs,
         group_key,
         init_symbol=init_symbol,
         module_name=module_name,
+        flush=flush,
     )
 
 
