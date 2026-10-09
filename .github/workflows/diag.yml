@@ -21,7 +21,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Probe errno across the resolve path
+      - name: Probe errno under strace
         env:
           PYTHONPATH: .
-        run: python .github/errno_probe.py
+        run: |
+          strace -f -tt -e trace=read,write,openat,fcntl,flock,futex,epoll_wait,epoll_ctl,newfstatat,statx,access,readlink,ioctl,getrandom,prlimit64,wait4,waitid,pipe2,dup2,close,mmap,mprotect,munmap,brk,clone python .github/errno_probe.py 2>&1 | grep -E "EAGAIN|\[probe\]" | tail -60

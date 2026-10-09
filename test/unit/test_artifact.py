@@ -1,5 +1,6 @@
 import ctypes
 import os
+import sys
 import tempfile
 import unittest
 
@@ -159,7 +160,11 @@ class TestArtifactPlan(unittest.TestCase):
             path="current-process",
             link=LinkPlan(roots=(), obj_files=()),
         )
-        loaded = LoadedArtifact(artifact=artifact, handle=ctypes.CDLL(None))
+        if sys.platform == 'win32':
+            handle = ctypes.CDLL('msvcrt.dll')
+        else:
+            handle = ctypes.CDLL(None)
+        loaded = LoadedArtifact(artifact=artifact, handle=handle)
 
         self.assertNotEqual(loaded.resolve("malloc"), 0)
 
