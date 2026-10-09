@@ -36,7 +36,6 @@ from pythoc.python_entry import (
     box_u64,
     box_value,
     box_wide,
-    errno_load,
     errno_store,
     export_item,
     field_item,
@@ -254,9 +253,6 @@ def _kind_flags(form):
 def _entry(slots_n, count, bind_names, tail):
     slots: array[ptr[void], slots_n]
     names: array[ptr[i8], slots_n]
-    # Snapshot the caller's errno before any adapter bookkeeping: the
-    # kernel must observe the same errno as with a direct C call.
-    saved_errno: i32 = errno_load()
     bind_names
     if bind_args(
         args,
@@ -286,16 +282,20 @@ def _tail(loads, linears, returned):
     returned
 
 
+# The kernel observes a clean errno: preserving the caller's errno would
+# leak CPython/glibc runtime noise into it (contended futex waits inside
+# the interpreter leave EAGAIN behind), so the entry zeroes errno right
+# before the call.  Values the kernel itself sets stay visible after it.
 @meta.quote
 def _returned(ret, call, box):
-    errno_store(saved_errno)
+    errno_store(i32(0))
     result: ret = call
     box
 
 
 @meta.quote
 def _void_returned(call):
-    errno_store(saved_errno)
+    errno_store(i32(0))
     call
     return none_ref()
 
