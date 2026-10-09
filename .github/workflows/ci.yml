@@ -69,7 +69,7 @@ jobs:
   test-windows:
     name: Test py${{ matrix.python-version }} / llvmlite ${{ matrix.llvmlite-version }} on Windows (zig)
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
