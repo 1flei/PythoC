@@ -26,7 +26,8 @@ def run_checks():
 
     out_dir = os.path.join('build', 'python_ext_check')
     os.makedirs(out_dir, exist_ok=True)
-    exe = os.path.join(out_dir, 'add_exe')
+    from pythoc.utils.link_utils import get_executable_extension
+    exe = os.path.join(out_dir, 'add_exe' + get_executable_extension())
     # Exercise the Python call path first: the callable runtime and the
     # development adapter groups now exist in the output manager, and the
     # executable link below must still contain only user objects.
@@ -49,12 +50,24 @@ def run_checks():
             raise SystemExit('executable plan links libpython: ' + lib)
 
     compile_to_executable(output_path=exe)
-    native_symbols = _symbols(exe)
-    if any(name.startswith('PyInit_') or name.startswith('pythoc_pyadapter_')
-           for name in native_symbols):
-        raise SystemExit('native executable contains a Python adapter symbol')
-    if 'add' not in native_symbols:
-        raise SystemExit('native executable is missing the kernel symbol')
+    if sys.platform == 'win32':
+        ran = subprocess.run([exe], capture_output=True)
+        if ran.returncode != 0:
+            raise SystemExit(
+                'native executable exited with ' + str(ran.returncode)
+            )
+    else:
+        native_symbols = _symbols(exe)
+        if any(
+            name.startswith('PyInit_')
+            or name.startswith('pythoc_pyadapter_')
+            for name in native_symbols
+        ):
+            raise SystemExit(
+                'native executable contains a Python adapter symbol'
+            )
+        if 'add' not in native_symbols:
+            raise SystemExit('native executable is missing the kernel symbol')
 
     compile_to_python_extension(
         add,

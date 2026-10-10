@@ -15,6 +15,8 @@ import json
 import os
 import sys
 import sysconfig
+import threading
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from .python_call import python_export_id
@@ -31,20 +33,106 @@ _INT_WIDTHS = {
 }
 _UNSUPPORTED = object()
 _KEEP_ALIVE = []
+_DEVELOPMENT_STATE = 'python_adapter'
+
+
+@dataclass
+class _DevelopmentAdapterState:
+    condition: threading.Condition = field(
+        default_factory=threading.Condition,
+        repr=False,
+    )
+    status: str = 'new'
+    owner: Optional[int] = None
+    error: Optional[BaseException] = None
+    entries: tuple = ()
+    specs_by_export: Dict[str, dict] = field(default_factory=dict)
+    adapter_addresses: Dict[str, int] = field(default_factory=dict)
+    kernel_addresses: Dict[str, int] = field(default_factory=dict)
+    adapter_path: Optional[str] = None
+    library: Any = None
+    kernel_library: Any = None
+
+
+@dataclass(frozen=True)
+class _BuiltDevelopmentAdapter:
+    entries: tuple
+    specs_by_export: Dict[str, dict]
+    adapter_addresses: Dict[str, int]
+    kernel_addresses: Dict[str, int]
+    adapter_path: str
+    library: Any
+    kernel_library: Any
 
 
 def bind_development_callable(wrapper) -> None:
     """Bind a first-call adapter without changing the kernel image."""
+    from .build.output_manager import get_output_manager
+
+    binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
+    if binding is None or binding.group_key is None:
+        raise RuntimeError('compiled callable has no compilation group')
+    manager = get_output_manager()
+    state = manager.get_group_runtime_state(
+        binding.group_key,
+        _DEVELOPMENT_STATE,
+    )
+    if state is not None and _wait_for_development_state(wrapper, state):
+        return
+
     spec = function_spec(wrapper)
     if spec is None:
         wrapper.bind_slow(_slow_implementation(wrapper))
         return
 
+    state = manager.get_or_create_group_runtime_state(
+        binding.group_key,
+        _DEVELOPMENT_STATE,
+        _DevelopmentAdapterState,
+    )
+    with state.condition:
+        while state.status == 'resolving':
+            if state.owner == threading.get_ident():
+                raise RuntimeError('re-entrant PythoC adapter group resolve')
+            state.condition.wait()
+        if state.status == 'ready':
+            _bind_ready_development_callable(wrapper, state)
+            return
+        if state.status == 'error':
+            raise state.error
+        state.status = 'resolving'
+        state.owner = threading.get_ident()
+
+    try:
+        built = _build_development_group(wrapper, spec)
+    except BaseException as error:
+        with state.condition:
+            state.status = 'error'
+            state.error = error
+            state.owner = None
+            state.condition.notify_all()
+        raise
+
+    with state.condition:
+        state.entries = built.entries
+        state.specs_by_export = built.specs_by_export
+        state.adapter_addresses = built.adapter_addresses
+        state.kernel_addresses = built.kernel_addresses
+        state.adapter_path = built.adapter_path
+        state.library = built.library
+        state.kernel_library = built.kernel_library
+        state.status = 'ready'
+        state.owner = None
+        state.condition.notify_all()
+        _bind_ready_development_callable(wrapper, state)
+
+
+def _build_development_group(wrapper, current_spec):
     from .native_executor import get_multi_so_executor
 
     executor = get_multi_so_executor()
     native = executor.execute_function(wrapper)
-    symbol = spec['symbol']
+    symbol = current_spec['symbol']
     kernel = getattr(native, '_pythoc_kernel_lib', None)
     if kernel is None:
         kernel = executor.loaded_libs.get(wrapper._binding.so_file)
@@ -52,16 +140,29 @@ def bind_development_callable(wrapper) -> None:
         raise RuntimeError(
             'PythoC kernel was not loaded for {}'.format(symbol)
         )
-    _publish_group_kernels(wrapper, kernel)
-    entries = _development_group_entries(wrapper, spec)
+    entries = _development_group_entries(wrapper, current_spec)
     specs = [entry_spec for _entry, entry_spec in entries]
     adapter_path = _development_adapter_path(wrapper, specs)
     library = _load_adapter_library(adapter_path)
     from .python_call import install_library
-    install_library(library, [wrapper])
-    wrapper.bind_adapter(_address_of(getattr(library, spec['adapter'])))
-    wrapper._pythoc_adapter_lib = library
-    wrapper._pythoc_kernel_lib = kernel
+    install_library(library, [entry for entry, _spec in entries])
+    adapter_addresses = {
+        spec['adapter']: _address_of(getattr(library, spec['adapter']))
+        for spec in specs
+    }
+    kernel_addresses = _publish_group_kernels(entries, kernel)
+    return _BuiltDevelopmentAdapter(
+        entries=tuple(entries),
+        specs_by_export={
+            spec['export_id']: spec
+            for _entry, spec in entries
+        },
+        adapter_addresses=adapter_addresses,
+        kernel_addresses=kernel_addresses,
+        adapter_path=adapter_path,
+        library=library,
+        kernel_library=kernel,
+    )
 
 
 def compile_python_extension(
@@ -141,7 +242,7 @@ def compile_python_extension(
             cache_check=lambda: _adapter_group_cache_hit(
                 adapter_group,
                 specs,
-            ),
+            ) and _python_entry_cache_hit(),
         ),
     ]
     if version_script is not None:
@@ -639,6 +740,32 @@ _ADAPTER_SO = {}
 _ADAPTER_LIB = {}
 
 
+def _wait_for_development_state(wrapper, state) -> bool:
+    with state.condition:
+        while state.status == 'resolving':
+            if state.owner == threading.get_ident():
+                raise RuntimeError('re-entrant PythoC adapter group resolve')
+            state.condition.wait()
+        if state.status == 'error':
+            raise state.error
+        if state.status != 'ready':
+            return False
+        _bind_ready_development_callable(wrapper, state)
+        return True
+
+
+def _bind_ready_development_callable(wrapper, state) -> None:
+    export_id = python_export_id(wrapper)
+    spec = state.specs_by_export.get(export_id)
+    if spec is None:
+        wrapper.bind_slow(_slow_implementation(wrapper))
+        return
+    wrapper._pythoc_kernel = state.kernel_addresses[spec['symbol']]
+    wrapper.bind_adapter(state.adapter_addresses[spec['adapter']])
+    wrapper._pythoc_adapter_lib = state.library
+    wrapper._pythoc_kernel_lib = state.kernel_library
+
+
 def _development_group_entries(wrapper, current_spec):
     from .build.output_manager import get_output_manager
 
@@ -726,39 +853,34 @@ def _compile_adapter_library(
         LinkPlan,
         build_artifact,
     )
-    objects = []
-    steps = []
-    for spec in specs:
-        entry_specs = [spec]
-        adapter_key = _adapter_object_path(output_path, entry_specs)
-        adapter_group = _adapter_group_key(adapter_key)
-        object_path = _adapter_group_object(adapter_group)
-        objects.append(object_path)
-        steps.append(ArtifactStep(
+    adapter_key = _adapter_object_path(output_path, specs)
+    adapter_group = _adapter_group_key(adapter_key)
+    object_path = _adapter_group_object(adapter_group)
+    steps = [
+        ArtifactStep(
             id='compile-python-entry:{}'.format(
                 os.path.abspath(object_path)
             ),
             kind='compile_generated_entry',
             phase=ArtifactPhase.PRE_LINK,
             outputs=(object_path,),
-            run=lambda entry_specs=entry_specs, adapter_group=adapter_group: (
-                _write_and_compile(
-                    entry_specs,
-                    adapter_group,
-                    init_symbol=None,
-                    module_name=None,
-                )
+            run=lambda: _write_and_compile(
+                specs,
+                adapter_group,
+                init_symbol=None,
+                module_name=None,
             ),
-            cache_check=(
-                lambda entry_specs=entry_specs, adapter_group=adapter_group:
-                _adapter_group_cache_hit(adapter_group, entry_specs)
-            ),
-        ))
+            cache_check=lambda: _adapter_group_cache_hit(
+                adapter_group,
+                specs,
+            ) and _python_entry_cache_hit(),
+        ),
+    ]
     plan = ArtifactPlan(
         kind=ArtifactKind.SHARED_LIBRARY,
         link=LinkPlan(roots=(), obj_files=()),
         output_path=output_path,
-        prefix_objects=tuple(objects) + (_entry_object_path(),),
+        prefix_objects=(object_path, _entry_object_path()),
         link_objects=tuple(link_objects or ()),
         extra_link_flags=tuple(link_libraries or ()),
         steps=tuple(steps),
@@ -841,10 +963,40 @@ def _adapter_group_object(group_key):
 
 
 def _entry_object_path():
-    source_file = os.path.realpath(
-        os.path.join(os.path.dirname(__file__), 'python_entry.py')
+    group_key = _python_entry_group_key()
+    source_file = group_key[0]
+    from .artifact import ArtifactRole
+    from .build.output_manager import get_output_manager
+
+    manager = get_output_manager()
+    for registered_key, group in manager.get_all_groups().items():
+        if (
+            os.path.realpath(group.get('source_file') or '')
+            == os.path.realpath(source_file)
+        ):
+            manager.set_group_artifact_role(
+                registered_key,
+                ArtifactRole.PYTHON_RUNTIME,
+            )
+    return _adapter_group_object(group_key)
+
+
+def _python_entry_group_key():
+    import importlib.util
+
+    module_spec = importlib.util.find_spec('pythoc.python_entry')
+    if module_spec is None or module_spec.origin is None:
+        raise RuntimeError('cannot locate PythoC Python entry runtime')
+    source_file = os.path.abspath(module_spec.origin)
+    return (source_file, None, None, None)
+
+
+def _python_entry_cache_hit():
+    from .build.output_manager import get_output_manager
+
+    return get_output_manager().group_object_cache_hit(
+        _python_entry_group_key(),
     )
-    return _adapter_group_object((source_file, None, None, None))
 
 
 def _adapter_group_cache_hit(group_key, specs):
@@ -940,27 +1092,17 @@ def ctypes_function_address(library, name: str) -> int:
     return _address_of(func)
 
 
-def _publish_group_kernels(wrapper, kernel_lib) -> None:
-    """Stamp each sibling kernel address so function-pointer args stay native."""
-    from .build.output_manager import get_output_manager
-
-    binding = getattr(wrapper, '_binding', None)
-    items = []
-    if binding is not None:
-        items.extend(get_output_manager().get_group_wrappers(binding.group_key))
-    if wrapper not in items:
-        items.append(wrapper)
-    for item in items:
-        state = getattr(item, '_binding', getattr(item, '_state', None))
-        if state is None:
-            continue
-        symbol = state.actual_func_name or state.original_name
-        if not symbol:
-            continue
-        try:
-            item._pythoc_kernel = ctypes_function_address(kernel_lib, symbol)
-        except AttributeError:
-            continue
+def _publish_group_kernels(entries, kernel_lib) -> Dict[str, int]:
+    """Resolve each sibling kernel exactly once for this process."""
+    addresses = {}
+    for item, spec in entries:
+        symbol = spec['symbol']
+        address = addresses.get(symbol)
+        if address is None:
+            address = ctypes_function_address(kernel_lib, symbol)
+            addresses[symbol] = address
+        item._pythoc_kernel = address
+    return addresses
 
 
 def _slow_implementation(wrapper):

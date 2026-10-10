@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
 
-from .model import LinkScope
+from .model import ArtifactRole, LinkScope
 
 
 @dataclass(frozen=True)
@@ -140,10 +140,12 @@ class LinkPlan:
             flush_all_pending_outputs()
         from ..build.output_manager import get_output_manager
 
+        groups = get_output_manager().get_all_groups()
         roots = tuple(
             key
-            for key in get_output_manager().get_all_groups()
-            if not is_internal_group(key)
+            for key, group in groups.items()
+            if group.get("artifact_role", ArtifactRole.NATIVE)
+            is ArtifactRole.NATIVE
         )
         if not roots:
             raise RuntimeError(
@@ -157,22 +159,15 @@ class LinkPlan:
 
 
 def is_internal_group(group_key) -> bool:
-    """Groups compiled from pythoc's own package sources.
+    """Return whether a registered group has a runtime-only artifact role."""
+    from ..build.output_manager import get_output_manager
 
-    The callable runtime (callable_type.py) and generated Python-adapter
-    entries (python_entry_bind.py) are process implementation details and
-    must never leak into a user program's link: their CPython symbols are
-    only resolvable inside a Python process, and their adapter symbols do
-    not belong to executable/static/dynamic-library targets.
-    """
-    source = group_key[0] if group_key else ""
-    if not source:
-        return False
-    pythoc_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    try:
-        return os.path.realpath(source).startswith(pythoc_dir + os.sep)
-    except OSError:
-        return False
+    group = get_output_manager().get_all_groups().get(tuple(group_key))
+    return bool(
+        group
+        and group.get("artifact_role", ArtifactRole.NATIVE)
+        is not ArtifactRole.NATIVE
+    )
 
 
 def _normalize_group_key(group_key) -> Tuple:

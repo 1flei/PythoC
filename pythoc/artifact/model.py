@@ -20,6 +20,12 @@ class ArtifactKind(str, Enum):
     PYTHON_EXTENSION = "python_extension"
 
 
+class ArtifactRole(str, Enum):
+    NATIVE = "native"
+    PYTHON_RUNTIME = "python_runtime"
+    PYTHON_ADAPTER = "python_adapter"
+
+
 class LinkScope(str, Enum):
     TRANSITIVE = "transitive"
     OWN_GROUP = "own_group"

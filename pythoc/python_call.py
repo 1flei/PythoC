@@ -420,9 +420,21 @@ def _build_callable_extension() -> bool:
     _building_runtime = True
     try:
         from . import callable_type
-        from .build.output_manager import flush_all_pending_outputs
+        from .build.output_manager import (
+            flush_all_pending_outputs,
+            get_output_manager,
+        )
+        from .artifact import ArtifactRole
         from .logger import logger
 
+        manager = get_output_manager()
+        runtime_source = os.path.realpath(callable_type.__file__)
+        for group_key, group in manager.get_all_groups().items():
+            if os.path.realpath(group.get('source_file') or '') == runtime_source:
+                manager.set_group_artifact_role(
+                    group_key,
+                    ArtifactRole.PYTHON_RUNTIME,
+                )
         logger.debug('callable runtime layout: {}'.format(callable_type.LAYOUT))
         flush_all_pending_outputs()
         obj = _runtime_object(callable_type.__file__)

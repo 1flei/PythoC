@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 from pythoc import bool, compile, f64, i32, i64
-from pythoc import python_call
+from pythoc import python_adapter, python_call
 
 
 @compile
@@ -57,6 +57,16 @@ def failed_add(a: i64, b: i64) -> i64:
 @compile
 def reentrant_add(a: i64, b: i64) -> i64:
     return a + b
+
+
+@compile(suffix='adapter_state')
+def state_first(a: i64) -> i64:
+    return a + 1
+
+
+@compile(suffix='adapter_state')
+def state_second(a: i64) -> i64:
+    return a + 2
 
 
 def _load_callee():
@@ -135,6 +145,37 @@ class TestPythonVectorcall(unittest.TestCase):
         self.assertFalse(second.is_alive())
         self.assertEqual(errors, [])
         self.assertEqual(results, [42, 42])
+
+    def test_sibling_first_call_reuses_group_runtime_state(self):
+        self.assertEqual(state_first(40), 41)
+        with mock.patch.object(
+            python_adapter,
+            'function_spec',
+            wraps=python_adapter.function_spec,
+        ) as function_spec:
+            self.assertEqual(state_second(40), 42)
+        function_spec.assert_not_called()
+
+    def test_entry_group_preserves_import_origin(self):
+        origin = os.path.abspath(os.path.join(
+            'build',
+            'linked-package',
+            'pythoc',
+            'python_entry.py',
+        ))
+        module_spec = mock.Mock(origin=origin)
+        with mock.patch(
+            'importlib.util.find_spec',
+            return_value=module_spec,
+        ):
+            group_key = python_adapter._python_entry_group_key()
+            object_path = python_adapter._entry_object_path()
+        self.assertEqual(group_key, (origin, None, None, None))
+        from pythoc.build.deps import get_dependency_tracker
+        self.assertEqual(
+            object_path,
+            get_dependency_tracker().derive_obj_file_from_group_key(group_key),
+        )
 
     def test_resolve_failure_is_preserved(self):
         error = LookupError('resolve marker')

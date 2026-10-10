@@ -6,6 +6,7 @@ python_entry.
 """
 
 import ast
+import os
 
 from pythoc import array, f64, i8, i32, i64, linear, meta, ptr, u64, void
 from pythoc.builtin_entities.func import func as func_type
@@ -36,6 +37,7 @@ from pythoc.python_entry import (
     box_u64,
     box_value,
     box_wide,
+    errno_store,
     export_item,
     field_item,
     fill_bytes,
@@ -283,12 +285,14 @@ def _tail(loads, linears, returned):
 
 @meta.quote
 def _returned(ret, call, box):
+    errno_store(i32(0))
     result: ret = call
     box
 
 
 @meta.quote
 def _void_returned(call):
+    errno_store(i32(0))
     call
     return none_ref()
 
@@ -1331,7 +1335,22 @@ def compile_adapter_object(specs, group_key, init_symbol, module_name):
         )
 
     from .build.output_manager import flush_all_pending_outputs
+    from .build.output_manager import get_output_manager
     from .build.deps import get_dependency_tracker
+    from .artifact import ArtifactRole
 
+    manager = get_output_manager()
+    manager.set_group_artifact_role(
+        group_key,
+        ArtifactRole.PYTHON_ADAPTER,
+    )
+    from . import python_entry
+    runtime_source = os.path.realpath(python_entry.__file__)
+    for runtime_key, group in manager.get_all_groups().items():
+        if os.path.realpath(group.get('source_file') or '') == runtime_source:
+            manager.set_group_artifact_role(
+                runtime_key,
+                ArtifactRole.PYTHON_RUNTIME,
+            )
     flush_all_pending_outputs()
     return get_dependency_tracker().derive_obj_file_from_group_key(group_key)
