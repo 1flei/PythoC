@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791561478314,
+  "lastUpdate": 1791624353500,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3208,6 +3208,45 @@ window.BENCHMARK_DATA = {
             "name": "nsieve",
             "value": 1.03,
             "unit": "PC/C ratio"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "3ab123a9e904914f5b9846f4bb84cbb69b8818b0",
+          "message": "Optimize cold compile and address CI",
+          "timestamp": "2026-10-10T17:20:47+08:00",
+          "tree_id": "600c831f66a9a7f8d2b28b95b50c34ae8679f258",
+          "url": "https://github.com/1flei/PythoC/commit/3ab123a9e904914f5b9846f4bb84cbb69b8818b0"
+        },
+        "date": 1791624352535,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.7,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 0.786,
+            "unit": "seconds/test"
           }
         ]
       }
