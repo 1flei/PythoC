@@ -467,9 +467,10 @@ def compile_artifact(
 ):
     """Compile all functions in a MetaArtifact.
 
-    The primary function is compiled first, then helpers. All share the
-    same compilation group. Each compiled wrapper is progressively added
-    to user_globals so later functions can reference earlier ones.
+    Helpers are compiled in declaration order, then the primary function.
+    All share one compilation group. Each wrapper is progressively added
+    to ``user_globals``, so helpers form a dependency chain and the primary
+    can reference every helper.
 
     Args:
         art: A MetaArtifact instance.
@@ -500,19 +501,15 @@ def compile_artifact(
         finally:
             del frame
 
-    results = []
-
-    # Collect all functions to compile: primary + helpers
-    all_funcs = []
+    # Compile helpers before their consumer.
+    all_funcs = list(art.helpers)
     primary = art.primary
     if isinstance(primary, GeneratedFunction):
         all_funcs.append(primary)
     elif isinstance(primary, ast.FunctionDef):
         all_funcs.append(primary)
 
-    for helper in art.helpers:
-        all_funcs.append(helper)
-
+    primary_wrapper = None
     for fn in all_funcs:
         if isinstance(fn, GeneratedFunction):
             w = compile_generated(
@@ -534,7 +531,7 @@ def compile_artifact(
             raise TypeError(
                 "Unsupported artifact member type: {}".format(type(fn).__name__)
             )
-        results.append(w)
+        if fn is primary:
+            primary_wrapper = w
 
-    # Return primary wrapper (first in results)
-    return results[0] if results else None
+    return primary_wrapper

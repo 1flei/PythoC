@@ -382,8 +382,6 @@ class OutputManager:
         """Check whether cached object metadata covers all currently pending defs."""
         pending_symbols = self._get_pending_symbols(group_key)
         has_ast_hashes = bool(group.get('_ast_content_hashes'))
-        if not pending_symbols and not has_ast_hashes:
-            return True
 
         if pending_symbols:
             compiled_symbols = self._get_cached_compiled_symbols(group_key, group)
@@ -427,20 +425,36 @@ class OutputManager:
                     )
                     return False
 
-        # Changing debug_info settings must invalidate cached objects, otherwise
-        # a previously-built object without DWARF would be reused after enabling
-        # PC_DEBUG_INFO (and vice versa).
+        # Object-emission settings are part of cache identity. Reusing an
+        # object emitted for another CPU can be incorrect even when its AST
+        # and source timestamp are unchanged.
         obj_file = group.get('obj_file')
         if obj_file:
             from .deps import get_dependency_tracker
             from ..config import config
+            from ..compiler import target_machine_identity
             dep_tracker = get_dependency_tracker()
             cached_deps = dep_tracker.load_deps(obj_file)
-            if cached_deps and cached_deps.debug_info != bool(config.debug_info):
+            if cached_deps is None:
+                return False
+            if cached_deps.debug_info != bool(config.debug_info):
                 from ..logger import logger
                 logger.debug(
                     f"Cache miss for {group_key}: debug_info changed "
                     f"({cached_deps.debug_info} -> {config.debug_info})"
+                )
+                return False
+            target_cpu, target_features = target_machine_identity()
+            if (
+                cached_deps.target_cpu != target_cpu
+                or cached_deps.target_features != target_features
+            ):
+                from ..logger import logger
+                logger.debug(
+                    f"Cache miss for {group_key}: target changed "
+                    f"(({cached_deps.target_cpu}, "
+                    f"{cached_deps.target_features}) -> "
+                    f"({target_cpu}, {target_features}))"
                 )
                 return False
 
@@ -1495,10 +1509,14 @@ class OutputManager:
                     combined.encode('utf-8')
                 ).hexdigest()[:16]
 
-            # Record whether debug info was enabled for this object, so that
-            # toggling PC_DEBUG_INFO invalidates the cache.
+            # Persist object-emission settings that affect cache safety.
             from ..config import config
+            from ..compiler import target_machine_identity
             group_deps.debug_info = bool(config.debug_info)
+            (
+                group_deps.target_cpu,
+                group_deps.target_features,
+            ) = target_machine_identity()
 
             # Save to file
             dep_tracker.save_deps(group_key, obj_file)

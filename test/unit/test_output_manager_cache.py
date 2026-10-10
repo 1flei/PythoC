@@ -36,9 +36,15 @@ class TestCachedObjectCoversPendingSymbols(unittest.TestCase):
         self.tracker = get_dependency_tracker()
 
     def _save_cached_deps(self, hashes, symbols=('f',)):
+        from pythoc.compiler import target_machine_identity
+
         group_deps = self.tracker.get_or_create_group_deps(self.group_key)
         group_deps.ast_content_hash = _combined_hash(hashes)
         group_deps.compiled_symbols = sorted(symbols)
+        (
+            group_deps.target_cpu,
+            group_deps.target_features,
+        ) = target_machine_identity()
         self.tracker.save_deps(self.group_key, self.obj_file)
 
     def _group(self, hashes):
@@ -48,9 +54,9 @@ class TestCachedObjectCoversPendingSymbols(unittest.TestCase):
             '_ast_content_hashes': list(hashes),
         }
 
-    def test_no_pending_no_hashes_is_covered(self):
+    def test_object_without_dependency_identity_is_not_covered(self):
         group = self._group([])
-        self.assertTrue(
+        self.assertFalse(
             self.om._cached_object_covers_pending_symbols(self.group_key, group)
         )
 
@@ -77,6 +83,16 @@ class TestCachedObjectCoversPendingSymbols(unittest.TestCase):
         group = self._group(['aaa'])
         self.assertFalse(
             self.om._cached_object_covers_pending_symbols(self.group_key, group)
+        )
+
+    def test_changed_target_is_not_covered(self):
+        self._save_cached_deps(['aaa'])
+        group_deps = self.tracker.get_or_create_group_deps(self.group_key)
+        group_deps.target_cpu = 'different-cpu'
+        self.tracker.save_deps(self.group_key, self.obj_file)
+        self.assertFalse(
+            self.om._cached_object_covers_pending_symbols(
+                self.group_key, self._group(['aaa']))
         )
 
 

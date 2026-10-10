@@ -190,6 +190,18 @@ _register(
     'Sampled when each compile group is flushed.',
 )
 _register(
+    'target_cpu', 'PC_TARGET_CPU', 'generic', _to_str,
+    'LLVM target CPU for object emission. "native" and "host" use the '
+    'host CPU; "generic" preserves portable code generation.',
+    'Sampled whenever a target machine is created.',
+)
+_register(
+    'target_features', 'PC_TARGET_FEATURES', 'generic', _to_str,
+    'LLVM target feature string. "native" and "host" use host features; '
+    '"generic" disables target-specific features.',
+    'Sampled whenever a target machine is created.',
+)
+_register(
     'debug_info', 'PC_DEBUG_INFO', False, _to_bool,
     'Emit DWARF debug info (line tables for functions/source lines) into '
     'object files and linked binaries.',

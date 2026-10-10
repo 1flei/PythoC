@@ -141,6 +141,11 @@ def PyObject_GetAttrString(o: ptr[void], name: ptr[i8]) -> ptr[void]:
 
 
 @extern(lib='')
+def PyObject_CallNoArgs(callable_obj: ptr[void]) -> ptr[void]:
+    pass
+
+
+@extern(lib='')
 def PyUnicode_CompareWithASCIIString(left: ptr[void], right: ptr[i8]) -> i32:
     pass
 

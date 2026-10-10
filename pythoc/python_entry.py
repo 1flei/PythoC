@@ -28,6 +28,7 @@ from pythoc.cpy_api import (
     PyLong_FromLongLong,
     PyLong_FromUnsignedLongLong,
     PyModule_Create2,
+    PyObject_CallNoArgs,
     PyObject_GetAttrString,
     PyTuple_GetItem,
     PyTuple_New,
@@ -404,6 +405,19 @@ def take_ptr(obj: ptr[void]) -> i64:
         return i64(PyBytes_AsString(inner))
     if kind == bytearray_id():
         return i64(PyByteArray_AsString(inner))
+    pointer_method: ptr[void] = PyObject_GetAttrString(
+        inner, "_pythoc_pointer")
+    if i64(pointer_method) != i64(0):
+        pointer_value: ptr[void] = PyObject_CallNoArgs(pointer_method)
+        release(pointer_method)
+        if i64(pointer_value) == i64(0):
+            return i64(0)
+        address: u64 = PyLong_AsUnsignedLongLong(pointer_value)
+        release(pointer_value)
+        return i64(address)
+    if i64(PyErr_Occurred()) != i64(PyExc_AttributeError):
+        return i64(0)
+    PyErr_Clear()
     if kind == i64(PyRuntime.callable_type):
         kern: ptr[void] = PyObject_GetAttrString(inner, "_pythoc_kernel")
         if i64(kern) == i64(0):

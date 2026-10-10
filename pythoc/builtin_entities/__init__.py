@@ -62,6 +62,20 @@ from .intrinsics import va_start, va_arg, va_end
 # Scoped goto/label (user-facing API)
 from .intrinsics import label, goto, goto_begin, goto_end
 
+# Fixed-width CPU SIMD registers
+from .simd import (
+    simd,
+    simd_splat,
+    simd_load,
+    simd_store,
+    simd_fma,
+    simd_reduce_add,
+    simd_reduce_max,
+    simd_bf16_dot,
+    simd_f32_to_bf16,
+    simd_bf16_dot_packed,
+)
+
 # Inline assembly intrinsic
 from .llvm_asm import llvm_asm
 
@@ -201,6 +215,18 @@ __all__ = [
     'popcount',
     'ctlz',
     'cttz',
+
+    # Fixed-width CPU SIMD registers
+    'simd',
+    'simd_splat',
+    'simd_load',
+    'simd_store',
+    'simd_fma',
+    'simd_reduce_add',
+    'simd_reduce_max',
+    'simd_bf16_dot',
+    'simd_f32_to_bf16',
+    'simd_bf16_dot_packed',
     
     # Python type wrapper
     'PythonType',

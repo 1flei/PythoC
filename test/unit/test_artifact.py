@@ -40,6 +40,18 @@ class _DependencyTracker:
 
 
 class TestLinkPlan(unittest.TestCase):
+    def test_group_deps_round_trip_target_identity(self):
+        deps = GroupDeps(
+            target_cpu='host-cpu',
+            target_features='+feature-a,-feature-b',
+        )
+        restored = GroupDeps.from_dict(deps.to_dict())
+        self.assertEqual(restored.target_cpu, 'host-cpu')
+        self.assertEqual(
+            restored.target_features,
+            '+feature-a,-feature-b',
+        )
+
     def test_own_group_and_transitive_scopes_are_distinct(self):
         with tempfile.TemporaryDirectory() as directory:
             root_obj = self._touch(directory, "root.o")

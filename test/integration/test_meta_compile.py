@@ -154,7 +154,43 @@ def make_doubler():
 gen_double = make_doubler()
 meta_double = meta.compile_generated(gen_double, user_globals=globals())
 
-# --- Test 9: cross-call ---
+# --- Test 9: artifact helper ordering ---
+
+artifact_helper = meta.func(
+    name="meta_artifact_helper",
+    params=[("x", i32)],
+    return_type=i32,
+    body=[
+        ast.Return(value=ast.BinOp(
+            left=ast.Name(id='x', ctx=ast.Load()),
+            op=ast.Add(),
+            right=ast.Constant(value=1),
+        ))
+    ],
+)
+artifact_primary = meta.func(
+    name="meta_artifact_primary",
+    params=[("x", i32)],
+    return_type=i32,
+    body=[
+        ast.Return(value=ast.BinOp(
+            left=ast.Call(
+                func=ast.Name(id='meta_artifact_helper', ctx=ast.Load()),
+                args=[ast.Name(id='x', ctx=ast.Load())],
+                keywords=[],
+            ),
+            op=ast.Mult(),
+            right=ast.Constant(value=2),
+        ))
+    ],
+)
+meta_artifact_primary = meta.compile_artifact(
+    meta.artifact(artifact_primary, helpers=(artifact_helper,)),
+    user_globals=globals(),
+    suffix="helper_order",
+)
+
+# --- Test 10: cross-call ---
 
 @compile
 def base_add(a: i32, b: i32) -> i32:
@@ -315,6 +351,12 @@ def test_meta_func_builder():
     print("OK test_meta_func_builder passed")
 
 
+def test_compile_artifact_helpers_precede_primary():
+    """Artifact helpers must be available while compiling the primary."""
+    assert meta_artifact_primary(4) == 10
+    print("OK test_compile_artifact_helpers_precede_primary passed")
+
+
 def test_cross_call():
     """Test meta-generated function calling a @compile function"""
     assert meta_cross(5) == 10
@@ -370,6 +412,7 @@ if __name__ == '__main__':
     test_quote_expr_scalar()
     test_quote_func_compile()
     test_meta_func_builder()
+    test_compile_artifact_helpers_precede_primary()
     test_cross_call()
     test_quote_func_type_expr()
     test_compile_factory_basic()

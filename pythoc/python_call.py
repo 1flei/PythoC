@@ -127,6 +127,8 @@ class _DeferredCallable:
             return getattr(native, name)
         if name == 'is_fast_bound':
             return lambda: False
+        if name == '_pythoc_pointer':
+            return getattr(self._bootstrap(), name)
         raise AttributeError(name)
 
 
@@ -184,10 +186,16 @@ def _native_callable(extension, func):
             raise error
         raise RuntimeError('PythoC callable resolve failed')
 
+    def _pythoc_pointer(bound=wrapper):
+        if not bound.is_fast_bound():
+            resolve_compiled_callable(bound)
+        return int(bound._pythoc_kernel)
+
     wrapper._pythoc_resolve_owner = None
     wrapper._pythoc_resolve = _pythoc_resolve
     wrapper._pythoc_wait = _pythoc_wait
     wrapper._pythoc_raise_error = _pythoc_raise_error
+    wrapper._pythoc_pointer = _pythoc_pointer
     return wrapper
 
 

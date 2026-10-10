@@ -16,6 +16,7 @@ class TestConfigSchema(unittest.TestCase):
             'log_level', 'log_modules', 'raise_on_error',
             'debug_ast', 'debug_ast_format', 'debug_ast_diff',
             'save_ir', 'save_unopt_ir', 'opt_level', 'debug_info',
+            'target_cpu', 'target_features',
             'build_workers', 'object_build_workers',
             'fail_on_build_time_queue',
             'cimport_backend',
@@ -70,6 +71,25 @@ class TestEnvFallback(unittest.TestCase):
         with patch.dict(os.environ, {'PC_LOG_MODULES': 'build,-build.cache'}):
             config.reset('log_modules')
             self.assertEqual(config.log_modules, 'build,-build.cache')
+
+    def test_target_defaults_are_portable(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('PC_TARGET_CPU', None)
+            os.environ.pop('PC_TARGET_FEATURES', None)
+            config.reset('target_cpu')
+            config.reset('target_features')
+            self.assertEqual(config.target_cpu, 'generic')
+            self.assertEqual(config.target_features, 'generic')
+
+    def test_target_environment_passthrough(self):
+        with patch.dict(os.environ, {
+            'PC_TARGET_CPU': 'native',
+            'PC_TARGET_FEATURES': '+avx2',
+        }):
+            config.reset('target_cpu')
+            config.reset('target_features')
+            self.assertEqual(config.target_cpu, 'native')
+            self.assertEqual(config.target_features, '+avx2')
 
     def test_empty_env_yields_default(self):
         os.environ.pop('PC_SAVE_IR', None)

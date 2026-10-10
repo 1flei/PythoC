@@ -241,7 +241,12 @@ def _get_result_type(callee_ast):
     return None
 
 
-def _build_loop_var_declarations(loop_var, return_type_annotation, call_site):
+def _build_loop_var_declarations(
+    loop_var,
+    return_type_annotation,
+    call_site,
+    visible_names=frozenset(),
+):
     """Build loop-variable declaration AST nodes for yield inlining.
 
     For simple Name: creates single AnnAssign.
@@ -257,7 +262,7 @@ def _build_loop_var_declarations(loop_var, return_type_annotation, call_site):
     """
     decls = []
 
-    if isinstance(loop_var, ast.Name):
+    if isinstance(loop_var, ast.Name) and loop_var.id not in visible_names:
         decl = ast.AnnAssign(
             target=ast.Name(id=loop_var.id, ctx=ast.Store()),
             annotation=copy.deepcopy(return_type_annotation),
@@ -268,7 +273,7 @@ def _build_loop_var_declarations(loop_var, return_type_annotation, call_site):
         decls.append(decl)
     elif isinstance(loop_var, ast.Tuple):
         for i, elt in enumerate(loop_var.elts):
-            if isinstance(elt, ast.Name):
+            if isinstance(elt, ast.Name) and elt.id not in visible_names:
                 element_type = _extract_tuple_element_type(
                     return_type_annotation, i)
                 decl = ast.AnnAssign(
@@ -560,6 +565,7 @@ def expand_inline(request):
                 exit_rule.loop_var,
                 exit_rule.return_type_annotation,
                 request.call_site,
+                request.caller_context.available_vars,
             )
     has_decls = bool(decl_stmts)
 

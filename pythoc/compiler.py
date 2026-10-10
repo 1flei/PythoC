@@ -92,9 +92,45 @@ binding.initialize_native_asmparser()
 # Detect pass manager API: llvmlite <0.45 uses legacy PM, >=0.45 uses new PM.
 _USE_NEW_PM = not hasattr(binding, 'create_function_pass_manager')
 
-# One TargetMachine per process/triple: layout is a function of the
-# target, not of the individual LLVM module.
+# Target machines are shared by target identity, not by compilation group.
 _target_machine_cache = {}
+
+
+def _resolve_target_cpu(value=None):
+    cpu = config.target_cpu if value is None else value
+    if cpu in ("native", "host"):
+        return binding.get_host_cpu_name()
+    if cpu in (None, "", "generic"):
+        return ""
+    return cpu
+
+
+def _resolve_target_features(value=None):
+    features = config.target_features if value is None else value
+    if features in ("native", "host"):
+        return binding.get_host_cpu_features().flatten()
+    if features in (None, "", "generic"):
+        return ""
+    return features
+
+
+def target_machine_identity():
+    """Return the resolved CPU and feature string used for object emission."""
+    return _resolve_target_cpu(), _resolve_target_features()
+
+
+def _create_target_machine(target, **kwargs):
+    cpu, features = target_machine_identity()
+    return target.create_target_machine(
+        cpu=cpu,
+        features=features,
+        **kwargs,
+    )
+
+
+def _target_machine_cache_key(triple):
+    cpu, features = target_machine_identity()
+    return triple, cpu, features
 
 
 @dataclass
@@ -139,11 +175,12 @@ class LLVMCompiler:
             triple = triple.replace('-windows-msvc', '-windows-gnu')
         self.module.triple = triple
         # Set data layout for correct struct size calculation
-        target_machine = _target_machine_cache.get(triple)
+        cache_key = _target_machine_cache_key(triple)
+        target_machine = _target_machine_cache.get(cache_key)
         if target_machine is None:
             target = binding.Target.from_triple(triple)
-            target_machine = target.create_target_machine()
-            _target_machine_cache[triple] = target_machine
+            target_machine = _create_target_machine(target)
+            _target_machine_cache[cache_key] = target_machine
         self.module.data_layout = target_machine.target_data
         return self.module
     
@@ -849,7 +886,7 @@ class LLVMCompiler:
     def _make_pass_builder(llvm_module):
         """Create a PassBuilder for the new pass manager API."""
         target = binding.Target.from_triple(llvm_module.triple)
-        tm = target.create_target_machine()
+        tm = _create_target_machine(target)
         pto = binding.create_pipeline_tuning_options()
         return binding.create_pass_builder(tm, pto)
 
@@ -932,7 +969,8 @@ class LLVMCompiler:
         # This is critical for shared libraries to support lazy symbol resolution
         # and circular dependencies between .so files
         target = binding.Target.from_triple(self.module.triple)
-        target_machine = target.create_target_machine(reloc='pic', codemodel='default')
+        target_machine = _create_target_machine(
+            target, reloc='pic', codemodel='default')
         
         # Compile to object code
         with open(filename, 'wb') as f:

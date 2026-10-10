@@ -27,6 +27,9 @@ from .builtin_entities import (
     atomic_fetch_and, atomic_fetch_or, atomic_exchange,
     inf, inff, nan, nanf,
     bswap, popcount, ctlz, cttz,
+    simd, simd_splat, simd_load, simd_store, simd_fma, simd_reduce_add,
+    simd_reduce_max, simd_bf16_dot, simd_f32_to_bf16,
+    simd_bf16_dot_packed,
 )
 
 # Provide lowercase alias for convenience
@@ -206,6 +209,18 @@ __all__ = [
     'popcount',
     'ctlz',
     'cttz',
+
+    # Fixed-width CPU SIMD registers
+    'simd',
+    'simd_splat',
+    'simd_load',
+    'simd_store',
+    'simd_fma',
+    'simd_reduce_add',
+    'simd_reduce_max',
+    'simd_bf16_dot',
+    'simd_f32_to_bf16',
+    'simd_bf16_dot_packed',
 
     # PC literal carrier
     'pc_literal',

@@ -14,6 +14,7 @@ Tests cover:
 import sys
 import os
 import platform
+import ctypes
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import unittest
@@ -140,6 +141,23 @@ if IS_X86_64:
         result: i32 = llvm_asm("bsf $1, $0", "=r,r", i32, val)
         return result
 
+    @compile(suffix="asm_with_inputs_kw_x86")
+    def test_fn_asm_with_inputs_kw(val: i32) -> i32:
+        result: i32 = llvm_asm(
+            "bsf $1, $0", "=r,r", ret_type=i32, inputs=[val],
+        )
+        return result
+
+    @compile(suffix="asm_store_inputs_x86")
+    def test_fn_asm_store_inputs(dst: ptr[i32], val: i32) -> i32:
+        llvm_asm("movl $1, ($0)", "r,r,~{memory}", inputs=[dst, val])
+        return dst[0]
+
+    @compile(suffix="asm_prefetch_ptr_x86")
+    def test_fn_asm_prefetch_ptr(dst: ptr[i32]) -> i32:
+        llvm_asm("prefetchnta ($0)", "r", dst)
+        return i32(1)
+
 
 # ============================================================
 # Test functions: asm returning a value
@@ -262,6 +280,23 @@ class TestLlvmAsm(DeferredTestCase):
         self.assertEqual(test_fn_asm_with_input(2), 1)
         self.assertEqual(test_fn_asm_with_input(4), 2)
         self.assertEqual(test_fn_asm_with_input(16), 4)
+
+    @unittest.skipUnless(IS_X86_64, "x86_64 only")
+    def test_asm_with_inputs_keyword(self):
+        self.assertEqual(test_fn_asm_with_inputs_kw(8), 3)
+        self.assertEqual(test_fn_asm_with_inputs_kw(16), 4)
+
+    @unittest.skipUnless(IS_X86_64, "x86_64 only")
+    def test_asm_store_via_inputs_keyword(self):
+        buf = (ctypes.c_int32 * 1)(0)
+        result = test_fn_asm_store_inputs(ctypes.addressof(buf), 42)
+        self.assertEqual(result, 42)
+        self.assertEqual(buf[0], 42)
+
+    @unittest.skipUnless(IS_X86_64, "x86_64 only")
+    def test_asm_pointer_operand_is_not_ret_type(self):
+        buf = (ctypes.c_int32 * 1)(7)
+        self.assertEqual(test_fn_asm_prefetch_ptr(ctypes.addressof(buf)), 1)
 
     # --- With output ---
 

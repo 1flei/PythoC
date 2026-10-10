@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 14  # Increment when scheduler/cache/effect planning semantics change
+DEPS_VERSION = 15  # Increment when scheduler/cache/effect planning semantics change
 
 
 # Memo for _type_source_file: id(type) -> (type, source_file).  The strong
@@ -217,6 +217,11 @@ class GroupDeps:
     # flag must invalidate the cached object.
     debug_info: bool = False
 
+    # Resolved LLVM target identity used to emit this object. Host aliases
+    # are expanded before persistence so cache reuse remains machine-safe.
+    target_cpu: Optional[str] = None
+    target_features: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization with compressed group keys."""
         # Collect all unique group keys
@@ -252,6 +257,11 @@ class GroupDeps:
 
         if self.debug_info:
             result['debug_info'] = True
+
+        if self.target_cpu is not None:
+            result['target_cpu'] = self.target_cpu
+        if self.target_features is not None:
+            result['target_features'] = self.target_features
 
         # Add group keys table if we have any
         if unique_group_keys:
@@ -292,6 +302,8 @@ class GroupDeps:
         compiled_symbols = d.get('compiled_symbols', [])
         ast_content_hash = d.get('ast_content_hash')
         debug_info = d.get('debug_info', False)
+        target_cpu = d.get('target_cpu')
+        target_features = d.get('target_features')
 
         return cls(
             version=d.get('version', DEPS_VERSION),
@@ -303,6 +315,8 @@ class GroupDeps:
             compiled_symbols=compiled_symbols,
             ast_content_hash=ast_content_hash,
             debug_info=debug_info,
+            target_cpu=target_cpu,
+            target_features=target_features,
         )
 
     
