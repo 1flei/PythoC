@@ -46,7 +46,17 @@ class offsetof(BuiltinFunction):
 
     @classmethod
     def _get_field_offset(cls, pc_type, field_name: str) -> int:
-        """Get byte offset of a field within a struct or union type."""
+        """Get the byte offset of a dot-separated member path."""
+        offset = 0
+        for member_name in field_name.split("."):
+            member_offset, pc_type = cls._get_member_layout(pc_type, member_name)
+            offset += member_offset
+        return offset
+
+    @classmethod
+    def _get_member_layout(cls, pc_type, field_name: str):
+        """Resolve a member's local byte offset and type together."""
+        pc_type = getattr(pc_type, '_union_type', pc_type)
         field_names, field_types = cls._get_struct_fields(pc_type)
 
         if field_name not in field_names:
@@ -55,7 +65,7 @@ class offsetof(BuiltinFunction):
 
         # All fields of a union share offset 0.
         if isinstance(pc_type, type) and issubclass(pc_type, UnionType):
-            return 0
+            return 0, field_types[field_names.index(field_name)]
 
         offset = 0
         for name, field_type in zip(field_names, field_types):
@@ -63,7 +73,7 @@ class offsetof(BuiltinFunction):
             offset = cls._align_to(offset, field_alignment)
 
             if name == field_name:
-                return offset
+                return offset, field_type
 
             field_size = cls._get_type_size(field_type)
             offset += field_size
@@ -74,6 +84,9 @@ class offsetof(BuiltinFunction):
     @classmethod
     def _get_struct_fields(cls, pc_type):
         """Return (field_names, field_types) for a struct-like type."""
+        ensure_fields = getattr(pc_type, '_ensure_field_types_resolved', None)
+        if callable(ensure_fields):
+            ensure_fields()
         if hasattr(pc_type, '_field_names') and hasattr(pc_type, '_field_types'):
             return pc_type._field_names, pc_type._field_types
 

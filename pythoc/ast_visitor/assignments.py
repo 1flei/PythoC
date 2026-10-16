@@ -142,6 +142,15 @@ class AssignmentsMixin:
                 linear_path=()
             )
     
+    def _assignment_ir_value(self, rvalue: ValueRef, target_type: ir.Type):
+        """Read pointer-backed array values when storing an array object."""
+        value = ensure_ir(rvalue)
+        if (isinstance(target_type, ir.ArrayType)
+                and isinstance(value.type, ir.PointerType)
+                and value.type.pointee == target_type):
+            return safe_load(self.builder, value, rvalue.get_pc_type())
+        return value
+
     def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef, node: ast.AST = None):
         """Store value to lvalue with type conversion and qualifier checks
         
@@ -167,9 +176,11 @@ class AssignmentsMixin:
         
         # Convert value to target type (implicit coercer checks pointer policy)
         rvalue = self.implicit_coercer.coerce(rvalue, target_pc_type, node)
+        target_ir = ensure_ir(lvalue)
+        value_ir = self._assignment_ir_value(rvalue, target_ir.type.pointee)
         
         # Use safe_store for qualifier-aware storage (handles const check + volatile)
-        safe_store(self.builder, ensure_ir(rvalue), ensure_ir(lvalue), target_pc_type, node=node)
+        safe_store(self.builder, value_ir, target_ir, target_pc_type, node=node)
 
     def _assign_to_target(self, target: ast.AST, rvalue: ValueRef, node, pc_type=None) -> None:
         """Unified single-target assignment: lvalue resolution, linear checks, store, and linear registration.
@@ -299,21 +310,8 @@ class AssignmentsMixin:
             # Regular variable: create stack allocation
             var_addr = self._create_alloca_in_entry(llvm_type, f"{var_name}_addr")
             
-            # Store value for non-static variables
-            # Special handling for arrays: if rvalue is already a pointer to array,
-            # we need to copy the array contents (load + store), not store the pointer
-            if isinstance(rvalue_ir.type, ir.PointerType) and isinstance(rvalue_ir.type.pointee, ir.ArrayType):
-                # Array literal case: rvalue is pointer to array, need to copy contents
-                if isinstance(llvm_type, ir.ArrayType):
-                    # Load the array value and store to new alloca
-                    array_value = self.builder.load(rvalue_ir)
-                    self.builder.store(array_value, var_addr)
-                else:
-                    # Non-array target type, just store normally
-                    self.builder.store(rvalue_ir, var_addr)
-            else:
-                # Normal case: store value directly
-                self.builder.store(rvalue_ir, var_addr)
+            value_ir = self._assignment_ir_value(rvalue, llvm_type)
+            self.builder.store(value_ir, var_addr)
         
         # Declare variable (for both static and non-static)
         self.declare_variable(
