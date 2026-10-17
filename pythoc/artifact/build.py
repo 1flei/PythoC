@@ -108,11 +108,7 @@ def _link_task(plan: ArtifactPlan, dependencies) -> BuildTask:
                 list(plan.object_files),
                 plan.output_path,
                 shared=False,
-                link_objects=(
-                    list(plan.link_objects)
-                    if plan.link_objects
-                    else None
-                ),
+                link_objects=list(plan.link_objects),
                 link_libraries=list(libraries),
                 extra_flags=list(plan.extra_link_flags),
             ),

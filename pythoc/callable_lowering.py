@@ -272,46 +272,38 @@ def lower_extern_wrapper(
 
     has_varargs = varargs_name is not None
 
-    # --- Try to reuse existing declaration ---
-    try:
-        existing = module.get_global(c_name)
-        if existing.is_declaration:
-            ir_func = existing
-        else:
-            logger.error(
-                f"Cannot call extern function '{func_name}' (symbol '{c_name}'): "
-                f"a local function with the same name is already defined.",
-                node=node, exc_type=NameError,
-            )
-            return None  # unreachable
-    except KeyError:
-        # --- Declare the extern function ---
-        module_context = module.context
-        param_llvm_types = [
-            param_type.get_llvm_type(module_context) for _, param_type in fixed_params
-        ]
+    module_context = module.context
+    param_llvm_types = [
+        param_type.get_llvm_type(module_context)
+        for _, param_type in fixed_params
+    ]
+    return_llvm_type = (
+        ir.VoidType() if extern_wrapper.return_type is None
+        else extern_wrapper.return_type.get_llvm_type(module_context)
+    )
+    convention = (
+        'x86_stdcallcc'
+        if extern_wrapper.calling_convention == 'stdcall' else 'ccc'
+    )
+    existing = module.globals.get(c_name)
+    if existing is not None:
+        if not isinstance(existing, ir.Function):
+            raise TypeError(f"Extern function '{c_name}' names a data symbol")
+        if (existing.calling_convention or 'ccc') != convention:
+            raise TypeError(f"Conflicting calling convention for '{c_name}'")
 
-        if extern_wrapper.return_type is None:
-            return_llvm_type = ir.VoidType()
-        else:
-            return_llvm_type = extern_wrapper.return_type.get_llvm_type(module_context)
+    from .builder import LLVMBuilder
 
-        from .builder import LLVMBuilder
-        func_wrapper = LLVMBuilder().declare_function(
-            module, c_name,
-            param_llvm_types, return_llvm_type,
-            var_arg=has_varargs,
-        )
-        ir_func = func_wrapper.ir_function
-
-        if extern_wrapper.calling_convention == 'stdcall':
-            ir_func.calling_convention = 'x86_stdcallcc'
-        else:
-            ir_func.calling_convention = 'ccc'
+    func_wrapper = LLVMBuilder().declare_function(
+        module, c_name, param_llvm_types, return_llvm_type,
+        var_arg=has_varargs, existing_func=existing,
+    )
+    ir_func = func_wrapper.ir_function
+    ir_func.calling_convention = convention
 
     # --- Record link library dependency ---
     lib = extern_wrapper.lib
-    if lib:
+    if lib and ir_func.is_declaration:
         # Global registry — used by the linker to determine -l flags
         from .registry import get_unified_registry
         get_unified_registry().add_link_library(lib)

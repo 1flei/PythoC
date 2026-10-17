@@ -46,6 +46,9 @@ class LinkPlan:
         flush: bool = True,
         output_manager=None,
         dependency_tracker=None,
+        standalone: bool = False,
+        link_objects: Sequence[str] = (),
+        link_libraries: Sequence[str] = (),
     ) -> "LinkPlan":
         if flush:
             from ..build.output_manager import flush_all_pending_outputs
@@ -70,11 +73,11 @@ class LinkPlan:
         seen_libraries = set()
 
         def add_object(path: Optional[str]) -> None:
-            if (
-                path
-                and os.path.exists(path)
-                and path not in seen_objects
-            ):
+            if not path or not os.path.isfile(path):
+                raise FileNotFoundError(
+                    "required link object does not exist: {!r}".format(path)
+                )
+            if path not in seen_objects:
                 seen_objects.add(path)
                 obj_files.append(path)
 
@@ -87,6 +90,11 @@ class LinkPlan:
             if group_key in seen_groups:
                 return
             seen_groups.add(group_key)
+            if standalone and is_internal_group(group_key):
+                raise RuntimeError(
+                    "standalone target depends on host Python adapter: {!r}"
+                    .format(group_key)
+                )
 
             group = groups.get(group_key)
             obj_file = group.get("obj_file") if group else None
@@ -107,17 +115,26 @@ class LinkPlan:
             if deps is None:
                 deps = dependency_tracker.get_deps_for_group(group_key)
             if deps is None:
-                return
+                raise RuntimeError(
+                    "missing link dependency metadata for group {!r}"
+                    .format(group_key)
+                )
 
             for link_object in deps.link_objects:
                 add_object(link_object)
             for library in deps.link_libraries:
                 add_library(library)
             for dependency in deps.group_dependencies:
+                if dependency.dependency_type == "source_embed":
+                    continue
                 target = getattr(dependency, "target_group", None)
                 if target is not None:
                     visit(target.to_tuple())
 
+        for link_object in link_objects:
+            add_object(link_object)
+        for library in link_libraries:
+            add_library(library)
         for root in roots:
             visit(root)
 
@@ -139,6 +156,7 @@ class LinkPlan:
 
             flush_all_pending_outputs()
         from ..build.output_manager import get_output_manager
+        from ..registry import get_unified_registry
 
         roots = tuple(
             key
@@ -149,30 +167,48 @@ class LinkPlan:
             raise RuntimeError(
                 "no @compile functions found; nothing to link"
             )
+        registry = get_unified_registry()
         return cls.from_group_roots(
             roots,
-            scope=LinkScope.OWN_GROUP,
+            scope=LinkScope.TRANSITIVE,
             flush=False,
+            standalone=True,
+            link_objects=tuple(registry.get_link_objects()),
+            link_libraries=tuple(registry.get_link_libraries()),
         )
 
 
 def is_internal_group(group_key) -> bool:
-    """Groups compiled from pythoc's own package sources.
+    """Whether a group implements the host Python adapter runtime.
 
-    The callable runtime (callable_type.py) and generated Python-adapter
-    entries (python_entry_bind.py) are process implementation details and
-    must never leak into a user program's link: their CPython symbols are
-    only resolvable inside a Python process, and their adapter symbols do
-    not belong to executable/static/dynamic-library targets.
+    These groups require a running CPython process. Standalone collection
+    excludes them as roots and rejects dependencies on them. Explicit
+    group plans may still include them when composing a Python extension.
+    Native package code, including c_helpers and libc shims, is not an
+    adapter merely because it lives inside the PythoC package.
     """
     source = group_key[0] if group_key else ""
     if not source:
         return False
     pythoc_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    try:
-        return os.path.realpath(source).startswith(pythoc_dir + os.sep)
-    except OSError:
-        return False
+    real_source = os.path.realpath(source)
+    return any(
+        real_source == adapter or real_source.startswith(adapter + ".__")
+        for adapter in (
+            os.path.join(pythoc_dir, filename)
+            for filename in _HOST_ADAPTER_MODULES
+        )
+    )
+
+
+_HOST_ADAPTER_MODULES = (
+    "callable_type.py",
+    "cpy_api.py",
+    "python_adapter.py",
+    "python_call.py",
+    "python_entry.py",
+    "python_entry_bind.py",
+)
 
 
 def _normalize_group_key(group_key) -> Tuple:

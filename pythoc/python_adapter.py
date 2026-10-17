@@ -132,6 +132,7 @@ def compile_python_extension(
             kind='compile_generated_entry',
             phase=ArtifactPhase.PRE_LINK,
             outputs=(adapter_object,),
+            resources=('python-entry-codegen',),
             run=lambda: _write_and_compile(
                 specs,
                 adapter_group,
@@ -741,6 +742,7 @@ def _compile_adapter_library(
             kind='compile_generated_entry',
             phase=ArtifactPhase.PRE_LINK,
             outputs=(object_path,),
+            resources=('python-entry-codegen',),
             run=lambda entry_specs=entry_specs, adapter_group=adapter_group: (
                 _write_and_compile(
                     entry_specs,

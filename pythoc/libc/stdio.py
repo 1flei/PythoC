@@ -5,6 +5,7 @@ Standard I/O Library Functions (stdio.h)
 from ..decorators import extern, extern_global
 from ..builtin_entities import ptr, i8, i32, i64, void
 from ..forward_ref import mark_type_defined
+from ._platform import IS_MACOS
 
 # FILE is an opaque stdio stream type.  Exposing it as a named alias lets
 # generated code use ``ptr[FILE]`` while keeping the actual representation as
@@ -14,13 +15,13 @@ mark_type_defined("FILE", FILE)
 
 __all__ = [
     'FILE',
-    'printf', 'scanf', 'puts', 'getchar', 'putchar',
+    'printf', 'scanf', 'puts', 'getchar', 'getc', 'putchar',
     'fopen', 'fclose', 'freopen', 'remove', 'fdopen',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
     'fileno',
     'stdin', 'stdout', 'stderr',
     '__stdinp', '__stdoutp', '__stderrp',
-    'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
+    'perror', 'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
     'setvbuf', 'setbuf', 'fgetc', 'fputc', 'ungetc',
     'sprintf', 'snprintf', 'vprintf', 'vfprintf', 'vsnprintf',
     'sscanf', 'popen', 'pclose',
@@ -45,6 +46,11 @@ def puts(s: ptr[i8]) -> i32:
 @extern(lib='c')
 def getchar() -> i32:
     """Read a character from stdin"""
+    pass
+
+@extern(lib='c')
+def getc(stream: ptr[i8]) -> i32:
+    """Read a character from a stream"""
     pass
 
 @extern(lib='c')
@@ -140,34 +146,31 @@ def fileno(stream: ptr[i8]) -> i32:
 # symbols (``extern FILE *stderr;``).  Reading one is a load from the
 # external global, not a call; extern_global binds each name to the
 # global's address, so uses inside @compile load the FILE* value.
-# On macOS these symbol names do not exist -- use __stdinp/__stdoutp/
-# __stderrp below instead.
-stdin = extern_global(ptr[FILE], 'stdin', lib='c')
-stdout = extern_global(ptr[FILE], 'stdout', lib='c')
-stderr = extern_global(ptr[FILE], 'stderr', lib='c')
+# On macOS the same three FILE* globals exist under the __stdinp /
+# __stdoutp / __stderrp names (the C preprocessor maps stdin/stdout/stderr
+# onto them); bind the plain names to those symbols there.
+if IS_MACOS:
+    stdin = extern_global(ptr[FILE], '__stdinp', lib='c')
+    stdout = extern_global(ptr[FILE], '__stdoutp', lib='c')
+    stderr = extern_global(ptr[FILE], '__stderrp', lib='c')
+else:
+    stdin = extern_global(ptr[FILE], 'stdin', lib='c')
+    stdout = extern_global(ptr[FILE], 'stdout', lib='c')
+    stderr = extern_global(ptr[FILE], 'stderr', lib='c')
 
-# macOS exposes stdin/stdout/stderr as global FILE* variables.  The C
-# preprocessor turns references to `stdin`, `stdout`, and `stderr` into the
-# accessor names below; pcc lowers those references to function calls.
-@extern(lib='c')
-def __stdinp() -> ptr[i8]:
-    """Return the standard input stream (macOS)."""
-    pass
-
-
-@extern(lib='c')
-def __stdoutp() -> ptr[i8]:
-    """Return the standard output stream (macOS)."""
-    pass
-
-
-@extern(lib='c')
-def __stderrp() -> ptr[i8]:
-    """Return the standard error stream (macOS)."""
-    pass
+# These are data aliases, not callable accessors.
+__stdinp = stdin
+__stdoutp = stdout
+__stderrp = stderr
 
 
 # P0 additions: buffering, seeking, char IO, formatted to buffers
+@extern(lib='c')
+def perror(s: ptr[i8]) -> void:
+    """Print a system error message to stderr"""
+    pass
+
+
 @extern(lib='c')
 def fseek(stream: ptr[i8], offset: i64, whence: i32) -> i32:
     """Reposition stream position indicator"""

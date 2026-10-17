@@ -221,15 +221,20 @@ def link_executable(obj_files: List[str], output_path: str) -> str:
         build_artifact,
     )
 
+    from ..registry import get_unified_registry
+
+    registry = get_unified_registry()
     link = LinkPlan(
         roots=(),
         obj_files=tuple(obj_files),
+        link_libraries=tuple(registry.get_link_libraries()),
         scope=LinkScope.OWN_GROUP,
     )
     result = build_artifact(ArtifactPlan(
         kind=ArtifactKind.EXECUTABLE,
         link=link,
         output_path=output_path,
+        link_objects=tuple(registry.get_link_objects()),
     )).path
     print(f"Successfully compiled to executable: {output_path}")
     print(f"Linked {len(obj_files)} object file(s)")
@@ -294,7 +299,7 @@ def link_static_library(obj_files: List[str], output_path: str) -> str:
 def compile_to_executable(output_path: Optional[str] = None,
                           source_file: Optional[str] = None) -> str:
     """Compile all @compile decorated functions to a native executable."""
-    from ..artifact import LinkPlan
+    from ..artifact import ArtifactKind, ArtifactPlan, LinkPlan, build_artifact
 
     if source_file is None:
         source_file = get_source_file_from_caller(offset=0)
@@ -302,7 +307,14 @@ def compile_to_executable(output_path: Optional[str] = None,
     output_path = determine_output_path(source_file, output_path)
 
     plan = LinkPlan.from_all_groups()
-    return link_executable(list(plan.obj_files), output_path)
+    result = build_artifact(ArtifactPlan(
+        kind=ArtifactKind.EXECUTABLE,
+        link=plan,
+        output_path=output_path,
+    )).path
+    print(f"Successfully compiled to executable: {output_path}")
+    print(f"Linked {len(plan.obj_files)} object file(s)")
+    return result
 
 
 def compile_to_static_library(

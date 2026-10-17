@@ -448,6 +448,20 @@ class TypeConverter:
         module = getattr(self._visitor, 'module', None)
         module_context = getattr(module, 'context', None) if module else None
         llvm_type = target_type.get_llvm_type(module_context)
+
+        if isinstance(python_val, bool):
+            python_val = int(python_val)
+
+        if isinstance(llvm_type, (ir.ArrayType, ir.BaseStructType)):
+            if not isinstance(python_val, (int, float)) or python_val != 0:
+                raise TypeError(
+                    "Aggregate initialization requires zero or an explicit "
+                    "sequence of field/element values"
+                )
+            return wrap_value(
+                self.create_zero_constant(llvm_type),
+                kind="value", type_hint=target_type,
+            )
         
         # Handle pointer types specially - convert integer to pointer via inttoptr.
         # Python integer constants are compile-time values, so the resulting
@@ -1370,11 +1384,9 @@ class TypeConverter:
         elif isinstance(llvm_type, ir.PointerType):
             return ir.Constant(llvm_type, None)
         elif isinstance(llvm_type, ir.ArrayType):
-            elem_zero = self.create_zero_constant(llvm_type.element)
-            return ir.Constant(llvm_type, [elem_zero] * llvm_type.count)
-        elif isinstance(llvm_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-            field_zeros = [self.create_zero_constant(ft) for ft in llvm_type.elements]
-            return ir.Constant(llvm_type, field_zeros)
+            return ir.Constant(llvm_type, None)
+        elif isinstance(llvm_type, ir.BaseStructType):
+            return ir.Constant(llvm_type, None)
         elif isinstance(llvm_type, ir.VoidType):
             raise TypeError("Cannot create zero constant for void type")
         else:

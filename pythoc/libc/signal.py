@@ -142,7 +142,14 @@ __all__ = [
     'sigemptyset',
     'sigfillset',
     'sigprocmask',
+    'kill',
 ]
+
+
+@extern(lib='c')
+def kill(pid: i32, sig: i32) -> i32:
+    """Send a signal to a process."""
+    pass
 
 
 @extern(lib='c')

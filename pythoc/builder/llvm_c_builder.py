@@ -275,6 +275,11 @@ class LLVMCBuilder(LLVMBuilder):
         func_type = ir.FunctionType(actual_return_type, actual_param_types, var_arg=var_arg)
         
         if existing_func is not None and isinstance(existing_func, ir.Function):
+            if existing_func.function_type != func_type:
+                raise TypeError(
+                    f"Conflicting function signature for '{name}': "
+                    f"{existing_func.function_type} != {func_type}"
+                )
             logger.debug(f"declare_function: using existing_func {name}, existing type={existing_func.type}, new type={func_type}")
             ir_function = existing_func
         else:

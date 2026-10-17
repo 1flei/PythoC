@@ -2,8 +2,9 @@
 Mathematical Functions (math.h)
 """
 
-from ..decorators import extern
-from ..builtin_entities import f64, i32
+from ..decorators import compile, extern
+from ..builtin_entities import f32, f64, i32, ptr
+from ._platform import IS_MACOS
 
 # Trigonometric functions
 @extern(lib='m')
@@ -166,6 +167,72 @@ def ldexp(x: f64, exp: i32) -> f64:
     pass
 
 @extern(lib='m')
+def frexp(x: f64, exp: ptr[i32]) -> f64:
+    """Decompose x into a normalized fraction and an integer exponent."""
+    pass
+
+
+@extern(lib='m')
 def ldexpl(x: f64, exp: i32) -> f64:
     """long double variant of ldexp; mapped to f64 on targets without long double."""
     pass
+
+
+# macOS exports these float/double helpers; other hosts use native shims.
+__all__ = [
+    'frexp', '__inline_isinff', '__inline_isinfd', '__inline_isinfl',
+    '__inline_isnanf', '__inline_isnand', '__inline_isnanl',
+    'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2',
+    'sinh', 'cosh', 'tanh', 'exp', 'log', 'log10', 'pow', 'sqrt',
+    'ceil', 'floor', 'fabs', 'fmod', 'trunc', 'round', 'modf', 'hypot',
+    'log1p', 'expm1', 'log2', 'copysign', 'acosh', 'asinh', 'atanh',
+    'erf', 'erfc', 'lgamma', 'tgamma', 'cbrt', 'ldexp', 'ldexpl',
+]
+
+
+if IS_MACOS:
+    @extern(lib='c')
+    def __inline_isinff(x: f32) -> i32:
+        pass
+
+    @extern(lib='c')
+    def __inline_isinfd(x: f64) -> i32:
+        pass
+
+    @extern(lib='c')
+    def __inline_isnanf(x: f32) -> i32:
+        pass
+
+    @extern(lib='c')
+    def __inline_isnand(x: f64) -> i32:
+        pass
+
+else:
+    from .. import inf, inff
+
+    @compile
+    def __inline_isinff(x: f32) -> i32:
+        return i32((x == inff) or (x == -inff))
+
+    @compile
+    def __inline_isinfd(x: f64) -> i32:
+        return i32((x == inf) or (x == -inf))
+
+    @compile
+    def __inline_isnanf(x: f32) -> i32:
+        return i32(x != x)
+
+    @compile
+    def __inline_isnand(x: f64) -> i32:
+        return i32(x != x)
+
+
+# PythoC represents these long-double spellings as f64, not a host x87 ABI.
+@compile
+def __inline_isinfl(x: f64) -> i32:
+    return __inline_isinfd(x)
+
+
+@compile
+def __inline_isnanl(x: f64) -> i32:
+    return __inline_isnand(x)

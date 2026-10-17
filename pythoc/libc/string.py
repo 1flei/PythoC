@@ -7,6 +7,12 @@ from ..builtin_entities import ptr, i8, i32, i64, void
 
 # String length
 @extern(lib='c')
+def strerror(errnum: i32) -> ptr[i8]:
+    """Return a string describing an error number"""
+    pass
+
+
+@extern(lib='c')
 def strlen(s: ptr[i8]) -> i64:
     """Get string length"""
     pass
