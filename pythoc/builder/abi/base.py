@@ -80,72 +80,18 @@ class ABIInfo(ABC):
         pass
     
     def get_type_size(self, llvm_type: ir.Type) -> int:
-        """Get size of LLVM type in bytes.
-        
-        Args:
-            llvm_type: LLVM type
-            
-        Returns:
-            Size in bytes
-        """
-        if isinstance(llvm_type, ir.IntType):
-            return (llvm_type.width + 7) // 8
-        elif isinstance(llvm_type, ir.FloatType):
-            return 4
-        elif isinstance(llvm_type, ir.DoubleType):
-            return 8
-        elif isinstance(llvm_type, ir.PointerType):
-            return 8  # Assume 64-bit pointers
-        elif isinstance(llvm_type, ir.ArrayType):
-            return llvm_type.count * self.get_type_size(llvm_type.element)
-        elif isinstance(llvm_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-            # Sum of field sizes with alignment
-            total = 0
-            for elem in llvm_type.elements:
-                elem_size = self.get_type_size(elem)
-                elem_align = self.get_type_alignment(elem)
-                # Align current offset
-                if total % elem_align != 0:
-                    total += elem_align - (total % elem_align)
-                total += elem_size
-            # Final struct alignment
-            struct_align = self.get_type_alignment(llvm_type)
-            if total % struct_align != 0:
-                total += struct_align - (total % struct_align)
-            return total
-        elif isinstance(llvm_type, ir.VoidType):
+        """Get the target allocation size of an LLVM ABI type."""
+        if isinstance(llvm_type, ir.VoidType):
             return 0
-        else:
-            # Default to 8 bytes
-            return 8
+        from ...target_layout import get_target_layout
+        return get_target_layout().primitive(llvm_type).allocation_size
     
     def get_type_alignment(self, llvm_type: ir.Type) -> int:
-        """Get alignment of LLVM type in bytes.
-        
-        Args:
-            llvm_type: LLVM type
-            
-        Returns:
-            Alignment in bytes
-        """
-        if isinstance(llvm_type, ir.IntType):
-            return min((llvm_type.width + 7) // 8, 8)
-        elif isinstance(llvm_type, ir.FloatType):
-            return 4
-        elif isinstance(llvm_type, ir.DoubleType):
-            return 8
-        elif isinstance(llvm_type, ir.PointerType):
-            return 8
-        elif isinstance(llvm_type, ir.ArrayType):
-            return self.get_type_alignment(llvm_type.element)
-        elif isinstance(llvm_type, (ir.LiteralStructType, ir.IdentifiedStructType)):
-            # Struct alignment is max of field alignments
-            max_align = 1
-            for elem in llvm_type.elements:
-                max_align = max(max_align, self.get_type_alignment(elem))
-            return max_align
-        else:
-            return 8
+        """Get the target ABI alignment of an LLVM ABI type."""
+        if isinstance(llvm_type, ir.VoidType):
+            return 1
+        from ...target_layout import get_target_layout
+        return get_target_layout().primitive(llvm_type).alignment
     
     def is_struct_type(self, llvm_type: ir.Type) -> bool:
         """Check if type is a struct type."""

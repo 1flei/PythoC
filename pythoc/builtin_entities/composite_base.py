@@ -177,35 +177,19 @@ class CompositeType(BuiltinType):
         return wrap_value(value, kind="value", type_hint=type_hint)
     
     @classmethod
-    def get_alignment(cls) -> int:
-        """Get alignment in bytes for this composite type.
-        
-        Default implementation: max alignment of all fields, capped at 8.
-        Subclasses may override for specific alignment rules.
-        
-        Returns:
-            Alignment in bytes (1, 2, 4, or 8)
-        """
+    def get_layout(cls):
         cls._ensure_field_types_resolved()
-        
         if cls._field_types is None:
-            return 1
-        
-        max_align = 1
-        for field_type in cls._field_types:
-            if field_type is None:
-                continue
-            if hasattr(field_type, 'get_size_bytes'):
-                field_size = field_type.get_size_bytes()
-                if field_size == 0:
-                    continue
-                if hasattr(field_type, 'get_alignment'):
-                    field_align = field_type.get_alignment()
-                else:
-                    field_align = min(field_size, 8)
-                max_align = max(max_align, field_align)
-        
-        return max_align
+            from ..target_layout import TypeLayout
+            return TypeLayout(0, 0, 1, 0)
+
+        from ..target_layout import get_target_layout, get_type_layout
+        fields = (get_type_layout(field) for field in cls._field_types)
+        return get_target_layout().struct(fields)
+
+    @classmethod
+    def get_alignment(cls) -> int:
+        return cls.get_layout().alignment
     
     @classmethod
     def _ensure_field_types_resolved(cls):
@@ -531,7 +515,9 @@ class CompositeType(BuiltinType):
         target_cls.get_field_index = unified_type.get_field_index
         target_cls.has_field = unified_type.has_field
         target_cls.get_field_count = unified_type.get_field_count
+        target_cls.get_layout = unified_type.get_layout
         target_cls.get_size_bytes = unified_type.get_size_bytes
+        target_cls.get_alignment = unified_type.get_alignment
         target_cls.get_ctypes_type = unified_type.get_ctypes_type
         target_cls.handle_subscript = unified_type.handle_subscript
         target_cls._ensure_field_types_resolved = unified_type._ensure_field_types_resolved

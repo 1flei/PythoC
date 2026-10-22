@@ -131,6 +131,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Build fields list
         fields = []
+        field_indices = []
         for i, field_type in enumerate(cls._field_types):
             if field_type is None:
                 continue
@@ -151,12 +152,16 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                 field_name = f"field_{i}"
             
             fields.append((field_name, field_ctype))
+            field_indices.append((i, field_name))
         
         # Create ctypes.Structure class dynamically
         class_name = f"CStruct_{cls.get_name()}"
         struct_class = type(class_name, (ctypes.Structure,), {
             '_fields_': fields
         })
+
+        from ..target_layout import validate_ctypes_layout
+        validate_ctypes_layout(cls, struct_class, field_indices)
         
         cls._ctypes_struct_cache = struct_class
         return struct_class
@@ -348,70 +353,23 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         return ir.LiteralStructType(llvm_field_types)
     
     @classmethod
-    def get_size_bytes(cls) -> int:
-        """Get size in bytes (with alignment)
-        
-        Zero-sized fields (like pyconst) are skipped in size calculation.
-        """
-        # Ensure field types are resolved
+    def get_layout(cls):
         cls._ensure_field_types_resolved()
-        
         if cls._field_types is None:
-            return 0
-        
-        # Calculate size with proper alignment (simplified)
-        total_size = 0
-        max_align = 1
-        
-        for field_type in cls._field_types:
-            if hasattr(field_type, 'get_size_bytes'):
-                field_size = field_type.get_size_bytes()
-                # Skip zero-sized fields (pyconst)
-                if field_size == 0:
-                    continue
-                if hasattr(field_type, 'get_alignment'):
-                    field_align = field_type.get_alignment()
-                else:
-                    field_align = min(field_size, 8)
-            else:
-                field_size = 4
-                field_align = 4
-            
-            max_align = max(max_align, field_align)
-            # Align current offset
-            if total_size % field_align != 0:
-                total_size += field_align - (total_size % field_align)
-            total_size += field_size
-        
-        # Align total size to max alignment
-        if total_size % max_align != 0:
-            total_size += max_align - (total_size % max_align)
-        
-        return total_size
+            from ..target_layout import TypeLayout
+            return TypeLayout(0, 0, 1, 0)
 
-    
+        from ..target_layout import get_target_layout, get_type_layout
+        fields = (get_type_layout(field) for field in cls._field_types)
+        return get_target_layout().struct(fields)
+
+    @classmethod
+    def get_size_bytes(cls) -> int:
+        return cls.get_layout().allocation_size
+
     @classmethod
     def get_alignment(cls) -> int:
-        """Get alignment in bytes: the maximum field alignment (C rules)."""
-        cls._ensure_field_types_resolved()
-        
-        if cls._field_types is None:
-            return 1
-        
-        max_align = 1
-        for field_type in cls._field_types:
-            if hasattr(field_type, 'get_size_bytes') and field_type.get_size_bytes() == 0:
-                # Skip zero-sized fields (pyconst)
-                continue
-            if hasattr(field_type, 'get_alignment'):
-                field_align = field_type.get_alignment()
-            elif hasattr(field_type, 'get_size_bytes'):
-                field_align = min(field_type.get_size_bytes(), 8)
-            else:
-                field_align = 4
-            max_align = max(max_align, field_align)
-        
-        return max_align
+        return cls.get_layout().alignment
 
     
     @classmethod

@@ -188,7 +188,10 @@ class EnumType(CompositeType):
         if payload_ctype is not None:
             fields.append(('payload', payload_ctype))
         
-        return type(class_name, (ctypes.Structure,), {'_fields_': fields})
+        ctype = type(class_name, (ctypes.Structure,), {'_fields_': fields})
+        from ..target_layout import validate_ctypes_layout
+        return validate_ctypes_layout(
+            cls, ctype, tuple(enumerate(name for name, _ in fields)))
     
     @classmethod
     def get_name(cls) -> str:
@@ -214,40 +217,25 @@ class EnumType(CompositeType):
         return ir.LiteralStructType([tag_llvm, payload_llvm])
     
     @classmethod
-    def get_size_bytes(cls) -> int:
-        """Get size in bytes for enum type
-        
-        Enum is struct { tag, union_payload }, so size is:
-        tag_size + padding + union_size, aligned to max alignment
-        """
+    def get_layout(cls):
         if cls._tag_type is None or cls._union_payload is None:
-            return 0
-        
-        tag_size = cls._tag_type.get_size_bytes()
-        union_size = cls._union_payload.get_size_bytes()
-        
-        # Calculate alignment
-        tag_align = min(tag_size, 8)
-        union_align = min(union_size, 8) if union_size > 0 else 1
-        max_align = max(tag_align, union_align)
-        
-        # Calculate total size with padding
-        # Start with tag
-        total = tag_size
-        
-        # Align for union
-        if total % union_align != 0 and union_size > 0:
-            total += union_align - (total % union_align)
-        
-        # Add union size
-        total += union_size
-        
-        # Align total to max alignment
-        if total % max_align != 0:
-            total += max_align - (total % max_align)
-        
-        return total
-    
+            from ..target_layout import TypeLayout
+            return TypeLayout(0, 0, 1, 0)
+
+        from ..target_layout import get_target_layout, get_type_layout
+        return get_target_layout().struct([
+            get_type_layout(cls._tag_type),
+            get_type_layout(cls._union_payload),
+        ])
+
+    @classmethod
+    def get_size_bytes(cls) -> int:
+        return cls.get_layout().allocation_size
+
+    @classmethod
+    def get_alignment(cls) -> int:
+        return cls.get_layout().alignment
+
     @classmethod
     def _setup_field_types(cls):
         """Setup _field_types and _field_names for CompositeType base class

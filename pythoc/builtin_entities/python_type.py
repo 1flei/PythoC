@@ -125,6 +125,13 @@ class PythonType(_PythonTypeBase):
         if self._is_constant:
             return 0
         return 0  # Non-constant Python types also have no LLVM representation
+
+    def get_layout(self):
+        from ..target_layout import TypeLayout
+        return TypeLayout(0, 0, 1, 0)
+
+    def get_alignment(self) -> int:
+        return 1
     
     def get_type_id(self, _visited=None) -> str:
         """Get type ID for pyconst[value]."""
@@ -648,6 +655,19 @@ class pyconst(BuiltinEntity):
     @classmethod
     def can_be_type(cls) -> bool:
         return True
+
+    @classmethod
+    def get_layout(cls):
+        from ..target_layout import TypeLayout
+        return TypeLayout(0, 0, 1, 0)
+
+    @classmethod
+    def get_size_bytes(cls) -> int:
+        return 0
+
+    @classmethod
+    def get_alignment(cls) -> int:
+        return 1
     
     @classmethod
     def __class_getitem__(cls, value):

@@ -14,6 +14,7 @@ class TypeQualifierMeta(BuiltinEntityMeta):
         '_normalize_qualifiers', '__init__', '__new__', '__init_subclass__',
         '__mro__', '__bases__', '__dict__', '__module__', '__qualname__',
         'get_llvm_type', 'get_size_bytes', 'get_type_id',
+        'get_layout', 'get_alignment',
     })
     
     def __getattribute__(cls, name):
@@ -142,10 +143,20 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
     def get_size_bytes(cls):
         """Size of the qualified (inner) type; resolved locally for the
         same reason as get_llvm_type."""
+        layout = cls.get_layout()
+        return layout.allocation_size if layout is not None else None
+
+    @classmethod
+    def get_layout(cls):
         base_type = cls._resolve_qualified_type()
         if base_type is None:
-            return super().get_size_bytes()
-        return base_type.get_size_bytes()
+            return super().get_layout()
+        return base_type.get_layout()
+
+    @classmethod
+    def get_alignment(cls):
+        layout = cls.get_layout()
+        return layout.alignment if layout is not None else None
 
     @classmethod
     def get_type_id(cls, _visited=None) -> str:

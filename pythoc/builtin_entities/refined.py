@@ -299,23 +299,23 @@ class RefinedType(CompositeType):
         return None
     
     @classmethod
-    def get_size_bytes(cls) -> int:
-        """Get size in bytes for refined type.
-        
-        Delegates to the base type or struct type.
-        """
-        # If we have a base type, use it
+    def get_layout(cls):
+        from ..target_layout import TypeLayout, get_type_layout
+
         if cls._base_type is not None:
-            if hasattr(cls._base_type, 'get_size_bytes'):
-                return cls._base_type.get_size_bytes()
-        
-        # Multi-parameter predicate: use struct type
+            return get_type_layout(cls._base_type)
         if cls._struct_type is not None:
-            if hasattr(cls._struct_type, 'get_size_bytes'):
-                return cls._struct_type.get_size_bytes()
-        
-        return 0
-    
+            return get_type_layout(cls._struct_type)
+        return TypeLayout(0, 0, 1, 0)
+
+    @classmethod
+    def get_size_bytes(cls) -> int:
+        return cls.get_layout().allocation_size
+
+    @classmethod
+    def get_alignment(cls) -> int:
+        return cls.get_layout().alignment
+
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Returns underlying LLVM type

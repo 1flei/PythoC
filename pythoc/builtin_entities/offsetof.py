@@ -67,6 +67,10 @@ class offsetof(BuiltinFunction):
         if isinstance(pc_type, type) and issubclass(pc_type, UnionType):
             return 0, field_types[field_names.index(field_name)]
 
+        if hasattr(pc_type, 'get_layout'):
+            index = field_names.index(field_name)
+            return pc_type.get_layout().field_offsets[index], field_types[index]
+
         offset = 0
         for name, field_type in zip(field_names, field_types):
             field_alignment = cls._get_type_alignment(field_type)

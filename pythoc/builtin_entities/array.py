@@ -27,8 +27,9 @@ class array(BuiltinType):
             return ctypes.c_void_p
         
         # Get element ctypes type
-        if hasattr(cls.element_type, 'get_ctypes_type'):
-            elem_ctype = cls.element_type.get_ctypes_type()
+        element_type = cls._get_element_type()
+        if hasattr(element_type, 'get_ctypes_type'):
+            elem_ctype = element_type.get_ctypes_type()
         else:
             return ctypes.c_void_p
         
@@ -41,7 +42,8 @@ class array(BuiltinType):
         for dim in reversed(cls.dimensions):
             result_type = result_type * dim
         
-        return result_type
+        from ..target_layout import validate_ctypes_layout
+        return validate_ctypes_layout(cls, result_type)
     
     @classmethod
     def get_name(cls) -> str:
@@ -62,7 +64,21 @@ class array(BuiltinType):
             dims_str = '_'.join(str(d) for d in cls.dimensions)
             return f'A{elem_id}_{dims_str}'
         return 'Ax'  # unknown array
-    
+
+    @classmethod
+    def _get_element_type(cls):
+        element_type = cls.element_type
+        if isinstance(element_type, str):
+            from ..forward_ref import get_defined_type
+            resolved = get_defined_type(element_type)
+            if resolved is None:
+                logger.error(
+                    f"array: unresolved forward reference '{element_type}'",
+                    node=None, exc_type=NameError,
+                )
+            return resolved
+        return element_type
+
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM array type
@@ -77,16 +93,7 @@ class array(BuiltinType):
         # forward-ref name kept by handle_type_subscript; resolve it here
         # (same lazy resolution as ptr's string pointee), failing loudly if
         # the name was never defined.
-        element_type = cls.element_type
-        if isinstance(element_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(element_type)
-            if resolved is None:
-                logger.error(
-                    f"array: unresolved forward reference '{element_type}'",
-                    node=None, exc_type=NameError,
-                )
-            element_type = resolved
+        element_type = cls._get_element_type()
         if hasattr(element_type, 'get_llvm_type'):
             elem_llvm = element_type.get_llvm_type(module_context)
         elif isinstance(element_type, ir.Type):
@@ -147,38 +154,22 @@ class array(BuiltinType):
         return dimensions
     
     @classmethod
-    def get_size_bytes(cls) -> int:
-        """Get size in bytes"""
+    def get_layout(cls):
         if cls.element_type is None or cls.dimensions is None:
-            return 0
-        
-        # Get element size
-        if hasattr(cls.element_type, 'get_size_bytes'):
-            elem_size = cls.element_type.get_size_bytes()
-        else:
-            elem_size = 4  # Default
-        
-        # Calculate total size
-        total_elements = 1
-        for dim in cls.dimensions:
-            total_elements *= dim
-        
-        return elem_size * total_elements
-    
+            from ..target_layout import TypeLayout
+            return TypeLayout(0, 0, 1, 0)
+
+        from ..target_layout import get_target_layout, get_type_layout
+        element_layout = get_type_layout(cls._get_element_type())
+        return get_target_layout().array(element_layout, cls.dimensions)
+
+    @classmethod
+    def get_size_bytes(cls) -> int:
+        return cls.get_layout().allocation_size
+
     @classmethod
     def get_alignment(cls) -> int:
-        """Get alignment in bytes.
-
-        C aligns an array to its element type's alignment, never more.
-        """
-        elem = cls.element_type
-        if elem is None:
-            return 1
-        if hasattr(elem, 'get_alignment'):
-            return elem.get_alignment()
-        if hasattr(elem, 'get_size_bytes'):
-            return min(elem.get_size_bytes(), 8)
-        return 1
+        return cls.get_layout().alignment
     
     @classmethod
     def can_be_called(cls) -> bool:

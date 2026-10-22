@@ -129,10 +129,12 @@ class simd(BuiltinType):
                              cls.lanes)
 
     @classmethod
-    def get_size_bytes(cls):
+    def get_layout(cls):
         if cls.element_type is None or cls.lanes is None:
-            return 0
-        return cls.element_type.get_size_bytes() * cls.lanes
+            from ..target_layout import TypeLayout
+            return TypeLayout(0, 0, 1, 0)
+        from ..target_layout import get_target_layout
+        return get_target_layout().primitive(cls.get_llvm_type())
 
     @classmethod
     def handle_type_subscript(cls, items):

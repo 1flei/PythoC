@@ -328,6 +328,7 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
     cls.get_field_index = unified_type.get_field_index
     cls.has_field = unified_type.has_field
     cls.get_field_count = unified_type.get_field_count
+    cls.get_layout = unified_type.get_layout
     cls.get_size_bytes = unified_type.get_size_bytes
     cls.get_alignment = unified_type.get_alignment
     cls.get_ctypes_type = unified_type.get_ctypes_type

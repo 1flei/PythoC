@@ -4,7 +4,6 @@ Enhanced version with modular architecture and comprehensive functionality
 """
 
 import ast
-import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List
 from llvmlite import ir, binding
@@ -13,6 +12,13 @@ from .registry import get_unified_registry
 from .type_resolver import TypeResolver
 from .logger import logger
 from .config import config
+from .target_layout import (
+    _create_target_machine,
+    _target_machine_cache_key,
+    default_target_triple,
+    get_target_machine,
+    target_machine_identity,
+)
 
 
 def _emit_wide_int_ffi_trampoline(module, llvm_function):
@@ -92,46 +98,6 @@ binding.initialize_native_asmparser()
 # Detect pass manager API: llvmlite <0.45 uses legacy PM, >=0.45 uses new PM.
 _USE_NEW_PM = not hasattr(binding, 'create_function_pass_manager')
 
-# Target machines are shared by target identity, not by compilation group.
-_target_machine_cache = {}
-
-
-def _resolve_target_cpu(value=None):
-    cpu = config.target_cpu if value is None else value
-    if cpu in ("native", "host"):
-        return binding.get_host_cpu_name()
-    if cpu in (None, "", "generic"):
-        return ""
-    return cpu
-
-
-def _resolve_target_features(value=None):
-    features = config.target_features if value is None else value
-    if features in ("native", "host"):
-        return binding.get_host_cpu_features().flatten()
-    if features in (None, "", "generic"):
-        return ""
-    return features
-
-
-def target_machine_identity():
-    """Return the resolved CPU and feature string used for object emission."""
-    return _resolve_target_cpu(), _resolve_target_features()
-
-
-def _create_target_machine(target, **kwargs):
-    cpu, features = target_machine_identity()
-    return target.create_target_machine(
-        cpu=cpu,
-        features=features,
-        **kwargs,
-    )
-
-
-def _target_machine_cache_key(triple):
-    cpu, features = target_machine_identity()
-    return triple, cpu, features
-
 
 @dataclass
 class _ResolvedFunctionDeclaration:
@@ -168,19 +134,10 @@ class LLVMCompiler:
     def create_module(self, name: str = "main"):
         """Create a new LLVM module"""
         self.module = ir.Module(name=name)
-        # On Windows, use windows-gnu triple so that generated .o files are
-        # compatible with zig's GNU linker (the only supported linker on Windows).
-        triple = binding.get_default_triple()
-        if sys.platform == 'win32':
-            triple = triple.replace('-windows-msvc', '-windows-gnu')
+        triple = default_target_triple()
         self.module.triple = triple
         # Set data layout for correct struct size calculation
-        cache_key = _target_machine_cache_key(triple)
-        target_machine = _target_machine_cache.get(cache_key)
-        if target_machine is None:
-            target = binding.Target.from_triple(triple)
-            target_machine = _create_target_machine(target)
-            _target_machine_cache[cache_key] = target_machine
+        target_machine = get_target_machine(triple)
         self.module.data_layout = target_machine.target_data
         return self.module
     

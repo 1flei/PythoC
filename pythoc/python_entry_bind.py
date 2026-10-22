@@ -178,15 +178,11 @@ def _form(pc_type):
 
 
 def _field_offset(pc_type, index):
-    _names, types = offsetof._get_struct_fields(pc_type)
-    offset = 0
-    for i, field_type in enumerate(types):
-        align = offsetof._get_type_alignment(field_type)
-        offset = offsetof._align_to(offset, align)
-        if i == index:
-            return int(offset)
-        offset += offsetof._get_type_size(field_type)
-    raise RuntimeError('struct field index is out of range')
+    layout = pc_type.get_layout()
+    try:
+        return int(layout.field_offsets[index])
+    except IndexError as exc:
+        raise RuntimeError('struct field index is out of range') from exc
 
 
 def _named_fields(form):

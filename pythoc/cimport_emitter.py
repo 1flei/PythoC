@@ -164,20 +164,6 @@ def _decl_unsupported_reason(decl: CDeclIR,
     return None
 
 
-# Layout the emitted pythoc types have on the targets cimport supports
-# (natural alignment, matching LLVM's default data layout).  cimport maps
-# C long to i64 and pythoc pointers are hardcoded to 8 bytes, so cimport as
-# a whole already assumes a 64-bit target.
-_PRIMITIVE_LAYOUT = {
-    "i8": (1, 1), "u8": (1, 1), "char": (1, 1), "bool": (1, 1),
-    "i16": (2, 2), "u16": (2, 2),
-    "i32": (4, 4), "u32": (4, 4), "f32": (4, 4),
-    "i64": (8, 8), "u64": (8, 8), "f64": (8, 8),
-    "f128": (16, 16),
-}
-_POINTER_LAYOUT = (8, 8)
-# Enums are emitted as @enum(i32).
-_ENUM_LAYOUT = (4, 4)
 # Records referenced but never declared in the main file are emitted as
 # opaque 1-byte placeholders.
 _PLACEHOLDER_LAYOUT = (1, 1)
@@ -188,6 +174,24 @@ def _align_up(value: int, alignment: int) -> int:
         return value
     remainder = value % alignment
     return value if remainder == 0 else value + alignment - remainder
+
+
+def _emitted_type_layout(name: str) -> tuple[int, int] | None:
+    from . import builtin_entities
+
+    emitted_name = "u8" if name == "char" else name
+    pc_type = getattr(builtin_entities, emitted_name, None)
+    if pc_type is None or not hasattr(pc_type, "get_layout"):
+        return None
+    layout = pc_type.get_layout()
+    return layout.allocation_size, layout.alignment
+
+
+def _pointer_layout() -> tuple[int, int]:
+    from .builtin_entities import ptr, void
+
+    layout = ptr[void].get_layout()
+    return layout.allocation_size, layout.alignment
 
 
 class _LayoutModel:
@@ -223,20 +227,20 @@ class _LayoutModel:
             return None
         kind = ty.kind
         if kind == "primitive":
-            return _PRIMITIVE_LAYOUT.get(ty.name or "")
+            return _emitted_type_layout(ty.name or "")
         if kind in ("pointer", "function"):
-            return _POINTER_LAYOUT
+            return _pointer_layout()
         if kind == "array":
             if ty.size is None or ty.size < 0:
                 # Emitted as ptr[elem].
-                return _POINTER_LAYOUT
+                return _pointer_layout()
             element = self.type_layout(ty.element, _visiting)
             if element is None:
                 return None
             elem_size, elem_align = element
             return (_align_up(elem_size, elem_align) * ty.size, elem_align)
         if kind == "enum":
-            return _ENUM_LAYOUT
+            return _emitted_type_layout("i32")
         if kind in ("struct", "union"):
             decl = self._records.get(_ident(ty.name)) if ty.name else None
             if decl is None:

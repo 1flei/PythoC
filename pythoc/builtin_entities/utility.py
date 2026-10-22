@@ -163,9 +163,12 @@ def _build_type_alignments():
     for name in _frozen_list_builtin_types():
         entity_cls = _frozen_get_builtin_entity(name)
         if entity_cls:
-            # Alignment = size for basic types
-            alignments[entity_cls] = entity_cls.get_size_bytes()
-            alignments[name] = entity_cls.get_size_bytes()
+            if hasattr(entity_cls, 'get_alignment'):
+                alignment = entity_cls.get_alignment()
+            else:
+                alignment = entity_cls.get_size_bytes()
+            alignments[entity_cls] = alignment
+            alignments[name] = alignment
     return alignments
 
 
@@ -211,14 +214,13 @@ def get_type_alignment(type_hint) -> int:
     # Handle builtin entity classes
     if isinstance(type_hint, type) and issubclass(type_hint, BuiltinEntity):
         if type_hint.can_be_type():
-            # For basic types, alignment = size (up to 8 bytes)
-            return min(type_hint.get_size_bytes(), 8)
+            return type_hint.get_alignment()
     
     # Handle string type names
     if isinstance(type_hint, str):
         entity = get_builtin_entity(type_hint)
         if entity and entity.can_be_type():
-            return min(entity.get_size_bytes(), 8)
+            return entity.get_alignment()
         # Fallback to TYPE_ALIGNMENTS dict
         return TYPE_ALIGNMENTS.get(type_hint, 4)
     

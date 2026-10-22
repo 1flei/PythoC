@@ -23,137 +23,76 @@ class UnionType(CompositeType):
     
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Get LLVM type for union (array with correct alignment)
-        
-        All fields share the same memory, so union is represented
-        as an array with size equal to the largest field and alignment
-        matching the most-aligned field.
-        
-        Uses integer types to preserve alignment:
-        - alignment 1: [N x i8]
-        - alignment 2: [N/2 x i16]
-        - alignment 4: [N/4 x i32]
-        - alignment 8: [N/8 x i64]
-        
-        Args:
-            module_context: Optional IR module context (not used)
-        """
+        """Get backing storage matching the semantic union layout."""
         if cls._field_types is None:
             logger.error("union type requires field types", node=None, exc_type=TypeError)
-        
-        # Ensure field types are resolved
+
         cls._ensure_field_types_resolved()
-        
-        max_size = 0
-        max_align = 1
-        for field_type in cls._field_types:
-            if hasattr(field_type, 'get_size_bytes'):
-                field_size = field_type.get_size_bytes()
-                # Skip void types (size 0)
-                if field_size == 0:
-                    continue
-                # Get alignment - use get_alignment if available, otherwise estimate
-                if hasattr(field_type, 'get_alignment'):
-                    field_align = field_type.get_alignment()
-                else:
-                    field_align = min(field_size, 8)
-            else:
-                logger.error(f"union.get_llvm_type: unknown field type {field_type}",
-                            node=None, exc_type=TypeError)
-            max_size = max(max_size, field_size)
-            max_align = max(max_align, field_align)
-        
-        # Align size to max alignment
-        if max_size == 0:
-            return ir.ArrayType(ir.IntType(8), 0)
-        if max_size % max_align != 0:
-            max_size += max_align - (max_size % max_align)
-        
-        # Choose element type based on alignment to preserve correct alignment
-        # This ensures the union has the same alignment as its most-aligned field
-        if max_align >= 8:
-            elem_type = ir.IntType(64)
-            elem_count = max_size // 8
-        elif max_align >= 4:
-            elem_type = ir.IntType(32)
-            elem_count = max_size // 4
-        elif max_align >= 2:
-            elem_type = ir.IntType(16)
-            elem_count = max_size // 2
-        else:
-            elem_type = ir.IntType(8)
-            elem_count = max_size
-        
-        return ir.ArrayType(elem_type, elem_count)
+
+        from ..target_layout import get_target_layout
+        layout = cls.get_layout()
+        target_layout = get_target_layout()
+        carrier = target_layout.alignment_carrier(layout.alignment)
+        carrier_layout = target_layout.primitive(carrier)
+        return ir.ArrayType(
+            carrier,
+            layout.allocation_size // carrier_layout.allocation_size,
+        )
     
     @classmethod
     def get_ctypes_type(cls):
-        """Get ctypes type for union (byte array).
-        
-        Union is represented as a byte array with size equal to the largest field.
-        """
+        """Get a ctypes union with the same member-driven alignment."""
         import ctypes
-        
-        size = cls.get_size_bytes()
-        if size == 0:
+
+        cached = getattr(cls, '_ctypes_union_cache', None)
+        if cached is not None:
+            return cached
+
+        cls._ensure_field_types_resolved()
+        fields = []
+        for index, field_type in enumerate(cls._field_types):
+            field_ctype = field_type.get_ctypes_type()
+            if field_ctype is None:
+                continue
+            field_name = (
+                cls._field_names[index] if cls._field_names is not None
+                else None
+            )
+            if not field_name:
+                field_name = f"field_{index}"
+            fields.append((field_name, field_ctype))
+
+        if not fields:
             return None
-        return ctypes.c_uint8 * size
+
+        union_class = type(
+            f"CUnion_{cls.get_name()}",
+            (ctypes.Union,),
+            {'_fields_': fields},
+        )
+        from ..target_layout import validate_ctypes_layout
+        validate_ctypes_layout(cls, union_class)
+        cls._ctypes_union_cache = union_class
+        return union_class
     
+    @classmethod
+    def get_layout(cls):
+        if cls._field_types is None:
+            from ..target_layout import TypeLayout
+            return TypeLayout(0, 0, 1, 0)
+
+        cls._ensure_field_types_resolved()
+        from ..target_layout import get_target_layout, get_type_layout
+        fields = (get_type_layout(field) for field in cls._field_types)
+        return get_target_layout().union(fields)
+
     @classmethod
     def get_size_bytes(cls) -> int:
-        """Get size in bytes (with alignment)"""
-        if cls._field_types is None:
-            return 0
-        
-        # Ensure field types are resolved
-        cls._ensure_field_types_resolved()
-        
-        max_size = 0
-        max_align = 1
-        for field_type in cls._field_types:
-            if hasattr(field_type, 'get_size_bytes'):
-                field_size = field_type.get_size_bytes()
-                if field_size == 0:
-                    continue
-                # Get alignment - use get_alignment if available, otherwise estimate
-                if hasattr(field_type, 'get_alignment'):
-                    field_align = field_type.get_alignment()
-                else:
-                    field_align = min(field_size, 8)
-            else:
-                logger.error(f"union.get_size_bytes: unknown field type {field_type}",
-                            node=None, exc_type=TypeError)
-            max_size = max(max_size, field_size)
-            max_align = max(max_align, field_align)
-        
-        # Align size
-        if max_size == 0:
-            return 0
-        if max_size % max_align != 0:
-            max_size += max_align - (max_size % max_align)
-        return max_size
-    
+        return cls.get_layout().allocation_size
+
     @classmethod
     def get_alignment(cls) -> int:
-        """Get alignment in bytes (max alignment of all fields)"""
-        if cls._field_types is None:
-            return 1
-        
-        cls._ensure_field_types_resolved()
-        
-        max_align = 1
-        for field_type in cls._field_types:
-            if hasattr(field_type, 'get_size_bytes'):
-                field_size = field_type.get_size_bytes()
-                if field_size == 0:
-                    continue
-                if hasattr(field_type, 'get_alignment'):
-                    field_align = field_type.get_alignment()
-                else:
-                    field_align = min(field_size, 8)
-                max_align = max(max_align, field_align)
-        
-        return max_align
+        return cls.get_layout().alignment
     
     @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node):

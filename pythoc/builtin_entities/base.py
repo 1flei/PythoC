@@ -497,11 +497,41 @@ class BuiltinType(BuiltinEntity):
             module_context: Optional IR module context (not used by basic types, but accepted for interface uniformity)
         """
         return cls._llvm_type
-    
+
+    @classmethod
+    def get_layout(cls):
+        """Return this type's target-aware semantic layout."""
+        from ..target_layout import TypeLayout, get_target_layout
+
+        llvm_type = cls._llvm_type
+        if cls._is_pointer:
+            llvm_type = ir.PointerType(ir.IntType(8))
+        elif llvm_type is None:
+            llvm_type = cls.get_llvm_type()
+        if llvm_type is None:
+            size = cls._size_bytes
+            if size is None:
+                return None
+            return TypeLayout(size, size, 1, size)
+
+        storage_size = None if cls._is_pointer else cls._size_bytes
+        bit_width = llvm_type.width if isinstance(llvm_type, ir.IntType) else None
+        return get_target_layout().primitive(
+            llvm_type,
+            storage_size=storage_size,
+            bit_width=bit_width,
+        )
+
     @classmethod
     def get_size_bytes(cls) -> int:
-        return cls._size_bytes
-    
+        layout = cls.get_layout()
+        return layout.allocation_size if layout is not None else None
+
+    @classmethod
+    def get_alignment(cls) -> int:
+        layout = cls.get_layout()
+        return layout.alignment if layout is not None else None
+
     @classmethod
     def is_signed(cls) -> bool:
         return cls._is_signed
@@ -542,8 +572,7 @@ class BuiltinType(BuiltinEntity):
         
         # Integer promotion rules
         if cls.is_integer() and hasattr(other, 'is_integer') and other.is_integer():
-            # Can promote smaller to larger
-            return cls.get_size_bytes() <= other.get_size_bytes()
+            return cls.get_layout().bit_width <= other.get_layout().bit_width
         
         # Float promotion rules
         if cls.is_float() and hasattr(other, 'is_float') and other.is_float():
