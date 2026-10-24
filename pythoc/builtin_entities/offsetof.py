@@ -63,6 +63,10 @@ class offsetof(BuiltinFunction):
             logger.error(f"offsetof(): field '{field_name}' not found in type '{cls._type_name(pc_type)}'",
                         node=None, exc_type=AttributeError)
 
+        from ..target_layout import NATURAL_LAYOUT
+        if not getattr(pc_type, '_layout_config', NATURAL_LAYOUT).is_natural:
+            raise TypeError('offsetof() cannot be applied to a bit field')
+
         # All fields of a union share offset 0.
         if isinstance(pc_type, type) and issubclass(pc_type, UnionType):
             return 0, field_types[field_names.index(field_name)]

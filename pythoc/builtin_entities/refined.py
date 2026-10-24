@@ -306,7 +306,7 @@ class RefinedType(CompositeType):
             return get_type_layout(cls._base_type)
         if cls._struct_type is not None:
             return get_type_layout(cls._struct_type)
-        return TypeLayout(0, 0, 1, 0)
+        return TypeLayout.empty()
 
     @classmethod
     def get_size_bytes(cls) -> int:

@@ -132,7 +132,7 @@ class simd(BuiltinType):
     def get_layout(cls):
         if cls.element_type is None or cls.lanes is None:
             from ..target_layout import TypeLayout
-            return TypeLayout(0, 0, 1, 0)
+            return TypeLayout.empty()
         from ..target_layout import get_target_layout
         return get_target_layout().primitive(cls.get_llvm_type())
 

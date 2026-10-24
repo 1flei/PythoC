@@ -175,7 +175,7 @@ def make_load_volatile(load_inst: ir.LoadInstr) -> ir.LoadInstr:
             %result = load volatile type, type* %ptr, align N
         """
         [val] = load_inst.operands
-        align = ' align %d' % load_inst.align if load_inst.align is not None else ''
+        align = ', align %d' % load_inst.align if load_inst.align is not None else ''
         
         # Check if using opaque pointers (pointer type has no pointee attribute or is_opaque)
         if hasattr(val.type, 'is_opaque') and val.type.is_opaque:
@@ -222,7 +222,7 @@ def make_store_volatile(store_inst: ir.StoreInstr) -> ir.StoreInstr:
             store volatile type %value, type* %ptr, align N
         """
         [val, ptr] = store_inst.operands
-        align = ' align %d' % store_inst.align if store_inst.align is not None else ''
+        align = ', align %d' % store_inst.align if store_inst.align is not None else ''
         
         # Check if using opaque pointers
         if hasattr(ptr.type, 'is_opaque') and ptr.type.is_opaque:
@@ -274,7 +274,14 @@ def safe_load(builder: ir.IRBuilder, ptr: ir.Value, pc_type: Any = None,
     return load_inst
 
 
-def safe_store(builder: ir.IRBuilder, value: ir.Value, ptr: ir.Value, 
+def check_const_store(pc_type, node=None):
+    """Apply the common const-mutation check before emitting a store."""
+    if is_const(pc_type):
+        type_name = pc_type.get_name() if hasattr(pc_type, 'get_name') else str(pc_type)
+        logger.error(f"Cannot reassign to const variable of type {type_name}", node=node)
+
+
+def safe_store(builder: ir.IRBuilder, value: ir.Value, ptr: ir.Value,
                pc_type: Any = None, align: Any = None, node: Any = None) -> ir.StoreInstr:
     """Store with automatic volatile handling and const checking
     
@@ -293,9 +300,7 @@ def safe_store(builder: ir.IRBuilder, value: ir.Value, ptr: ir.Value,
         RuntimeError: If attempting to modify const-qualified type
     """
     # Check if trying to modify const
-    if is_const(pc_type):
-        type_name = pc_type.get_name() if hasattr(pc_type, 'get_name') else str(pc_type)
-        logger.error(f"Cannot reassign to const variable of type {type_name}", node=node)
+    check_const_store(pc_type, node)
     
     store_inst = builder.store(value, ptr, align=align)
     

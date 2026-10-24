@@ -267,7 +267,13 @@ class ptr(BuiltinType):
         # Unified path for subscript: compute lvalue address via visitor and wrap
         if isinstance(arg_node, ast.Subscript):
             lvalue = visitor.visit_lvalue(arg_node)
-            address_ptr = lvalue.ir_value
+            if not lvalue.has_place():
+                logger.error(
+                    "ptr() requires an addressable value",
+                    node=node,
+                    exc_type=TypeError,
+                )
+            address_ptr = lvalue.require_place()
             if not lvalue.type_hint:
                 logger.error("ptr(): missing PC type hint for lvalue; cannot infer pointee type", node=node, exc_type=TypeError)
             pointee_type = lvalue.type_hint
@@ -277,7 +283,13 @@ class ptr(BuiltinType):
         
         # Fallback unified path: use visit_lvalue to get the address
         lvalue = visitor.visit_lvalue(arg_node)
-        address_ptr = lvalue.ir_value
+        if not lvalue.has_place():
+            logger.error(
+                "ptr() requires an addressable value",
+                node=node,
+                exc_type=TypeError,
+            )
+        address_ptr = lvalue.require_place()
         
         # Infer the pointee type from the lvalue's type hint
         if lvalue.type_hint:

@@ -71,6 +71,12 @@ class ValueRefDispatcher:
             node=getattr(value_ref, "source_node", None),
         )
 
+        if value_ref.has_storage():
+            return wrap_value(
+                value_ref.get_ir_value(), kind='value',
+                type_hint=value_ref.type_hint,
+                source_node=value_ref.source_node,
+            )
         if value_ref.is_python_value() or not value_ref.has_place():
             return value_ref
 

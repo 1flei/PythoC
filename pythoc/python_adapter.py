@@ -500,6 +500,9 @@ def _type_flag(pc_type, name: str) -> bool:
 
 
 def _classify_struct(pc_type, abi, stack):
+    from .target_layout import NATURAL_LAYOUT
+    if not getattr(pc_type, '_layout_config', NATURAL_LAYOUT).is_natural:
+        return _classify_blob(pc_type, abi)
     field_types = getattr(pc_type, '_field_types', None)
     if field_types is None:
         return None

@@ -71,6 +71,12 @@ from .utils.link_utils import linklibrary
 from .config import config
 from .forward_ref import mark_type_defined, register_forward_ref_callback
 from .session import CompileSession
+from .target_layout import (
+    TargetLayout,
+    TypeLayout,
+    get_target_layout,
+    get_type_layout,
+)
 
 import builtins as _py
 
@@ -135,6 +141,7 @@ __all__ = [
     'sizeof',
     'offsetof',
     'typeof',
+    'TypeLayout', 'TargetLayout', 'get_target_layout', 'get_type_layout',
     'char',
     'pyconst',
     

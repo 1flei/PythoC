@@ -48,6 +48,13 @@ class UnionType(CompositeType):
         if cached is not None:
             return cached
 
+        from ..target_layout import NATURAL_LAYOUT
+        if not getattr(cls, '_layout_config', NATURAL_LAYOUT).is_natural:
+            from .bitfield_access import get_bit_storage_ctypes
+            storage = get_bit_storage_ctypes(cls.get_layout(), 'CBitUnion')
+            cls._ctypes_union_cache = storage
+            return storage
+
         cls._ensure_field_types_resolved()
         fields = []
         for index, field_type in enumerate(cls._field_types):
@@ -79,10 +86,17 @@ class UnionType(CompositeType):
     def get_layout(cls):
         if cls._field_types is None:
             from ..target_layout import TypeLayout
-            return TypeLayout(0, 0, 1, 0)
+            return TypeLayout.empty()
 
         cls._ensure_field_types_resolved()
         from ..target_layout import get_target_layout, get_type_layout
+        from ..target_layout import NATURAL_LAYOUT, bit_aggregate_layout
+        layout_config = getattr(cls, '_layout_config', NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            return bit_aggregate_layout(
+                cls._field_names, cls._field_types, layout_config,
+                is_union=True,
+            )
         fields = (get_type_layout(field) for field in cls._field_types)
         return get_target_layout().union(fields)
 
@@ -122,6 +136,21 @@ class UnionType(CompositeType):
                         node=node, exc_type=IndexError)
         
         field_type = cls._field_types[index_val]
+
+        from ..ir_helpers import propagate_qualifiers
+        field_type = propagate_qualifiers(base.type_hint, field_type)
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .bitfield_access import access_bit_field
+            return access_bit_field(
+                visitor,
+                base,
+                cls,
+                index_val,
+                field_type,
+            )
         
         # Get the address of the union
         union_ptr = cls._get_value_address(visitor, base)
@@ -196,6 +225,18 @@ class UnionType(CompositeType):
         # If we have const[union], accessing field should give const[field_type]
         if base.type_hint:
             field_type = propagate_qualifiers(base.type_hint, field_type)
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .bitfield_access import access_bit_field
+            return access_bit_field(
+                visitor,
+                base,
+                cls,
+                field_index,
+                field_type,
+            )
         
         # Get the address of the union
         union_ptr = cls._get_value_address(visitor, base)
@@ -218,8 +259,12 @@ class UnionType(CompositeType):
         return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr)
 
 
-def create_union_type(field_types: List[Any], field_names: Optional[List[str]] = None,
-                      python_class: Optional[type] = None) -> type:
+def create_union_type(
+    field_types: List[Any],
+    field_names: Optional[List[str]] = None,
+    python_class: Optional[type] = None,
+    layout_config=None,
+) -> type:
     """Create a union type without global caching
     
     Args:
@@ -230,6 +275,9 @@ def create_union_type(field_types: List[Any], field_names: Optional[List[str]] =
     Returns:
         UnionType subclass
     """
+    from ..target_layout import NATURAL_LAYOUT
+    layout_config = layout_config or NATURAL_LAYOUT
+
     # Build type name
     from ..type_id import get_type_id
     type_names = []
@@ -253,6 +301,7 @@ def create_union_type(field_types: List[Any], field_names: Optional[List[str]] =
             '_field_types': field_types,
             '_field_names': field_names,
             '_python_class': python_class,
+            '_layout_config': layout_config,
         }
     )
     
@@ -280,13 +329,13 @@ class union(UnionType):
         """Decorator application"""
         return self._apply_decorator(cls, self.suffix, self.anonymous)
     
-    def __new__(cls, target=None, suffix=None):
+    def __new__(cls, target=None, suffix=None, **kwargs):
         """Support @union decorator syntax with parameters
         
         Uses the common decorator pattern from CompositeType base class.
         """
         # Delegate to base class factory method
-        return cls.create_decorator_instance(target, suffix)
+        return cls.create_decorator_instance(target, suffix, **kwargs)
     
     @classmethod
     def _apply_decorator(cls, target_cls, suffix=None, **kwargs):
@@ -313,12 +362,16 @@ class union(UnionType):
         
         # Use common field parsing logic
         parsed = cls._parse_class_fields(target_cls)
+
+        from ..target_layout import make_aggregate_layout_config
+        layout_config = make_aggregate_layout_config(**kwargs)
         
         # Create union type
         unified_type = create_union_type(
             parsed['field_types'],
             parsed['field_names'],
-            python_class=target_cls
+            python_class=target_cls,
+            layout_config=layout_config,
         )
         
         # Setup forward reference handling if needed

@@ -512,7 +512,7 @@ class BuiltinType(BuiltinEntity):
             size = cls._size_bytes
             if size is None:
                 return None
-            return TypeLayout(size, size, 1, size)
+            return TypeLayout(size * 8, size * 8, 8, size * 8)
 
         storage_size = None if cls._is_pointer else cls._size_bytes
         bit_width = llvm_type.width if isinstance(llvm_type, ir.IntType) else None

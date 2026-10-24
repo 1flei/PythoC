@@ -135,8 +135,14 @@ def add_struct_handle_call(cls):
     return cls
 
 
-def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=None,
-                          static_linkage='weak_odr'):
+def compile_dynamic_class(
+    cls,
+    suffix=None,
+    type_factory=None,
+    captured_symbols=None,
+    static_linkage='weak_odr',
+    layout_config=None,
+):
     """Compile a @compile decorated class into a unified struct/union type
     
     This function now uses the unified struct type system with structural typing.
@@ -269,7 +275,12 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
                 f"'param' cannot be used as a struct field type ('{fname}')",
                 exc_type=TypeError,
             )
-    unified_type = type_factory(parsed_field_types, field_names, python_class=cls)
+    unified_type = type_factory(
+        parsed_field_types,
+        field_names,
+        python_class=cls,
+        layout_config=layout_config,
+    )
     
     # === HANDLE FORWARD/CIRCULAR REFERENCES ===
     # Check if any field types are still strings (unresolved forward references)
@@ -333,8 +344,11 @@ def compile_dynamic_class(cls, suffix=None, type_factory=None, captured_symbols=
     cls.get_alignment = unified_type.get_alignment
     cls.get_ctypes_type = unified_type.get_ctypes_type
     cls.handle_subscript = unified_type.handle_subscript
+    cls.is_struct_type = unified_type.is_struct_type
+    cls.get_all_fields = unified_type.get_all_fields
     cls._ensure_field_types_resolved = unified_type._ensure_field_types_resolved
     cls.get_type_id = unified_type.get_type_id
+    cls._layout_config = unified_type._layout_config
     
     # Delegate struct-specific methods if available
     if hasattr(unified_type, '_get_structure_hash'):

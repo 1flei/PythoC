@@ -128,7 +128,7 @@ class PythonType(_PythonTypeBase):
 
     def get_layout(self):
         from ..target_layout import TypeLayout
-        return TypeLayout(0, 0, 1, 0)
+        return TypeLayout.empty()
 
     def get_alignment(self) -> int:
         return 1
@@ -659,7 +659,7 @@ class pyconst(BuiltinEntity):
     @classmethod
     def get_layout(cls):
         from ..target_layout import TypeLayout
-        return TypeLayout(0, 0, 1, 0)
+        return TypeLayout.empty()
 
     @classmethod
     def get_size_bytes(cls) -> int:

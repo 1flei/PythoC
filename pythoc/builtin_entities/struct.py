@@ -128,6 +128,17 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             return cls._ctypes_struct_cache
         
         cls._ensure_field_types_resolved()
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .bitfield_access import get_bit_storage_ctypes
+            storage = get_bit_storage_ctypes(
+                cls.get_layout(),
+                f"CStruct_{cls.get_name()}",
+            )
+            cls._ctypes_struct_cache = storage
+            return storage
         
         # Build fields list
         fields = []
@@ -260,6 +271,12 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .bitfield_access import get_bit_storage_type
+            return get_bit_storage_type(cls.get_layout())
         
         # Rule: @compile class always uses IdentifiedStructType.
         # _force_identified extends this to named programmatic structs, which is
@@ -357,9 +374,16 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         cls._ensure_field_types_resolved()
         if cls._field_types is None:
             from ..target_layout import TypeLayout
-            return TypeLayout(0, 0, 1, 0)
+            return TypeLayout.empty()
 
         from ..target_layout import get_target_layout, get_type_layout
+        from ..target_layout import NATURAL_LAYOUT, bit_aggregate_layout
+        layout_config = getattr(cls, '_layout_config', NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            return bit_aggregate_layout(
+                cls._field_names, cls._field_types, layout_config,
+                is_union=False,
+            )
         fields = (get_type_layout(field) for field in cls._field_types)
         return get_target_layout().struct(fields)
 
@@ -392,6 +416,11 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             type_id = id(field_type) if field_type is not None else 0
             field_name = cls._field_names[i] if cls._field_names and i < len(cls._field_names) else None
             hash_components.append((type_id, field_name))
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            hash_components.append(("layout", layout_config.identity()))
         
         return hash(tuple(hash_components))
     
@@ -537,6 +566,26 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         if hasattr(field_type, 'handle_field_access'):
             # Delegate to field type's handler (for pyconst)
             return field_type.handle_field_access(visitor, base, field_index, attr_name, node)
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .bitfield_access import access_bit_field
+            from ..literal_protocol import project_tracking_metadata
+
+            result_var_name, result_linear_path = project_tracking_metadata(
+                base,
+                field_index,
+            )
+            return access_bit_field(
+                visitor,
+                base,
+                cls,
+                field_index,
+                field_type,
+                var_name=result_var_name,
+                linear_path=result_linear_path,
+            )
         
         # Get LLVM field index (may differ from PC index due to zero-sized fields)
         module_context = visitor.module.context if visitor.module else None
@@ -617,6 +666,26 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             # Delegate to field type's handler (for pyconst)
             field_name = cls._field_names[index_val] if cls._field_names and index_val < len(cls._field_names) else f"[{index_val}]"
             return field_type.handle_field_access(visitor, base, index_val, field_name, node)
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .bitfield_access import access_bit_field
+            from ..literal_protocol import project_tracking_metadata
+
+            result_var_name, result_linear_path = project_tracking_metadata(
+                base,
+                index_val,
+            )
+            return access_bit_field(
+                visitor,
+                base,
+                cls,
+                index_val,
+                field_type,
+                var_name=result_var_name,
+                linear_path=result_linear_path,
+            )
         
         # Get LLVM field index
         module_context = visitor.module.context if visitor.module else None
@@ -688,9 +757,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         return fields
 
 
-def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] = None, 
+def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] = None,
                        python_class: Optional[type] = None,
-                       elements: Optional[List[Any]] = None) -> type:
+                       elements: Optional[List[Any]] = None,
+                       layout_config=None) -> type:
     """Create a struct type without global caching
     
     Args:
@@ -702,6 +772,9 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
     Returns:
         StructType subclass
     """
+    from ..target_layout import NATURAL_LAYOUT
+    layout_config = layout_config or NATURAL_LAYOUT
+
     # Generate name for the struct type
     if python_class:
         canonical_name = python_class.__name__
@@ -739,6 +812,7 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
             '_struct_info': None,
             '_structure_hash': None,
             '_elements': elements,  # Store original ValueRef elements for iteration
+            '_layout_config': layout_config,
         }
     )
     
@@ -766,13 +840,13 @@ class struct(StructType):
         """Decorator application"""
         return self._apply_decorator(cls, self.suffix, self.anonymous)
     
-    def __new__(cls, target=None, suffix=None):
+    def __new__(cls, target=None, suffix=None, **kwargs):
         """Support @struct decorator syntax with parameters
         
         Uses the common decorator pattern from CompositeType base class.
         """
         # Delegate to base class factory method
-        return cls.create_decorator_instance(target, suffix)
+        return cls.create_decorator_instance(target, suffix, **kwargs)
     
     @classmethod
     def get_name(cls) -> str:

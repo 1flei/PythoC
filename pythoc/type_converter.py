@@ -891,14 +891,9 @@ class TypeConverter:
                 field_val = self.convert(py_valueref, ftype)
                 field_values.append(ensure_ir(field_val))
 
-        struct_llvm_type = target_struct_type.get_llvm_type(
-            self._visitor.module.context
-        )
-        struct_value = ir.Constant(struct_llvm_type, ir.Undefined)
-        for i, field_val in enumerate(field_values):
-            struct_value = self._visitor.builder.insert_value(
-                struct_value, field_val, i
-            )
+        from .literal_protocol import assemble_aggregate_value
+        struct_value = assemble_aggregate_value(
+            self._visitor, target_struct_type, field_values)
         return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
 
     def _convert_struct_to_struct(self, value, source_struct_type, target_struct_type, original_target_type):
@@ -938,10 +933,9 @@ class TypeConverter:
             converted_fields.append(ensure_ir(converted_field))
         
         # Build target struct value
-        target_llvm_type = target_struct_type.get_llvm_type(self._visitor.module.context)
-        struct_value = ir.Constant(target_llvm_type, ir.Undefined)
-        for i, field_val in enumerate(converted_fields):
-            struct_value = self._visitor.builder.insert_value(struct_value, field_val, i)
+        from .literal_protocol import assemble_aggregate_value
+        struct_value = assemble_aggregate_value(
+            self._visitor, target_struct_type, converted_fields)
         
         return wrap_value(struct_value, kind="value", type_hint=original_target_type)
 

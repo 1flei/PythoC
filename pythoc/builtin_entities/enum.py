@@ -220,7 +220,7 @@ class EnumType(CompositeType):
     def get_layout(cls):
         if cls._tag_type is None or cls._union_payload is None:
             from ..target_layout import TypeLayout
-            return TypeLayout(0, 0, 1, 0)
+            return TypeLayout.empty()
 
         from ..target_layout import get_target_layout, get_type_layout
         return get_target_layout().struct([

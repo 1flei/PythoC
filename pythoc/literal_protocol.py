@@ -320,8 +320,8 @@ def lower_sequence_to_constant(visitor, carrier, target_pc_type):
         visitor, carrier, target_pc_type, _lower_element_to_constant)
     if lowered is None:
         return None
-    agg_llvm, consts = lowered
-    return ir.Constant(agg_llvm, consts)
+    _, consts = lowered
+    return assemble_aggregate_value(visitor, target_pc_type, consts)
 
 
 def materialize_sequence_value(visitor, carrier, target_pc_type):
@@ -343,7 +343,23 @@ def materialize_sequence_value(visitor, carrier, target_pc_type):
         logger.error(
             f"Cannot materialize sequence literal into {target_pc_type}",
             node=None, exc_type=TypeError)
-    agg_llvm, values = lowered
+    _, values = lowered
+    return assemble_aggregate_value(visitor, target_pc_type, values)
+
+
+def assemble_aggregate_value(visitor, target_pc_type, values):
+    """Assemble semantic fields using the target's storage representation."""
+    from llvmlite import ir
+    from .ir_helpers import is_link_time_constant
+    from .target_layout import NATURAL_LAYOUT
+    from .type_converter import strip_qualifiers
+
+    target_pc_type = strip_qualifiers(target_pc_type)
+    agg_llvm = target_pc_type.get_llvm_type(visitor.module.context)
+    layout_config = getattr(target_pc_type, '_layout_config', NATURAL_LAYOUT)
+    if not layout_config.is_natural:
+        from .builtin_entities.bitfield_access import assemble_bit_fields
+        return assemble_bit_fields(visitor, target_pc_type, values)
     if all(is_link_time_constant(v) for v in values):
         return ir.Constant(agg_llvm, values)
     agg = ir.Constant(agg_llvm, ir.Undefined)

@@ -146,6 +146,18 @@ class DebugInfoBuilder:
 
     def _build_debug_type(self, pc_type: Any) -> Optional[ir.DIValue]:
         """Inner helper without caching; returns None for unsupported types."""
+        from .target_layout import NATURAL_LAYOUT
+        layout_config = getattr(pc_type, '_layout_config', NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            from .builtin_entities import array, u8
+            size = pc_type.get_layout().allocation_size
+            storage = self._build_member_type('_storage', array[u8, size], 0)
+            return self.module.add_debug_info('DICompositeType', {
+                'tag': ir.DIToken('DW_TAG_structure_type'),
+                'name': pc_type.get_name(),
+                'size': size * 8,
+                'elements': self.module.add_metadata([storage]),
+            })
         if getattr(pc_type, '_is_integer', False):
             size = getattr(pc_type, '_size_bytes', 0) * 8
             name = pc_type.get_name() if hasattr(pc_type, 'get_name') else str(pc_type)

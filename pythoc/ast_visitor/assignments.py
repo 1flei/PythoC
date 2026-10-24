@@ -158,11 +158,11 @@ class AssignmentsMixin:
         
         # Convert value to target type (implicit coercer checks pointer policy)
         rvalue = self.implicit_coercer.coerce(rvalue, target_pc_type, node)
-        target_ir = ensure_ir(lvalue)
-        value_ir = self._assignment_ir_value(rvalue, target_ir.type.pointee)
+        target_type = lvalue.get_storage_type()
+        value_ir = self._assignment_ir_value(rvalue, target_type)
         
         # Use safe_store for qualifier-aware storage (handles const check + volatile)
-        safe_store(self.builder, value_ir, target_ir, target_pc_type, node=node)
+        lvalue.store(self.builder, value_ir, node=node)
 
     def _assign_to_target(self, target: ast.AST, rvalue: ValueRef, node, pc_type=None) -> None:
         """Unified single-target assignment: lvalue resolution, linear checks, store, and linear registration.

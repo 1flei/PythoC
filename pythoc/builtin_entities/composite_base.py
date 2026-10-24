@@ -18,6 +18,7 @@ from llvmlite import ir
 from .base import BuiltinType
 from ..logger import logger
 from ..valueref import ValueRef
+from ..target_layout import NATURAL_LAYOUT
 
 
 # Serializes lazy field-type resolution (forward references) so concurrent
@@ -45,6 +46,8 @@ class CompositeType(BuiltinType):
     _needs_type_resolution: bool = False
     _field_types_resolved: bool = False
     _type_namespace: Optional[dict] = None
+
+    _layout_config = NATURAL_LAYOUT
     
     @classmethod
     def _extract_constant_index(cls, node: ast.Subscript, visitor=None, index_value=None) -> int:
@@ -181,7 +184,7 @@ class CompositeType(BuiltinType):
         cls._ensure_field_types_resolved()
         if cls._field_types is None:
             from ..target_layout import TypeLayout
-            return TypeLayout(0, 0, 1, 0)
+            return TypeLayout.empty()
 
         from ..target_layout import get_target_layout, get_type_layout
         fields = (get_type_layout(field) for field in cls._field_types)
@@ -325,7 +328,7 @@ class CompositeType(BuiltinType):
         """
         from ..type_id import get_type_id
 
-        if not cls._field_types:
+        if not cls._field_types and cls._layout_config.is_natural:
             return "empty"
 
         if _visited is None:
@@ -341,6 +344,11 @@ class CompositeType(BuiltinType):
                 field_ids.append(f"{fname}:{ftype_id}")
             else:
                 field_ids.append(ftype_id)
+
+        from ..target_layout import NATURAL_LAYOUT
+        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            field_ids.append(f"layout:{layout_config.identity()}")
 
         field_str = ','.join(field_ids)
         field_hash = hashlib.md5(field_str.encode()).hexdigest()[:8]
@@ -522,6 +530,7 @@ class CompositeType(BuiltinType):
         target_cls.handle_subscript = unified_type.handle_subscript
         target_cls._ensure_field_types_resolved = unified_type._ensure_field_types_resolved
         target_cls.get_type_id = unified_type.get_type_id
+        target_cls._layout_config = unified_type._layout_config
         
         # Inject Python-level constructor that returns pc_literal
         _inject_pc_literal_constructor(target_cls, unified_type)
@@ -575,7 +584,14 @@ class CompositeType(BuiltinType):
         """
         # Default implementation: delegate to compile_dynamic_class
         from ..decorators.structs import compile_dynamic_class
-        return compile_dynamic_class(target_cls, suffix=suffix)
+        from ..target_layout import make_aggregate_layout_config
+
+        layout_config = make_aggregate_layout_config(**kwargs)
+        return compile_dynamic_class(
+            target_cls,
+            suffix=suffix,
+            layout_config=layout_config,
+        )
 
 
 def _inject_pc_literal_constructor(target_cls, unified_type):

@@ -159,6 +159,11 @@ def _form(pc_type):
         base['kind'] = 'blob'
         return base
     if _type_flag(pc_type, 'is_struct_type') or getattr(pc_type, '_is_struct', False):
+        from .target_layout import NATURAL_LAYOUT
+        layout_config = getattr(pc_type, "_layout_config", NATURAL_LAYOUT)
+        if not layout_config.is_natural:
+            base['kind'] = 'blob'
+            return base
         fields = []
         types = getattr(pc_type, '_field_types', None) or []
         names = getattr(pc_type, '_field_names', None) or []

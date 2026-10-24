@@ -81,6 +81,7 @@ class ValueRef:
     var_name: Optional[str] = None  # Variable name for linear tracking
     linear_path: Optional[tuple] = None  # Index path for linear tracking
     vref_id: Optional[str] = None  # Unique ID for ValueRef tracking (replaces temp_linear_id)
+    _storage: AnyType = None
 
     def __init__(self,
                  kind: str,
@@ -90,7 +91,8 @@ class ValueRef:
                  source_node: Optional[ast.AST] = None,
                  var_name: Optional[str] = None,
                  linear_path: Optional[tuple] = None,
-                 vref_id: Optional[str] = None):
+                 vref_id: Optional[str] = None,
+                 storage: AnyType = None):
         self._kind = kind
         self.value = value
         self.type_hint = type_hint
@@ -99,6 +101,7 @@ class ValueRef:
         self.var_name = var_name
         self.linear_path = linear_path
         self.vref_id = vref_id
+        self._storage = storage
         self.__post_init__()
     
     def __post_init__(self):
@@ -138,7 +141,7 @@ class ValueRef:
             raise TypeError(
                 f"Cannot get ir_value from Python type {self.type_hint.get_name() if hasattr(self.type_hint, 'get_name') else self.type_hint}"
             )
-        return self.value
+        return self.get_ir_value()
     
     def is_python_value(self) -> bool:
         """Check if this ValueRef holds a Python value."""
@@ -183,7 +186,7 @@ class ValueRef:
             raise TypeError(
                 f"Python type {self.type_hint.get_name() if hasattr(self.type_hint, 'get_name') else self.type_hint} has no LLVM type"
             )
-        return self.value.type
+        return self.get_llvm_type()
 
     def unwrap(self) -> ir.Value:
         """Get underlying LLVM IR value.
@@ -194,7 +197,7 @@ class ValueRef:
             raise TypeError(
                 f"Cannot unwrap Python value to LLVM IR"
             )
-        return self.value
+        return self.get_ir_value()
 
     def is_pointer(self) -> bool:
         """Check if this is a pointer-typed value.
@@ -210,11 +213,29 @@ class ValueRef:
             # Explicit pointer flag on BuiltinType
             if hasattr(self.type_hint, '_is_pointer') and getattr(self.type_hint, '_is_pointer'):
                 return True
-        return isinstance(self.value.type, ir.PointerType)
+        return isinstance(self.get_llvm_type(), ir.PointerType)
 
     def has_place(self) -> bool:
-        """Check if this ValueRef can be used as an assignable place."""
+        """Check whether this value has addressable backend storage."""
         return self._kind == "address" or self._address is not None
+
+    def has_storage(self) -> bool:
+        """Check for non-addressable storage such as a bit field."""
+        return self._storage is not None
+
+    def get_storage_type(self):
+        """Return the exact LLVM value type accepted by this storage."""
+        if self.has_storage():
+            return self._storage.llvm_type
+        return self.require_place().type.pointee
+
+    def store(self, builder, value, *, node=None):
+        """Store through either addressable or projected field storage."""
+        if self.has_storage():
+            return self._storage.store(value, node=node)
+        from .ir_helpers import safe_store
+        return safe_store(builder, value, self.require_place(), self.type_hint,
+                          node=node)
 
     def get_place(self) -> Optional[ir.Value]:
         """Get the backend place pointer/value used for lvalue operations."""
@@ -249,6 +270,7 @@ class ValueRef:
             var_name=self.var_name if var_name is _UNSET else var_name,
             linear_path=self.linear_path if linear_path is _UNSET else linear_path,
             vref_id=self.vref_id if vref_id is _UNSET else vref_id,
+            storage=self._storage,
         )
 
         core_fields = {
@@ -260,6 +282,7 @@ class ValueRef:
             'var_name',
             'linear_path',
             'vref_id',
+            '_storage',
         }
         for attr_name, attr_value in self.__dict__.items():
             if attr_name not in core_fields:
@@ -271,7 +294,8 @@ class ValueRef:
         """Get pointee type if this is a pointer."""
         if self.is_python_value():
             return None
-        return self.value.type.pointee if isinstance(self.value.type, ir.PointerType) else None
+        llvm_type = self.get_llvm_type()
+        return llvm_type.pointee if isinstance(llvm_type, ir.PointerType) else None
     
     def get_llvm_type(self) -> ir.Type:
         """Get LLVM type for this value.
@@ -284,6 +308,8 @@ class ValueRef:
             raise TypeError(
                 f"Python type {self.type_hint.get_name() if hasattr(self.type_hint, 'get_name') else self.type_hint} has no LLVM type"
             )
+        if self.has_storage():
+            return self._storage.llvm_type
         # Prioritize actual IR value type for consistency (only for IR values)
         if isinstance(self.value, ir.Value):
             return self.value.type
@@ -363,6 +389,11 @@ class ValueRef:
         # Special case: pyconst_field is already an lvalue (with special semantics)
         if self._kind == 'pyconst_field':
             return self
+
+        if self.has_storage():
+            if not self._storage.mutable:
+                raise ValueError('Cannot assign to a temporary bit field')
+            return self.clone()
         
         if self.is_python_value():
             raise TypeError("Cannot convert Python value to lvalue")
@@ -421,6 +452,8 @@ class ValueRef:
         if self.is_python_value():
             # Return empty struct {} for pyconst (zero-sized type)
             return ir.Constant(ir.LiteralStructType([]), [])
+        if self.has_storage():
+            return self._storage.load()
         return self.value
 
 
