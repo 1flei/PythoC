@@ -9,12 +9,13 @@ def _load_lib_handle(lib):
     Resolution rules (shared by extern functions and extern globals):
     - '' -> the current process (symbols from registered .o files; group
       .so objects are dlopened RTLD_GLOBAL after compilation)
-    - 'c' -> the current process on Unix, msvcrt.dll on Windows
+    - 'c' -> the current process on Unix, the Universal CRT on Windows
     - a bare name -> lib{name}.so / {name}.dll
     - anything containing '/' -> treated as a path
     """
     import ctypes
     import platform
+    from ..utils.c_runtime import load_c_runtime
 
     if not lib:
         # Symbols from registered object files (cimport compile_sources
@@ -40,10 +41,10 @@ def _load_lib_handle(lib):
 
     # Map library names to platform-specific library paths
     system = platform.system()
+    if lib == 'c' or (system == 'Windows' and lib == 'm'):
+        return load_c_runtime()
     if system == 'Windows':
         lib_map = {
-            'c': 'msvcrt.dll',
-            'm': 'msvcrt.dll',
             'gcc_s': 'libgcc_s_seh-1.dll',
         }
     else:

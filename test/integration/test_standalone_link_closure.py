@@ -4,16 +4,16 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from pythoc.utils.cc_utils import find_available_cc
+from pythoc.utils.cc_utils import compile_c_to_object
 from pythoc.utils.link_utils import (
-    get_platform_link_flags, get_shared_lib_extension,
+    get_shared_lib_extension, link_files,
 )
+from test.utils.pe_imports import read_pe_imports
 
 
 class TestStandaloneLinkClosure(unittest.TestCase):
@@ -23,12 +23,11 @@ class TestStandaloneLinkClosure(unittest.TestCase):
         c_source = Path(__file__).parent / "fixtures/link_support.c"
         with tempfile.TemporaryDirectory(prefix="pythoc-link-test-") as temp:
             library = Path(temp) / ("liblinkprobe" + get_shared_lib_extension())
-            command = (
-                shlex.split(find_available_cc())
-                + get_platform_link_flags(shared=True)
-                + [str(c_source), "-o", str(library)]
+            object_file = compile_c_to_object(
+                str(c_source), str(Path(temp) / "linkprobe.o"),
             )
-            subprocess.run(command, check=True, capture_output=True, text=True)
+            link_files([object_file], str(library), shared=True,
+                       link_objects=[], link_libraries=[])
             env = dict(os.environ)
             env["PYTHONPATH"] = str(source_root)
             env["PC_TEST_LINK_LIBRARY"] = str(library)
@@ -50,9 +49,17 @@ class TestStandaloneLinkClosure(unittest.TestCase):
             self.assertEqual(first["objects"], second["objects"])
             self.assertIn(str(library), second["libraries"])
             self.assertGreaterEqual(len(second["objects"]), 2)
-            symbols = subprocess.check_output(
-                ["nm", "-u", second["executable"]], text=True,
-            )
+            if sys.platform == "win32":
+                imports = read_pe_imports(second["executable"])
+                self.assertTrue(imports)
+                self.assertFalse(any("python" in name.lower()
+                                     for name in imports))
+                symbols = "\n".join(symbol for names in imports.values()
+                                    for symbol in names)
+            else:
+                symbols = subprocess.check_output(
+                    ["nm", "-u", second["executable"]], text=True,
+                )
             self.assertIsNone(re.search(r"\b_?Py[A-Z_]", symbols), symbols)
             if sys.platform == "darwin":
                 libraries = subprocess.check_output(

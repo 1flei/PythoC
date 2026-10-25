@@ -484,15 +484,25 @@ class MultiSOExecutor:
                 # Ensure the directory containing `so_file` is on the DLL search path.
                 if sys.platform == 'win32':
                     abs_path = os.path.abspath(so_file)
-                    dll_dir = os.path.dirname(abs_path)
-                    try:
-                        if hasattr(os, 'add_dll_directory') and dll_dir:
-                            self._dll_dir_handles.append(os.add_dll_directory(dll_dir))
-                    except Exception:
-                        # Fallback: best-effort PATH prepend
-                        pass
-                    if dll_dir and dll_dir not in os.environ.get('PATH', ''):
-                        os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
+                    obj_file = os.path.splitext(so_file)[0] + '.o'
+                    libraries = self._get_persisted_link_libraries(obj_file)
+                    directories = {os.path.dirname(abs_path)}
+                    directories.update(
+                        os.path.dirname(os.path.abspath(path))
+                        for path in libraries
+                        if os.path.isabs(path) or '/' in path or '\\' in path
+                    )
+                    for dll_dir in sorted(directories):
+                        try:
+                            if hasattr(os, 'add_dll_directory'):
+                                self._dll_dir_handles.append(
+                                    os.add_dll_directory(dll_dir))
+                        except OSError:
+                            pass
+                        path_entries = os.environ.get('PATH', '').split(os.pathsep)
+                        if dll_dir not in path_entries:
+                            os.environ['PATH'] = os.pathsep.join(
+                                [dll_dir, *path_entries])
 
                 # On macOS, ctypes.CDLL forces RTLD_NOW even when RTLD_LAZY is specified,
                 # breaking circular dependencies. Use libc.dlopen directly.

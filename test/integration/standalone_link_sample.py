@@ -11,6 +11,7 @@ from pythoc import callable_type, python_entry
 from pythoc.artifact import ArtifactRole, LinkPlan
 from pythoc.build.output_manager import get_output_manager
 from pythoc.c_helpers import post_inc
+from pythoc.utils.link_utils import get_executable_extension
 
 
 @extern(lib=os.environ["PC_TEST_LINK_LIBRARY"])
@@ -48,7 +49,8 @@ if __name__ == "__main__":
         }
         for path in plan.obj_files
     }
-    executable = str(Path("build/standalone-link-sample").resolve())
+    executable = str(Path("build/standalone-link-sample").with_suffix(
+        get_executable_extension()).resolve())
     compile_to_executable(output_path=executable)
     result = subprocess.run([executable], check=False)
     assert result.returncode == 0

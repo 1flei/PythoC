@@ -11,6 +11,7 @@ Test cases:
 """
 from __future__ import annotations
 import os
+import shlex
 import sys
 import tempfile
 import unittest
@@ -423,7 +424,7 @@ with open(_case3_source_path, 'w') as _f:
 # Compile to shared library
 from pythoc.utils.cc_utils import find_available_cc
 _case3_cc = find_available_cc()
-_case3_cmd = _case3_cc.split()  # e.g. "python-zig cc"
+_case3_cmd = shlex.split(_case3_cc)
 _case3_cmd.extend(['-shared', '-fPIC', '-O2'])
 if sys.platform == 'win32' and 'zig' in _case3_cc:
     _case3_cmd.extend(['-target', 'x86_64-windows-gnu'])

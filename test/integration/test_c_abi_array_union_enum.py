@@ -14,6 +14,7 @@ Enum: struct{tag_t, union[payloads...]} - tag + payload union
 """
 
 import unittest
+import shlex
 import os
 import sys
 import ctypes
@@ -498,7 +499,7 @@ def _compile_c_library():
     dll_file = os.path.join(build_dir, f'test_c_abi_aue{ext}')
 
     linker = find_available_linker()
-    linker_cmd = linker.split()
+    linker_cmd = shlex.split(linker)
     platform_flags = get_platform_link_flags(shared=True, linker=linker)
 
     cmd = linker_cmd + platform_flags + [os.path.abspath(obj_file), '-o', os.path.abspath(dll_file)]

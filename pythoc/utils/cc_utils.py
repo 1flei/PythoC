@@ -8,6 +8,7 @@ Used by cimport to compile .c sources when compile_sources=True.
 import os
 import sys
 import shutil
+import shlex
 import hashlib
 import subprocess
 from typing import List, Optional
@@ -30,15 +31,15 @@ def get_cc_candidates() -> List[str]:
         # Windows: only zig is supported.
         zig_cc = _zig_tool_cmd('cc')
         if zig_cc:
-            candidates.append(' '.join(zig_cc))
+            candidates.append(shlex.join(zig_cc))
     else:
         for cc in ['cc', 'clang', 'gcc']:
             if _which_cached(cc):
-                candidates.append(cc)
+                candidates.append(shlex.join([cc]))
         # zig as fallback on non-Windows
         zig_cc = _zig_tool_cmd('cc')
         if zig_cc:
-            candidates.append(' '.join(zig_cc))
+            candidates.append(shlex.join(zig_cc))
     
     return candidates
 
@@ -162,7 +163,7 @@ def compile_c_to_object(source_path: str, output_path: Optional[str] = None,
             return output_path
     
     # Build compilation command
-    cmd = cc.split()  # Handle 'python-zig cc'
+    cmd = shlex.split(cc)
     
     # Add compilation flags
     # -fPIC is required on ELF/Mach-O; on Windows we use zig (windows-gnu target)

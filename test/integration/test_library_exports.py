@@ -1,4 +1,5 @@
 import os
+import shlex
 import subprocess
 import sys
 import unittest
@@ -420,7 +421,7 @@ class TestLibraryExports(unittest.TestCase):
 
     def _consumer_compile_command(self, header_path, source_path, link_library, exe_path):
         cc = find_available_cc()
-        return cc.split() + get_platform_link_flags(shared=False, linker=cc) + [
+        return shlex.split(cc) + get_platform_link_flags(shared=False, linker=cc) + [
             '-I', os.path.abspath(os.path.dirname(header_path)),
             os.path.abspath(source_path),
             os.path.abspath(link_library),

@@ -1,6 +1,7 @@
 """Public bindings use data globals, typed pointers, and explicit exports."""
 
 import locale
+import ctypes
 import unittest
 
 from pythoc import i32, ptr
@@ -13,6 +14,12 @@ from pythoc.libc.stddef import wchar_t
 
 class TestLibcLinkSupport(unittest.TestCase):
     def test_standard_stream_names_are_noncallable_data_aliases(self):
+        if IS_WINDOWS:
+            self.assertTrue(getattr(stdio, '__acrt_iob_func')._is_extern)
+            self.assertIn('__acrt_iob_func', stdio.__all__)
+            self.assertNotIn('stdin', stdio.__all__)
+            self.assertTrue(stdio.standard_stream._is_compiled)
+            return
         for name, alias in (("stdin", "__stdinp"), ("stdout", "__stdoutp"),
                             ("stderr", "__stderrp")):
             binding = getattr(stdio, name)
@@ -57,6 +64,9 @@ class TestLibcLinkSupport(unittest.TestCase):
             dict(wchar.wcstok.param_types)["ptr_"].get_llvm_type(), expected,
         )
         self.assertIs(stdio.getc.return_type, i32)
+        self.assertEqual(wchar_t.get_size_bytes(), ctypes.sizeof(ctypes.c_wchar))
+        self.assertEqual(wchar.wcstol.return_type.get_size_bytes(),
+                         ctypes.sizeof(ctypes.c_long))
 
 
 if __name__ == "__main__":

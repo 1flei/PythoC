@@ -34,7 +34,7 @@ from .ucontext import *
 
 __all__ = [
     # stdio.h
-    'FILE',
+    'FILE', 'standard_stream',
     'printf', 'scanf', 'puts', 'getchar', 'putchar', 'fopen', 'fclose', 'freopen',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
 

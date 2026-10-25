@@ -1,5 +1,6 @@
 #include <stdalign.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -25,6 +26,12 @@ struct LargeBits {
     uint64_t a : 64;
     uint64_t b : 64;
     uint64_t c : 64;
+};
+
+struct BoundaryRecord {
+    unsigned char prefix;
+    struct Boundary value;
+    unsigned char suffix;
 };
 
 struct AllShort pc_bit_short(struct AllShort value) {
@@ -89,5 +96,9 @@ int main(void) {
     printf("boundary %zu %zu ", sizeof(boundary), alignof(struct Boundary));
     print_bytes(&boundary, sizeof(boundary));
     printf("\n");
+    printf("boundary_layout %zu %zu %zu %zu %zu\n",
+           sizeof(struct Boundary[2]), sizeof(struct BoundaryRecord),
+           alignof(struct BoundaryRecord), offsetof(struct BoundaryRecord, value),
+           offsetof(struct BoundaryRecord, suffix));
     return 0;
 }

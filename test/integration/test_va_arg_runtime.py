@@ -11,6 +11,7 @@ generates correct platform-specific ABI code for all common types.
 """
 
 import os
+import shlex
 import sys
 import unittest
 import ctypes
@@ -291,7 +292,7 @@ def _compile_c_library():
     dll_file = os.path.join(build_dir, f"test_va_helper{ext}")
 
     linker = find_available_linker()
-    linker_cmd = linker.split()
+    linker_cmd = shlex.split(linker)
     platform_flags = get_platform_link_flags(shared=True, linker=linker)
     cmd = (
         linker_cmd + platform_flags

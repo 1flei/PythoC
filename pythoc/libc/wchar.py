@@ -5,6 +5,10 @@ Wide Character String Functions (wchar.h)
 from ..decorators import extern
 from ..builtin_entities import ptr, i32, i64
 from .stddef import wchar_t, size_t
+from ._platform import IS_WINDOWS
+
+
+_c_long = i32 if IS_WINDOWS else i64
 
 
 @extern(lib='c')
@@ -44,7 +48,7 @@ def wcschr(s: ptr[wchar_t], c: wchar_t) -> ptr[wchar_t]:
 
 
 @extern(lib='c')
-def wcstol(nptr: ptr[wchar_t], endptr: ptr[ptr[wchar_t]], base: i32) -> i64:
+def wcstol(nptr: ptr[wchar_t], endptr: ptr[ptr[wchar_t]], base: i32) -> _c_long:
     """Convert a wide string to a long"""
     pass
 

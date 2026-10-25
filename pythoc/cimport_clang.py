@@ -273,7 +273,7 @@ def _host_system_include_dirs(target: Optional[str] = None) -> List[str]:
     if key in _HOST_INCLUDE_CACHE:
         return list(_HOST_INCLUDE_CACHE[key])
     dirs: List[str] = []
-    cmd = cc.split() + ['-E', '-v', '-x', 'c', '-']
+    cmd = shlex.split(cc) + ['-E', '-v', '-x', 'c', '-']
     if target:
         cmd.extend(['-target', target])
     try:

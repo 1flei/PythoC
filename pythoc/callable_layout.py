@@ -8,6 +8,7 @@ covers each CPython ABI and other runtimes that expose the same headers.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 import sysconfig
 import tempfile
@@ -217,7 +218,7 @@ def _layout_via_cc_probe(include_dirs) -> dict:
     try:
         errors = []
         for linker in get_default_linkers():
-            cmd = linker.split() + [
+            cmd = shlex.split(linker) + [
                 '-I' + d for d in include_dirs
             ] + [probe_src, '-o', exe]
             result = subprocess.run(

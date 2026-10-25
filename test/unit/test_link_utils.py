@@ -38,25 +38,40 @@ class TestBuildLinkCommandExtraFlags(unittest.TestCase):
         self.assertEqual(cmd[-2:], ['-undefined', 'dynamic_lookup'])
 
 
-@unittest.skipIf(sys.platform == 'win32', 'errno slot checked on POSIX only')
 class TestFileLockPreservesErrno(unittest.TestCase):
     def setUp(self):
         self.accessor = _errno_slot_accessor()
         if self.accessor is None:
             self.skipTest('platform errno slot not reachable')
+        previous = self._errno()
+        self.addCleanup(setattr, self.accessor().contents, 'value', previous)
 
     def _errno(self):
         return self.accessor().contents.value
 
     def _hold_lock(self, path, hold_seconds):
-        import fcntl
+        other = open(path, 'a+')
+        other.write('x')
+        other.flush()
+        other.seek(0)
+        if sys.platform == 'win32':
+            import msvcrt
 
-        other = open(path, 'a')
-        fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            msvcrt.locking(other.fileno(), msvcrt.LK_NBLCK, 1)
+
+            def unlock():
+                msvcrt.locking(other.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(other.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def unlock():
+                fcntl.flock(other.fileno(), fcntl.LOCK_UN)
 
         def release_soon():
             time.sleep(hold_seconds)
-            fcntl.flock(other.fileno(), fcntl.LOCK_UN)
+            unlock()
             other.close()
 
         threading.Thread(target=release_soon).start()
@@ -66,6 +81,12 @@ class TestFileLockPreservesErrno(unittest.TestCase):
         with _preserve_c_errno():
             self.accessor().contents.value = 11
         self.assertEqual(self._errno(), 4)
+
+    def test_file_lock_preserves_the_body_errno_on_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with file_lock(os.path.join(tmp, 'x.lock')):
+                self.accessor().contents.value = 17
+            self.assertEqual(self._errno(), 17)
 
     def test_contended_file_lock_leaves_errno_untouched(self):
         with tempfile.TemporaryDirectory() as tmp:

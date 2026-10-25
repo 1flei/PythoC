@@ -2,10 +2,10 @@
 Standard I/O Library Functions (stdio.h)
 """
 
-from ..decorators import extern, extern_global
-from ..builtin_entities import ptr, i8, i32, i64, void
+from ..decorators import compile, extern, extern_global
+from ..builtin_entities import ptr, i8, i32, i64, u32, void
 from ..forward_ref import mark_type_defined
-from ._platform import IS_MACOS
+from ._platform import IS_MACOS, IS_WINDOWS
 
 # FILE is an opaque stdio stream type.  Exposing it as a named alias lets
 # generated code use ``ptr[FILE]`` while keeping the actual representation as
@@ -19,8 +19,7 @@ __all__ = [
     'fopen', 'fclose', 'freopen', 'remove', 'fdopen',
     'fread', 'fwrite', 'fgets', 'fputs', 'fprintf', 'fscanf', 'fflush',
     'fileno',
-    'stdin', 'stdout', 'stderr',
-    '__stdinp', '__stdoutp', '__stderrp',
+    'standard_stream',
     'perror', 'fseek', 'ftell', 'rewind', 'ferror', 'feof', 'clearerr',
     'setvbuf', 'setbuf', 'fgetc', 'fputc', 'ungetc',
     'sprintf', 'snprintf', 'vprintf', 'vfprintf', 'vsnprintf',
@@ -149,7 +148,18 @@ def fileno(stream: ptr[i8]) -> i32:
 # On macOS the same three FILE* globals exist under the __stdinp /
 # __stdoutp / __stderrp names (the C preprocessor maps stdin/stdout/stderr
 # onto them); bind the plain names to those symbols there.
-if IS_MACOS:
+if IS_WINDOWS:
+    @extern(lib='c')
+    def __acrt_iob_func(index: u32) -> ptr[FILE]:
+        """Return a Universal CRT standard stream by index (0, 1 or 2)."""
+        pass
+
+    @compile
+    def standard_stream(index: u32) -> ptr[FILE]:
+        return __acrt_iob_func(index)
+
+    __all__.append('__acrt_iob_func')
+elif IS_MACOS:
     stdin = extern_global(ptr[FILE], '__stdinp', lib='c')
     stdout = extern_global(ptr[FILE], '__stdoutp', lib='c')
     stderr = extern_global(ptr[FILE], '__stderrp', lib='c')
@@ -158,10 +168,21 @@ else:
     stdout = extern_global(ptr[FILE], 'stdout', lib='c')
     stderr = extern_global(ptr[FILE], 'stderr', lib='c')
 
-# These are data aliases, not callable accessors.
-__stdinp = stdin
-__stdoutp = stdout
-__stderrp = stderr
+if not IS_WINDOWS:
+    __stdinp = stdin
+    __stdoutp = stdout
+    __stderrp = stderr
+    __all__.extend(('stdin', 'stdout', 'stderr',
+                    '__stdinp', '__stdoutp', '__stderrp'))
+
+    @compile
+    def standard_stream(index: u32) -> ptr[FILE]:
+        """Return stdin, stdout or stderr for an index of 0, 1 or 2."""
+        if index == 0:
+            return stdin
+        if index == 1:
+            return stdout
+        return stderr
 
 
 # P0 additions: buffering, seeking, char IO, formatted to buffers

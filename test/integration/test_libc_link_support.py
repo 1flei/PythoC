@@ -11,7 +11,7 @@ import threading
 import unittest
 
 from pythoc import (
-    array, compile, extern, f32, f64, i8, i32, nullptr, ptr, u64,
+    array, compile, f32, f64, i8, i32, nullptr, ptr, u64,
 )
 from pythoc.libc.errno import (
     __error as native_error, __errno_location as native_errno_location,
@@ -24,29 +24,23 @@ from pythoc.libc.math import (
 )
 from pythoc.libc.signal import kill
 from pythoc.libc.stdio import (
-    fclose, ferror, fputc, getc, perror, rewind, stderr, stdin, stdout,
+    fclose, ferror, fopen, fputc, getc, perror, rewind, standard_stream,
 )
+from pythoc.libc.stddef import wchar_t
+from pythoc.libc._platform import IS_WINDOWS
+from pythoc.utils.c_runtime import load_c_runtime
 from pythoc.libc.string import strerror
 from pythoc.libc.wchar import wcschr, wcsncmp, wcstok, wcstol
 
 
-@extern(lib="c")
-def tmpfile() -> ptr[i8]:
-    pass
-
-
 @compile
 def stream_address(index: i32) -> u64:
-    if index == 0:
-        return u64(stdin)
-    if index == 1:
-        return u64(stdout)
-    return u64(stderr)
+    return u64(standard_stream(index))
 
 
 @compile
-def stream_roundtrip() -> i32:
-    stream = tmpfile()
+def stream_roundtrip(path: ptr[i8]) -> i32:
+    stream = fopen(path, "w+b")
     if stream == nullptr:
         return -1
     written = fputc(65, stream)
@@ -85,9 +79,10 @@ def print_error() -> i32:
     return 0
 
 
-@compile
-def signal_probe(pid: i32) -> i32:
-    return kill(pid, 0)
+if not IS_WINDOWS:
+    @compile
+    def signal_probe(pid: i32) -> i32:
+        return kill(pid, 0)
 
 
 @compile
@@ -124,8 +119,8 @@ def classify_long(value: f64) -> i32:
 
 @compile
 def wide_parse() -> i32:
-    text: array[i32, 5] = (49, 50, 51, 120, 0)
-    end: ptr[i32] = nullptr
+    text: array[wchar_t, 5] = (49, 50, 51, 120, 0)
+    end: ptr[wchar_t] = nullptr
     value = wcstol(text, ptr(end), 10)
     found = wcschr(text, 120)
     return (i32(value) + i32(end[0] == 120)
@@ -134,16 +129,16 @@ def wide_parse() -> i32:
 
 @compile
 def wide_compare() -> i32:
-    left: array[i32, 4] = (97, 98, 120, 0)
-    right: array[i32, 4] = (97, 98, 121, 0)
+    left: array[wchar_t, 4] = (97, 98, 120, 0)
+    right: array[wchar_t, 4] = (97, 98, 121, 0)
     return i32(wcsncmp(left, right, 2) == 0) + i32(wcsncmp(left, right, 3) < 0)
 
 
 @compile
 def wide_tokens() -> i32:
-    text: array[i32, 6] = (97, 44, 98, 44, 99, 0)
-    delimiters: array[i32, 2] = (44, 0)
-    state: ptr[i32] = nullptr
+    text: array[wchar_t, 6] = (97, 44, 98, 44, 99, 0)
+    delimiters: array[wchar_t, 2] = (44, 0)
+    state: ptr[wchar_t] = nullptr
     first = wcstok(text, delimiters, ptr(state))
     second = wcstok(nullptr, delimiters, ptr(state))
     third = wcstok(nullptr, delimiters, ptr(state))
@@ -157,13 +152,24 @@ class TestLibcLinkSupport(unittest.TestCase):
         names = ("__stdinp", "__stdoutp", "__stderrp") if (
             sys.platform == "darwin"
         ) else ("stdin", "stdout", "stderr")
-        host = ctypes.CDLL(None)
+        host = load_c_runtime()
+        if IS_WINDOWS:
+            accessor = getattr(host, '__acrt_iob_func')
+            accessor.argtypes = [ctypes.c_uint]
+            accessor.restype = ctypes.c_void_p
+            for index in range(3):
+                self.assertEqual(stream_address(index), accessor(index))
+            return
         for index, name in enumerate(names):
             self.assertEqual(stream_address(index),
                              ctypes.c_void_p.in_dll(host, name).value)
 
     def test_getc_eof_and_resource_close(self):
-        self.assertEqual(stream_roundtrip(), 5)
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.fsencode(str(Path(directory) / "stream.bin"))
+            self.assertEqual(stream_roundtrip(path), 5)
 
     def test_errno_aliases_and_thread_local_slots(self):
         self.assertEqual(errno_roundtrip(), 124)
@@ -199,6 +205,7 @@ class TestLibcLinkSupport(unittest.TestCase):
         self.assertIn("pc-link-support:", result.stderr)
         self.assertIn(os.strerror(22), result.stderr)
 
+    @unittest.skipIf(IS_WINDOWS, "kill(pid, 0) is a POSIX process probe")
     def test_kill_zero_only_probes_this_process(self):
         self.assertEqual(signal_probe(os.getpid()), 0)
 

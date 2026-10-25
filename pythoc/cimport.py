@@ -25,6 +25,7 @@ Usage:
 """
 
 import os
+import shlex
 import sys
 import hashlib
 import importlib.util
@@ -247,7 +248,7 @@ def _preprocess_source(path: str, cc: Optional[str] = None,
         if cc is None:
             cc = find_available_cc()
 
-        cmd = cc.split()
+        cmd = shlex.split(cc)
         cmd.extend(['-E', '-P'])
 
         for inc in (include_dirs or []):

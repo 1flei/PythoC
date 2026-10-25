@@ -22,7 +22,11 @@ from pythoc import (
 )
 from pythoc import array, extern, i3, i8, ptr, static, u33, u64, volatile
 from pythoc.utils.cc_utils import compile_c_to_object, find_available_cc
-from pythoc.utils.link_utils import get_shared_lib_extension, link_files
+from pythoc.utils.link_utils import (
+    get_executable_extension, get_shared_lib_extension, link_files,
+)
+from pythoc.target_layout import default_target_triple
+from test.utils.c_bitfield_profiles import c_bitfield_options
 
 
 _temp = tempfile.TemporaryDirectory(prefix='pc-bitfield-')
@@ -32,6 +36,7 @@ _build.mkdir(parents=True, exist_ok=True)
 _object = compile_c_to_object(str(_source), str(_build / 'oracle.o'))
 _library = link_files([_object], str(_build / (
     'oracle' + get_shared_lib_extension())), shared=True, link_objects=[])
+_c_options = c_bitfield_options(default_target_triple())
 
 
 @struct(storage_unit=16)
@@ -41,17 +46,20 @@ class AllShort:
     c: u6
 
 
-@struct(storage_unit=16, storage_unit_overrides={'b': 32})
+@struct(**_c_options['mixed'])
 class MixedUnits:
     a: u3
     b: u5
     c: u6
 
 
-@struct(storage_unit=16, unit_break_before={'b': 32})
+@struct(**_c_options['boundary'])
 class UnitBoundary:
     a: u3
     b: u3
+
+
+BoundaryRecord = struct[('prefix', u8), ('value', UnitBoundary), ('suffix', u8)]
 
 
 @struct(storage_unit=64)
@@ -139,6 +147,12 @@ def initialized_mixed() -> MixedUnits:
 def initialized_boundary() -> UnitBoundary:
     value: UnitBoundary = (5, 3)
     return value
+
+
+@compile
+def boundary_array_stride() -> i64:
+    values: array[UnitBoundary, 2]
+    return i64(u64(ptr(values[1])) - u64(ptr(values[0])))
 
 
 @compile
@@ -301,7 +315,8 @@ class TestBitLayoutIntegration(unittest.TestCase):
         self.assertEqual(exhaustive_crossing_storage(), 0)
 
     def test_native_c_layout_and_python_entry_bytes(self):
-        executable = str(Path(_temp.name) / 'oracle')
+        executable = str(Path(_temp.name) / (
+            'oracle' + get_executable_extension()))
         subprocess.run(shlex.split(find_available_cc()) + [
             '-std=c11', str(_source), '-o', executable], check=True,
             capture_output=True, text=True)
@@ -319,7 +334,14 @@ class TestBitLayoutIntegration(unittest.TestCase):
             self.assertEqual(len(raw), layout.allocation_size)
             expected.append(f'{name} {layout.allocation_size} '
                             f'{layout.alignment} {raw.hex()}')
+        nested = BoundaryRecord.get_layout()
+        expected.append('boundary_layout {} {} {} {} {}'.format(
+            array[UnitBoundary, 2].get_size_bytes(), nested.allocation_size,
+            nested.alignment, *nested.field_offsets[1:],
+        ))
         self.assertEqual(actual, expected)
+        self.assertEqual(boundary_array_stride(),
+                         UnitBoundary._struct_type.get_size_bytes())
 
     def test_runtime_tuple_dict_and_struct_initialization(self):
         self.assertEqual(runtime_initialization(21), 141)

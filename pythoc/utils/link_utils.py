@@ -11,12 +11,14 @@ import os
 import sys
 import struct
 import shutil
+import shlex
 import subprocess
 import threading
 import time
 from functools import lru_cache
 from typing import Dict, List, Optional, Set
 from contextlib import ExitStack, contextmanager
+from .c_runtime import load_c_runtime
 
 
 # Version marker for shared-library link semantics.  Written to a
@@ -192,7 +194,7 @@ def _read_coff_exports(obj_path: str) -> Set[str]:
 @lru_cache(maxsize=1)
 def _errno_slot_accessor():
     """Return the current thread's C errno slot accessor when available."""
-    libc = ctypes.CDLL(None)
+    libc = load_c_runtime()
     if sys.platform == 'darwin':
         name = '__error'
     elif sys.platform == 'win32':
@@ -240,6 +242,7 @@ if sys.platform == 'win32':
                 while True:
                     try:
                         lockfile = open(lockfile_path, 'a+')
+                        lockfile.seek(0)
                         msvcrt.locking(
                             lockfile.fileno(),
                             msvcrt.LK_NBLCK,
@@ -269,8 +272,10 @@ if sys.platform == 'win32':
         finally:
             if lockfile:
                 try:
-                    msvcrt.locking(lockfile.fileno(), msvcrt.LK_UNLCK, 1)
-                    lockfile.close()
+                    with _preserve_c_errno():
+                        lockfile.seek(0)
+                        msvcrt.locking(lockfile.fileno(), msvcrt.LK_UNLCK, 1)
+                        lockfile.close()
                 except Exception:
                     pass
 else:
@@ -370,7 +375,7 @@ def _get_linker_candidates() -> List[str]:
         # Windows: only zig is supported.
         zig_cc = _zig_tool_cmd('cc')
         if zig_cc:
-            candidates.append(' '.join(zig_cc))
+            candidates.append(shlex.join(zig_cc))
     else:
         for linker in ['cc', 'clang', 'gcc']:
             if _which_cached(linker):
@@ -378,7 +383,7 @@ def _get_linker_candidates() -> List[str]:
         # zig as fallback on non-Windows
         zig_cc = _zig_tool_cmd('cc')
         if zig_cc:
-            candidates.append(' '.join(zig_cc))
+            candidates.append(shlex.join(zig_cc))
     
     return candidates
 
@@ -426,7 +431,7 @@ def _get_archiver_candidates() -> List[str]:
     if sys.platform == 'win32':
         zig_ar = _zig_tool_cmd('ar')
         if zig_ar:
-            candidates.append(' '.join(zig_ar))
+            candidates.append(shlex.join(zig_ar))
         if _which_cached('llvm-ar'):
             candidates.append('llvm-ar')
     else:
@@ -435,7 +440,7 @@ def _get_archiver_candidates() -> List[str]:
                 candidates.append(archiver)
         zig_ar = _zig_tool_cmd('ar')
         if zig_ar:
-            candidates.append(' '.join(zig_ar))
+            candidates.append(shlex.join(zig_ar))
 
     return candidates
 
@@ -776,7 +781,7 @@ def build_link_command(
     from ..registry import get_unified_registry
 
     # Split linker command (handles 'python-zig cc' etc.)
-    linker_cmd = linker.split()
+    linker_cmd = shlex.split(linker)
 
     platform_flags = get_platform_link_flags(shared, linker=linker)
     lib_flags = get_link_flags(link_libraries)
@@ -847,7 +852,7 @@ def try_link_with_linkers(
     for linker in linkers:
         # Check if linker executable is available
         # For 'python-zig cc', check 'python-zig'; for 'gcc', check 'gcc'
-        linker_exe = linker.split()[0]
+        linker_exe = shlex.split(linker)[0]
         if not _which_cached(linker_exe):
             errors.append(f"{linker}: not found")
             continue
@@ -1219,7 +1224,7 @@ def ensure_link_objects_loaded() -> Optional[str]:
 def build_archive_command(obj_files: List[str], output_file: str,
                           archiver: str = 'ar') -> List[str]:
     """Build a static library archive command."""
-    archiver_cmd = archiver.split()
+    archiver_cmd = shlex.split(archiver)
     all_obj_files = [os.path.abspath(p) for p in obj_files]
     return archiver_cmd + ['rcs', os.path.abspath(output_file)] + all_obj_files
 
@@ -1235,7 +1240,7 @@ def try_archive_with_archivers(
 
     errors = []
     for archiver in archivers:
-        archiver_exe = archiver.split()[0]
+        archiver_exe = shlex.split(archiver)[0]
         if not _which_cached(archiver_exe):
             errors.append(f"{archiver}: not found")
             continue
