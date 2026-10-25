@@ -22,6 +22,8 @@ from pythoc import (
     void,
 )
 from pythoc.callable_layout import python_abi_layout
+from pythoc.artifact import ArtifactRole
+from pythoc.build.output_manager import get_output_manager
 
 LAYOUT = python_abi_layout()
 
@@ -816,3 +818,9 @@ def PyInit__callable() -> ptr[void]:
         release(module)
         return ptr[void](0)
     return module
+
+
+# A direct import must not expose this host runtime as a standalone root.
+get_output_manager().set_group_artifact_role(
+    PyInit__callable._binding.group_key, ArtifactRole.PYTHON_RUNTIME,
+)

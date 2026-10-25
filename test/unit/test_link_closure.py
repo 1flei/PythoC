@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 import pythoc
 from pythoc.artifact import (
-    ArtifactKind, ArtifactPlan, LinkPlan, LinkScope, plan_artifact_tasks,
+    ArtifactKind, ArtifactPlan, ArtifactRole, LinkPlan, LinkScope,
+    plan_artifact_tasks,
 )
 from pythoc.artifact.link_plan import is_internal_group
 from pythoc.build.deps import GroupDependency, GroupDeps, GroupKey
@@ -35,9 +36,10 @@ class TestLinkClosure(unittest.TestCase):
         path.touch()
         return str(path)
 
-    def group(self, key, name, *, targets=(), objects=(), libraries=()):
+    def group(self, key, name, *, targets=(), objects=(), libraries=(),
+              role=ArtifactRole.NATIVE):
         obj = self.object_file(name)
-        self.groups[key] = {"obj_file": obj}
+        self.groups[key] = {"obj_file": obj, "artifact_role": role}
         self.deps[key] = GroupDeps(
             group_key=GroupKey.from_tuple(key),
             group_dependencies=[
@@ -91,25 +93,52 @@ class TestLinkClosure(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "dependency metadata"):
             self.plan([self.root])
 
-    def test_only_host_adapters_are_internal(self):
+    def test_roles_classify_groups_independently_of_source_paths(self):
         package = Path(pythoc.__file__).parent
-        for filename in ("python_entry.py", "callable_type.py"):
-            for suffix in ("", ".__parametric__.entry.i32"):
-                key = (str(package / (filename + suffix)), None, None, None)
-                self.assertTrue(is_internal_group(key))
+        for role in (ArtifactRole.PYTHON_RUNTIME,
+                     ArtifactRole.PYTHON_ADAPTER):
+            key = ("/arbitrary/runtime.py", role.value, None, None)
+            self.group(key, role.value + ".o", role=role)
+            self.assertTrue(is_internal_group(key, groups=self.groups))
         for path in (package / "c_helpers.py", package / "libc/errno.py",
-                     Path("/src/python_entry.py")):
-            self.assertFalse(is_internal_group((str(path), None, None, None)))
+                     package / "python_entry.py"):
+            key = (str(path), None, None, None)
+            self.group(key, path.name + ".o")
+            self.assertFalse(is_internal_group(key, groups=self.groups))
+        with patch("pythoc.build.output_manager.get_output_manager",
+                   return_value=self.manager):
+            for key in self.groups:
+                self.assertEqual(is_internal_group(key),
+                                 is_internal_group(key, groups=self.groups))
 
     def test_adapter_policy_only_applies_to_standalone_targets(self):
         adapter = (
             str(Path(pythoc.__file__).parent / "python_entry.py"),
             None, None, None,
         )
-        obj = self.group(adapter, "adapter.o")
+        obj = self.group(adapter, "adapter.o", role=ArtifactRole.PYTHON_ADAPTER)
         self.assertEqual(self.plan([adapter]).obj_files, (obj,))
         with self.assertRaisesRegex(RuntimeError, "host Python adapter"):
             self.plan([adapter], standalone=True)
+
+    def test_standalone_uses_supplied_manager_roles(self):
+        for role in (ArtifactRole.PYTHON_RUNTIME,
+                     ArtifactRole.PYTHON_ADAPTER):
+            with self.subTest(role=role):
+                self.group(self.root, "root.o", role=role)
+                with patch(
+                    "pythoc.build.output_manager.get_output_manager",
+                    side_effect=AssertionError("global manager was read"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError,
+                                                "host Python adapter"):
+                        self.plan([self.root], standalone=True)
+
+    def test_standalone_rejects_transitive_runtime_dependency(self):
+        self.group(self.root, "root.o", targets=[self.child])
+        self.group(self.child, "child.o", role=ArtifactRole.PYTHON_RUNTIME)
+        with self.assertRaisesRegex(RuntimeError, "host Python adapter"):
+            self.plan([self.root], standalone=True)
 
     def test_all_groups_collects_native_support_transitively(self):
         helper = (
@@ -122,7 +151,7 @@ class TestLinkClosure(unittest.TestCase):
             str(Path(pythoc.__file__).parent / "python_entry.py"),
             None, None, None,
         )
-        self.group(adapter, "adapter.o")
+        self.group(adapter, "adapter.o", role=ArtifactRole.PYTHON_RUNTIME)
         with patch("pythoc.build.output_manager.get_output_manager",
                    return_value=self.manager), patch(
                        "pythoc.build.deps.get_dependency_tracker",
@@ -158,14 +187,19 @@ class TestFrozenLinkInputs(unittest.TestCase):
         with patch("pythoc.python_adapter._adapter_object_path",
                    side_effect=adapter_path), patch(
                        "pythoc.artifact.build_artifact") as build:
+            specs = [{"adapter": "first"}, {"adapter": "second"}]
+            _compile_adapter_library(specs, "adapter.so", (), ())
             _compile_adapter_library(
-                [{"adapter": "first"}, {"adapter": "second"}],
-                "adapter.so", (), (),
+                [{"adapter": "other-group"}], "other.so", (), (),
             )
-        steps = build.call_args.args[0].steps
-        self.assertEqual(len(steps), 2)
-        self.assertEqual(steps[0].resources, ('python-entry-codegen',))
-        self.assertEqual(steps[1].resources, steps[0].resources)
+        first, second = [call.args[0].steps for call in build.call_args_list]
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertEqual(first[0].resources, ('python-entry-codegen',))
+        self.assertEqual(second[0].resources, first[0].resources)
+        with patch("pythoc.python_adapter._write_and_compile") as compile_entry:
+            first[0].run()
+        self.assertEqual(compile_entry.call_args.args[0], specs)
 
     def test_explicit_empty_inputs_never_read_registry_at_execution(self):
         plan = ArtifactPlan(

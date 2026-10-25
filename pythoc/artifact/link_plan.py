@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence, Tuple
 
-from .model import LinkScope
+from .model import ArtifactRole, LinkScope
 
 
 @dataclass(frozen=True)
@@ -90,7 +90,7 @@ class LinkPlan:
             if group_key in seen_groups:
                 return
             seen_groups.add(group_key)
-            if standalone and is_internal_group(group_key):
+            if standalone and is_internal_group(group_key, groups=groups):
                 raise RuntimeError(
                     "standalone target depends on host Python adapter: {!r}"
                     .format(group_key)
@@ -158,10 +158,12 @@ class LinkPlan:
         from ..build.output_manager import get_output_manager
         from ..registry import get_unified_registry
 
+        groups = get_output_manager().get_all_groups()
         roots = tuple(
             key
-            for key in get_output_manager().get_all_groups()
-            if not is_internal_group(key)
+            for key, group in groups.items()
+            if group.get("artifact_role", ArtifactRole.NATIVE)
+            is ArtifactRole.NATIVE
         )
         if not roots:
             raise RuntimeError(
@@ -178,37 +180,18 @@ class LinkPlan:
         )
 
 
-def is_internal_group(group_key) -> bool:
-    """Whether a group implements the host Python adapter runtime.
+def is_internal_group(group_key, *, groups=None) -> bool:
+    """Return whether a registered group has a runtime-only artifact role."""
+    if groups is None:
+        from ..build.output_manager import get_output_manager
 
-    These groups require a running CPython process. Standalone collection
-    excludes them as roots and rejects dependencies on them. Explicit
-    group plans may still include them when composing a Python extension.
-    Native package code, including c_helpers and libc shims, is not an
-    adapter merely because it lives inside the PythoC package.
-    """
-    source = group_key[0] if group_key else ""
-    if not source:
-        return False
-    pythoc_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    real_source = os.path.realpath(source)
-    return any(
-        real_source == adapter or real_source.startswith(adapter + ".__")
-        for adapter in (
-            os.path.join(pythoc_dir, filename)
-            for filename in _HOST_ADAPTER_MODULES
-        )
+        groups = get_output_manager().get_all_groups()
+    group = groups.get(_normalize_group_key(group_key))
+    return bool(
+        group
+        and group.get("artifact_role", ArtifactRole.NATIVE)
+        is not ArtifactRole.NATIVE
     )
-
-
-_HOST_ADAPTER_MODULES = (
-    "callable_type.py",
-    "cpy_api.py",
-    "python_adapter.py",
-    "python_call.py",
-    "python_entry.py",
-    "python_entry_bind.py",
-)
 
 
 def _normalize_group_key(group_key) -> Tuple:

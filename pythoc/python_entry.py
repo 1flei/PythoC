@@ -5,6 +5,8 @@ and then calls its own kernel directly.
 """
 
 from pythoc import array, compile, f64, i8, i32, i64, ptr, static, struct, u64, void
+from pythoc.artifact import ArtifactRole
+from pythoc.build.output_manager import get_output_manager
 from pythoc.cpy_api import (
     PyByteArray_AsString,
     PyByteArray_Size,
@@ -44,6 +46,7 @@ from pythoc.cpy_api import (
     memcpy,
 )
 from pythoc.decorators.extern import extern_global
+from pythoc.libc.errno import errno_slot
 
 PyLong_Type = extern_global(i8, 'PyLong_Type', lib='')
 PyFloat_Type = extern_global(i8, 'PyFloat_Type', lib='')
@@ -163,6 +166,11 @@ def none_ref() -> ptr[void]:
 @compile
 def type_error(msg: ptr[i8]) -> void:
     PyErr_SetString(PyExc_TypeError, msg)
+
+
+@compile
+def errno_store(value: i32) -> void:
+    errno_slot()[0] = value
 
 
 @compile
@@ -745,3 +753,8 @@ def _check_literal_layout():
 
 
 _check_literal_layout()
+
+# Classify the producer before a caller requests an adapter or a link plan.
+get_output_manager().set_group_artifact_role(
+    pythoc_make_module._binding.group_key, ArtifactRole.PYTHON_RUNTIME,
+)

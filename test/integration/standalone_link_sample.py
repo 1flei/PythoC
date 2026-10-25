@@ -7,7 +7,9 @@ from pathlib import Path
 import subprocess
 
 from pythoc import compile, compile_to_executable, extern, i32, ptr
-from pythoc.artifact import LinkPlan
+from pythoc import callable_type, python_entry
+from pythoc.artifact import ArtifactRole, LinkPlan
+from pythoc.build.output_manager import get_output_manager
 from pythoc.c_helpers import post_inc
 
 
@@ -24,7 +26,21 @@ def main() -> i32:
 
 
 if __name__ == "__main__":
+    groups = get_output_manager().get_all_groups()
+    for wrapper in (python_entry.pythoc_make_module,
+                    callable_type.PyInit__callable):
+        assert groups[wrapper._binding.group_key]["artifact_role"] is (
+            ArtifactRole.PYTHON_RUNTIME
+        )
+    assert main() == 0
     plan = LinkPlan.from_all_groups()
+    runtime_groups = [
+        group for group in get_output_manager().get_all_groups().values()
+        if group.get("artifact_role", ArtifactRole.NATIVE)
+        is not ArtifactRole.NATIVE
+    ]
+    assert all(group.get("obj_file") not in plan.obj_files
+               for group in runtime_groups)
     snapshot = {
         str(Path(path).resolve()): {
             "mtime_ns": Path(path).stat().st_mtime_ns,
@@ -39,4 +55,5 @@ if __name__ == "__main__":
     print("LINK_STATE=" + json.dumps({
         "objects": snapshot, "libraries": plan.link_libraries,
         "executable": executable,
+        "runtime_group_count": len(runtime_groups),
     }))

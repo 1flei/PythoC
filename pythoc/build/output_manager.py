@@ -270,6 +270,57 @@ class OutputManager:
                 return []
             return list(group.get('all_wrappers') or group.get('wrappers') or [])
 
+    def get_group_runtime_state(self, group_key, namespace):
+        """Return process-local runtime state owned by one subsystem."""
+        if not namespace:
+            raise ValueError("group runtime-state namespace must not be empty")
+        with self._state_lock:
+            group = self._all_groups.get(tuple(group_key))
+            if group is None:
+                return None
+            return group.get('runtime_states', {}).get(namespace)
+
+    def get_or_create_group_runtime_state(
+        self,
+        group_key,
+        namespace,
+        factory,
+    ):
+        """Atomically create process-local state without changing GroupKey."""
+        if not namespace:
+            raise ValueError("group runtime-state namespace must not be empty")
+        with self._state_lock:
+            group = self._all_groups.get(tuple(group_key))
+            if group is None:
+                raise KeyError("unknown compilation group: {!r}".format(
+                    tuple(group_key)
+                ))
+            states = group.setdefault('runtime_states', {})
+            state = states.get(namespace)
+            if state is None:
+                state = factory()
+                states[namespace] = state
+            return state
+
+    def set_group_artifact_role(self, group_key, role):
+        """Classify a group for artifact selection in the current session."""
+        from ..artifact.model import ArtifactRole
+
+        role = ArtifactRole(role)
+        with self._state_lock:
+            group = self._all_groups.get(tuple(group_key))
+            if group is None:
+                raise KeyError("unknown compilation group: {!r}".format(
+                    tuple(group_key)
+                ))
+            existing = group.get('artifact_role')
+            if existing is not None and existing != role:
+                raise RuntimeError(
+                    "compilation group artifact role changed from {!r} to {!r}"
+                    .format(existing, role)
+                )
+            group['artifact_role'] = role
+
     def get_group_effect_specialization(self, group_key, effect_key, wrapper_ids):
         """Return a completed group-level effect specialization if current."""
         with self._state_lock:

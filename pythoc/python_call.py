@@ -110,13 +110,18 @@ class _DeferredCallable:
         native = self.__dict__.get('_native_self')
         if native is not None:
             return native
-        func = self.__dict__.pop('_deferred_func')
-        self.__dict__.pop('_native_self')
-        native = _native_callable(ensure_callable_extension(), func)
-        native.__dict__.update(self.__dict__)
-        self.__dict__ = native.__dict__
-        self._native_self = native
-        return native
+        with _extension_lock:
+            native = self.__dict__.get('_native_self')
+            if native is not None:
+                return native
+            func = self.__dict__['_deferred_func']
+            native = _native_callable(ensure_callable_extension(), func)
+            self.__dict__.pop('_deferred_func')
+            self.__dict__.pop('_native_self')
+            native.__dict__.update(self.__dict__)
+            self.__dict__ = native.__dict__
+            self._native_self = native
+            return native
 
     def __call__(self, *args, **kwargs):
         return self._bootstrap()(*args, **kwargs)
@@ -428,9 +433,21 @@ def _build_callable_extension() -> bool:
     _building_runtime = True
     try:
         from . import callable_type
-        from .build.output_manager import flush_all_pending_outputs
+        from .build.output_manager import (
+            flush_all_pending_outputs,
+            get_output_manager,
+        )
+        from .artifact import ArtifactRole
         from .logger import logger
 
+        manager = get_output_manager()
+        runtime_source = os.path.realpath(callable_type.__file__)
+        for group_key, group in manager.get_all_groups().items():
+            if os.path.realpath(group.get('source_file') or '') == runtime_source:
+                manager.set_group_artifact_role(
+                    group_key,
+                    ArtifactRole.PYTHON_RUNTIME,
+                )
         logger.debug('callable runtime layout: {}'.format(callable_type.LAYOUT))
         flush_all_pending_outputs()
         obj = _runtime_object(callable_type.__file__)

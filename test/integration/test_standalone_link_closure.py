@@ -46,6 +46,7 @@ class TestStandaloneLinkClosure(unittest.TestCase):
 
             first = run_sample()
             second = run_sample()
+            self.assertGreater(first["runtime_group_count"], 0)
             self.assertEqual(first["objects"], second["objects"])
             self.assertIn(str(library), second["libraries"])
             self.assertGreaterEqual(len(second["objects"]), 2)

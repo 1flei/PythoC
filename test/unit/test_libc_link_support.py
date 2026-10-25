@@ -7,7 +7,7 @@ from pythoc import i32, ptr
 from pythoc.decorators.extern import ExternGlobal
 from pythoc.libc import errno, math, stdio, wchar
 from pythoc.libc import locale as pc_locale
-from pythoc.libc._platform import IS_MACOS
+from pythoc.libc._platform import IS_MACOS, IS_WINDOWS
 from pythoc.libc.stddef import wchar_t
 
 
@@ -22,10 +22,15 @@ class TestLibcLinkSupport(unittest.TestCase):
             self.assertEqual(binding.c_name, alias if IS_MACOS else name)
 
     def test_errno_names_have_one_native_binding_and_one_shim(self):
+        if IS_WINDOWS:
+            self.assertTrue(errno._errno._is_extern)
+            self.assertIs(errno.errno_slot, errno._errno)
+            return
         native = "__error" if IS_MACOS else "__errno_location"
         shim = "__errno_location" if IS_MACOS else "__error"
         self.assertTrue(getattr(errno, native)._is_extern)
         self.assertTrue(getattr(errno, shim)._is_compiled)
+        self.assertIs(errno.errno_slot, getattr(errno, native))
 
     def test_locale_categories_match_the_host(self):
         for name in pc_locale.__all__:
