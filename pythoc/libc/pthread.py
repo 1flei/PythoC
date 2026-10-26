@@ -15,7 +15,7 @@ matching the alignment the C library expects for these objects.
 """
 
 from ..decorators import compile, extern
-from ..builtin_entities import i8, i32, i64, u32, u64, ptr, array, void
+from ..builtin_entities import i8, i32, i64, u32, u64, ptr, array, void, func
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_LINUX
 from .sys_types import pthread_t
@@ -161,6 +161,18 @@ def pthread_mutexattr_destroy(attr: ptr[pthread_mutexattr_t]) -> i32:
     pass
 
 
+if IS_MACOS or IS_LINUX:
+    @extern(lib="c")
+    def pthread_create(thread: ptr[pthread_t], attr: ptr[void],
+                       start: func[ptr[void], ptr[void]], arg: ptr[void]) -> i32:
+        pass
+
+
+    @extern(lib="c")
+    def pthread_join(thread: pthread_t, retval: ptr[ptr[void]]) -> i32:
+        pass
+
+
 __all__ = [
     "pthread_t", "pthread_key_t",
     "pthread_get_stackaddr_np", "pthread_get_stacksize_np",
@@ -173,3 +185,5 @@ __all__ = [
     "pthread_mutexattr_init", "pthread_mutexattr_settype",
     "pthread_mutexattr_destroy",
 ]
+if IS_MACOS or IS_LINUX:
+    __all__.extend(['pthread_create', 'pthread_join'])

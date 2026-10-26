@@ -94,3 +94,12 @@ def localtime(t: ptr[time_t]) -> ptr[tm]:
 def strftime(s: ptr[i8], maxsize: u64, format: ptr[i8], tm: ptr[tm]) -> u64:
     """Format broken-down time into a string."""
     pass
+
+
+if IS_MACOS or IS_LINUX:
+    from .sys_stat import timespec as _timespec
+
+    @extern(lib='c')
+    def nanosleep(req: ptr[_timespec], rem: ptr[_timespec]) -> i32:
+        """Sleep for a relative interval."""
+        pass

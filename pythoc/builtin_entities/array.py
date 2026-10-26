@@ -344,8 +344,11 @@ class array(BuiltinType):
         # Remaining items are dimensions
         dimensions = []
         for name_opt, dim in items[1:]:
-            if not isinstance(dim, int) or dim <= 0:
-                logger.error(f"array dimensions must be positive integers, got {dim}",
+            # dim == 0 is the C zero-length array extension: the field
+            # contributes its element alignment and no storage. Only a
+            # negative dimension is malformed.
+            if not isinstance(dim, int) or dim < 0:
+                logger.error(f"array dimensions must be non-negative integers, got {dim}",
                             node=None, exc_type=TypeError)
             dimensions.append(dim)
         elem_name = getattr(element_type, 'get_name', lambda: str(element_type))()

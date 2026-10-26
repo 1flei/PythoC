@@ -7,6 +7,19 @@ many portable C sources (e.g. sysconf, getpid, read, write).
 
 from ..decorators import extern
 from ..builtin_entities import ptr, i8, i32, i64, u32, u64, void
+from ._platform import IS_LINUX, IS_MACOS
+from .stddef import size_t, ssize_t
+from .sys_types import gid_t, off_t, uid_t
+
+
+# <unistd.h> sysconf names. glibc uses a zero-based enum in bits/confname.h;
+# Darwin numbers them from 1, so _SC_PAGESIZE is 29 there and 30 on glibc.
+if IS_LINUX:
+    _SC_PAGESIZE = 30
+elif IS_MACOS:
+    _SC_PAGESIZE = 29
+if IS_LINUX or IS_MACOS:
+    _SC_PAGE_SIZE = _SC_PAGESIZE
 
 
 @extern(lib='c')
@@ -133,3 +146,60 @@ def sleep(seconds: u32) -> u32:
 def usleep(useconds: u32) -> i32:
     """Sleep for microseconds."""
     pass
+
+
+if IS_LINUX or IS_MACOS:
+    @extern(lib='c')
+    def fsync(fd: i32) -> i32:
+        """Flush file data and metadata to the device."""
+        pass
+
+
+    @extern(lib='c')
+    def ftruncate(fd: i32, length: off_t) -> i32:
+        """Truncate a file to a given length."""
+        pass
+
+
+    @extern(lib='c')
+    def pread(fd: i32, buf: ptr[void], count: size_t,
+              offset: off_t) -> ssize_t:
+        """Read from a file descriptor at an offset."""
+        pass
+
+
+    @extern(lib='c')
+    def pwrite(fd: i32, buf: ptr[void], count: size_t,
+               offset: off_t) -> ssize_t:
+        """Write to a file descriptor at an offset."""
+        pass
+
+
+    @extern(lib='c')
+    def fchown(fd: i32, owner: uid_t, group: gid_t) -> i32:
+        """Change the owner and group of an open file."""
+        pass
+
+
+    @extern(lib='c')
+    def geteuid() -> uid_t:
+        """Get effective user ID."""
+        pass
+
+
+    @extern(lib='c')
+    def rmdir(path: ptr[i8]) -> i32:
+        """Remove an empty directory."""
+        pass
+
+
+__all__ = [
+    'sysconf', 'open', 'getpid', 'getcwd', 'close', 'read', 'write', 'lseek',
+    'access', 'isatty', 'getpagesize', 'mprotect', 'unlink', 'chdir',
+    'gethostname', 'getuid', 'readlink', 'symlink', 'pipe', 'sleep', 'usleep',
+]
+if IS_LINUX or IS_MACOS:
+    __all__.extend([
+        '_SC_PAGESIZE', '_SC_PAGE_SIZE', 'fsync', 'ftruncate', 'pread',
+        'pwrite', 'fchown', 'geteuid', 'rmdir',
+    ])

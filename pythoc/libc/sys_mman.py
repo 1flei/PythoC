@@ -4,6 +4,8 @@ POSIX memory-mapped files (<sys/mman.h>).
 
 from ..decorators import extern
 from ..builtin_entities import ptr, i32, i64, void
+from ._platform import IS_LINUX
+from .stddef import size_t
 
 
 PROT_NONE = 0
@@ -29,8 +31,18 @@ def munmap(addr: ptr[void], length: i64) -> i32:
     pass
 
 
+if IS_LINUX:
+    @extern(lib="c")
+    def mremap(old_address: ptr[void], old_size: size_t, new_size: size_t,
+               flags: i32, *args) -> ptr[void]:
+        """Remap a virtual memory address."""
+        pass
+
+
 __all__ = [
     "mmap", "munmap",
     "PROT_NONE", "PROT_READ", "PROT_WRITE", "PROT_EXEC",
     "MAP_SHARED", "MAP_PRIVATE", "MAP_FIXED", "MAP_FAILED",
 ]
+if IS_LINUX:
+    __all__.append('mremap')

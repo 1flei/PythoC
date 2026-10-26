@@ -7,11 +7,12 @@ runners; expected values differ by platform where noted.
 """
 
 import importlib
+import os
 import platform
 import sys
 import unittest
 
-from pythoc import compile, i32, sizeof, offsetof
+from pythoc import compile, i32, i64, u32, sizeof, offsetof, void
 from pythoc.libc.signal import raise_, siginfo_t, sigset_t, sigaction
 from pythoc.libc.time import timeval, tm, time_t
 from pythoc.libc.ucontext import ucontext_t
@@ -31,7 +32,8 @@ if IS_POSIX:
     from pythoc import array, i8, nullptr, ptr
     from pythoc.libc.dirent import DIR, dirent, opendir, readdir, closedir
     from pythoc.libc.stdlib import getenv, setenv, unsetenv
-    from pythoc.libc.unistd import gethostname
+    from pythoc.libc.unistd import _SC_PAGESIZE, fsync, geteuid, gethostname, sysconf
+    from pythoc.libc.pthread import pthread_create, pthread_join, pthread_t
 
 
     @compile
@@ -76,6 +78,40 @@ if IS_POSIX:
         """gethostname into a stack buffer; 0 on success."""
         buf: array[i8, 256] = ""
         return gethostname(buf, 256)
+
+
+    @compile
+    def test_fsync_bad_fd() -> i32:
+        """fsync on a closed descriptor resolves and returns an error."""
+        return fsync(-1)
+
+
+    @compile
+    def test_sysconf_pagesize() -> i64:
+        """sysconf(_SC_PAGESIZE) returns the host page size."""
+        return sysconf(_SC_PAGESIZE)
+
+
+    @compile
+    def test_geteuid_call() -> u32:
+        """geteuid resolves against libc."""
+        return geteuid()
+
+
+    @compile
+    def _posix_thread_main(arg: ptr[void]) -> ptr[void]:
+        return arg
+
+
+    @compile
+    def test_pthread_roundtrip() -> i32:
+        """pthread_create and pthread_join round-trip a null argument."""
+        tid: pthread_t
+        rc: i32 = pthread_create(ptr(tid), nullptr, _posix_thread_main, nullptr)
+        if rc != 0:
+            return rc
+        out: ptr[void]
+        return pthread_join(tid, ptr(out))
 
 
 @compile
@@ -241,6 +277,19 @@ class TestLibcPlatform(unittest.TestCase):
     @unittest.skipIf(not IS_POSIX, 'setenv/gethostname have no UCRT symbol')
     def test_gethostname_call(self):
         self.assertEqual(test_gethostname_call(), 0)
+
+    @unittest.skipIf(not IS_POSIX, 'POSIX file and thread calls')
+    def test_fsync_and_geteuid(self):
+        self.assertNotEqual(test_fsync_bad_fd(), 0)
+        self.assertEqual(test_geteuid_call(), os.geteuid())
+
+    @unittest.skipIf(not IS_POSIX, 'sysconf is POSIX-only')
+    def test_sysconf_pagesize(self):
+        self.assertEqual(test_sysconf_pagesize(), os.sysconf('SC_PAGE_SIZE'))
+
+    @unittest.skipIf(not IS_POSIX, 'POSIX file and thread calls')
+    def test_pthread_roundtrip(self):
+        self.assertEqual(test_pthread_roundtrip(), 0)
 
     def test_cassert_symbol(self):
         """cassert exposes the platform assertion handler, or refuses to import."""
