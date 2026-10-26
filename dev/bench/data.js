@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792942827667,
+  "lastUpdate": 1793029872710,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3324,6 +3324,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.109,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "yifan",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "e394760ed8a1da83f789bc5a13867871c98d346a",
+          "message": "Support zero-length arrays as in C and extend more libc and POSIX bindings",
+          "timestamp": "2026-10-26T23:17:31+08:00",
+          "tree_id": "40f63ade6f0910b6625e985bdf265d77a2a8eddf",
+          "url": "https://github.com/1flei/PythoC/commit/e394760ed8a1da83f789bc5a13867871c98d346a"
+        },
+        "date": 1793029872219,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.83,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.05,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.103,
             "unit": "seconds/test"
           }
         ]
