@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793029872710,
+  "lastUpdate": 1793284715088,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3363,6 +3363,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.103,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "03cd7e2136f2f2c33d104fd762923c9a2af11843",
+          "message": "Fix the interaction between some std components and linear value",
+          "timestamp": "2026-10-29T22:31:38+08:00",
+          "tree_id": "177467cec5550911e87bddcc79003a11449b89c4",
+          "url": "https://github.com/1flei/PythoC/commit/03cd7e2136f2f2c33d104fd762923c9a2af11843"
+        },
+        "date": 1793284713340,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.78,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.07,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.274,
             "unit": "seconds/test"
           }
         ]
