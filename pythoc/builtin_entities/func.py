@@ -203,18 +203,15 @@ class func(BuiltinType):
             fn_type and getattr(fn_type, 'var_arg', False)
         ) or bool(cls.has_llvm_varargs)
 
-        # --- Normalize typed *args / **kwargs carriers ---
-        # This is the single convergence point for ALL call paths.
-        # If the caller passed raw positional args to a function with typed
-        # collectors, pack them into pc_tuple / pc_dict here.
-        if not is_varargs and len(args) != len(cls.param_types):
-            if cls.has_varargs or cls.has_kwargs:
-                from ..call_normalization import normalize_typed_collectors
-                args = normalize_typed_collectors(
-                    args, cls.param_types,
-                    has_varargs=cls.has_varargs,
-                    has_kwargs=cls.has_kwargs,
-                )
+        # All paths preserve packed carriers and normalize raw collectors,
+        # including a raw singleton whose count matches the lowered ABI.
+        if not is_varargs and (cls.has_varargs or cls.has_kwargs):
+            from ..call_normalization import normalize_typed_collectors
+            args = normalize_typed_collectors(
+                args, cls.param_types,
+                has_varargs=cls.has_varargs,
+                has_kwargs=cls.has_kwargs,
+            )
 
         if not is_varargs and len(args) != len(cls.param_types):
             import ast as _ast

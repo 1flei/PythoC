@@ -4,6 +4,7 @@ Enhanced version with modular architecture and comprehensive functionality
 """
 
 import ast
+import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List
 from llvmlite import ir, binding
@@ -19,6 +20,30 @@ from .target_layout import (
     get_target_machine,
     target_machine_identity,
 )
+
+
+class _FFIReturnAttributedCall(ir.instructions.CallInstr):
+    """Serialize call-site return attributes missing from llvmlite's call API."""
+
+    def __init__(self, *args, return_attributes, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.return_attributes = copy.copy(return_attributes)
+
+    def _descr(self, buf, add_metadata):
+        rendered = []
+        super()._descr(rendered, add_metadata)
+        if not self.return_attributes:
+            buf.extend(rendered)
+            return
+        prefix = self.opname + ' '
+        if self.cconv:
+            prefix += self.cconv + ' '
+        # Delegate argument, function-attribute and metadata formatting to
+        # llvmlite. The extension owns only the return-attribute position.
+        assert rendered[0].startswith(prefix)
+        attributes = ' '.join(self.return_attributes._to_list(self.type))
+        buf.append(prefix + attributes + ' ' + rendered[0][len(prefix):])
+        buf.extend(rendered[1:])
 
 
 def _emit_wide_int_ffi_trampoline(module, llvm_function):
@@ -67,6 +92,12 @@ def _emit_wide_int_ffi_trampoline(module, llvm_function):
     tramp = ir.Function(
         module, ir.FunctionType(tramp_ret, tramp_param_types), tramp_name)
     arg_offset = 1 if wide_return else 0
+    if not wide_return:
+        tramp.return_value.attributes = copy.copy(
+            llvm_function.return_value.attributes)
+    for index, source in enumerate(llvm_function.args):
+        if not _is_wide(source.type):
+            tramp.args[index + arg_offset].attributes = copy.copy(source.attributes)
     builder = ir.IRBuilder(tramp.append_basic_block('entry'))
     call_args = []
     for i, arg_ty in enumerate(ftype.args):
@@ -77,9 +108,17 @@ def _emit_wide_int_ffi_trampoline(module, llvm_function):
             call_args.append(builder.load(arg))
         else:
             call_args.append(arg)
-    result = builder.call(llvm_function, call_args)
+    result = _FFIReturnAttributedCall(
+        builder.block, llvm_function, call_args,
+        return_attributes=llvm_function.return_value.attributes)
+    builder._insert(result)
+    result.arg_attributes = {
+        index: copy.copy(arg.attributes)
+        for index, arg in enumerate(llvm_function.args)
+    }
     if wide_return:
         builder.store(result, tramp.args[0])
+    if isinstance(tramp_ret, ir.VoidType):
         builder.ret_void()
     else:
         builder.ret(result)
@@ -609,6 +648,10 @@ class LLVMCompiler:
             visitor.builder.add_stmt(stmt)
             visitor.visit(stmt)
 
+        # Record fall-through defers before finalizing and checking ownership.
+        # Explicit return/goto paths have already emitted their own defers.
+        visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
+
         # Finalize CFG structure (no IR emission yet).
         # Connects fall-through CFG blocks to exit, computes loop headers.
         visitor.builder.finalize()
@@ -617,11 +660,6 @@ class LLVMCompiler:
         # CFG merge checks (and loop invariants).
         # Must happen before emit_ir() since IR doesn't exist yet.
         visitor.builder.run_cfg_linear_check()
-
-        # Exit function-level scope in ScopeManager
-        # This enforces: when variables go out of scope, all linear states are inactive.
-        # Note: defer execution during scope exit records PCIR (not real IR).
-        visitor.scope_manager.exit_scope(visitor.builder, node=ast_node)
 
         # Check for unresolved scoped goto statements
         visitor.scope_manager.check_goto_consistency(ast_node)

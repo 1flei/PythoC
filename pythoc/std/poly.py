@@ -1,4 +1,3 @@
-# varargs ABI v2
 """
 Poly standard library for PC
 
@@ -10,17 +9,14 @@ Usage:
     add(1, 2)  # static dispatch by type
     add(my_enum_val, other_enum_val)  # dynamic dispatch by enum tag
 
-See test/integration/test_poly.py for examples.
 """
 from __future__ import annotations
 
 import ast
 from typing import Any, Dict, List, Tuple
 
-from ..registry import get_unified_registry
 from ..logger import logger
-from ..decorators import compile
-from ..builtin_entities import struct, enum, i32, i64, f64, ptr, i8, bool as pc_bool
+from ..builtin_entities import i64, f64, ptr, i8, bool as pc_bool
 
 class Poly:
     """Polymorphism dispatcher for @compile functions.
@@ -90,9 +86,6 @@ class Poly:
         1. Try static dispatch by argument type hints
         2. If args contain Enum types, generate dynamic dispatch function
         """
-        from ..valueref import ensure_ir, wrap_value
-        from llvmlite import ir
-        
         # Try static dispatch first
         arg_types = tuple(self._get_type_hint(a) for a in args)
         from ..type_id import get_type_id
@@ -123,7 +116,12 @@ class Poly:
         return dynamic_dispatch.handle_call(visitor, dynamic_dispatch, args, node)
 
     def prepare_dynamic_dispatch(self, *arg_types):
-        """Pre-generate a dynamic dispatch wrapper for the given argument types."""
+        """Optionally pre-generate a wrapper for an argument-type combination.
+
+        Ordinary calls infer these types and generate the wrapper on demand.
+        Explicit preparation can move generation before object building when
+        the caller enables the guard against build-time compilation queueing.
+        """
         enum_indices = []
         for i, arg_type in enumerate(arg_types):
             if isinstance(arg_type, type) and getattr(arg_type, '_is_enum', False):
@@ -158,8 +156,12 @@ class Poly:
         for enum_cls in enum_classes:
             variants = []
             for vname, vtype in zip(enum_cls._variant_names, enum_cls._variant_types):
-                if vtype is not None:  # Skip None payload variants
-                    variants.append((vname, vtype))
+                if vtype is None:
+                    logger.error(
+                        "Poly dynamic dispatch requires a payload for every "
+                        f"variant; {enum_cls.__name__}.{vname} has none",
+                        node, exc_type=TypeError)
+                variants.append((vname, vtype))
             variants_per_enum.append(variants)
         
         # Check all combinations exist in _sig_map and collect return types
@@ -174,7 +176,6 @@ class Poly:
                 _, variant_type = combo[i]
                 expected_types[enum_idx] = variant_type
             
-            from ..type_id import get_type_id
             sig_key = tuple(get_type_id(t) for t in expected_types)
             logger.debug(f"Checking signature: {sig_key}")
             target_info = self._sig_map.get(sig_key)
@@ -187,8 +188,7 @@ class Poly:
                 # Get return type from function info directly from wrapper
                 target_func, _ = target_info
                 func_info = getattr(target_func, '_func_info', None)
-                if func_info and func_info.return_type_hint:
-                    return_types.append(func_info.return_type_hint)
+                return_types.append(func_info.return_type_hint)
         
         if missing_combinations:
             error_msg = "Poly: cannot generate dynamic dispatch - missing function overloads:\n"
@@ -200,7 +200,7 @@ class Poly:
         if return_types:
             first_return_type = return_types[0]
             for rt in return_types[1:]:
-                if repr(rt) != repr(first_return_type):
+                if get_type_id(rt) != get_type_id(first_return_type):
                     error_msg = (
                         f"Poly: cannot generate dynamic dispatch - inconsistent return types:\n"
                         f"  Expected all overloads to return {first_return_type}, "
@@ -208,103 +208,64 @@ class Poly:
                     )
                     logger.error(error_msg, node)
 
-        # Step 3: Generate and compile dispatch function
-        # print(f"all_sigs={all_sigs}")
-        # all_sigs_key = tuple(all_sigs.keys())
-        # if all_sigs_key in self._dynamic_dispatch_cache:
-        #     return self._dynamic_dispatch_cache[all_sigs_key].handle_call(visitor, args, node)
+        # Specialize ordinary native match code. Pattern extraction transfers
+        # linear payloads through the same rules as handwritten ADT consumers.
+        from .. import meta
 
-        def gen_tag_combinations(enum_classes):
-            """Generate all combinations of tag values from multiple enum classes"""
-            import itertools
-            
-            # Get all tag values for each enum class
-            tag_lists = []
-            for enum_cls in enum_classes:
-                # Get all tag values from _variant_names
-                tags = [getattr(enum_cls, vname) for vname in enum_cls._variant_names]
-                tag_lists.append(tags)
-            
-            # Generate all combinations
-            for tag_combo in itertools.product(*tag_lists):
-                yield tag_combo
+        enum_by_index = dict(enum_indices)
+        globals_dict = {}
+        cases = []
+        for case_index, (combo, _, target_info) in enumerate(variant_combos):
+            patterns = []
+            arguments = []
+            variant_by_index = dict(zip(enum_by_index, combo))
+            for index in range(len(arg_types)):
+                if index not in enum_by_index:
+                    arguments.append(ast.Name(id=f'arg_{index}', ctx=ast.Load()))
+                    continue
+                enum_name = f'_enum_{index}'
+                globals_dict[enum_name] = enum_by_index[index]
+                variant_name, _ = variant_by_index[index]
+                payload_name = f'payload_{index}'
+                patterns.append(ast.MatchSequence(patterns=[
+                    ast.MatchValue(value=ast.Attribute(
+                        value=ast.Name(id=enum_name, ctx=ast.Load()),
+                        attr=variant_name, ctx=ast.Load())),
+                    ast.MatchAs(name=payload_name),
+                ]))
+                arguments.append(ast.Name(id=payload_name, ctx=ast.Load()))
 
-        tag_to_func = {}
-        tag_to_struct = {}
-        tag_to_param_map = {}
-        tag_to_variant_indices = {}  # Map tag_tuple -> list of variant indices for each enum arg
-        
-        # Build enum position set for quick lookup
-        enum_positions = set(pos for pos, _ in enum_indices)
-        
-        for combo, expected_types, target_info in variant_combos:
-            tag_tuple = tuple(
-                enum_cls._tag_values[vname] 
-                for (vname, vtype), enum_cls in zip(combo, enum_classes)
-            )
-            
-            # Build list of variant indices for this tag combination
-            variant_idx_list = []
-            for (vname, vtype), enum_cls in zip(combo, enum_classes):
-                # Find the index of this variant in the enum's variant list
-                variant_idx = enum_cls._variant_names.index(vname)
-                variant_idx_list.append(variant_idx)
-            tag_to_variant_indices[tag_tuple] = variant_idx_list
-            
-            target_func, param_types = target_info
-            tag_to_func[tag_tuple] = target_func
-            tag_to_struct[tag_tuple] = struct[param_types]
-            
-            # Build parameter extraction map: (arg_idx, extract_payload, enum_arg_index)
-            # extract_payload=True means take args[arg_idx][1][variant_idx] (enum payload from union)
-            # extract_payload=False means take args[arg_idx] directly
-            # enum_arg_index is the index in enum_indices list (to get variant_idx)
-            param_extract = []
-            enum_arg_counter = 0
-            for i in range(len(arg_types)):
-                if i in enum_positions:
-                    param_extract.append((i, True, enum_arg_counter))
-                    enum_arg_counter += 1
-                else:
-                    param_extract.append((i, False, -1))
-            tag_to_param_map[tag_tuple] = param_extract
-        
-        ArgTypesPack = struct[arg_types]
-        
-        # Generate deterministic suffix based on argument types and enum classes
-        # This ensures cache hit works correctly across process restarts
-        suffix_parts = ['dispatch']
-        for t in arg_types:
-            suffix_parts.append(str(get_type_id(t)).replace(' ', '').replace(',', '_'))
-        dispatch_suffix = '_'.join(suffix_parts)
-        
-        # Create new dynamic dispatch function with deterministic suffix
-        @compile(suffix=dispatch_suffix)
-        def dynamic_dispatch(*args : ArgTypesPack) -> first_return_type:
-            for tags in gen_tag_combinations(enum_classes):
-                all_match: i32 = 1
-                for i in range(len(enum_indices)):
-                    if args[enum_indices[i][0]][0] != tags[i]:
-                        all_match = 0
-                        break
-                if all_match != 0:
-                    params: tag_to_struct[tags]
-                    
-                    # CRITICAL: Fully inline all dictionary accesses to avoid variable sharing issues.
-                    # When constant loop unrolling occurs, intermediate variables like target_func,
-                    # variant_indices, etc. can share storage across iterations, causing later
-                    # assignments to overwrite earlier ones. By directly accessing dictionaries inline,
-                    # we ensure each iteration gets the correct values without variable conflicts.
-                    for param_idx in range(len(tag_to_param_map[tags])):
-                        arg_idx, extract_payload, enum_arg_idx = tag_to_param_map[tags][param_idx]
-                        if extract_payload:
-                            params[param_idx] = args[arg_idx][1][tag_to_variant_indices[tags][enum_arg_idx]]
-                        else:
-                            params[param_idx] = args[arg_idx]
-                        pass
-                    
-                    return tag_to_func[tags](*params)
+            target_name = f'_target_{case_index}'
+            globals_dict[target_name] = target_info[0]
+            pattern = (patterns[0] if len(patterns) == 1
+                       else ast.MatchSequence(patterns=patterns))
+            cases.append(ast.match_case(pattern=pattern, guard=None, body=[
+                ast.Return(value=ast.Call(
+                    func=ast.Name(id=target_name, ctx=ast.Load()),
+                    args=arguments, keywords=[])),
+            ]))
 
+        subjects = [ast.Name(id=f'arg_{index}', ctx=ast.Load())
+                    for index in enum_by_index]
+        subject = (subjects[0] if len(subjects) == 1
+                   else ast.Tuple(elts=subjects, ctx=ast.Load()))
+        body = [ast.Match(subject=subject, cases=cases)]
+        generated = meta.func(
+            name='dynamic_dispatch',
+            params=[(f'arg_{index}', pc_type)
+                    for index, pc_type in enumerate(arg_types)],
+            return_type=first_return_type,
+            body=body,
+            required_globals=globals_dict,
+            source_file=__file__,
+        )
+        # Two dispatchers over the same input types may select different
+        # overloads. Include native target identities in the specialization.
+        targets = tuple((target[0]._func_info.source_file,
+                         target[0]._func_info.mangled_name
+                         or target[0]._func_info.name)
+                        for _, _, target in variant_combos)
+        dynamic_dispatch = meta.compile_generated(
+            generated, suffix=('poly_match', cache_key, targets))
         self._dynamic_dispatch_cache[cache_key] = dynamic_dispatch
         return dynamic_dispatch
-        

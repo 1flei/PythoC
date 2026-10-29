@@ -21,6 +21,12 @@ class YieldAnalyzer(ast.NodeVisitor):
         self.has_yield = False
         self.yield_nodes: List[ast.Yield] = []
         
+    def visit_FunctionDef(self, node):
+        pass
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+    visit_Lambda = visit_FunctionDef
+
     def visit_Yield(self, node: ast.Yield):
         """Record yield statement"""
         self.has_yield = True
@@ -39,7 +45,8 @@ def analyze_yield_function(func_ast: ast.FunctionDef) -> Optional[YieldAnalyzer]
         YieldAnalyzer if function contains yield, None otherwise
     """
     analyzer = YieldAnalyzer()
-    analyzer.visit(func_ast)
+    for statement in func_ast.body:
+        analyzer.visit(statement)
     
     if not analyzer.has_yield:
         return None
@@ -50,6 +57,19 @@ def analyze_yield_function(func_ast: ast.FunctionDef) -> Optional[YieldAnalyzer]
 def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
     """Create a yield placeholder with explicit callee globals."""
     from .._inline.perform_desugar import desugar_effect_performs
+    from ..builtin_entities.python_type import PythonType
+    from ..valueref import wrap_value
+    from ..call_normalization import lower_inline_signature
+    import inspect
+
+    defaults = {
+        name: wrap_value(parameter.default, kind='python',
+                         type_hint=PythonType.wrap(parameter.default))
+        for name, parameter in inspect.signature(func).parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    source_ast = func_ast
+    func_ast, signature = lower_inline_signature(source_ast, defaults)
     func_ast = desugar_effect_performs(func_ast)
 
     def placeholder_wrapper(*args, **kwargs):
@@ -59,6 +79,7 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
         )
 
     placeholder_wrapper._is_yield_generated = True
+    placeholder_wrapper._pc_call_signature = signature
     placeholder_wrapper._pc_compile_level_callable = True
     # The yield placeholder is never actually called at runtime: the for-loop
     # visitor splices the body in and the param-binding template moves each
@@ -70,6 +91,7 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
     placeholder_wrapper.defer_linear_transfer = True
     placeholder_wrapper.__name__ = func.__name__
     placeholder_wrapper._original_ast = func_ast
+    placeholder_wrapper._yield_source_ast = source_ast
     placeholder_wrapper._yield_func_obj = func
     placeholder_wrapper._yield_callee_globals = dict(callee_globals or {})
     placeholder_wrapper._effect_suffix = effect_suffix
@@ -86,6 +108,7 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
             'placeholder': placeholder_wrapper,
             'original_ast': func_ast,
             'call_node': node,
+            'evaluated_args': True,
             'call_args': args
         }
         return result
@@ -187,7 +210,7 @@ def specialize_yield_wrapper(placeholder, suffix, effect_overrides):
         globals_dict[name] = specialized
 
     func = getattr(placeholder, '_yield_func_obj')
-    func_ast = getattr(placeholder, '_original_ast')
+    func_ast = getattr(placeholder, '_yield_source_ast', placeholder._original_ast)
     specialized_placeholder = _make_yield_placeholder(
         func, func_ast, globals_dict, effect_suffix=suffix,
     )

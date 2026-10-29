@@ -26,7 +26,7 @@ class _ClosureWrapper:
     """Callable protocol object for a compile-level closure.
 
     Calling the closure means compile-time inline expansion of its body
-    (via ClosureAdapter). Default arguments are pre-evaluated ValueRefs
+    (via ClosureAdapter). Copyable defaults are pre-evaluated ValueRefs
     captured eagerly at the closure definition site.
 
     A closure whose body contains yield is a for-loop producer, not a
@@ -51,16 +51,16 @@ class _ClosureWrapper:
     # placeholder), so the flag is set per-instance in __init__ below.
 
     def __init__(self, func_ast, visitor, func_globals, capture_bindings,
-                 capture_runtime, param_names, n_required, default_vrefs):
-        self.func_ast = func_ast
+                 capture_runtime, defaults):
+        from ..call_normalization import lower_inline_signature
+
+        self.func_ast, self._pc_call_signature = lower_inline_signature(
+            func_ast, defaults)
         self.name = func_ast.name
         self.visitor = visitor
         self.func_globals = func_globals
         self._capture_bindings = capture_bindings
         self._capture_runtime = capture_runtime
-        self._param_names = param_names
-        self._n_required = n_required
-        self._default_vrefs = default_vrefs
         self._has_yield = _contains_yield(func_ast)
         # Yield closures are inlined by the for-loop visitor; the param-
         # binding template transfers argument ownership via move() exactly
@@ -70,6 +70,12 @@ class _ClosureWrapper:
 
     def handle_call(self, visitor, func_ref, args, call_node):
         """Execute closure inline, or hand it to the yield-inline path."""
+        from ..call_normalization import NormalizedCallArgs, bind_call_args
+
+        if not isinstance(args, NormalizedCallArgs):
+            args = bind_call_args(
+                self._pc_call_signature, args, [],
+                visitor.visit_rvalue_expression, call_node)
         if self._has_yield:
             from ..builtin_entities.python_type import PythonType
             result = wrap_value(self, kind='python', type_hint=PythonType(self))
@@ -79,6 +85,7 @@ class _ClosureWrapper:
                 'placeholder': self,
                 'original_ast': self.func_ast,
                 'call_node': call_node,
+                'evaluated_args': True,
                 'call_args': args,
                 # Closures capture by reference from ALL enclosing scopes,
                 # unlike module-level yield functions (whose free names
@@ -90,17 +97,8 @@ class _ClosureWrapper:
 
         from .._inline import ClosureAdapter
 
-        n_provided = len(args)
-        n_params = len(self._param_names)
-        if not (self._n_required <= n_provided <= n_params):
-            logger.error(
-                f"Closure {self.func_ast.name}() takes {n_params} arguments "
-                f"({self._n_required} required), got {n_provided}",
-                node=call_node, exc_type=TypeError
-            )
-        # Fill missing arguments from the eagerly captured defaults
-        bound = list(args) + self._default_vrefs[n_provided - self._n_required:]
-        param_bindings = dict(zip(self._param_names, bound))
+        param_bindings = dict(zip(
+            self._pc_call_signature['param_names'], args))
 
         # Use ClosureAdapter to inline the closure with captured globals
         adapter = ClosureAdapter(visitor, param_bindings, func_globals=self.func_globals)
@@ -175,29 +173,14 @@ class FunctionsMixin:
         param_names = [a.arg for a in args_node.posonlyargs + args_node.args]
         n_required = len(param_names) - len(args_node.defaults)
 
-        # Eager capture: evaluate defaults at the definition site and
-        # snapshot them as plain rvalues (mirrors move(): ownership
-        # transfers here, and the stored value carries neither source
-        # tracking nor the place - it is a true value snapshot, so later
-        # writes to the source variable do not affect the default).
-        default_vrefs = []
-        for default_expr in args_node.defaults:
-            v = self.visit_rvalue_expression(default_expr)
-            self._transfer_linear_ownership(
-                v, reason="lambda default argument", node=node)
-            if v.is_python_value():
-                default_vrefs.append(v)
-            else:
-                default_vrefs.append(wrap_value(
-                    v.value, kind='value', type_hint=get_type_hint(v)))
+        # Defaults are reusable copyable snapshots of definition-time values.
+        default_vrefs = self._evaluate_closure_defaults(args_node.defaults)
 
-        # Positional-only markers are dropped on purpose: all parameters
-        # stay positional in the synthesized definition.
         func_def = ast.FunctionDef(
             name=f"_lambda_{node.lineno}_{node.col_offset}",
             args=ast.arguments(
-                posonlyargs=[],
-                args=args_node.posonlyargs + args_node.args,
+                posonlyargs=args_node.posonlyargs,
+                args=args_node.args,
                 vararg=None,
                 kwonlyargs=[],
                 kw_defaults=[],
@@ -210,7 +193,7 @@ class FunctionsMixin:
         func_def = ast.fix_missing_locations(ast.copy_location(func_def, node))
 
         wrapper = self._make_closure_wrapper(
-            func_def, param_names, n_required, default_vrefs)
+            func_def, dict(zip(param_names[n_required:], default_vrefs)))
         return wrap_value(wrapper, kind='python', type_hint=wrapper)
 
     def _register_closure(self, node: ast.FunctionDef):
@@ -222,8 +205,18 @@ class FunctionsMixin:
         from ..valueref import ValueRef, wrap_value
         from ..registry import VariableInfo
 
-        param_names = [a.arg for a in node.args.posonlyargs + node.args.args]
-        wrapper = self._make_closure_wrapper(node, param_names, len(param_names), [])
+        positional = node.args.posonlyargs + node.args.args
+        default_start = len(positional) - len(node.args.defaults)
+        default_names = [arg.arg for arg in positional[default_start:]]
+        expressions = list(node.args.defaults)
+        keyword_defaults = zip(node.args.kwonlyargs, node.args.kw_defaults)
+        for arg, expression in keyword_defaults:
+            if expression is not None:
+                default_names.append(arg.arg)
+                expressions.append(expression)
+        defaults = self._evaluate_closure_defaults(expressions)
+        wrapper = self._make_closure_wrapper(
+            node, dict(zip(default_names, defaults)))
 
         # Register as a variable in current scope
         var_info = VariableInfo(
@@ -240,8 +233,26 @@ class FunctionsMixin:
 
         self.scope_manager.declare_variable(var_info, allow_shadow=True)
 
-    def _make_closure_wrapper(self, node: ast.FunctionDef, param_names,
-                              n_required, default_vrefs):
+    def _evaluate_closure_defaults(self, expressions):
+        from ..literal_protocol import iter_value_ref_leaves
+
+        defaults = []
+        for expression in expressions:
+            value = self.visit_rvalue_expression(expression)
+            if any(self._is_linear_type(leaf.type_hint)
+                   for leaf in iter_value_ref_leaves(value)):
+                logger.error(
+                    'linear default arguments are not supported; '
+                    'pass owned values explicitly',
+                    node=expression, exc_type=TypeError)
+            if value.is_python_value():
+                defaults.append(value)
+            else:
+                defaults.append(wrap_value(
+                    value.value, kind='value', type_hint=get_type_hint(value)))
+        return defaults
+
+    def _make_closure_wrapper(self, node: ast.FunctionDef, defaults):
         """Build the callable wrapper for a closure/lambda AST."""
         from .._inline.scope_analyzer import analyze_function_scope, build_caller_context
         from .._inline.closure_capture import build_closure_capture_plan
@@ -275,7 +286,5 @@ class FunctionsMixin:
             closure_globals,
             capture_plan.bindings,
             capture_plan.runtime,
-            param_names,
-            n_required,
-            default_vrefs,
+            defaults,
         )

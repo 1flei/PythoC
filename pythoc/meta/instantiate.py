@@ -300,19 +300,18 @@ def _instantiate_closure(source) -> Any:
     capture_bindings = getattr(source, "_capture_bindings", None)
     capture_runtime = getattr(source, "_capture_runtime", None)
 
-    # Default arguments of a lambda are eager captures: move them out of
+    # Default arguments of a closure are eager captures: move them out of
     # the call signature and into the capture channels (constant bindings
     # for Python values, runtime captures moved into the state at init).
-    default_vrefs = list(getattr(source, "_default_vrefs", None) or [])
-    if default_vrefs:
-        param_names = list(getattr(source, "_param_names", []))
-        n_required = getattr(source, "_n_required", len(param_names))
-        defaulted_names = param_names[n_required:]
+    signature = getattr(source, '_pc_call_signature', {})
+    defaults = signature.get('defaults', {})
+    if defaults:
         func_ast = copy.deepcopy(func_ast)
-        func_ast.args.args = list(func_ast.args.args[:n_required])
+        func_ast.args.args = [arg for arg in func_ast.args.args
+                              if arg.arg not in defaults]
         capture_bindings = dict(capture_bindings or {})
         capture_runtime = list(capture_runtime or [])
-        for name, vref in zip(defaulted_names, default_vrefs):
+        for name, vref in defaults.items():
             if vref.is_python_value():
                 capture_bindings[name] = extract_value_from_vref(vref)
             else:

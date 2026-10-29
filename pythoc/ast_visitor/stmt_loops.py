@@ -289,6 +289,18 @@ class LoopsMixin:
         adapter = YieldInlineAdapter(self)
         inline_info = iter_val._yield_inline_info
 
+        # visit_Call has evaluated and normalized arguments in source order.
+        # The expansion binds these values, not the original expressions.
+        call_node = inline_info['call_node']
+        if inline_info.get('evaluated_args', False):
+            import copy
+            from .._inline.inline_adapter import bind_argument_values
+            names = bind_argument_values(self, inline_info['call_args'],
+                                         preserve_linear=True)
+            call_node = copy.copy(call_node)
+            call_node.args = [ast.Name(id=name, ctx=ast.Load()) for name in names]
+            call_node.keywords = []
+
         # Extract callee context for resolving names during yield inlining
         func_obj = inline_info.get('func_obj', None)
         callee_globals = inline_info.get('callee_globals', None)
@@ -308,7 +320,7 @@ class LoopsMixin:
         inline_result, after_else_label, gen_done_label = adapter.try_inline_for_loop(
             node,
             inline_info['original_ast'],
-            inline_info['call_node'],
+            call_node,
             func_obj=func_obj,
             callee_globals_override=callee_globals,
             all_visible=inline_info.get('is_closure', False),

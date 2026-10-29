@@ -1,9 +1,16 @@
-"""Option/Result std helpers with do-notation support."""
+"""Option/Result helpers that preserve native payload ownership.
+
+Copyable sums support consuming predicates and eager defaults. Linear sums
+use tag projection (value[0]) for inspection and lazy fallbacks for extraction.
+Result bind/do use a copyable error channel; owned errors require an explicit
+match or fallback consumer.
+"""
 
 from ..builtin_entities import i8, static, ptr, array
 from ..builtin_entities.enum import _create_enum_type
 from ..builtin_entities.types import bool as pc_bool
 from ..effect import effect
+from ..schema_protocol import is_linear_schema_type
 from pythoc import compile, inline
 
 
@@ -62,6 +69,9 @@ effect.default(errno=ErrnoSlotProvider())
 def option_wrap(value_type, tag_type=i8, name=None):
     """Create Option enum type and user-space helper namespace.
 
+    Linear payloads support constructors, bind/do and unwrap_or_else.
+    Copyable payloads also support is_some/is_none and unwrap_or.
+
     Returns:
         (OptionType, option_api)
     """
@@ -82,18 +92,6 @@ def option_wrap(value_type, tag_type=i8, name=None):
     def option_none() -> option_type:
         return option_type(option_type.NoneVal)
 
-    @compile(suffix=(suffix_base, "is_some"))
-    def option_is_some(o: option_type) -> pc_bool:
-        match o:
-            case (option_type.Some, _):
-                return True
-            case (option_type.NoneVal):
-                return False
-
-    @compile(suffix=(suffix_base, "is_none"))
-    def option_is_none(o: option_type) -> pc_bool:
-        return not option_is_some(o)
-
     @compile(suffix=(suffix_base, "bind"))
     def option_bind(o: option_type) -> value_type:
         match o:
@@ -102,19 +100,19 @@ def option_wrap(value_type, tag_type=i8, name=None):
             case (option_type.NoneVal):
                 pass
 
-    @compile(suffix=(suffix_base, "unwrap_or"))
-    def option_unwrap_or(o: option_type, default: value_type) -> value_type:
-        match o:
-            case (option_type.Some, v):
-                return v
-            case (option_type.NoneVal):
-                return default
-
     @inline
     def option_do(genexp, _option_type=option_type) -> option_type:
         for value in genexp:
             return _option_type(_option_type.Some, value)
         return _option_type(_option_type.NoneVal)
+
+    @inline
+    def option_unwrap_or_else(o: option_type, fallback) -> value_type:
+        match o:
+            case (option_type.Some, value):
+                return value
+            case option_type.NoneVal:
+                return fallback()
 
     class option_api:
         type = option_type
@@ -122,15 +120,41 @@ def option_wrap(value_type, tag_type=i8, name=None):
         none = option_none
         bind = option_bind
         do = option_do
-        is_some = option_is_some
-        is_none = option_is_none
-        unwrap_or = option_unwrap_or
+        unwrap_or_else = option_unwrap_or_else
+
+    if not is_linear_schema_type(option_type):
+        @compile(suffix=(suffix_base, "is_some"))
+        def option_is_some(o: option_type) -> pc_bool:
+            match o:
+                case (option_type.Some, _):
+                    return True
+                case (option_type.NoneVal):
+                    return False
+
+        @compile(suffix=(suffix_base, "is_none"))
+        def option_is_none(o: option_type) -> pc_bool:
+            return not option_is_some(o)
+
+        @compile(suffix=(suffix_base, "unwrap_or"))
+        def option_unwrap_or(o: option_type, default: value_type) -> value_type:
+            match o:
+                case (option_type.Some, v):
+                    return v
+                case (option_type.NoneVal):
+                    return default
+
+        option_api.is_some = option_is_some
+        option_api.is_none = option_is_none
+        option_api.unwrap_or = option_unwrap_or
 
     return option_type, option_api
 
 
 def result_wrap(ok_type, err_type, tag_type=i8, name=None):
     """Create Result enum type and user-space helper namespace.
+
+    All payloads support constructors and unwrap_or_else. Bind/do require
+    a copyable error; is_ok/is_err and unwrap_or require a copyable sum.
 
     Returns:
         (ResultType, result_api)
@@ -154,18 +178,6 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
     def result_err(e: err_type) -> result_type:
         return result_type(result_type.Err, e)
 
-    @compile(suffix=(suffix_base, "is_ok"))
-    def result_is_ok(r: result_type) -> pc_bool:
-        match r:
-            case (result_type.Ok, _):
-                return True
-            case (result_type.Err, _):
-                return False
-
-    @compile(suffix=(suffix_base, "is_err"))
-    def result_is_err(r: result_type) -> pc_bool:
-        return not result_is_ok(r)
-
     @compile(suffix=(suffix_base, "bind"))
     def result_bind(r: result_type) -> ok_type:
         match r:
@@ -177,14 +189,6 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
                 # slot) win over the module default provider.
                 ptr[err_type](effect.errno.get_slot(err_type)())[0] = err_value
                 pass
-
-    @compile(suffix=(suffix_base, "unwrap_or"))
-    def result_unwrap_or(r: result_type, default: ok_type) -> ok_type:
-        match r:
-            case (result_type.Ok, v):
-                return v
-            case (result_type.Err, _):
-                return default
 
     @inline
     def result_do(
@@ -204,15 +208,50 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
                 return _result_type(_result_type.Ok, value)
         return _result_type(_result_type.Err, err)
 
+    @inline
+    def result_unwrap_or_else(r: result_type, fallback) -> ok_type:
+        match r:
+            case (result_type.Ok, value):
+                return value
+            case (result_type.Err, error):
+                return fallback(error)
+
     class result_api:
         type = result_type
         ok = result_ok
         err = result_err
-        bind = result_bind
-        do = result_do
-        is_ok = result_is_ok
-        is_err = result_is_err
-        unwrap_or = result_unwrap_or
+        unwrap_or_else = result_unwrap_or_else
+
+    # The implicit errno channel contains copyable errors. Owned errors stay
+    # in the sum until an explicit match or fallback consumes them.
+    if not is_linear_schema_type(err_type):
+        result_api.bind = result_bind
+        result_api.do = result_do
+
+    if not is_linear_schema_type(result_type):
+        @compile(suffix=(suffix_base, "is_ok"))
+        def result_is_ok(r: result_type) -> pc_bool:
+            match r:
+                case (result_type.Ok, _):
+                    return True
+                case (result_type.Err, _):
+                    return False
+
+        @compile(suffix=(suffix_base, "is_err"))
+        def result_is_err(r: result_type) -> pc_bool:
+            return not result_is_ok(r)
+
+        @compile(suffix=(suffix_base, "unwrap_or"))
+        def result_unwrap_or(r: result_type, default: ok_type) -> ok_type:
+            match r:
+                case (result_type.Ok, v):
+                    return v
+                case (result_type.Err, _):
+                    return default
+
+        result_api.is_ok = result_is_ok
+        result_api.is_err = result_is_err
+        result_api.unwrap_or = result_unwrap_or
 
     return result_type, result_api
 
@@ -229,6 +268,8 @@ def make_note(option_api, result_api):
     Usage (@compile code):
         r: R = note_to_R(o, Err(Err.Code, 77))
     """
+    if is_linear_schema_type(result_api.type._variant_types[1]):
+        raise TypeError("make_note requires a copyable error; use make_note_lazy")
     opt_type = option_api.type
     res_type = result_api.type
     _result_ok = result_api.ok
@@ -252,11 +293,12 @@ def make_note(option_api, result_api):
     return _note
 
 
-def make_hush(result_api, option_api):
+def make_hush(result_api, option_api, drop_error=None):
     """Create a Result->Option conversion function (Python meta layer).
 
-    Binds both types at Python level, returns a plain @compile function
-    usable inside @compile code with no phantom arguments.
+    Without a consumer, errors must be copyable and the result is a native
+    compiled function. An explicit drop_error callback is expanded inline
+    only on the error branch and must consume an owned error.
 
     Usage (Python meta layer):
         hush_to_O = make_hush(R_api, O_api)
@@ -264,6 +306,9 @@ def make_hush(result_api, option_api):
     Usage (@compile code):
         o: O = hush_to_O(r)
     """
+    if (is_linear_schema_type(result_api.type._variant_types[1])
+            and drop_error is None):
+        raise TypeError("make_hush requires an explicit consumer for an owned error")
     res_type = result_api.type
     opt_type = option_api.type
     _option_some = option_api.some
@@ -275,15 +320,39 @@ def make_hush(result_api, option_api):
         "hush",
     )
 
-    @compile(suffix=suffix)
+    decorator = compile(suffix=suffix) if drop_error is None else inline
+
+    @decorator
     def _hush(r: res_type) -> opt_type:
         match r:
             case (res_type.Ok, v):
                 return _option_some(v)
-            case (res_type.Err, _):
+            case (res_type.Err, error):
+                if drop_error is not None:
+                    drop_error(error)
                 return _option_none()
 
     return _hush
 
 
-__all__ = ["option_wrap", "result_wrap", "make_note", "make_hush"]
+def make_note_lazy(option_api, result_api, error_factory):
+    """Convert an option, constructing the error only for the absent branch."""
+    opt_type = option_api.type
+    res_type = result_api.type
+    result_ok = result_api.ok
+    result_err = result_api.err
+
+    @inline
+    def note(o: opt_type) -> res_type:
+        match o:
+            case (opt_type.Some, value):
+                return result_ok(value)
+            case opt_type.NoneVal:
+                return result_err(error_factory())
+
+    return note
+
+
+__all__ = [
+    "option_wrap", "result_wrap", "make_note", "make_note_lazy", "make_hush",
+]

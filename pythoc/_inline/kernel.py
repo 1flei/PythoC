@@ -317,12 +317,14 @@ def merge_inline_globals(visitor, inline_result):
     merged = dict(old or {})
     merged.update(inline_result.required_globals)
     visitor.ctx.user_globals = merged
+    visitor._python_global_cache.clear()
     return old
 
 
 def restore_globals(visitor, old_globals):
     """Restore previously saved user_globals."""
     visitor.ctx.user_globals = old_globals
+    visitor._python_global_cache.clear()
 
 
 @contextmanager

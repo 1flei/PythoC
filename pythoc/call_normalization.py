@@ -16,6 +16,7 @@ All typed *args / **kwargs carrier packing converges through
 
 from __future__ import annotations
 
+import copy
 import inspect
 from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING
 
@@ -24,6 +25,14 @@ from .logger import logger
 
 if TYPE_CHECKING:
     import ast
+
+
+class NormalizedCallArgs(list):
+    """Arguments bound to formal parameters, including collector carriers.
+
+    Plain sequences contain source-level positional arguments. Only binders
+    and producers of native ABI arguments construct this representation.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -69,9 +78,9 @@ def normalize_typed_collectors(
 ) -> List[ValueRef]:
     """Pack raw positional args into typed *args / **kwargs carriers.
 
-    Called from ``func.handle_call`` when ``len(args) != len(param_types)``
-    and the function has typed collectors.  This is the single convergence
-    point for ALL call paths (AST visit_Call, defer, poly, meta, etc.).
+    Called from ``func.handle_call`` for every typed-collector call.
+    NormalizedCallArgs explicitly identifies already bound arguments. Raw
+    tuple/struct values remain payloads, irrespective of their shape.
 
     Args:
         args: Raw positional arguments from the caller.
@@ -86,6 +95,9 @@ def normalize_typed_collectors(
     varargs_count = 1 if has_varargs else 0
     fixed_count = len(param_types) - varargs_count - kwargs_count
 
+    if isinstance(args, NormalizedCallArgs):
+        return args
+
     normalized = list(args[:fixed_count])
     extra = list(args[fixed_count:])
 
@@ -97,7 +109,7 @@ def normalize_typed_collectors(
     if has_kwargs:
         normalized.append(build_kwargs_carrier({}))
 
-    return normalized
+    return NormalizedCallArgs(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +128,11 @@ def _get_callee_signature_for_ast(func_ref: ValueRef) -> Optional[Dict[str, Any]
 
     hint = getattr(func_ref, 'type_hint', None)
 
+    value = getattr(func_ref, 'value', None)
+    signature = getattr(value, '_pc_call_signature', None)
+    if signature is not None:
+        return signature
+
     # 1. func[...] type with param_names
     if hint is not None and isinstance(hint, type) and issubclass(hint, func_cls):
         names = list(getattr(hint, 'param_names', None) or [])
@@ -132,18 +149,9 @@ def _get_callee_signature_for_ast(func_ref: ValueRef) -> Optional[Dict[str, Any]
     if func_info is not None:
         ast_node = getattr(func_info, 'ast_node', None)
         if ast_node is not None:
-            param_names = [arg.arg for arg in ast_node.args.args]
-            if (getattr(func_info, 'has_varargs', False) or
-                    getattr(func_info, 'has_llvm_varargs', False)):
-                if ast_node.args.vararg is not None:
-                    param_names.append(ast_node.args.vararg.arg)
-            if getattr(func_info, 'has_kwargs', False) and ast_node.args.kwarg is not None:
-                param_names.append(ast_node.args.kwarg.arg)
-            return _build_sig(
-                param_names,
-                has_varargs=getattr(func_info, 'has_varargs', False),
+            return _build_sig_from_ast(
+                ast_node.args,
                 has_llvm_varargs=getattr(func_info, 'has_llvm_varargs', False),
-                has_kwargs=getattr(func_info, 'has_kwargs', False),
             )
 
         if func_info.param_names:
@@ -209,14 +217,26 @@ def normalize_ast_call_args(
             )
         return positional_args
 
+    return bind_call_args(signature, positional_args, keywords,
+                          visit_rvalue_expression, node)
+
+
+def bind_call_args(signature, positional_args, keywords,
+                   visit_rvalue_expression, node):
+    """Bind evaluated arguments using the shared parameter-kind metadata."""
     fixed_param_names = signature['fixed_param_names']
     has_varargs = signature['has_varargs']
     has_kwargs = signature['has_kwargs']
-    fixed_count = len(fixed_param_names)
-
-    fixed_args = list(positional_args[:fixed_count])
-    extra_positional = list(positional_args[fixed_count:])
-    merged_fixed = list(fixed_args)
+    positional_only = signature['positional_only']
+    keyword_only = signature['keyword_only']
+    positional_names = [name for name in fixed_param_names
+                        if name not in keyword_only]
+    positional_count = len(positional_names)
+    extra_positional = list(positional_args[positional_count:])
+    if extra_positional and not (has_varargs or signature['has_llvm_varargs']):
+        logger.error('too many positional arguments', node=node,
+                     exc_type=TypeError)
+    bound = dict(zip(positional_names, positional_args))
     kwargs_payload: Dict[str, ValueRef] = {}
 
     for kw in keywords:
@@ -227,22 +247,21 @@ def normalize_ast_call_args(
             )
 
         value_ref = visit_rvalue_expression(kw.value)
-        if kw.arg in fixed_param_names:
-            idx = fixed_param_names.index(kw.arg)
-            if idx < len(fixed_args):
+        if kw.arg in positional_only and not has_kwargs:
+            logger.error(f"argument '{kw.arg}' is positional-only", node=node,
+                         exc_type=TypeError)
+        if kw.arg in fixed_param_names and kw.arg not in positional_only:
+            if kw.arg in bound:
+                from_positional = (
+                    kw.arg in positional_names
+                    and positional_names.index(kw.arg) < len(positional_args))
+                origin = ('both as positional and keyword' if from_positional
+                          else 'more than once as keyword')
                 logger.error(
-                    f"argument '{kw.arg}' given both as positional (index {idx}) "
-                    f"and keyword",
+                    f"argument '{kw.arg}' given {origin}",
                     node=node, exc_type=TypeError,
                 )
-            while len(merged_fixed) <= idx:
-                merged_fixed.append(None)
-            if merged_fixed[idx] is not None:
-                logger.error(
-                    f"duplicate keyword argument: '{kw.arg}'",
-                    node=node, exc_type=TypeError,
-                )
-            merged_fixed[idx] = value_ref
+            bound[kw.arg] = value_ref
             continue
 
         if kw.arg in kwargs_payload:
@@ -260,14 +279,18 @@ def normalize_ast_call_args(
 
         kwargs_payload[kw.arg] = value_ref
 
-    for i, name in enumerate(fixed_param_names):
-        if i >= len(merged_fixed) or merged_fixed[i] is None:
+    for name in fixed_param_names:
+        if name not in bound:
+            defaults = signature.get('defaults', {})
+            if name in defaults:
+                bound[name] = defaults[name]
+                continue
             logger.error(
                 f"missing required argument: '{name}'",
                 node=node, exc_type=TypeError,
             )
 
-    normalized = list(merged_fixed)
+    normalized = [bound[name] for name in fixed_param_names]
 
     if has_varargs:
         normalized.append(build_varargs_carrier(extra_positional))
@@ -277,7 +300,7 @@ def normalize_ast_call_args(
     if has_kwargs:
         normalized.append(build_kwargs_carrier(kwargs_payload))
 
-    return normalized
+    return NormalizedCallArgs(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -422,11 +445,11 @@ def _build_sig(
     has_varargs: bool = False,
     has_llvm_varargs: bool = False,
     has_kwargs: bool = False,
-) -> Optional[Dict[str, Any]]:
+    positional_only=(),
+    keyword_only=(),
+    defaults=None,
+) -> Dict[str, Any]:
     """Build signature metadata dict for AST keyword binding."""
-    if not param_names and not has_varargs and not has_llvm_varargs and not has_kwargs:
-        return None
-
     fixed_count = len(param_names)
     if has_varargs or has_llvm_varargs:
         fixed_count -= 1
@@ -441,31 +464,67 @@ def _build_sig(
         'has_varargs': has_varargs,
         'has_llvm_varargs': has_llvm_varargs,
         'has_kwargs': has_kwargs,
+        'positional_only': tuple(positional_only),
+        'keyword_only': tuple(keyword_only),
+        'defaults': dict(defaults or {}),
     }
 
 
-def _build_sig_from_python(signature: inspect.Signature) -> Optional[Dict[str, Any]]:
-    """Build signature info from a Python ``inspect.Signature``."""
-    param_names: List[str] = []
-    has_llvm_varargs = False
-    has_kwargs = False
+def _build_sig_from_ast(arguments, defaults=None, *, has_llvm_varargs=False):
+    fixed = arguments.posonlyargs + arguments.args + arguments.kwonlyargs
+    collectors = [arg for arg in (arguments.vararg, arguments.kwarg)
+                  if arg is not None]
+    return _build_sig(
+        [arg.arg for arg in fixed + collectors],
+        has_varargs=arguments.vararg is not None and not has_llvm_varargs,
+        has_llvm_varargs=has_llvm_varargs,
+        has_kwargs=arguments.kwarg is not None,
+        positional_only=[arg.arg for arg in arguments.posonlyargs],
+        keyword_only=[arg.arg for arg in arguments.kwonlyargs],
+        defaults=defaults,
+    )
 
-    for param in signature.parameters.values():
-        if param.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        ):
-            param_names.append(param.name)
-        elif param.kind == inspect.Parameter.VAR_POSITIONAL:
-            param_names.append(param.name)
-            has_llvm_varargs = True
-        elif param.kind == inspect.Parameter.VAR_KEYWORD:
-            param_names.append(param.name)
-            has_kwargs = True
+
+def lower_inline_signature(func_ast, defaults):
+    """Retain source binding rules while lowering inline ABI parameters."""
+    signature = _build_sig_from_ast(func_ast.args, defaults)
+    lowered = copy.deepcopy(func_ast)
+    arguments = lowered.args
+    collectors = [arg for arg in (arguments.vararg, arguments.kwarg)
+                  if arg is not None]
+    for arg in collectors:
+        if arg.annotation is None:
+            raise TypeError('Inline collectors require a type annotation')
+    arguments.args = (arguments.posonlyargs + arguments.args
+                      + arguments.kwonlyargs + collectors)
+    arguments.posonlyargs = []
+    arguments.kwonlyargs = []
+    arguments.defaults = []
+    arguments.kw_defaults = []
+    arguments.vararg = None
+    arguments.kwarg = None
+    return lowered, signature
+
+
+def _build_sig_from_python(signature: inspect.Signature) -> Dict[str, Any]:
+    """Build signature info from a Python ``inspect.Signature``."""
+    parameters = list(signature.parameters.values())
+    fixed = [param for param in parameters if param.kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )]
+    varargs = [param for param in parameters
+               if param.kind == inspect.Parameter.VAR_POSITIONAL]
+    kwargs = [param for param in parameters
+              if param.kind == inspect.Parameter.VAR_KEYWORD]
 
     return _build_sig(
-        param_names,
-        has_llvm_varargs=has_llvm_varargs,
-        has_kwargs=has_kwargs,
+        [param.name for param in fixed + varargs + kwargs],
+        has_llvm_varargs=bool(varargs),
+        has_kwargs=bool(kwargs),
+        positional_only=[param.name for param in fixed
+                         if param.kind == inspect.Parameter.POSITIONAL_ONLY],
+        keyword_only=[param.name for param in fixed
+                      if param.kind == inspect.Parameter.KEYWORD_ONLY],
     )

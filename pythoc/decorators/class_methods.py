@@ -34,6 +34,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..logger import logger
 
 
+def _is_class_callable(member) -> bool:
+    """Accept native functions and compile-level inline continuations."""
+    return (getattr(member, "_is_compiled", False)
+            or getattr(member, "_pc_compile_level_callable", False))
+
+
 def extract_class_method_defs(source_cls) -> List[Tuple[str, ast.FunctionDef]]:
     """Return ``(name, FunctionDef)`` pairs for plain ``def`` members.
 
@@ -127,7 +133,7 @@ def attach_class_methods(
 
         # Already-compiled wrapper from an explicit @compile(...) on the
         # method: keep it verbatim, just make sure it lives on target_cls.
-        if getattr(member, "_is_compiled", False):
+        if _is_class_callable(member):
             setattr(target_cls, name, member)
             attached.append(name)
             continue
@@ -174,7 +180,7 @@ def lookup_class_method(decorated_cls, attr_name: str):
 
     for candidate in candidates:
         member = getattr(candidate, attr_name, None)
-        if member is not None and getattr(member, "_is_compiled", False):
+        if member is not None and _is_class_callable(member):
             return member
     return None
 

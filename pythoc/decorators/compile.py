@@ -279,12 +279,8 @@ def _compile_parametric_specialization(
         except Exception:
             pass
 
-        class _YieldFuncStub:
-            __name__ = factory_wrapper._original_name
-            __globals__ = spec_globals
-
         return create_yield_iterator_wrapper(
-            _YieldFuncStub(), inlined_ast, yield_analyzer, spec_globals,
+            factory_wrapper.__wrapped__, inlined_ast, yield_analyzer, spec_globals,
             synthetic_source_file, _get_registry(),
         )
 

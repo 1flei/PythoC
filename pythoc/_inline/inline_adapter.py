@@ -168,35 +168,8 @@ class InlineAdapter:
         ownership has already been transferred by the caller when the
         arguments were evaluated.
         """
-        arg_temps: Dict[str, str] = {}
-        call_id = get_next_id()
-
-        for i, (param_name, param_value) in enumerate(self.param_bindings.items()):
-            temp_name = f"_arg_{self.kind}_{call_id}_{i}"
-            arg_temps[param_name] = temp_name
-
-            if not isinstance(param_value, ValueRef):
-                from ..builtin_entities.python_type import PythonType
-                param_value = wrap_value(
-                    param_value,
-                    kind="python",
-                    type_hint=PythonType.wrap(param_value, is_constant=True),
-                )
-            else:
-                # Fresh ValueRef without var_name tracking so the temp is
-                # not re-consumed in the caller's linear state.
-                param_value = param_value.clone(var_name=None, linear_path=None)
-
-            temp_info = VariableInfo(
-                name=temp_name,
-                value_ref=param_value,
-                alloca=None,  # CRITICAL: no alloca for pure value temps
-                source=f"{self.kind}_arg_temp",
-                is_parameter=False,
-            )
-            self.visitor.scope_manager.declare_variable(temp_info, allow_shadow=True)
-
-        return arg_temps
+        names = bind_argument_values(self.visitor, self.param_bindings.values())
+        return dict(zip(self.param_bindings, names))
 
     def _build_caller_context(self) -> ScopeContext:
         """Construct caller ScopeContext for kernel capture detection.
@@ -272,3 +245,26 @@ class InlineAdapter:
             kind='value',
             type_hint=var_info.type_hint,
         )
+
+
+def bind_argument_values(visitor, values, *, preserve_linear=False):
+    """Expose evaluated call arguments to AST expansion without replaying them.
+
+    Plain inline calls have already transferred ownership. Yield expansion
+    performs that transfer in its parameter bindings and retains source paths.
+    """
+    names = []
+    call_id = get_next_id()
+    for index, value in enumerate(values):
+        name = f"_arg_inline_{call_id}_{index}"
+        if not isinstance(value, ValueRef):
+            from ..builtin_entities.python_type import PythonType
+            value = wrap_value(value, kind="python",
+                               type_hint=PythonType.wrap(value, is_constant=True))
+        elif not preserve_linear:
+            value = value.clone(var_name=None, linear_path=None)
+        info = VariableInfo(name=name, value_ref=value, alloca=None,
+                            source="inline_arg_temp", is_parameter=False)
+        visitor.scope_manager.declare_variable(info, allow_shadow=True)
+        names.append(name)
+    return names
