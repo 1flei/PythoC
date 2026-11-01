@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793284715088,
+  "lastUpdate": 1793545431140,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3402,6 +3402,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.274,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "ff39d590b7ea26ea98c5d7b9cd79d6e16d10853b",
+          "message": "Fix canonical type id and constant init",
+          "timestamp": "2026-11-01T22:56:56+08:00",
+          "tree_id": "a6698dcf17768387d1cdbfbec99473417b22da22",
+          "url": "https://github.com/1flei/PythoC/commit/ff39d590b7ea26ea98c5d7b9cd79d6e16d10853b"
+        },
+        "date": 1793545430483,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.81,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.193,
             "unit": "seconds/test"
           }
         ]
