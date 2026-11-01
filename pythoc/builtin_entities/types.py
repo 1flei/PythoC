@@ -124,6 +124,20 @@ class ptr(BuiltinType):
     # Linear tracking ends when a value enters ptr
     
     @classmethod
+    def _resolve_pointee(cls, ctx=None):
+        """Resolve a pointee using visible bindings, then the session namespace."""
+        pointee = cls.pointee_type
+        if isinstance(pointee, str):
+            from .base import lookup_ctx_type_name
+            from ..forward_ref import get_defined_type
+            resolved = lookup_ctx_type_name(ctx, pointee)
+            if resolved is None:
+                resolved = get_defined_type(pointee)
+            if resolved is not None:
+                return resolved
+        return pointee
+
+    @classmethod
     def get_name(cls) -> str:
         if cls.pointee_type is not None:
             pointee_name = cls.pointee_type.get_name() if hasattr(cls.pointee_type, 'get_name') else str(cls.pointee_type)
@@ -161,27 +175,12 @@ class ptr(BuiltinType):
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM pointer type"""
         if cls.pointee_type is not None:
-            pointee = cls.pointee_type
+            pointee = cls._resolve_pointee()
 
-            # Resolve forward reference if pointee_type is a string
+            # An unresolved pointee has no layout. Its pointer representation
+            # is an address; the PythoC name remains in the semantic type.
             if isinstance(pointee, str):
-                from ..forward_ref import get_defined_type
-                resolved = get_defined_type(pointee)
-                if resolved is not None:
-                    pointee = resolved
-
-            # A pointee that is STILL an unresolvable name is an incomplete
-            # type behind a pointer -- exactly C's ``struct S *`` with no
-            # visible definition.  C accepts pointers to incomplete types;
-            # materialize a stable opaque identified struct named after the
-            # tag so pointer identity is consistent without needing a layout.
-            if isinstance(pointee, str):
-                if module_context is None:
-                    logger.error(
-                        f"ptr.get_llvm_type: unresolved forward reference '{pointee}' without module context",
-                        node=None, exc_type=TypeError)
-                pointee_llvm = module_context.get_identified_type(pointee)
-                return ir.PointerType(pointee_llvm)
+                return ir.PointerType(ir.IntType(8))
 
             # ptr[void] -> i8* (same as unspecialized ptr)
             if pointee is void:
@@ -248,62 +247,28 @@ class ptr(BuiltinType):
         return cls._handle_getptr_call(visitor, args, node)
     
     @classmethod
+    def evaluate_call_argument(cls, visitor, node):
+        """Address-taking evaluates its operand as a place exactly once."""
+        if cls.pointee_type is None:
+            return visitor.visit_lvalue(node)
+        return visitor.visit_rvalue_expression(node)
+
+    @classmethod
     def _handle_getptr_call(cls, visitor, args, node: ast.Call) -> ir.Value:
-        """Handle ptr(variable) call - get address of a variable (equivalent to getptr)
-        
-        Unified implementation: delegates to visit_lvalue to get the address,
-        sharing the same logic as lvalue assignments.
-        
-        Args:
-            visitor: AST visitor
-            args: Pre-evaluated arguments (should be length 1) - NOT USED, we use node.args[0]
-            node: Original ast.Call node
-        """
-        if len(node.args) != 1:
-            logger.error("ptr() requires exactly one argument", node=node, exc_type=ValueError)
-        
-        arg_node = node.args[0]
-        
-        # Unified path for subscript: compute lvalue address via visitor and wrap
-        if isinstance(arg_node, ast.Subscript):
-            lvalue = visitor.visit_lvalue(arg_node)
-            if not lvalue.has_place():
-                logger.error(
-                    "ptr() requires an addressable value",
-                    node=node,
-                    exc_type=TypeError,
-                )
-            address_ptr = lvalue.require_place()
-            if not lvalue.type_hint:
-                logger.error("ptr(): missing PC type hint for lvalue; cannot infer pointee type", node=node, exc_type=TypeError)
-            pointee_type = lvalue.type_hint
-            ptr_type = cls[pointee_type]
-            
-            return wrap_value(address_ptr, kind='value', type_hint=ptr_type)
-        
-        # Fallback unified path: use visit_lvalue to get the address
-        lvalue = visitor.visit_lvalue(arg_node)
+        """Return the address of the already evaluated operand."""
+        if len(args) != 1:
+            logger.error("ptr() requires exactly one argument", node=node,
+                         exc_type=ValueError)
+        lvalue = args[0]
         if not lvalue.has_place():
-            logger.error(
-                "ptr() requires an addressable value",
-                node=node,
-                exc_type=TypeError,
-            )
-        address_ptr = lvalue.require_place()
-        
-        # Infer the pointee type from the lvalue's type hint
-        if lvalue.type_hint:
-            pointee_type = lvalue.type_hint
-        else:
-            # No PC type hint available; do not infer from LLVM
-            logger.error("ptr(): missing PC type hint for lvalue; cannot infer pointee type", node=node, exc_type=TypeError)
-        
-        # Create ptr[T] type hint
-        ptr_type = cls[pointee_type]
-        
-        # Return as a pointer value
-        return wrap_value(address_ptr, kind='value', type_hint=ptr_type)
-    
+            logger.error("ptr() requires an addressable value", node=node,
+                         exc_type=TypeError)
+        if not lvalue.type_hint:
+            logger.error("ptr(): missing PC type hint for lvalue", node=node,
+                         exc_type=TypeError)
+        return wrap_value(lvalue.require_place(), kind="value",
+                          type_hint=cls[lvalue.type_hint])
+
     @classmethod
     def handle_type_conversion(cls, visitor, value_or_node, node: ast.Call = None) -> ir.Value:
         """Handle explicit pointer conversion through the unified value path."""
@@ -330,22 +295,25 @@ class ptr(BuiltinType):
             right = visitor.type_converter.convert(right, i64)
         
         # Pointer arithmetic operates on runtime pcvalues plus their type hints.
-        gep_result = visitor.builder.gep(ensure_ir(left), [ensure_ir(right)])
+        from ..type_converter import get_base_type
+        pointer_type = get_base_type(left.type_hint)
+        pointee = pointer_type._resolve_pointee(getattr(visitor, 'ctx', None))
+        if isinstance(pointee, str):
+            logger.error(
+                f"Pointer arithmetic requires a complete pointee type: {pointee}",
+                node=node, exc_type=TypeError)
+        llvm_type = (ir.PointerType(ir.IntType(8))
+                     if pointee is None or pointee is void
+                     else ir.PointerType(pointee.get_llvm_type(visitor.module.context)))
+        typed_base = visitor.builder.bitcast(ensure_ir(left), llvm_type)
+        gep_result = visitor.builder.gep(typed_base, [ensure_ir(right)])
         return wrap_value(gep_result, kind="value", type_hint=left.type_hint)
 
     @classmethod
     def handle_radd(cls, visitor, left, right, node: ast.BinOp):
         """Handle reverse pointer addition: offset + ptr"""
-        from ..valueref import wrap_value, ensure_ir
-        
-        # cast to pc type for python value
-        if left.is_python_value():
-            left = visitor.type_converter.convert(left, i64)
-        
-        # offset + ptr is the same as ptr + offset
-        gep_result = visitor.builder.gep(ensure_ir(right), [ensure_ir(left)])
-        return wrap_value(gep_result, kind="value", type_hint=right.type_hint)
-    
+        return cls.handle_add(visitor, right, left, node)
+
     @classmethod
     def handle_sub(cls, visitor, left, right, node: ast.BinOp):
         """Handle pointer subtraction: ptr - offset or ptr - ptr or ptr - array"""
@@ -371,11 +339,19 @@ class ptr(BuiltinType):
             byte_diff = visitor.builder.sub(left_int, right_int)
             
             # Get element size
-            pointee_type = cls.pointee_type
-            if pointee_type and hasattr(pointee_type, 'get_size_bytes'):
-                elem_size = pointee_type.get_size_bytes()
+            pointee_type = cls._resolve_pointee(getattr(visitor, 'ctx', None))
+            if isinstance(pointee_type, str):
+                logger.error(
+                    f"Pointer subtraction requires a complete pointee type: {pointee_type}",
+                    node=node, exc_type=TypeError)
+            if pointee_type is not None and pointee_type is not void:
+                from ..target_layout import get_type_layout
+                elem_size = get_type_layout(pointee_type).stride
+                if elem_size == 0:
+                    logger.error("Pointer subtraction requires a nonzero element stride",
+                                 node=node, exc_type=TypeError)
             else:
-                elem_size = 1  # Default to byte pointer
+                elem_size = 1  # Void pointers use byte arithmetic.
             
             # Divide by element size to get element count
             elem_size_ir = ir.Constant(i64.get_llvm_type(), elem_size)
@@ -387,8 +363,8 @@ class ptr(BuiltinType):
             right = visitor.type_converter.convert(right, i64)
         
         neg_right = visitor.builder.neg(ensure_ir(right))
-        gep_result = visitor.builder.gep(ensure_ir(left), [ensure_ir(neg_right)])
-        return wrap_value(gep_result, kind="value", type_hint=left.type_hint)
+        neg_value = wrap_value(neg_right, kind="value", type_hint=right.type_hint)
+        return cls.handle_add(visitor, left, neg_value, node)
 
     @classmethod
     def handle_deref(cls, visitor, base, node: ast.Subscript):
@@ -399,21 +375,10 @@ class ptr(BuiltinType):
         from ..valueref import wrap_value, ensure_ir
         from ..ir_helpers import propagate_qualifiers
         
-        pointee_type_hint = None
-        if base.type_hint and hasattr(base.type_hint, 'pointee_type'):
-            pointee_type_hint = base.type_hint.pointee_type
-
-        # Resolve forward reference if pointee_type_hint is a string.
-        # The visible module namespace wins (plain ``A = SomeType`` aliases
-        # reachable from the compiling function), then the session registry.
-        if isinstance(pointee_type_hint, str):
-            from .base import lookup_ctx_type_name
-            resolved = lookup_ctx_type_name(getattr(visitor, 'ctx', None), pointee_type_hint)
-            if resolved is None:
-                from ..forward_ref import get_defined_type
-                resolved = get_defined_type(pointee_type_hint)
-            if resolved is not None:
-                pointee_type_hint = resolved
+        from ..type_converter import get_base_type
+        pointer_type = get_base_type(base.type_hint)
+        pointee_type_hint = pointer_type._resolve_pointee(
+            getattr(visitor, 'ctx', None))
 
         if pointee_type_hint is None:
             logger.error(f"Cannot infer pointee type for pointer subscript {base}", node=node, exc_type=TypeError)
@@ -607,21 +572,19 @@ class ptr(BuiltinType):
                isinstance(current_type_hint.pointee_type, type) and
                hasattr(current_type_hint.pointee_type, 'pointee_type')):
             # This is ptr[ptr[...]], load to get the inner pointer
+            current_ir = visitor.builder.bitcast(
+                current_ir, current_type_hint.get_llvm_type(visitor.module.context))
             current_ir = visitor.builder.load(current_ir)
             current_type_hint = current_type_hint.pointee_type
         
-        # Now current_type_hint should be ptr[Struct] where Struct is the final type
-        struct_type = current_type_hint.pointee_type
-        
-        # Resolve forward reference if struct_type is a string
+        from ..type_converter import get_base_type
+        pointer_type = get_base_type(current_type_hint)
+        struct_type = pointer_type._resolve_pointee(getattr(visitor, 'ctx', None))
         if isinstance(struct_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(struct_type)
-            if resolved is None:
-                logger.error(f"ptr attribute access: unresolved forward reference '{struct_type}'", node=node, exc_type=TypeError)
-            struct_type = resolved
-            struct_type = resolved
-        
+            logger.error(
+                f"ptr attribute access: unresolved forward reference '{struct_type}'",
+                node=node, exc_type=TypeError)
+
         # Require PC struct type; do not accept raw LLVM struct types
         if not (isinstance(struct_type, type) and hasattr(struct_type, 'handle_attribute')):
             logger.error("ptr attribute access requires PC struct type; got non-PC type", node=node, exc_type=TypeError)
@@ -634,6 +597,8 @@ class ptr(BuiltinType):
                 node=node, exc_type=AttributeError
             )
         
+        typed_ptr = ir.PointerType(struct_type.get_llvm_type(visitor.module.context))
+        current_ir = visitor.builder.bitcast(current_ir, typed_ptr)
         struct_value = visitor.builder.load(current_ir)
         struct_base = wrap_value(struct_value, kind="address", type_hint=struct_type, address=current_ir)
 

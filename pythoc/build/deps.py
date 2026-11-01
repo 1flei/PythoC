@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 15  # Increment when scheduler/cache/effect planning semantics change
+DEPS_VERSION = 20  # Invalidate pointer field storage and forward canonicalization.
 
 
 # Memo for _type_source_file: id(type) -> (type, source_file).  The strong

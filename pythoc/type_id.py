@@ -73,11 +73,14 @@ def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
     Get the unique type ID for a PC type.
 
     Delegates to the type's get_type_id() method if available.
-    For LLVM IR types, looks up the corresponding Python class in registry.
+    Backend representations are not PythoC type identities.
 
     Returns a compact string that uniquely identifies the type.
     """
-    cached = _cache_lookup(pc_type)
+    from .type_graph import canonical_record_type, validation_in_progress
+    pc_type = canonical_record_type(pc_type)
+    validating = validation_in_progress()
+    cached = None if validating else _cache_lookup(pc_type)
     if cached is not None:
         return cached
     if _visited is None:
@@ -97,20 +100,8 @@ def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
             result = pc_type.get_type_id(_visited)
         finally:
             _visited.remove(type_key)
-        if misses_before == _name_token_misses:
+        if not validating and misses_before == _name_token_misses:
             _cache_store(pc_type, result)
-        return result
-
-    from llvmlite import ir
-    if isinstance(pc_type, ir.IdentifiedStructType):
-        from .registry import get_unified_registry
-        registry = get_unified_registry()
-        struct_info = registry.get_struct(pc_type.name)
-        if struct_info and struct_info.python_class:
-            result = get_type_id(struct_info.python_class, _visited)
-        else:
-            result = f'{len(pc_type.name)}{pc_type.name}'
-        _cache_store(pc_type, result)
         return result
 
     raise TypeError(f"Type {pc_type} (type={type(pc_type)}) does not have a get_type_id() method")

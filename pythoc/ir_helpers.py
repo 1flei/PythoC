@@ -4,6 +4,13 @@ from typing import Any, Optional
 from .logger import logger
 
 
+def alloca_in_entry(builder, llvm_type, name=""):
+    """Allocate a fixed compiler scratch slot once per function invocation."""
+    llvm_builder = builder if isinstance(builder, ir.IRBuilder) else builder.ir_builder
+    with llvm_builder.goto_entry_block():
+        return llvm_builder.alloca(llvm_type, name=name)
+
+
 def strip_qualifiers(pc_type: Any) -> Any:
     """Strip qualifier wrappers (const, volatile, static) from a type.
 

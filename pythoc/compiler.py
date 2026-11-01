@@ -901,7 +901,8 @@ class LLVMCompiler:
             fpm.add_instruction_combine_pass()
 
         if opt_level >= 2:
-            fpm.add_new_gvn_pass()
+            # NewGVN can merge distinct loop-carried pointer values whose
+            # assignments occur on different dispatcher paths.
             fpm.add_instruction_combine_pass()
             fpm.add_jump_threading_pass()
             fpm.add_simplify_cfg_pass()
@@ -913,7 +914,6 @@ class LLVMCompiler:
             fpm.add_tail_call_elimination_pass()
             fpm.add_sroa_pass()
             fpm.add_instruction_combine_pass()
-            fpm.add_new_gvn_pass()
             fpm.add_simplify_cfg_pass()
             fpm.add_aggressive_dce_pass()
 

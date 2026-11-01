@@ -22,14 +22,8 @@ from .base import BuiltinEntityMeta
 from ..valueref import extract_constant_index
 
 
-# Guards identified-struct materialization so that the same struct class can
-# be compiled into multiple LLVM modules (possibly from concurrent threads).
+# Protect lazy field-map initialization independently of backend materialization.
 _llvm_type_lock = threading.RLock()
-# (struct class, module context) pairs whose LLVM body is currently being
-# built.  A self-referential field (e.g. ptr["Node"]) re-enters get_llvm_type()
-# while the body is in progress; the recursive call must observe the opaque
-# placeholder without trying to set the body again.
-_setting_body: set = set()
 
 
 class StructTypeMeta(BuiltinEntityMeta):
@@ -98,6 +92,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     # LLVM type, so a named identified type is required to break the cycle.
     # Programmatically built struct types set this together with _canonical_name
     # to name the identified type.
+    _pc_record = True
     _force_identified: bool = False
     _structure_hash: Optional[int] = None  # Hash for fast type compatibility check
     _llvm_field_map: Optional[Dict[int, int]] = None  # PC field idx -> LLVM field idx
@@ -122,6 +117,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         Uses caching to avoid recreating the same struct type.
         """
         import ctypes
+        from ..type_graph import validate_type_graph
+        validate_type_graph(cls)
         
         # Check cache first
         if hasattr(cls, '_ctypes_struct_cache') and cls._ctypes_struct_cache is not None:
@@ -269,8 +266,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         if cls._field_types is None:
             logger.error("struct type requires field types", node=node, exc_type=TypeError)
         
-        # Ensure field types are resolved
-        cls._ensure_field_types_resolved()
+        from ..type_graph import validate_type_graph
+        validate_type_graph(cls)
 
         from ..target_layout import NATURAL_LAYOUT
         layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
@@ -278,56 +275,15 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             from .bitfield_access import get_bit_storage_type
             return get_bit_storage_type(cls.get_layout())
         
-        # Rule: @compile class always uses IdentifiedStructType.
-        # _force_identified extends this to named programmatic structs, which is
-        # required for recursive types (a literal struct cannot reference itself).
         if cls._is_compile_class() or cls._force_identified:
             if module_context is None:
                 logger.error(
-                    f"@compile class '{cls._canonical_name}' requires module_context for IdentifiedStructType",
+                    f"@compile class '{cls._canonical_name}' requires module_context",
                     node=node, exc_type=TypeError)
-            # Get or create the IdentifiedStructType (opaque initially)
-            # Use Python class name, not canonical name, for @compile classes
-            # This ensures consistency with registry lookups
-            llvm_type_name = cls._python_class.__name__ if cls._python_class else cls._canonical_name
+            from ..type_graph import record_definition
+            from ..builder.record_types import materialize_record
+            return materialize_record(record_definition(cls), module_context)
 
-            # Apply anonymous suffix if present (for @compile(anonymous=True))
-            if cls._python_class and hasattr(cls._python_class, '_anonymous_suffix') and cls._python_class._anonymous_suffix:
-                llvm_type_name = llvm_type_name + cls._python_class._anonymous_suffix
-
-            # The llvmlite context memoizes identified types by name, and each
-            # module owns its context, so this lookup doubles as the per-module
-            # cache: the same struct class yields a distinct IdentifiedStructType
-            # per module, and repeated lookups within one module are free.
-            llvm_struct_type = module_context.get_identified_type(llvm_type_name)
-
-            # Set body if the type is still opaque, unless this (class, module)
-            # pair is already being built further up the stack (self-referential
-            # fields re-enter here and must observe the opaque placeholder).
-            body_key = (cls, module_context)
-            if llvm_struct_type.elements is None and body_key not in _setting_body:
-                with _llvm_type_lock:
-                    if llvm_struct_type.elements is None and body_key not in _setting_body:
-                        _setting_body.add(body_key)
-                        try:
-                            # Build field types, filtering out zero-sized fields (pyconst)
-                            llvm_field_types = []
-                            for field_type in cls._field_types:
-                                if hasattr(field_type, 'get_llvm_type'):
-                                    llvm_type = field_type.get_llvm_type(module_context)
-                                    # Skip None (zero-sized fields like pyconst)
-                                    if llvm_type is not None:
-                                        llvm_field_types.append(llvm_type)
-                                else:
-                                    logger.error(f"Unknown struct field type {field_type}", node=node, exc_type=TypeError)
-
-                            # Set body (this will set elements attribute)
-                            llvm_struct_type.set_body(*llvm_field_types)
-                        finally:
-                            _setting_body.discard(body_key)
-
-            return llvm_struct_type
-        
         # Rule: Anonymous struct[...] always uses LiteralStructType
         # Note: Field names affect PC type caching (via canonical_name) but not LLVM structure
         
@@ -371,7 +327,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     
     @classmethod
     def get_layout(cls):
-        cls._ensure_field_types_resolved()
+        from ..type_graph import validate_type_graph
+        validate_type_graph(cls)
         if cls._field_types is None:
             from ..target_layout import TypeLayout
             return TypeLayout.empty()
@@ -434,6 +391,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     @classmethod
     def get_type_id(cls, _visited=None) -> str:
         """Generate unique type ID for struct types"""
+        from ..type_graph import canonical_record_type
+        canonical = canonical_record_type(cls)
+        if canonical is not cls:
+            return canonical.get_type_id(_visited)
         struct_name = cls._canonical_name or getattr(cls, '__name__', 'S')
         suffix = cls.get_type_id_suffix(_visited)
         return f"{len(struct_name)}{struct_name}_{suffix}"
@@ -615,6 +576,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         zero = ir.Constant(ir.IntType(32), 0)
         idx = ir.Constant(ir.IntType(32), llvm_field_index)
         field_ptr = visitor.builder.gep(struct_ptr, [zero, idx])
+        field_ptr = visitor.builder.bitcast(
+            field_ptr, ir.PointerType(field_type.get_llvm_type(module_context)))
         
         # Load value and return with address for lvalue support
         loaded_value = visitor.builder.load(field_ptr)
@@ -720,6 +683,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         zero = ir.Constant(ir.IntType(32), 0)
         idx = ir.Constant(ir.IntType(32), llvm_index_val)
         field_ptr = visitor.builder.gep(struct_ptr, [zero, idx])
+        field_ptr = visitor.builder.bitcast(
+            field_ptr, ir.PointerType(field_type.get_llvm_type(module_context)))
         
         # Load value and return with address for lvalue support
         loaded_value = visitor.builder.load(field_ptr)

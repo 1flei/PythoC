@@ -361,6 +361,13 @@ def assemble_aggregate_value(visitor, target_pc_type, values):
         from .builtin_entities.bitfield_access import assemble_bit_fields
         return assemble_bit_fields(visitor, target_pc_type, values)
     if all(is_link_time_constant(v) for v in values):
+        from .builder.record_types import storage_value
+        fields = (agg_llvm.elements if isinstance(agg_llvm, ir.BaseStructType)
+                  else (agg_llvm.element,) * agg_llvm.count)
+        if len(values) != len(fields):
+            raise TypeError('Aggregate initializer field count mismatch')
+        values = [storage_value(None, value, field)
+                  for value, field in zip(values, fields)]
         return ir.Constant(agg_llvm, values)
     agg = ir.Constant(agg_llvm, ir.Undefined)
     for i, v in enumerate(values):

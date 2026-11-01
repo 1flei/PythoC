@@ -60,6 +60,8 @@ class CompileSession:
         # a local import to keep this module import-cycle-free.
         from .forward_ref import ForwardRefNamespace
         self.forward_refs: ForwardRefNamespace = ForwardRefNamespace()
+        from .type_graph import TypeGraph
+        self.type_graph = TypeGraph()
         # Tokens of nested ``with session:`` blocks, innermost last.
         self._enter_tokens: List[Token] = []
 

@@ -451,6 +451,9 @@ class TypeConverter:
 
         if isinstance(python_val, bool):
             python_val = int(python_val)
+        if (getattr(target_type, '_is_bool', False)
+                and isinstance(python_val, (int, float))):
+            python_val = int(python_val != 0)
 
         if isinstance(llvm_type, (ir.ArrayType, ir.BaseStructType)):
             if not isinstance(python_val, (int, float)) or python_val != 0:
@@ -1098,6 +1101,7 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
+        target_is_bool = getattr(get_base_type(type_hint), '_is_bool', False)
 
         # Constant-fold integer conversions so compile-time values like offsetof()
         # remain constants when assigned to differently-sized fields.
@@ -1116,7 +1120,7 @@ class TypeConverter:
                     if v & (1 << (sw - 1)):
                         v = v - (1 << sw)
             elif sw > tw:
-                if tw == 1:
+                if target_is_bool:
                     v = int(v != 0)
                 else:
                     v = v & ((1 << tw) - 1)
@@ -1134,9 +1138,9 @@ class TypeConverter:
                 else self.builder.sext(value_ir, target_type)
             )
         elif source_type.width > target_type.width:
-            # Special case: converting to bool (i1) should use comparison, not truncation
-            # bool(42) should be True, not False (42's lowest bit is 0)
-            if target_type.width == 1:
+            # Special case: converting to bool should use comparison, not truncation
+            # i1/u1 remain integers even though they share bool's LLVM type.
+            if target_is_bool:
                 # Convert to bool: compare != 0
                 result = self.builder.icmp_signed('!=', value_ir, ir.Constant(source_type, 0))
             else:
@@ -1187,6 +1191,14 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
+        if getattr(get_base_type(type_hint), '_is_bool', False):
+            if isinstance(value_ir, ir.Constant):
+                result = ir.Constant(target_type, int(value_ir.constant != 0))
+            else:
+                result = self.builder.fcmp_unordered(
+                    '!=', value_ir, ir.Constant(source_type, 0.0))
+            return wrap_value(result, kind="value", type_hint=type_hint)
+
 
         # Constant-fold float -> integer conversion by computing the integer value
         # directly. Avoids emitting a fptosi/fptoui constexpr, which LLVM 20+
@@ -1341,6 +1353,14 @@ class TypeConverter:
         type_hint,
     ) -> ValueRef:
         value_ir = ensure_ir(value)
+        if getattr(get_base_type(type_hint), '_is_bool', False):
+            if isinstance(value_ir, ir.Constant) and value_ir.constant is None:
+                result = ir.Constant(target_type, 0)
+            else:
+                result = self.builder.icmp_unsigned(
+                    '!=', value_ir, ir.Constant(source_type, None))
+            return wrap_value(result, kind="value", type_hint=type_hint)
+
         if isinstance(value_ir, ir.Constant) and value_ir.constant is None:
             result = ir.Constant(target_type, 0)
         else:

@@ -3,7 +3,7 @@ Mathematical Functions (math.h)
 """
 
 from ..decorators import compile, extern
-from ..builtin_entities import f32, f64, i32, ptr
+from ..builtin_entities import f32, f64, i32, ptr, u32, u64, union
 from ._platform import IS_MACOS
 
 # Trigonometric functions
@@ -119,7 +119,9 @@ def trunc(x: f64) -> f64: pass
 def round(x: f64) -> f64: pass
 
 @extern(lib='m')
-def modf(x: f64) -> f64: pass
+def modf(x: f64, integral: ptr[f64]) -> f64:
+    """Return the fraction and write the integral part through a pointer."""
+    pass
 
 @extern(lib='m')
 def hypot(x: f64, y: f64) -> f64: pass
@@ -182,6 +184,7 @@ def ldexpl(x: f64, exp: i32) -> f64:
 __all__ = [
     'frexp', '__inline_isinff', '__inline_isinfd', '__inline_isinfl',
     '__inline_isnanf', '__inline_isnand', '__inline_isnanl',
+    '__inline_isfinitef', '__inline_isfinited', '__inline_isfinitel',
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2',
     'sinh', 'cosh', 'tanh', 'exp', 'log', 'log10', 'pow', 'sqrt',
     'ceil', 'floor', 'fabs', 'fmod', 'trunc', 'round', 'modf', 'hypot',
@@ -236,3 +239,24 @@ def __inline_isinfl(x: f64) -> i32:
 @compile
 def __inline_isnanl(x: f64) -> i32:
     return __inline_isnand(x)
+
+
+@compile
+def __inline_isfinitef(x: f32) -> i32:
+    bits: union[f32, u32]
+    bits[0] = x
+    return i32((bits[1] & u32(0x7f800000)) != u32(0x7f800000))
+
+
+@compile
+def __inline_isfinited(x: f64) -> i32:
+    bits: union[f64, u64]
+    bits[0] = x
+    exponent: u64 = bits[1] & u64(0x7ff0000000000000)
+    return i32(exponent != u64(0x7ff0000000000000))
+
+
+@compile
+def __inline_isfinitel(x: f64) -> i32:
+    """Use the existing f64 model of long-double compatibility helpers."""
+    return __inline_isfinited(x)

@@ -264,6 +264,13 @@ class LLVMBuilder(AbstractBuilder):
         return self._builder.extract_value(agg, idx, name=name)
     
     def insert_value(self, agg: Any, value: Any, idx: Any, name: str = "") -> Any:
+        from .record_types import storage_value
+        indices = [idx] if isinstance(idx, int) else idx
+        target = agg.type
+        for index in indices:
+            target = (target.elements[index] if isinstance(target, ir.BaseStructType)
+                      else target.element)
+        value = storage_value(self._builder, value, target)
         return self._builder.insert_value(agg, value, idx, name=name)
 
     # ========== Vector Operations ==========

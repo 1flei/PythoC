@@ -33,13 +33,19 @@ class CallsMixin:
         """
         func_ref = self.visit_expression(node.func)
 
+        evaluate_argument = getattr(
+            func_ref.type_hint, "evaluate_call_argument", None
+        )
         positional_args = []
         for arg in node.args:
             if isinstance(arg, ast.Starred):
                 expanded_args = self._expand_starred_struct(arg.value)
                 positional_args.extend(expanded_args)
             else:
-                positional_args.append(self.visit_rvalue_expression(arg))
+                value = (evaluate_argument(self, arg)
+                         if evaluate_argument is not None
+                         else self.visit_rvalue_expression(arg))
+                positional_args.append(value)
 
         from ..call_normalization import normalize_ast_call_args
         args = normalize_ast_call_args(

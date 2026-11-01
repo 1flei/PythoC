@@ -10,6 +10,8 @@ This module provides functions to:
 from typing import Optional
 from llvmlite import ir
 
+from ...ir_helpers import alloca_in_entry
+
 from .base import CoercedType, PassingKind
 
 
@@ -42,7 +44,7 @@ def pack_struct_for_return(builder: ir.IRBuilder, struct_value: ir.Value,
     # This works because memory layout matches
     
     # Allocate space for the struct
-    alloca = builder.alloca(original_type, name="struct.coerce")
+    alloca = alloca_in_entry(builder, original_type, name="struct.coerce")
     builder.store(struct_value, alloca)
     
     # Load as the coerced type
@@ -82,7 +84,7 @@ def unpack_struct_from_return(builder: ir.IRBuilder, coerced_value: ir.Value,
     # This works because memory layout matches
     
     # Allocate space for the coerced value
-    alloca = builder.alloca(coerced_type, name="coerce.unpack")
+    alloca = alloca_in_entry(builder, coerced_type, name="coerce.unpack")
     builder.store(coerced_value, alloca)
     
     # Load as the original struct type
@@ -103,7 +105,7 @@ def create_sret_alloca(builder: ir.IRBuilder, struct_type: ir.Type) -> ir.Alloca
     Returns:
         Alloca instruction for the sret buffer
     """
-    return builder.alloca(struct_type, name="sret.buf")
+    return alloca_in_entry(builder, struct_type, name="sret.buf")
 
 
 def pack_struct_for_argument(builder: ir.IRBuilder, struct_value: ir.Value,
@@ -141,14 +143,14 @@ def pack_struct_for_argument(builder: ir.IRBuilder, struct_value: ir.Value,
     if coercion.is_indirect:
         # byval: pass pointer to copy
         # Allocate and store, return pointer
-        alloca = builder.alloca(original_type, name="arg.byval")
+        alloca = alloca_in_entry(builder, original_type, name="arg.byval")
         builder.store(struct_value, alloca)
         return alloca
     
     coerced_type = coercion.coerced_type
     
     # Strategy: alloca original struct, store value, bitcast pointer, load as coerced
-    alloca = builder.alloca(original_type, name="arg.coerce")
+    alloca = alloca_in_entry(builder, original_type, name="arg.coerce")
     builder.store(struct_value, alloca)
     
     coerced_ptr = builder.bitcast(alloca, ir.PointerType(coerced_type), name="arg.coerce.ptr")
@@ -185,7 +187,7 @@ def unpack_coerced_parameter(builder, coerced_value: ir.Value,
         return builder.load(coerced_value, name="param.byval.load")
     
     # Coerced: alloca coerced type, store value, bitcast, load as struct
-    alloca = builder.alloca(coerced_type, name="param.coerce.unpack")
+    alloca = alloca_in_entry(builder, coerced_type, name="param.coerce.unpack")
     builder.store(coerced_value, alloca)
     
     struct_ptr = builder.bitcast(alloca, ir.PointerType(original_type), name="param.struct.ptr")

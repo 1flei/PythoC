@@ -310,7 +310,7 @@ class EnumType(CompositeType):
         tag_llvm = cls._tag_type.get_llvm_type(visitor.module.context)
         payload_llvm = cls._union_payload.get_llvm_type(visitor.module.context)
         enum_struct_t = ir.LiteralStructType([tag_llvm, payload_llvm])
-        enum_alloca = visitor.builder.alloca(enum_struct_t)
+        enum_alloca = visitor.builder.alloca(enum_struct_t, name="enum.value")
         
         # Store tag
         zero = ir.Constant(ir.IntType(32), 0)

@@ -33,6 +33,12 @@ class ForwardRefNamespace:
         self._defined_types: Dict[str, Any] = {}
         self._callbacks: Dict[str, List[Callable]] = {}
         self._lock = threading.RLock()
+        self._revision = 0
+
+    @property
+    def revision(self):
+        with self._lock:
+            return self._revision
 
     def register_callback(self, type_name: str, callback: Callable[[Any], None]):
         """Register a callback to be called when type_name is defined
@@ -60,6 +66,7 @@ class ForwardRefNamespace:
         """
         with self._lock:
             self._defined_types[type_name] = type_obj
+            self._revision += 1
             callbacks = self._callbacks.pop(type_name, [])
 
         for callback in callbacks:
@@ -91,6 +98,7 @@ class ForwardRefNamespace:
         with self._lock:
             self._callbacks.clear()
             self._defined_types.clear()
+            self._revision += 1
 
     def get_pending_callbacks(self) -> Dict[str, int]:
         """Get count of pending callbacks for each type (for debugging)

@@ -121,7 +121,7 @@ class CompositeType(BuiltinType):
         
         # Need to allocate and store the value
         value_ir = ensure_ir(base)
-        value_ptr = visitor.builder.alloca(get_type(value_ir))
+        value_ptr = visitor.builder.alloca(get_type(value_ir), name="aggregate.value")
         visitor.builder.store(value_ir, value_ptr)
         return value_ptr
     

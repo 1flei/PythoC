@@ -444,7 +444,8 @@ class LLVMCBuilder(LLVMBuilder):
                 if coercion.is_indirect:
                     # sret: allocate buffer, pass as first arg, load result
                     logger.debug(f"LLVMCBuilder.call: using sret for {getattr(fn, 'name', fn)}, agg_type={agg_type}")
-                    sret_buf = self._builder.alloca(agg_type, name="sret.buf")
+                    from .abi.coercion import create_sret_alloca
+                    sret_buf = create_sret_alloca(self._builder, agg_type)
                     call_args = [sret_buf] + coerced_args
                     call_arg_attrs = {0: ['sret', 'noalias']}
                     for byval_index in byval_arg_indices:

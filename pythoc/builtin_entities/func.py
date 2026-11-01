@@ -11,16 +11,24 @@ class func(BuiltinType):
     _is_signed = False
     _is_pointer = True
     param_types = None   # Tuple of parameter types (T1, T2, ...)
+    param_names = None   # Optional names in parameter order
     return_type = None   # Return type
     has_varargs = False  # Whether the function was declared with *args: T
     has_llvm_varargs = False  # Whether the function uses bare LLVM/C varargs
     has_kwargs = False   # Whether the function was declared with **kwargs: T
 
     @classmethod
+    def _get_parameter_names(cls):
+        """Return signature parameter names, including unnamed slots."""
+        stored = cls.param_names or ()
+        return tuple((stored[index] or None) if index < len(stored) else None
+                     for index in range(len(cls.param_types or ())))
+
+    @classmethod
     def get_name(cls) -> str:
         if cls.param_types is not None and cls.return_type is not None:
             param_strs = []
-            stored_param_names = cls.param_names or ()
+            stored_param_names = cls._get_parameter_names()
             for index, param_type in enumerate(cls.param_types):
                 if hasattr(param_type, 'get_name'):
                     type_name = param_type.get_name()
@@ -29,7 +37,7 @@ class func(BuiltinType):
                 else:
                     type_name = str(param_type)
 
-                param_name = stored_param_names[index] if index < len(stored_param_names) else None
+                param_name = stored_param_names[index]
                 if param_name:
                     param_strs.append(f'{param_name}: {type_name}')
                 else:

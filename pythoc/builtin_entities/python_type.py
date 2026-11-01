@@ -266,6 +266,13 @@ class PythonType(_PythonTypeBase):
     def defer_linear_transfer(self):
         return getattr(self._python_object, 'defer_linear_transfer', False)
 
+    def evaluate_call_argument(self, visitor, node):
+        """Let compile-time callables request a place instead of an rvalue."""
+        evaluate = getattr(self._python_object, "evaluate_call_argument", None)
+        if evaluate is not None:
+            return evaluate(visitor, node)
+        return visitor.visit_rvalue_expression(node)
+
     def handle_call(self, visitor, func_ref, args, node: ast.Call):
         """Handle calling a Python-backed callable.
         
