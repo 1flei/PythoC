@@ -251,18 +251,6 @@ def _compile_parametric_specialization(
     except Exception:
         pass
 
-    # Use a synthetic source file for each specialization.  PythoC's build
-    # manager locks a source file once its shared library has been loaded, so
-    # defining new compiled functions for the original file after native
-    # execution has started is not allowed.  Parametric specializations are
-    # created lazily at call sites, so we place them in their own file.
-    # The synthetic file must be unique per (function, suffix) pair.
-    synthetic_source_file = "{}.__parametric__.{}.{}".format(
-        factory_wrapper._source_file,
-        factory_wrapper._original_name,
-        suffix if suffix else "default",
-    )
-
     # Yield-based generators must be returned as placeholders that trigger
     # inline expansion at call sites, just like non-parametric yield functions.
     # Because the inlined body is spliced into the caller, any reference to a
@@ -281,7 +269,7 @@ def _compile_parametric_specialization(
 
         return create_yield_iterator_wrapper(
             factory_wrapper.__wrapped__, inlined_ast, yield_analyzer, spec_globals,
-            synthetic_source_file, _get_registry(),
+            factory_wrapper._source_file, _get_registry(),
         )
 
     return compile_ast(
@@ -292,11 +280,19 @@ def _compile_parametric_specialization(
         suffix=suffix,
         attrs=factory_wrapper._original_fn_attrs,
         linkage=getattr(factory_wrapper, '_original_linkage', None),
-        source_file=synthetic_source_file,
+        source_file=factory_wrapper._source_file,
         source_code=source_code,
         start_line=factory_wrapper._start_line,
         user_globals=spec_globals,
         effect_suffix=factory_wrapper._original_effect_suffix,
+        # Loaded groups are immutable, so each function/type specialization
+        # needs its own group. Keep physical source provenance for caching.
+        group_key=(
+            factory_wrapper._source_file,
+            '__parametric__.' + factory_wrapper._original_name,
+            suffix,
+            factory_wrapper._original_effect_suffix,
+        ),
         copy_ast=False,
     )
 
