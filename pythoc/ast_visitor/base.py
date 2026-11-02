@@ -111,6 +111,16 @@ class LLVMIRVisitor(ast.NodeVisitor):
         finally:
             self._current_node = old_node
 
+    def generic_visit(self, node):
+        """Do not give unknown source syntax accidental traversal semantics."""
+        if isinstance(node, (ast.stmt, ast.expr)):
+            logger.error(
+                f"Unsupported Python syntax: {type(node).__name__}",
+                node=node,
+                exc_type=SyntaxError,
+            )
+        return super().generic_visit(node)
+
     @property
     def struct_types(self):
         return self.ctx.struct_types

@@ -145,6 +145,10 @@ class ControlFlowMixin:
             )
         
         return result
+
+    def visit_Pass(self, node: ast.Pass):
+        """A pass statement has no runtime effect."""
+        return None
     
     def visit_With(self, node: ast.With):
         """Handle with statements
