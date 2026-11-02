@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from pythoc import array, const, func, i32, i64, ptr, refined, u32, union
+from pythoc import array, compile, const, func, i32, i64, ptr, refined, u32, union
 from pythoc.builtin_entities.struct import create_struct_type
 from pythoc.forward_ref import mark_type_defined
 from pythoc.session import CompileSession
@@ -28,6 +28,21 @@ class RecordTypeSemanticsTest(unittest.TestCase):
         self.session = CompileSession()
         self.session.__enter__()
         self.addCleanup(self.session.__exit__, None, None, None)
+
+    def test_recursive_factory_fields_bind_their_own_declaration(self):
+        def make_node(value_type):
+            @compile
+            class FactoryNode:
+                next: ptr['FactoryNode']
+                value: value_type
+
+            return FactoryNode
+
+        small = make_node(i32)
+        wide = make_node(i64)
+        self.assertIs(small._field_types[0].pointee_type, small)
+        self.assertIs(wide._field_types[0].pointee_type, wide)
+        self.assertNotEqual(get_type_id(small), get_type_id(wide))
 
     def test_recursive_views_have_one_pythoc_identity(self):
         first, second = recursive_views()

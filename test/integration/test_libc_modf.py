@@ -5,12 +5,10 @@ import math
 from pathlib import Path
 import struct
 import sys
-import tempfile
 import unittest
 
 from pythoc import compile, f64, ptr
-from pythoc.utils.cc_utils import compile_c_to_object
-from pythoc.utils.link_utils import get_shared_lib_extension, link_files
+from test.native_reference import c_reference
 from pythoc.libc.math import modf
 
 
@@ -26,15 +24,10 @@ class GuardedOutput(ctypes.Structure):
 
 class ModfRuntimeTest(unittest.TestCase):
     def test_fraction_and_integral_match_an_independent_c_call(self):
-        with tempfile.TemporaryDirectory(prefix='pythoc-modf-reference-') as temp:
-            root = Path(temp)
-            source = (Path(__file__).resolve().parent / 'fixtures'
-                      / 'libc_modf_reference.c')
-            obj = compile_c_to_object(str(source), str(root / 'reference.o'))
-            library = link_files(
-                [obj], str(root / ('reference' + get_shared_lib_extension())),
-                shared=True, link_objects=[], link_libraries=['m'])
-            reference = ctypes.CDLL(str(library)).split_reference
+        source = (Path(__file__).resolve().parent / 'fixtures'
+                  / 'libc_modf_reference.c')
+        with c_reference(source, ['m']) as library:
+            reference = library.split_reference
             reference.argtypes = [ctypes.c_double, ctypes.POINTER(ctypes.c_double)]
             reference.restype = ctypes.c_double
             cases = [0.0, -0.0, 0.25, -0.25, 1.75, -1.75,

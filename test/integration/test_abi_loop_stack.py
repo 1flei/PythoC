@@ -1,9 +1,11 @@
 """C ABI scratch storage must remain bounded in long-running loops."""
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 from pythoc import array, compile, extern, i32, i64, seq
@@ -44,20 +46,22 @@ def loop(count: i32) -> i64:
 
 
 class AbiLoopStackTest(unittest.TestCase):
-    @unittest.skipIf(sys.platform == 'win32', 'requires POSIX stack resource limits')
     def test_repeated_indirect_returns_and_by_value_arguments_use_bounded_stack(self):
         result = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--child'],
                                 capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
+def check_bounded_loop():
+    count = 500000
+    assert loop(count) == count * (count - 1) + count * 7
+
+
 if __name__ == '__main__':
     if sys.argv[1:] == ['--child']:
-        import resource
         assert loop(1) == 7
-        _, hard = resource.getrlimit(resource.RLIMIT_STACK)
-        resource.setrlimit(resource.RLIMIT_STACK, (1024 * 1024, hard))
-        count = 500000
-        assert loop(count) == count * (count - 1) + count * 7
+        threading.stack_size(1024 * 1024)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(check_bounded_loop).result()
     else:
         unittest.main()

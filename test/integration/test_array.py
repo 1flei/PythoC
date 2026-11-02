@@ -459,61 +459,61 @@ if __name__ == "__main__":
     test_3d_array()
 
     # Run demos
-    printf("=== Array Sum Demo ===\n")
+    print("=== Array Sum Demo ===\n", end="")
     result = array_sum()
     assert result == 150, f"array_sum expected 150, got {result}"
 
-    printf("\n=== Matrix Multiply Demo ===\n")
+    print("\n=== Matrix Multiply Demo ===\n", end="")
     matrix_multiply()
 
-    printf("\n=== Array Pointer Demo ===\n")
+    print("\n=== Array Pointer Demo ===\n", end="")
     array_pointer_demo()
 
     # Test tuple indexing feature
-    printf("\n=== Tuple Index 2D Test ===\n")
+    print("\n=== Tuple Index 2D Test ===\n", end="")
     test_tuple_index_2d()
 
-    printf("\n=== Tuple Index 3D Test ===\n")
+    print("\n=== Tuple Index 3D Test ===\n", end="")
     test_tuple_index_3d()
 
-    printf("\n=== Tuple Index 4D Test ===\n")
+    print("\n=== Tuple Index 4D Test ===\n", end="")
     test_tuple_index_4d()
 
-    printf("\n=== Tuple Index Mixed Test ===\n")
+    print("\n=== Tuple Index Mixed Test ===\n", end="")
     test_tuple_index_mixed()
 
-    printf("\n=== Tuple Index Arithmetic Test ===\n")
+    print("\n=== Tuple Index Arithmetic Test ===\n", end="")
     test_tuple_index_arithmetic()
 
-    printf("\n=== Tuple Index Assignment Test ===\n")
+    print("\n=== Tuple Index Assignment Test ===\n", end="")
     test_tuple_index_assignment()
 
     # Test string literal initialization of byte arrays
-    printf("\n=== String Init i8 Array Test ===\n")
+    print("\n=== String Init i8 Array Test ===\n", end="")
     result = test_string_init_i8_array()
     assert result == 394, f"expected 394, got {result}"
 
-    printf("\n=== String Init Exact Size Array Test ===\n")
+    print("\n=== String Init Exact Size Array Test ===\n", end="")
     result = test_string_init_exact_size_array()
     assert result == 394, f"expected 394, got {result}"
 
-    printf("\n=== String Init u8 Array Test ===\n")
+    print("\n=== String Init u8 Array Test ===\n", end="")
     result = test_string_init_u8_array()
     assert result == 394, f"expected 394, got {result}"
 
-    printf("\n=== String Init Struct Array Field Test ===\n")
+    print("\n=== String Init Struct Array Field Test ===\n", end="")
     result = test_string_init_struct_array_field()
     assert result == 527, f"expected 527, got {result}"
 
-    printf("\n=== Array Pointer Compare Struct Test ===\n")
+    print("\n=== Array Pointer Compare Struct Test ===\n", end="")
     result = test_array_ptr_compare_struct()
     assert result == 1, f"expected 1, got {result}"
 
-    printf("\n=== Array Pointer Equal Test ===\n")
+    print("\n=== Array Pointer Equal Test ===\n", end="")
     result = test_array_ptr_equal()
     assert result == 1, f"expected 1, got {result}"
 
-    printf("\n=== Two Arrays Compare Test ===\n")
+    print("\n=== Two Arrays Compare Test ===\n", end="")
     result = test_two_arrays_compare()
     assert result == 1, f"expected 1, got {result}"
 

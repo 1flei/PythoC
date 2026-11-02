@@ -34,6 +34,7 @@ def typed_node_type(value_type):
     class TypedNode:
         next: ptr['TypedNode']
         value: value_type
+        canary: i32
 
     return TypedNode
 
@@ -47,7 +48,9 @@ def read_independent_recursive_types() -> i64:
     small: Small
     wide: Wide
     small.value = 7
+    small.canary = 0x6badf00d
     wide.value = 4294967296
+    wide.canary = 0x13579bdf
     small.next = ptr(small)
     wide.next = ptr(wide)
     return i64(small.next.value) + wide.next.value

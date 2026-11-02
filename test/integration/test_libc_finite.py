@@ -1,14 +1,13 @@
 """Native finite classification agrees with an independent C implementation."""
 
 import ctypes
+from contextlib import ExitStack
 from pathlib import Path
 import random
-import tempfile
 import unittest
 
 from pythoc import compile, f32, f64, i32, u32, u64, union
-from pythoc.utils.cc_utils import compile_c_to_object
-from pythoc.utils.link_utils import get_shared_lib_extension, link_files
+from test.native_reference import c_reference
 from pythoc.libc.math import (
     __inline_isfinitef as finite_float,
     __inline_isfinited as finite_double,
@@ -40,16 +39,11 @@ def classify_long_compat(bits: u64) -> i32:
 class LibcFiniteRuntimeTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory(prefix='pythoc-finite-reference-')
-        cls.addClassCleanup(cls.temp.cleanup)
-        root = Path(cls.temp.name)
+        resources = ExitStack()
+        cls.addClassCleanup(resources.close)
         source = (Path(__file__).resolve().parent / 'fixtures'
                   / 'libc_finite_reference.c')
-        obj = compile_c_to_object(str(source), str(root / 'reference.o'))
-        library = link_files(
-            [obj], str(root / ('reference' + get_shared_lib_extension())),
-            shared=True, link_objects=[], link_libraries=['m'])
-        cls.reference = ctypes.CDLL(str(library))
+        cls.reference = resources.enter_context(c_reference(source, ['m']))
         cls.reference.finite32.argtypes = [ctypes.c_uint32]
         cls.reference.finite32.restype = ctypes.c_int
         cls.reference.finite64.argtypes = [ctypes.c_uint64]

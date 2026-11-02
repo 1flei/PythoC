@@ -241,6 +241,8 @@ def compile_dynamic_class(
     type_resolver = TypeResolver(user_globals=type_namespace)
     
     # === RESOLVE FIELD TYPES ===
+    from ..builtin_entities.base import rebind_lazy_type_names
+
     parsed_field_types = []
     for fname, ftype in cls._struct_fields:
         if isinstance(ftype, str):
@@ -255,9 +257,12 @@ def compile_dynamic_class(
                 resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
             except NameError:
                 resolved_type = ftype
-            parsed_field_types.append(resolved_type)
         else:
-            parsed_field_types.append(ftype)
+            resolved_type = ftype
+        # Formed pointers can still carry a quoted self-reference. Bind it
+        # to this declaration before a later factory call reuses its name.
+        parsed_field_types.append(
+            rebind_lazy_type_names(resolved_type, type_namespace.get))
 
     # Class-level static members (``name: static[T] = ...``) are not instance
     # fields; split them out before the unified type is built.

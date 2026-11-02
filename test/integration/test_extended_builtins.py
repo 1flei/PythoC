@@ -20,7 +20,7 @@ from pythoc import (
     bswap, popcount, ctlz, cttz,
 )
 from pythoc.libc.errno import __error, __errno_location
-from pythoc.libc.stdio import fputs, stderr
+from pythoc.libc.stdio import fputs, standard_stream
 
 
 # ============================================================
@@ -278,10 +278,10 @@ if platform.system() == 'Linux':
     def errno_slot_glibc() -> i32:
         return __errno_location()[0]
 
-    @compile
-    def stderr_write() -> i32:
-        """glibc exposes stderr as an extern FILE* data symbol."""
-        return fputs("pythoc stderr smoke\n", stderr)
+
+@compile
+def stderr_write() -> i32:
+    return fputs("pythoc stderr smoke\n", standard_stream(2))
 
 
 # ============================================================
@@ -369,8 +369,7 @@ class TestLibcAccessors(unittest.TestCase):
     def test_errno_glibc(self):
         self.assertEqual(errno_slot_glibc(), 0)
 
-    @unittest.skipUnless(platform.system() == 'Linux', 'glibc data symbol')
-    def test_stderr_data_symbol(self):
+    def test_standard_error_stream(self):
         self.assertGreaterEqual(stderr_write(), 0)
 
 

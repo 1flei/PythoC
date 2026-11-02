@@ -597,15 +597,10 @@ def _win32_dll_usable(output_file: str) -> bool:
 def _win32_dll_uptodate(output_file: str, obj_files: List[str]) -> bool:
     if not _win32_dll_usable(output_file):
         return False
-    base = os.path.splitext(output_file)[0]
-    artifact_mtime = min(
-        os.path.getmtime(path)
-        for path in (
-            output_file,
-            base + '.exports.def',
-            base + '.lib',
-        )
-    )
+    # Import libraries describe exports, not implementation bytes. A linker
+    # can retain an unchanged import table across a newer object/DLL build.
+    # Its timestamp must not trigger replacement of an already mapped DLL.
+    artifact_mtime = os.path.getmtime(output_file)
     return all(
         artifact_mtime >= os.path.getmtime(obj)
         for obj in obj_files

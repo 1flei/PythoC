@@ -1,6 +1,7 @@
 """Check that the Python extension target stays separate from native AOT."""
 
 import os
+import subprocess
 import sys
 
 from pythoc import compile, compile_to_executable, compile_to_python_extension, i32, i64
@@ -78,7 +79,6 @@ def run_checks():
 
 
 def _symbols(path):
-    import subprocess
     result = subprocess.run(
         ['nm', path],
         capture_output=True,

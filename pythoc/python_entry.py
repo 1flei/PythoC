@@ -131,7 +131,7 @@ def pythoc_install_runtime(
 
 
 @compile
-def py_load(obj: ptr[void], offset: i64) -> ptr[void]:
+def pythoc_py_load(obj: ptr[void], offset: i64) -> ptr[void]:
     raw: ptr[i8] = ptr[i8](obj)
     at: ptr[i8] = raw + offset
     slot: ptr[ptr[void]] = ptr[ptr[void]](at)
@@ -139,7 +139,7 @@ def py_load(obj: ptr[void], offset: i64) -> ptr[void]:
 
 
 @compile
-def py_store(obj: ptr[void], offset: i64, value: ptr[void]) -> void:
+def pythoc_py_store(obj: ptr[void], offset: i64, value: ptr[void]) -> void:
     raw: ptr[i8] = ptr[i8](obj)
     at: ptr[i8] = raw + offset
     slot: ptr[ptr[void]] = ptr[ptr[void]](at)
@@ -147,122 +147,122 @@ def py_store(obj: ptr[void], offset: i64, value: ptr[void]) -> void:
 
 
 @compile
-def py_type_id(obj: ptr[void]) -> i64:
-    return i64(py_load(obj, i64(8)))
+def pythoc_py_type_id(obj: ptr[void]) -> i64:
+    return i64(pythoc_py_load(obj, i64(8)))
 
 
 @compile
-def none_ptr() -> ptr[void]:
+def pythoc_none_ptr() -> ptr[void]:
     return ptr[void](ptr(_Py_NoneStruct))
 
 
 @compile
-def none_ref() -> ptr[void]:
-    obj: ptr[void] = none_ptr()
+def pythoc_none_ref() -> ptr[void]:
+    obj: ptr[void] = pythoc_none_ptr()
     Py_IncRef(obj)
     return obj
 
 
 @compile
-def type_error(msg: ptr[i8]) -> void:
+def pythoc_type_error(msg: ptr[i8]) -> void:
     PyErr_SetString(PyExc_TypeError, msg)
 
 
 @compile
-def errno_store(value: i32) -> void:
+def pythoc_errno_store(value: i32) -> void:
     errno_slot()[0] = value
 
 
 @compile
-def overflow_error(msg: ptr[i8]) -> void:
+def pythoc_overflow_error(msg: ptr[i8]) -> void:
     PyErr_SetString(PyExc_OverflowError, msg)
 
 
 @compile
-def value_error(msg: ptr[i8]) -> void:
+def pythoc_value_error(msg: ptr[i8]) -> void:
     PyErr_SetString(PyExc_ValueError, msg)
 
 
 @compile
-def release(obj: ptr[void]) -> void:
+def pythoc_release(obj: ptr[void]) -> void:
     if i64(obj) != i64(0):
         Py_DecRef(obj)
 
 
 @compile
-def own(obj: ptr[void]) -> ptr[void]:
+def pythoc_own(obj: ptr[void]) -> ptr[void]:
     if i64(obj) != i64(0):
         Py_IncRef(obj)
     return obj
 
 
 @compile
-def long_id() -> i64:
+def pythoc_long_id() -> i64:
     return i64(ptr(PyLong_Type))
 
 
 @compile
-def float_id() -> i64:
+def pythoc_float_id() -> i64:
     return i64(ptr(PyFloat_Type))
 
 
 @compile
-def bool_id() -> i64:
+def pythoc_bool_id() -> i64:
     return i64(ptr(PyBool_Type))
 
 
 @compile
-def tuple_id() -> i64:
+def pythoc_tuple_id() -> i64:
     return i64(ptr(PyTuple_Type))
 
 
 @compile
-def list_id() -> i64:
+def pythoc_list_id() -> i64:
     return i64(ptr(PyList_Type))
 
 
 @compile
-def dict_id() -> i64:
+def pythoc_dict_id() -> i64:
     return i64(ptr(PyDict_Type))
 
 
 @compile
-def bytes_id() -> i64:
+def pythoc_bytes_id() -> i64:
     return i64(ptr(PyBytes_Type))
 
 
 @compile
-def bytearray_id() -> i64:
+def pythoc_bytearray_id() -> i64:
     return i64(ptr(PyByteArray_Type))
 
 
 @compile
-def unwrap(obj: ptr[void]) -> ptr[void]:
+def pythoc_unwrap(obj: ptr[void]) -> ptr[void]:
     if i64(obj) == i64(0):
         return obj
-    if py_type_id(obj) == i64(PyRuntime.literal_type):
-        return py_load(obj, i64(48))
+    if pythoc_py_type_id(obj) == i64(PyRuntime.literal_type):
+        return pythoc_py_load(obj, i64(48))
     return obj
 
 
 @compile
-def is_none(obj: ptr[void]) -> i32:
+def pythoc_is_none(obj: ptr[void]) -> i32:
     if i64(obj) == i64(0):
         return i32(0)
-    if i64(obj) == i64(none_ptr()):
+    if i64(obj) == i64(pythoc_none_ptr()):
         return i32(1)
     return i32(0)
 
 
 @compile
-def is_true(obj: ptr[void]) -> i32:
+def pythoc_is_true(obj: ptr[void]) -> i32:
     if i64(obj) == i64(ptr(_Py_TrueStruct)):
         return i32(1)
     return i32(0)
 
 
 @compile
-def bind_args(
+def pythoc_bind_args(
     args: ptr[ptr[void]],
     nargsf: i64,
     kwnames: ptr[void],
@@ -279,7 +279,7 @@ def bind_args(
         out[index] = ptr[void](0)
         index = index + i64(1)
     if nargs > nparam:
-        type_error("too many positional arguments")
+        pythoc_type_error("too many positional arguments")
         return i32(1)
     npos: i64 = nargs
     index = i64(0)
@@ -298,10 +298,10 @@ def bind_args(
                     hit = slot
                 slot = slot + i64(1)
             if hit < i64(0):
-                type_error("unexpected keyword argument")
+                pythoc_type_error("unexpected keyword argument")
                 return i32(1)
             if i64(out[hit]) != i64(0):
-                type_error("multiple values for argument")
+                pythoc_type_error("multiple values for argument")
                 return i32(1)
             out[hit] = args[nargs + kw]
             kw = kw + i64(1)
@@ -309,119 +309,119 @@ def bind_args(
 
 
 @compile
-def _as_i64(obj: ptr[void]) -> i64:
-    kind: i64 = py_type_id(obj)
-    if kind == bool_id():
-        if is_true(obj) == i32(1):
+def pythoc__as_i64(obj: ptr[void]) -> i64:
+    kind: i64 = pythoc_py_type_id(obj)
+    if kind == pythoc_bool_id():
+        if pythoc_is_true(obj) == i32(1):
             return i64(1)
         return i64(0)
-    if kind != long_id():
-        type_error("an integer is required")
+    if kind != pythoc_long_id():
+        pythoc_type_error("an integer is required")
         return i64(0)
     return PyLong_AsLongLong(obj)
 
 
 @compile
-def take_i64(obj: ptr[void]) -> i64:
+def pythoc_take_i64(obj: ptr[void]) -> i64:
     if i64(obj) == i64(0):
-        type_error("missing required argument")
+        pythoc_type_error("missing required argument")
         return i64(0)
-    return _as_i64(unwrap(obj))
+    return pythoc__as_i64(pythoc_unwrap(obj))
 
 
 @compile
-def take_signed(obj: ptr[void], lo: i64, hi: i64) -> i64:
-    value: i64 = take_i64(obj)
+def pythoc_take_signed(obj: ptr[void], lo: i64, hi: i64) -> i64:
+    value: i64 = pythoc_take_i64(obj)
     if i64(PyErr_Occurred()) != i64(0):
         return i64(0)
     if value < lo:
-        overflow_error("integer out of range")
+        pythoc_overflow_error("integer out of range")
         return i64(0)
     if value > hi:
-        overflow_error("integer out of range")
+        pythoc_overflow_error("integer out of range")
         return i64(0)
     return value
 
 
 @compile
-def take_u64(obj: ptr[void]) -> u64:
+def pythoc_take_u64(obj: ptr[void]) -> u64:
     if i64(obj) == i64(0):
-        type_error("missing required argument")
+        pythoc_type_error("missing required argument")
         return u64(0)
-    inner: ptr[void] = unwrap(obj)
-    kind: i64 = py_type_id(inner)
-    if kind == bool_id():
-        if is_true(inner) == i32(1):
+    inner: ptr[void] = pythoc_unwrap(obj)
+    kind: i64 = pythoc_py_type_id(inner)
+    if kind == pythoc_bool_id():
+        if pythoc_is_true(inner) == i32(1):
             return u64(1)
         return u64(0)
-    if kind != long_id():
-        type_error("an integer is required")
+    if kind != pythoc_long_id():
+        pythoc_type_error("an integer is required")
         return u64(0)
     return PyLong_AsUnsignedLongLong(inner)
 
 
 @compile
-def take_f64(obj: ptr[void]) -> f64:
+def pythoc_take_f64(obj: ptr[void]) -> f64:
     if i64(obj) == i64(0):
-        type_error("missing required argument")
+        pythoc_type_error("missing required argument")
         return f64(0.0)
-    inner: ptr[void] = unwrap(obj)
-    kind: i64 = py_type_id(inner)
-    if kind == bool_id():
-        if is_true(inner) == i32(1):
+    inner: ptr[void] = pythoc_unwrap(obj)
+    kind: i64 = pythoc_py_type_id(inner)
+    if kind == pythoc_bool_id():
+        if pythoc_is_true(inner) == i32(1):
             return f64(1.0)
         return f64(0.0)
-    if kind == float_id():
+    if kind == pythoc_float_id():
         return PyFloat_AsDouble(inner)
-    if kind == long_id():
+    if kind == pythoc_long_id():
         return PyLong_AsDouble(inner)
-    type_error("expected a real number")
+    pythoc_type_error("expected a real number")
     return f64(0.0)
 
 
 @compile
-def take_bool(obj: ptr[void]) -> i32:
+def pythoc_take_bool(obj: ptr[void]) -> i32:
     if i64(obj) == i64(0):
-        type_error("missing required argument")
+        pythoc_type_error("missing required argument")
         return i32(0)
-    inner: ptr[void] = unwrap(obj)
-    kind: i64 = py_type_id(inner)
-    if kind == bool_id():
-        return is_true(inner)
-    if kind == long_id():
+    inner: ptr[void] = pythoc_unwrap(obj)
+    kind: i64 = pythoc_py_type_id(inner)
+    if kind == pythoc_bool_id():
+        return pythoc_is_true(inner)
+    if kind == pythoc_long_id():
         if PyLong_AsLongLong(inner) != i64(0):
             return i32(1)
         return i32(0)
-    type_error("expected a bool")
+    pythoc_type_error("expected a bool")
     return i32(0)
 
 
 @compile
-def take_ptr(obj: ptr[void]) -> i64:
+def pythoc_take_ptr(obj: ptr[void]) -> i64:
     if i64(obj) == i64(0):
-        type_error("expected a pointer")
+        pythoc_type_error("expected a pointer")
         return i64(0)
-    inner: ptr[void] = unwrap(obj)
-    if is_none(inner) == i32(1):
+    inner: ptr[void] = pythoc_unwrap(obj)
+    if pythoc_is_none(inner) == i32(1):
         return i64(0)
-    kind: i64 = py_type_id(inner)
-    if kind == bool_id():
-        return i64(is_true(inner))
-    if kind == long_id():
+    kind: i64 = pythoc_py_type_id(inner)
+    if kind == pythoc_bool_id():
+        return i64(pythoc_is_true(inner))
+    if kind == pythoc_long_id():
         return PyLong_AsLongLong(inner)
-    if kind == bytes_id():
+    if kind == pythoc_bytes_id():
         return i64(PyBytes_AsString(inner))
-    if kind == bytearray_id():
+    if kind == pythoc_bytearray_id():
         return i64(PyByteArray_AsString(inner))
     pointer_method: ptr[void] = PyObject_GetAttrString(
         inner, "_pythoc_pointer")
     if i64(pointer_method) != i64(0):
         pointer_value: ptr[void] = PyObject_CallNoArgs(pointer_method)
-        release(pointer_method)
+        pythoc_release(pointer_method)
         if i64(pointer_value) == i64(0):
             return i64(0)
         address: u64 = PyLong_AsUnsignedLongLong(pointer_value)
-        release(pointer_value)
+        pythoc_release(pointer_value)
         return i64(address)
     if i64(PyErr_Occurred()) != i64(PyExc_AttributeError):
         return i64(0)
@@ -429,21 +429,21 @@ def take_ptr(obj: ptr[void]) -> i64:
     if kind == i64(PyRuntime.callable_type):
         kern: ptr[void] = PyObject_GetAttrString(inner, "_pythoc_kernel")
         if i64(kern) == i64(0):
-            type_error("expected a pointer")
+            pythoc_type_error("expected a pointer")
             return i64(0)
         addr: u64 = PyLong_AsUnsignedLongLong(kern)
         Py_DecRef(kern)
         return i64(addr)
-    buf: i64 = buffer_addr(inner)
+    buf: i64 = pythoc_buffer_addr(inner)
     if i64(PyErr_Occurred()) == i64(0):
         return buf
     PyErr_Clear()
-    type_error("expected a pointer")
+    pythoc_type_error("expected a pointer")
     return i64(0)
 
 
 @compile
-def _buffer_data(obj: ptr[void]) -> i64:
+def pythoc__buffer_data(obj: ptr[void]) -> i64:
     view: array[i8, 80]
     if PyObject_GetBuffer(obj, ptr[void](ptr(view)), i32(0)) != i32(0):
         return i64(0)
@@ -455,7 +455,7 @@ def _buffer_data(obj: ptr[void]) -> i64:
 
 
 @compile
-def _type_code_is(obj: ptr[void], code: ptr[i8]) -> i32:
+def pythoc__type_code_is(obj: ptr[void], code: ptr[i8]) -> i32:
     raw: ptr[i8] = ptr[i8](obj)
     at: ptr[i8] = raw + i64(8)
     slot: ptr[ptr[void]] = ptr[ptr[void]](at)
@@ -464,11 +464,11 @@ def _type_code_is(obj: ptr[void], code: ptr[i8]) -> i32:
     if i64(marker) == i64(0):
         PyErr_Clear()
         return i32(0)
-    if py_type_id(marker) != i64(ptr(PyUnicode_Type)):
-        release(marker)
+    if pythoc_py_type_id(marker) != i64(ptr(PyUnicode_Type)):
+        pythoc_release(marker)
         return i32(0)
     eq: i32 = PyUnicode_CompareWithASCIIString(marker, code)
-    release(marker)
+    pythoc_release(marker)
     PyErr_Clear()
     if eq == i32(0):
         return i32(1)
@@ -476,39 +476,39 @@ def _type_code_is(obj: ptr[void], code: ptr[i8]) -> i32:
 
 
 @compile
-def _contained_address(obj: ptr[void]) -> i64:
+def pythoc__contained_address(obj: ptr[void]) -> i64:
     held: ptr[void] = PyObject_GetAttrString(obj, "value")
     if i64(held) == i64(0):
         return i64(0)
-    if is_none(held) == i32(1):
-        release(held)
+    if pythoc_is_none(held) == i32(1):
+        pythoc_release(held)
         return i64(0)
-    kind: i64 = py_type_id(held)
-    if kind == long_id():
+    kind: i64 = pythoc_py_type_id(held)
+    if kind == pythoc_long_id():
         addr: i64 = PyLong_AsLongLong(held)
-        release(held)
+        pythoc_release(held)
         return addr
-    if kind == bytes_id():
+    if kind == pythoc_bytes_id():
         addr2: i64 = i64(PyBytes_AsString(held))
-        release(held)
+        pythoc_release(held)
         return addr2
-    if kind == bytearray_id():
+    if kind == pythoc_bytearray_id():
         addr3: i64 = i64(PyByteArray_AsString(held))
-        release(held)
+        pythoc_release(held)
         return addr3
-    release(held)
-    type_error("expected a pointer")
+    pythoc_release(held)
+    pythoc_type_error("expected a pointer")
     return i64(0)
 
 
 @compile
-def buffer_addr(obj: ptr[void]) -> i64:
+def pythoc_buffer_addr(obj: ptr[void]) -> i64:
     # ctypes.pointer: buffer protocol exposes the pointer slot. contents is
     # the pointee, and its buffer is the address the kernel should receive.
     pointee: ptr[void] = PyObject_GetAttrString(obj, "contents")
     if i64(pointee) != i64(0):
-        addr: i64 = _buffer_data(pointee)
-        release(pointee)
+        addr: i64 = pythoc__buffer_data(pointee)
+        pythoc_release(pointee)
         return addr
     if i64(PyErr_Occurred()) != i64(PyExc_AttributeError):
         PyErr_Clear()
@@ -517,72 +517,72 @@ def buffer_addr(obj: ptr[void]) -> i64:
 
     # c_void_p / c_char_p store the address in .value. Their buffer is the
     # slot that holds that address, which is not the pointer itself.
-    if _type_code_is(obj, "P") == i32(1):
-        return _contained_address(obj)
-    if _type_code_is(obj, "z") == i32(1):
-        return _contained_address(obj)
+    if pythoc__type_code_is(obj, "P") == i32(1):
+        return pythoc__contained_address(obj)
+    if pythoc__type_code_is(obj, "z") == i32(1):
+        return pythoc__contained_address(obj)
 
-    data: i64 = _buffer_data(obj)
+    data: i64 = pythoc__buffer_data(obj)
     if i64(PyErr_Occurred()) == i64(0):
         return data
     PyErr_Clear()
     owned: ptr[void] = PyObject_GetAttrString(obj, "_obj")
     if i64(owned) == i64(0):
         return i64(0)
-    data2: i64 = _buffer_data(owned)
-    release(owned)
+    data2: i64 = pythoc__buffer_data(owned)
+    pythoc_release(owned)
     if i64(PyErr_Occurred()) == i64(0):
         return data2
     return i64(0)
 
 
 @compile
-def fill_wide(obj: ptr[void], dest: ptr[i8], is_signed: i32) -> i32:
+def pythoc_fill_wide(obj: ptr[void], dest: ptr[i8], is_signed: i32) -> i32:
     if i64(obj) == i64(0):
-        type_error("missing required argument")
+        pythoc_type_error("missing required argument")
         return i32(1)
-    inner: ptr[void] = unwrap(obj)
-    kind: i64 = py_type_id(inner)
-    if kind == bool_id():
-        if is_true(inner) == i32(1):
+    inner: ptr[void] = pythoc_unwrap(obj)
+    kind: i64 = pythoc_py_type_id(inner)
+    if kind == pythoc_bool_id():
+        if pythoc_is_true(inner) == i32(1):
             dest[0] = i8(1)
         else:
             dest[0] = i8(0)
         return i32(0)
-    if kind != long_id():
-        type_error("an integer is required")
+    if kind != pythoc_long_id():
+        pythoc_type_error("an integer is required")
         return i32(1)
     return _PyLong_AsByteArray(inner, dest, u64(16), i32(1), is_signed)
 
 
 @compile
-def fill_bytes(obj: ptr[void], dest: ptr[i8], n: i64) -> i32:
+def pythoc_fill_bytes(obj: ptr[void], dest: ptr[i8], n: i64) -> i32:
     if i64(obj) == i64(0):
-        type_error("expected bytes")
+        pythoc_type_error("expected bytes")
         return i32(1)
-    inner: ptr[void] = unwrap(obj)
-    kind: i64 = py_type_id(inner)
+    inner: ptr[void] = pythoc_unwrap(obj)
+    kind: i64 = pythoc_py_type_id(inner)
     src: ptr[i8] = ptr[i8](0)
     size: i64 = i64(0)
-    if kind == bytes_id():
+    if kind == pythoc_bytes_id():
         src = PyBytes_AsString(inner)
         size = PyBytes_Size(inner)
     else:
-        if kind == bytearray_id():
+        if kind == pythoc_bytearray_id():
             src = PyByteArray_AsString(inner)
             size = PyByteArray_Size(inner)
         else:
-            type_error("expected bytes")
+            pythoc_type_error("expected bytes")
             return i32(1)
     if size < n:
-        type_error("buffer too small")
+        pythoc_type_error("buffer too small")
         return i32(1)
     memcpy(dest, src, u64(n))
     return i32(0)
 
 
 @compile
-def zero_bytes(dest: ptr[i8], n: i64) -> void:
+def pythoc_zero_bytes(dest: ptr[i8], n: i64) -> void:
     index: i64 = i64(0)
     while index < n:
         dest[index] = i8(0)
@@ -590,94 +590,94 @@ def zero_bytes(dest: ptr[i8], n: i64) -> void:
 
 
 @compile
-def field_item(src: ptr[void], index: i64, name: ptr[i8]) -> ptr[void]:
+def pythoc_field_item(src: ptr[void], index: i64, name: ptr[i8]) -> ptr[void]:
     if i64(src) == i64(0):
         return src
-    if py_type_id(src) == i64(PyRuntime.literal_type):
-        fields: ptr[void] = py_load(src, i64(32))
+    if pythoc_py_type_id(src) == i64(PyRuntime.literal_type):
+        fields: ptr[void] = pythoc_py_load(src, i64(32))
         if i64(fields) != i64(0):
-            if i64(fields) != i64(none_ptr()):
-                if py_type_id(fields) == dict_id():
+            if i64(fields) != i64(pythoc_none_ptr()):
+                if pythoc_py_type_id(fields) == pythoc_dict_id():
                     got: ptr[void] = PyDict_GetItemString(fields, name)
                     if i64(got) != i64(0):
-                        return own(got)
-        return field_item(py_load(src, i64(48)), index, name)
-    if py_type_id(src) == tuple_id():
+                        return pythoc_own(got)
+        return pythoc_field_item(pythoc_py_load(src, i64(48)), index, name)
+    if pythoc_py_type_id(src) == pythoc_tuple_id():
         if index < PyTuple_Size(src):
-            return own(PyTuple_GetItem(src, index))
-        type_error("not enough values")
+            return pythoc_own(PyTuple_GetItem(src, index))
+        pythoc_type_error("not enough values")
         return ptr[void](0)
-    if py_type_id(src) == list_id():
+    if pythoc_py_type_id(src) == pythoc_list_id():
         if index < PyList_Size(src):
-            return own(PyList_GetItem(src, index))
-        type_error("not enough values")
+            return pythoc_own(PyList_GetItem(src, index))
+        pythoc_type_error("not enough values")
         return ptr[void](0)
-    if py_type_id(src) == dict_id():
+    if pythoc_py_type_id(src) == pythoc_dict_id():
         got: ptr[void] = PyDict_GetItemString(src, name)
         if i64(got) == i64(0):
-            type_error("missing field")
+            pythoc_type_error("missing field")
             return ptr[void](0)
-        return own(got)
+        return pythoc_own(got)
     return PyObject_GetAttrString(src, name)
 
 
 @compile
-def box_new(type_name: ptr[i8]) -> ptr[void]:
+def pythoc_box_new(type_name: ptr[i8]) -> ptr[void]:
     ty: ptr[void] = PyDict_GetItemString(PyRuntime.types, type_name)
     if i64(ty) == i64(0):
-        type_error("unknown PythoC type")
+        pythoc_type_error("unknown PythoC type")
         return ptr[void](0)
     obj: ptr[void] = PyType_GenericAlloc(PyRuntime.literal_type, i64(0))
     if i64(obj) == i64(0):
         return obj
     Py_IncRef(ty)
-    py_store(obj, i64(40), ty)
-    blank: ptr[void] = none_ptr()
+    pythoc_py_store(obj, i64(40), ty)
+    blank: ptr[void] = pythoc_none_ptr()
     Py_IncRef(blank)
-    py_store(obj, i64(32), blank)
+    pythoc_py_store(obj, i64(32), blank)
     Py_IncRef(blank)
-    py_store(obj, i64(24), blank)
+    pythoc_py_store(obj, i64(24), blank)
     Py_IncRef(blank)
-    py_store(obj, i64(16), blank)
+    pythoc_py_store(obj, i64(16), blank)
     return obj
 
 
 @compile
-def box_value(type_name: ptr[i8], value: ptr[void]) -> ptr[void]:
-    obj: ptr[void] = box_new(type_name)
+def pythoc_box_value(type_name: ptr[i8], value: ptr[void]) -> ptr[void]:
+    obj: ptr[void] = pythoc_box_new(type_name)
     if i64(obj) == i64(0):
         return obj
-    py_store(obj, i64(48), value)
+    pythoc_py_store(obj, i64(48), value)
     return obj
 
 
 @compile
-def box_fields(obj: ptr[void], fields: ptr[void], names: ptr[void]) -> void:
-    previous: ptr[void] = py_load(obj, i64(32))
-    release(previous)
-    py_store(obj, i64(32), fields)
-    previous = py_load(obj, i64(24))
-    release(previous)
-    py_store(obj, i64(24), names)
+def pythoc_box_fields(obj: ptr[void], fields: ptr[void], names: ptr[void]) -> void:
+    previous: ptr[void] = pythoc_py_load(obj, i64(32))
+    pythoc_release(previous)
+    pythoc_py_store(obj, i64(32), fields)
+    previous = pythoc_py_load(obj, i64(24))
+    pythoc_release(previous)
+    pythoc_py_store(obj, i64(24), names)
 
 
 @compile
-def box_i64(value: i64, type_name: ptr[i8]) -> ptr[void]:
-    return box_value(type_name, PyLong_FromLongLong(value))
+def pythoc_box_i64(value: i64, type_name: ptr[i8]) -> ptr[void]:
+    return pythoc_box_value(type_name, PyLong_FromLongLong(value))
 
 
 @compile
-def box_u64(value: u64, type_name: ptr[i8]) -> ptr[void]:
-    return box_value(type_name, PyLong_FromUnsignedLongLong(value))
+def pythoc_box_u64(value: u64, type_name: ptr[i8]) -> ptr[void]:
+    return pythoc_box_value(type_name, PyLong_FromUnsignedLongLong(value))
 
 
 @compile
-def box_f64(value: f64, type_name: ptr[i8]) -> ptr[void]:
-    return box_value(type_name, PyFloat_FromDouble(value))
+def pythoc_box_f64(value: f64, type_name: ptr[i8]) -> ptr[void]:
+    return pythoc_box_value(type_name, PyFloat_FromDouble(value))
 
 
 @compile
-def bool_obj(value: i32) -> ptr[void]:
+def pythoc_bool_obj(value: i32) -> ptr[void]:
     obj: ptr[void] = ptr[void](ptr(_Py_FalseStruct))
     if value != i32(0):
         obj = ptr[void](ptr(_Py_TrueStruct))
@@ -686,16 +686,16 @@ def bool_obj(value: i32) -> ptr[void]:
 
 
 @compile
-def box_bool(value: i32, type_name: ptr[i8]) -> ptr[void]:
+def pythoc_box_bool(value: i32, type_name: ptr[i8]) -> ptr[void]:
     obj: ptr[void] = ptr[void](ptr(_Py_FalseStruct))
     if value != i32(0):
         obj = ptr[void](ptr(_Py_TrueStruct))
     Py_IncRef(obj)
-    return box_value(type_name, obj)
+    return pythoc_box_value(type_name, obj)
 
 
 @compile
-def export_item(
+def pythoc_export_item(
     tup: ptr[void],
     index: i64,
     dct: ptr[void],
@@ -711,11 +711,11 @@ def export_item(
 
 
 @compile
-def box_wide(src: ptr[i8], is_signed: i32, type_name: ptr[i8]) -> ptr[void]:
+def pythoc_box_wide(src: ptr[i8], is_signed: i32, type_name: ptr[i8]) -> ptr[void]:
     num: ptr[void] = _PyLong_FromByteArray(src, u64(16), i32(1), is_signed)
     if i64(num) == i64(0):
         return num
-    return box_value(type_name, num)
+    return pythoc_box_value(type_name, num)
 
 
 def _check_literal_layout():
