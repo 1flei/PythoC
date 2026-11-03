@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793587628660,
+  "lastUpdate": 1793706659525,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3480,6 +3480,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 0.744,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "00881b3db9e2391e17bec03427519c555635e498",
+          "message": "Optimize the time complexity of the cfg visit",
+          "timestamp": "2026-11-03T17:17:24+08:00",
+          "tree_id": "91a5fd93ad126caa2ab256f90074cc3cc2030737",
+          "url": "https://github.com/1flei/PythoC/commit/00881b3db9e2391e17bec03427519c555635e498"
+        },
+        "date": 1793706658840,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.98,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.408,
             "unit": "seconds/test"
           }
         ]
