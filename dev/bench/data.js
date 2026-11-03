@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793717538505,
+  "lastUpdate": 1793722159999,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3554,6 +3554,45 @@ window.BENCHMARK_DATA = {
             "name": "nsieve",
             "value": 1.07,
             "unit": "PC/C ratio"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "ef7a843e3f3518347cd260da7560ed02a01d3841",
+          "message": "Increase the windows CI timeout",
+          "timestamp": "2026-11-03T23:26:42+08:00",
+          "tree_id": "cdada0b12f2d99816f632e150da20529333527b3",
+          "url": "https://github.com/1flei/PythoC/commit/ef7a843e3f3518347cd260da7560ed02a01d3841"
+        },
+        "date": 1793722157448,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.65,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.04,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.943,
+            "unit": "seconds/test"
           }
         ]
       }
