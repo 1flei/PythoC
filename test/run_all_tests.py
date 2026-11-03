@@ -12,6 +12,7 @@ Unit tests are run in quiet mode to keep the full-suite output readable.
 Each suite's output is printed directly as if run individually.
 """
 
+import argparse
 import subprocess
 import sys
 import os
@@ -32,7 +33,9 @@ def print_header(text: str):
     print(f"{BOLD}{BLUE}{text:^70}{RESET}")
     print(f"{BOLD}{BLUE}{'='*70}{RESET}\n")
 
-def run_test_suite(name: str, command: list) -> tuple[bool, float]:
+def run_test_suite(
+    name: str, command: list, timeout: int = 600,
+) -> tuple[bool, float]:
     """Run a test suite, streaming its output directly to stdout/stderr.
 
     Returns (passed, duration).
@@ -51,7 +54,7 @@ def run_test_suite(name: str, command: list) -> tuple[bool, float]:
         result = subprocess.run(
             command,
             cwd=workspace,
-            timeout=600,
+            timeout=timeout,
             env=env,
             stdin=subprocess.DEVNULL
         )
@@ -59,7 +62,7 @@ def run_test_suite(name: str, command: list) -> tuple[bool, float]:
         passed = result.returncode == 0
     except subprocess.TimeoutExpired:
         duration = time.time() - start_time
-        print(f"\n{RED}Test suite timed out after 600 seconds{RESET}")
+        print(f"\n{RED}Test suite timed out after {timeout} seconds{RESET}")
         passed = False
     except Exception as e:
         duration = time.time() - start_time
@@ -70,14 +73,25 @@ def run_test_suite(name: str, command: list) -> tuple[bool, float]:
     print(f"\n{status} {name} completed in {duration:.2f}s")
     return passed, duration
 
-def main():
+def main(argv=None):
     """Main test runner"""
+    parser = argparse.ArgumentParser(description='Run all PC test suites')
+    parser.add_argument('--suite-timeout', type=int, default=600,
+                        help='Timeout in seconds for each suite (default: 600)')
+    parser.add_argument('--test-timeout', type=int, default=300,
+                        help='Timeout in seconds for each integration file '
+                             '(default: 300)')
+    args = parser.parse_args(argv)
+    if args.suite_timeout <= 0 or args.test_timeout <= 0:
+        parser.error('timeouts must be positive')
+
     print_header("PC Compiler - Full Test Suite")
 
     python_exe = sys.executable
     test_suites = [
         ("Unit Tests", [python_exe, "test/run_unit_tests.py", "--quiet"]),
-        ("Integration Tests", [python_exe, "test/run_integration_tests.py"]),
+        ("Integration Tests", [python_exe, "test/run_integration_tests.py",
+                               "--timeout", str(args.test_timeout)]),
         ("Example Tests", [python_exe, "test/run_examples.py"]),
     ]
 
@@ -85,7 +99,7 @@ def main():
 
     suite_results = []
     for name, command in test_suites:
-        passed, duration = run_test_suite(name, command)
+        passed, duration = run_test_suite(name, command, timeout=args.suite_timeout)
         suite_results.append((name, passed, duration))
 
     # Final summary

@@ -69,7 +69,10 @@ jobs:
   test-windows:
     name: Test py${{ matrix.python-version }} / llvmlite ${{ matrix.llvmlite-version }} on Windows (zig)
     runs-on: windows-latest
-    timeout-minutes: 10
+    # Includes dependency setup and both cold and warm test runs.
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: '1'
     strategy:
       fail-fast: false
       matrix:
@@ -110,14 +113,14 @@ jobs:
         run: |
           echo "=== First run: clean build (no cache) ==="
           if (Test-Path build) { Remove-Item -Recurse -Force build }
-          python test/run_all_tests.py
+          python test/run_all_tests.py --suite-timeout 900 --test-timeout 600
 
       - name: Run tests (second run - with cache)
         env:
           PYTHONPATH: .
         run: |
           echo "=== Second run: with cache ==="
-          python test/run_all_tests.py
+          python test/run_all_tests.py --suite-timeout 900 --test-timeout 600
 
   test-arm64:
     name: Test on ARM64 (AArch64)

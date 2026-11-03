@@ -90,11 +90,14 @@ def _print_failure_detail(stdout: str, stderr: str, returncode: int):
         print(f"    (no output)")
 
 
-def run_tests_serial(test_files: List[Path], quiet: bool = False) -> List[Tuple[str, bool, str, str, float, int]]:
+def run_tests_serial(
+    test_files: List[Path], quiet: bool = False, timeout: int = 300,
+) -> List[Tuple[str, bool, str, str, float, int]]:
     """Run tests serially (for accurate timing benchmarks)"""
     results = []
     for i, test_file in enumerate(test_files):
-        test_name, success, stdout, stderr, duration, rc = run_single_test(test_file)
+        test_name, success, stdout, stderr, duration, rc = run_single_test(
+            test_file, timeout=timeout)
         if not quiet:
             status = f"{GREEN}OK{RESET}" if success else f"{RED}FAIL{RESET}"
             print(f"[{i+1}/{len(test_files)}] {status} {test_name} ({duration:.2f}s)")
@@ -108,6 +111,7 @@ def run_tests_parallel(
     test_files: List[Path],
     max_workers: int = None,
     quiet: bool = False,
+    timeout: int = 300,
 ) -> List[Tuple[str, bool, str, str, float, int]]:
     """Run tests in parallel (for faster execution)"""
     if max_workers is None:
@@ -120,7 +124,7 @@ def run_tests_parallel(
     
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_test = {
-            executor.submit(run_single_test, test_file): test_file.stem
+            executor.submit(run_single_test, test_file, timeout=timeout): test_file.stem
             for test_file in test_files
         }
         
@@ -168,7 +172,7 @@ def build_json_result(
     }
 
 
-def main():
+def main(argv=None):
     """Main test runner"""
     parser = argparse.ArgumentParser(description='Run PC integration tests')
     parser.add_argument('--serial', action='store_true',
@@ -177,7 +181,11 @@ def main():
                         help='Output results as JSON (for CI)')
     parser.add_argument('--quiet', action='store_true',
                         help='Minimal output (for benchmarking)')
-    args = parser.parse_args()
+    parser.add_argument('--timeout', type=int, default=300,
+                        help='Timeout in seconds for each test file (default: 300)')
+    args = parser.parse_args(argv)
+    if args.timeout <= 0:
+        parser.error('timeout must be positive')
     
     quiet_output = args.quiet or args.json
     mode = "Serial" if args.serial else "Parallel"
@@ -206,9 +214,9 @@ def main():
     
     # Run tests
     if args.serial:
-        results = run_tests_serial(test_files, quiet_output)
+        results = run_tests_serial(test_files, quiet_output, timeout=args.timeout)
     else:
-        results = run_tests_parallel(test_files, quiet=quiet_output)
+        results = run_tests_parallel(test_files, quiet=quiet_output, timeout=args.timeout)
     
     wall_time = time.time() - wall_start
     
