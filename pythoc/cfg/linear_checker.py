@@ -21,6 +21,7 @@ Rules:
 """
 
 from dataclasses import dataclass, field
+from collections import deque
 from typing import Dict, List, Optional, Set, Tuple, Any, Union, TYPE_CHECKING
 from ..logger import logger
 import ast
@@ -500,10 +501,10 @@ class LinearChecker:
         
         # BFS to find nearest predecessor with statements
         visited = {block_id}
-        queue = [block_id]
+        queue = deque([block_id])
         
         while queue:
-            current_id = queue.pop(0)
+            current_id = queue.popleft()
             for edge in cfg.get_predecessors(current_id):
                 pred_id = edge.source_id
                 if pred_id in visited:
@@ -518,10 +519,10 @@ class LinearChecker:
         
         # If no predecessor has statements, try successors
         visited = {block_id}
-        queue = [block_id]
+        queue = deque([block_id])
         
         while queue:
-            current_id = queue.pop(0)
+            current_id = queue.popleft()
             for edge in cfg.get_successors(current_id):
                 succ_id = edge.target_id
                 if succ_id in visited:

@@ -12,7 +12,8 @@ are AST nodes stored in blocks.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Set, Iterator, Tuple, Any
+from collections.abc import Sequence
+from typing import Optional, List, Dict, Set, Iterator, Tuple, Any, Iterable
 import ast
 import copy
 
@@ -67,7 +68,7 @@ class CFGBlock:
         self.stmts.extend(stmts)
 
 
-@dataclass
+@dataclass(init=False)
 class CFGEdge:
     """Directed edge representing control flow between blocks
     
@@ -86,11 +87,28 @@ class CFGEdge:
         condition: AST expression for conditional edges
         condition_value: Compile-time constant value (if known)
     """
-    source_id: int
-    target_id: int
+    _source_id: int = field(repr=False)
+    _target_id: int = field(repr=False)
     kind: str = 'sequential'
     condition: Optional[ast.expr] = None
     condition_value: Optional[bool] = None
+
+    def __init__(self, source_id: int, target_id: int,
+                 kind: str = 'sequential', condition: Optional[ast.expr] = None,
+                 condition_value: Optional[bool] = None):
+        self._source_id = source_id
+        self._target_id = target_id
+        self.kind = kind
+        self.condition = condition
+        self.condition_value = condition_value
+
+    @property
+    def source_id(self) -> int:
+        return self._source_id
+
+    @property
+    def target_id(self) -> int:
+        return self._target_id
     
     def __repr__(self) -> str:
         cond_str = ""
@@ -109,7 +127,25 @@ class CFGEdge:
         return self.kind == 'loop_back'
 
 
-@dataclass
+class _EdgeView(Sequence):
+    """Ordered read-only access to a CFG's owned edge list."""
+
+    def __init__(self, edges):
+        self._edges = edges
+
+    def __len__(self):
+        return len(self._edges)
+
+    def __getitem__(self, index):
+        return self._edges[index]
+
+    def __iter__(self):
+        return iter(self._edges)
+
+    def __reversed__(self):
+        return reversed(self._edges)
+
+
 class CFG:
     """Control Flow Graph for a function
     
@@ -121,20 +157,41 @@ class CFG:
         entry_id: ID of entry block
         exit_id: ID of exit block
         blocks: Mapping from block ID to CFGBlock
-        edges: List of all edges
+        edges: Ordered read-only view of all edges
         return_blocks: IDs of blocks containing return statements
         loop_headers: IDs of loop header blocks (computed after construction)
     """
-    func_name: str
-    entry_id: int = 0
-    exit_id: int = 0
-    blocks: Dict[int, CFGBlock] = field(default_factory=dict)
-    edges: List[CFGEdge] = field(default_factory=list)
-    return_blocks: List[int] = field(default_factory=list)
-    loop_headers: Set[int] = field(default_factory=set)
-    
-    # Internal counter for block IDs
-    _next_block_id: int = field(default=0, repr=False)
+    def __init__(self, func_name: str, entry_id: int = 0, exit_id: int = 0,
+                 blocks: Optional[Dict[int, CFGBlock]] = None,
+                 edges: Iterable[CFGEdge] = (),
+                 return_blocks: Optional[List[int]] = None,
+                 loop_headers: Optional[Set[int]] = None,
+                 _next_block_id: int = 0):
+        self.func_name = func_name
+        self.entry_id = entry_id
+        self.exit_id = exit_id
+        self.blocks = blocks if blocks is not None else {}
+        self.return_blocks = return_blocks if return_blocks is not None else []
+        self.loop_headers = loop_headers if loop_headers is not None else set()
+        self._next_block_id = _next_block_id
+        self._edges = list(edges)
+        self._edge_view = _EdgeView(self._edges)
+        self._rebuild_adjacency()
+
+    @property
+    def edges(self) -> Sequence[CFGEdge]:
+        """Topology changes go through add_edge, remove_edge, or redirect_edge."""
+        return self._edge_view
+
+    def _rebuild_adjacency(self):
+        self._outgoing: Dict[int, List[CFGEdge]] = {}
+        self._incoming: Dict[int, List[CFGEdge]] = {}
+        for edge in self._edges:
+            self._index_edge(edge)
+
+    def _index_edge(self, edge: CFGEdge):
+        self._outgoing.setdefault(edge.source_id, []).append(edge)
+        self._incoming.setdefault(edge.target_id, []).append(edge)
     
     def _get_next_id(self) -> int:
         """Get next unique block ID"""
@@ -174,13 +231,35 @@ class CFG:
             kind=kind,
             **kwargs
         )
-        self.edges.append(edge)
+        self._edges.append(edge)
+        self._index_edge(edge)
         return edge
     
     def remove_edge(self, edge: CFGEdge):
         """Remove an edge from the CFG"""
-        if edge in self.edges:
-            self.edges.remove(edge)
+        if edge in self._edges:
+            removed = self._edges.pop(self._edges.index(edge))
+            for index, block_id in ((self._outgoing, removed.source_id),
+                                    (self._incoming, removed.target_id)):
+                bucket = index[block_id]
+                bucket.remove(removed)
+                if not bucket:
+                    del index[block_id]
+
+    def redirect_edge(self, edge: CFGEdge, source_id: int,
+                      target_id: int) -> CFGEdge:
+        """Replace an edge's endpoints, preserving global insertion order.
+
+        This structural edit costs O(E); append-only construction and adjacency
+        queries do not rebuild the index. Edge metadata remains mutable.
+        """
+        index = self._edges.index(edge)
+        original = self._edges[index]
+        replacement = CFGEdge(source_id, target_id, original.kind,
+                              original.condition, original.condition_value)
+        self._edges[index] = replacement
+        self._rebuild_adjacency()
+        return replacement
     
     def get_block(self, block_id: int) -> Optional[CFGBlock]:
         """Get block by ID"""
@@ -188,11 +267,11 @@ class CFG:
     
     def get_successors(self, block_id: int) -> List[CFGEdge]:
         """Get all outgoing edges from a block"""
-        return [e for e in self.edges if e.source_id == block_id]
+        return list(self._outgoing.get(block_id, ()))
     
     def get_predecessors(self, block_id: int) -> List[CFGEdge]:
         """Get all incoming edges to a block"""
-        return [e for e in self.edges if e.target_id == block_id]
+        return list(self._incoming.get(block_id, ()))
     
     def get_successor_blocks(self, block_id: int) -> List[CFGBlock]:
         """Get all successor blocks"""

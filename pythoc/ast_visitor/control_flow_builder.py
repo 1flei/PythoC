@@ -514,8 +514,8 @@ class ControlFlowBuilder:
         src_id = self._current_block_id
         dst_id = self._get_cfg_block_id(target)
 
-        for edge in reversed(self._cfg.edges):
-            if edge.source_id == src_id and edge.target_id == dst_id:
+        for edge in reversed(self._cfg.get_successors(src_id)):
+            if edge.target_id == dst_id:
                 edge.kind = 'loop_back'
                 break
 
