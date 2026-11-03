@@ -43,12 +43,9 @@ class _ClosureWrapper:
 
     _pc_compile_level_callable = True
 
-    # NOTE: defer_linear_transfer is deliberately NOT a class attribute.
-    # _ClosureWrapper also serves PLAIN (non-yield) closures, whose call
-    # sites must keep transferring linear argument ownership. Only yield
-    # closures go through the for-loop inline path where the param-binding
-    # template moves each argument exactly once (see yield_transform
-    # placeholder), so the flag is set per-instance in __init__ below.
+    # Expanded parameter bindings emit the ownership transfer, for both
+    # ordinary closures and yield producers.
+    defer_linear_transfer = True
 
     def __init__(self, func_ast, visitor, func_globals, capture_bindings,
                  capture_runtime, defaults):
@@ -62,11 +59,6 @@ class _ClosureWrapper:
         self._capture_bindings = capture_bindings
         self._capture_runtime = capture_runtime
         self._has_yield = _contains_yield(func_ast)
-        # Yield closures are inlined by the for-loop visitor; the param-
-        # binding template transfers argument ownership via move() exactly
-        # once. The call site must not transfer as well. Plain closures
-        # keep the default (False): their call sites own the transfer.
-        self.defer_linear_transfer = self._has_yield
 
     def handle_call(self, visitor, func_ref, args, call_node):
         """Execute closure inline, or hand it to the yield-inline path."""

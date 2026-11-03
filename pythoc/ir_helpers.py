@@ -50,6 +50,15 @@ def propagate_qualifiers(from_type: Any, to_type: Any) -> Any:
     from .builtin_entities.qualifiers import const, volatile
     from .type_descriptor import _flags
     flags = _flags(from_type)
+    from .type_converter import get_base_type, strip_qualifiers
+    source = strip_qualifiers(from_type)
+    base = get_base_type(source)
+    if (getattr(source, '_is_refined', False)
+            and (getattr(base, '_field_types', None) is not None
+                 or getattr(base, 'dimensions', None) is not None)):
+        # Mutating a subobject cannot establish the predicate on its owner.
+        # A copy with its proof erased can still be modified and re-proved.
+        flags = dict(flags, const=True)
     result = const[to_type] if flags.get('const') else to_type
     return volatile[result] if flags.get('volatile') else result
 

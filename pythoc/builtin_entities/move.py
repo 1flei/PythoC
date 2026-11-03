@@ -21,7 +21,7 @@ def _fresh_move_value(value):
     )
 
     if isinstance(value, ValueRef):
-        return value.clone(var_name=None, linear_path=None)
+        return value.clone(var_name=None, linear_path=None, linear_owner_id=None)
 
     if is_sequence_carrier(value):
         fresh_elements = [_fresh_move_value(elem) for elem in get_sequence_elements(value)]
@@ -92,4 +92,10 @@ class move(BuiltinFunction):
         # The ownership has already been transferred from the source by visit_Call
         
         fresh_value = _fresh_move_value(arg_value.value)
-        return arg_value.clone(value=fresh_value, var_name=None, linear_path=None)
+        if arg_value.is_python_value():
+            from .python_type import PythonType
+            return arg_value.clone(value=fresh_value,
+                                   type_hint=PythonType.wrap(fresh_value, is_constant=True),
+                                   var_name=None, linear_path=None, linear_owner_id=None)
+        return arg_value.clone(value=fresh_value, var_name=None, linear_path=None,
+                               linear_owner_id=None)

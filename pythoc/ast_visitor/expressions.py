@@ -237,6 +237,8 @@ class ExpressionsMixin:
             if not isinstance(val, ValueRef):
                 return val
             self.builder.position_at_end(block)
+            if self._is_linear_type(result_type):
+                self._transfer_linear_ownership(val, reason='conditional result', node=node)
             return self.implicit_coercer.coerce(val, result_type, node)
 
         then_val = _coerce_branch(then_val, then_block)

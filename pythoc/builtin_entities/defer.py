@@ -136,12 +136,10 @@ def _execute_single_defer(visitor, callable_obj, func_ref: ValueRef, args: list,
     
     logger.debug(f"_execute_single_defer: {callable_obj}")
     
-    # Transfer linear ownership NOW at execution time
-    for arg in args:
-        visitor._transfer_linear_ownership(arg, reason="deferred function argument", node=node)
-    
-    # Generate the actual defer call IR
-    callable_obj.handle_call(visitor, func_ref, args, node)
+    # The ordinary call protocol owns argument transfer, including expanded
+    # callees whose parameter bindings perform that transfer themselves.
+    result = visitor.value_dispatcher.handle_call(func_ref, args, node)
+    visitor._track_owned_result(result, node)
 
 
 def _get_callable_obj(func_arg: ValueRef):

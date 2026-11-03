@@ -144,6 +144,8 @@ def inline(func=None, *, cls_method=False, method=False):
         
         # Common metadata
         wrapper._is_inline = True
+        # Parameter binding in the expanded body performs the ownership move.
+        wrapper.defer_linear_transfer = True
         wrapper._pc_compile_level_callable = True
         wrapper._func_ast = func_ast
         wrapper._param_names = param_names

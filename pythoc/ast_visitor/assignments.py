@@ -56,19 +56,11 @@ class AssignmentsMixin:
             if not self._is_linear_type(candidate.type_hint):
                 continue
 
-            if candidate_linear_path:
-                path_str = (
-                    f"{candidate_var_name}"
-                    f"[{']['.join(map(str, candidate_linear_path))}]"
-                )
-            else:
-                path_str = candidate_var_name
-
-            logger.error(
-                f"Cannot assign linear token '{path_str}' "
-                f"(use move() to transfer ownership)",
-                node,
-            )
+            owner_id = candidate.linear_owner_id
+            if owner_id is None:
+                owner_id = self.lookup_variable(candidate_var_name).var_id
+            self._get_cf_builder().record_linear_copy(
+                owner_id, candidate_var_name, candidate_linear_path, node)
 
     def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef, pc_type=None, source="inference") -> ValueRef:
         """Visit lvalue or define new variable if it doesn't exist
@@ -231,23 +223,20 @@ class AssignmentsMixin:
         # Store value to lvalue
         self._store_to_lvalue(lvalue, decayed_rvalue, node)
         
-        # Handle linear token registration
-        rvalue_pc_type = rvalue.get_pc_type()
-        if self._is_linear_type(rvalue_pc_type):
-            lvalue_var_name = getattr(lvalue, 'var_name', None)
-            lvalue_linear_path = getattr(lvalue, 'linear_path', None)
-            
-            if lvalue_var_name and lvalue_linear_path is not None:
-                is_undefined = rvalue.is_undefined_pcvalue()
-                
-                if hasattr(rvalue, 'var_name') and rvalue.var_name:
-                    # Variable reference - transfer ownership
-                    self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
-                    self._transfer_linear_ownership(rvalue, reason="assignment", node=node)
-                elif not is_undefined:
-                    # Initialized value (function return, linear(), etc.)
-                    self._register_linear_token(lvalue_var_name, lvalue.type_hint, node, path=lvalue_linear_path)
-    
+        # Every successful owned store hands responsibility to its destination,
+        # including raw pointer storage outside the local CFG binding set.
+        if self._is_linear_type(lvalue.type_hint) and not rvalue.is_undefined_pcvalue():
+            owner_id = lvalue.linear_owner_id
+            if owner_id is None and lvalue.var_name:
+                owner_id = self.lookup_variable(lvalue.var_name).var_id
+            if owner_id is not None:
+                name = lvalue.var_name or f'<temporary {owner_id}>'
+                for path in self._get_linear_paths(lvalue.type_hint, lvalue.linear_path or ()):
+                    self._get_cf_builder().record_linear_transition(
+                        owner_id, name, path, 'invalid', 'valid',
+                        line_number=getattr(node, 'lineno', None), node=node)
+            self._transfer_linear_ownership(rvalue, reason='assignment', node=node)
+
     def _store_to_new_lvalue(self, node, var_name, pc_type, rvalue: ValueRef):
         """Create new lvalue for assignment
         

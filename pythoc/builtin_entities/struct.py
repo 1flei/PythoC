@@ -368,19 +368,16 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             args: Pre-evaluated arguments (should be empty for default constructor)
             node: Original ast.Call node
         """
-        from ..valueref import wrap_value
-        
-        if len(args) != 0:
+        if args:
             logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given)",
-                        node=node, exc_type=TypeError)
-        
-        # Get LLVM struct type
-        struct_type = cls.get_llvm_type(visitor.module.context)
-        
-        # Create undef value
-        struct_value = ir.Constant(struct_type, ir.Undefined)
-        
-        return wrap_value(struct_value, kind="value", type_hint=cls)
+                         node=node, exc_type=TypeError)
+        from ..type_descriptor import contains_refinement_storage
+        if contains_refinement_storage(cls):
+            logger.error('Cannot default-construct an aggregate with proof-bearing fields; '
+                         'provide an explicit initializer', node=node, exc_type=TypeError)
+        from ..valueref import wrap_value
+        return wrap_value(ir.Constant(cls.get_llvm_type(visitor.module.context), ir.Undefined),
+                          kind='value', type_hint=cls)
     
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
@@ -442,6 +439,9 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         if base.type_hint:
             field_type = propagate_qualifiers(base.type_hint, field_type)
         
+        from ..literal_protocol import project_tracking_metadata
+        result_var_name, result_linear_path = project_tracking_metadata(base, field_index)
+
         # Check if field is zero-sized (pyconst)
         if hasattr(field_type, 'handle_field_access'):
             # Delegate to field type's handler (for pyconst)
@@ -451,12 +451,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
         if not layout_config.is_natural:
             from .bitfield_access import access_bit_field
-            from ..literal_protocol import project_tracking_metadata
-
-            result_var_name, result_linear_path = project_tracking_metadata(
-                base,
-                field_index,
-            )
             return access_bit_field(
                 visitor,
                 base,
@@ -486,7 +480,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                 struct_value = ensure_ir(base)
                 field_value = visitor.builder.extract_value(struct_value, llvm_field_index)
                 # For struct values without address, we can't provide lvalue
-                return wrap_value(field_value, kind="value", type_hint=field_type)
+                return wrap_value(
+                    field_value, kind="value", type_hint=field_type,
+                    var_name=result_var_name, linear_path=result_linear_path,
+                    linear_owner_id=base.linear_owner_id)
             else:
                 logger.error(f"Cannot access field '{attr_name}' on non-struct type {base.type_hint}",
                             node=node, exc_type=ValueError)
@@ -500,9 +497,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Load value and return with address for lvalue support
         
-        from ..literal_protocol import project_tracking_metadata
-
-        result_var_name, result_linear_path = project_tracking_metadata(base, field_index)
         return wrap_value(
             field_ptr,
             kind="address",
@@ -510,6 +504,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             address=field_ptr,
             var_name=result_var_name,
             linear_path=result_linear_path,
+            linear_owner_id=base.linear_owner_id,
         )
     
     @classmethod
@@ -541,6 +536,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                         node=node, exc_type=IndexError)
         
         field_type = cls._field_types[index_val]
+        from ..ir_helpers import propagate_qualifiers
+        field_type = propagate_qualifiers(base.type_hint, field_type)
         
         # Check if field is zero-sized (pyconst)
         if hasattr(field_type, 'handle_field_access'):
@@ -592,7 +589,9 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             # Use extract_value - this cannot be used as lvalue
             struct_value = ensure_ir(base)
             field_value = visitor.builder.extract_value(struct_value, llvm_index_val)
-            return wrap_value(field_value, kind="value", type_hint=field_type)
+            return wrap_value(field_value, kind="value", type_hint=field_type,
+                              var_name=result_var_name, linear_path=result_linear_path,
+                              linear_owner_id=base.linear_owner_id)
         else:
             logger.error(f"Cannot access field [{index_val}] on non-struct type",
                         node=node, exc_type=ValueError)
@@ -606,7 +605,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Load value and return with address for lvalue support
         return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr,
-                        var_name=result_var_name, linear_path=result_linear_path)
+                        var_name=result_var_name, linear_path=result_linear_path,
+                        linear_owner_id=base.linear_owner_id)
 
     @classmethod
     def get_all_fields(cls, visitor, base, node) -> list:

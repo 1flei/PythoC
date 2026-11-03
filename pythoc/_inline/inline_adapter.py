@@ -163,10 +163,9 @@ class InlineAdapter:
         registered temps have ``alloca=None`` so that ``visit_Name``
         returns the ValueRef directly.
 
-        Linear types: we strip ``var_name`` / ``linear_path`` from the
-        ValueRef so the temporary is not tracked for consumption; the
-        ownership has already been transferred by the caller when the
-        arguments were evaluated.
+        Linear references retain their CFG owner identity. The expanded
+        parameter-binding move transfers that owner exactly once; these
+        Python name aliases do not create or discharge ownership.
         """
         names = bind_argument_values(self.visitor, self.param_bindings.values())
         return dict(zip(self.param_bindings, names))
@@ -250,8 +249,8 @@ class InlineAdapter:
 def bind_argument_values(visitor, values, *, preserve_linear=False):
     """Expose evaluated call arguments to AST expansion without replaying them.
 
-    Plain inline calls have already transferred ownership. Yield expansion
-    performs that transfer in its parameter bindings and retains source paths.
+    Expanded parameter bindings perform ownership transfer for inline,
+    closure and yield calls. These aliases retain the source CFG owner.
     """
     names = []
     call_id = get_next_id()

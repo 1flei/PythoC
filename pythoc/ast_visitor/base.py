@@ -474,8 +474,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
             logger.error(f"Expression {ast.dump(expr)} returned None", node=expr, exc_type=ValueError)
         
         if isinstance(result, ValueRef):
-            return result
-        
+            return self._track_owned_result(result, expr)
+
         # Wrap non-ValueRef results (type objects, raw Python values)
         # as compile-time python constants so callers see a uniform type.
         return wrap_python_constant(result)
@@ -488,7 +488,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if value_ref.has_place():
             place = value_ref.require_place()
             if value_ref.value is place:
-                return value_ref.clone(var_name=name, linear_path=())
+                return value_ref.clone(
+                    var_name=name, linear_path=(),
+                    linear_owner_id=self.lookup_variable(name).var_id)
 
         return value_ref
 
@@ -628,65 +630,61 @@ class LLVMIRVisitor(ast.NodeVisitor):
             return self.builder
         return None
 
+    def _track_owned_result(self, result: ValueRef, node) -> ValueRef:
+        """Register each fresh owned expression in the existing CFG state."""
+        if result.is_python_value():
+            from ..literal_protocol import iter_literal_value_refs
+            for leaf in iter_literal_value_refs(result.get_python_value()):
+                self._track_owned_result(leaf, node)
+            return result
+        cf = self._get_cf_builder()
+        if (cf is None
+                or not self._is_linear_type(result.type_hint)
+                or result.is_undefined_pcvalue()
+                or result.linear_owner_id is not None):
+            return result
+        if result.var_name:
+            variable = self.lookup_variable(result.var_name)
+            result.linear_owner_id = variable.var_id
+            return result
+        # An indirect place is a borrowed view of memory, not a newly
+        # produced value. Calls may materialize owned results in scratch
+        # storage, so they still acquire an owner even when address-backed.
+        if result.has_place() and not isinstance(node, ast.Call):
+            return result
+        from ..registry import _get_next_var_id
+        owner_id = _get_next_var_id()
+        name = f'<temporary {owner_id}>'
+        for path in self._get_linear_paths(result.type_hint):
+            cf.record_linear_register(owner_id, name, path, 'invalid',
+                                      line_number=getattr(node, 'lineno', None), node=node)
+            cf.record_linear_transition(owner_id, name, path, 'invalid', 'valid',
+                                        line_number=getattr(node, 'lineno', None), node=node)
+        result.linear_owner_id = owner_id
+        result.linear_path = ()
+        return result
+
     def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer", node=None):
-        """Transfer ownership of linear tokens from a ValueRef
-        
-        This is the unified method for transferring linear ownership in:
-        - Function calls (arguments)
-        - Returns (return value)
-        - Move operations
-        
-        Emits LinearTransition events to CFG for path-sensitive analysis.
-        CFG checker validates state transitions; AST visitor just emits events.
-        
-        Args:
-            value_ref: ValueRef carrying linear tracking info (via var_name)
-            reason: Description of why ownership is being transferred
-            node: AST node for error reporting
-        """
-        from ..literal_protocol import iter_literal_value_refs
-
-        logger.debug(f"_transfer_linear_ownership: value_ref={value_ref}, reason={reason}")
-
-        if value_ref.is_python_value():
-            transferred_nested = False
-            for nested_ref in iter_literal_value_refs(value_ref.get_python_value()):
-                self._transfer_linear_ownership(nested_ref, reason, node)
-                transferred_nested = True
-            if transferred_nested:
-                return
-        
-        # Skip if not a linear type
-        if not self._is_linear_type(value_ref.type_hint):
+        """Discharge the source owner when handing a value to its next owner."""
+        from ..literal_protocol import iter_value_ref_leaves
+        cf = self._get_cf_builder()
+        if cf is None:
             return
-        
-        # Check if ValueRef carries variable tracking info
-        if not hasattr(value_ref, 'var_name') or not value_ref.var_name:
-            return  # No tracking info, nothing to transfer
-        
-        if not hasattr(value_ref, 'linear_path') or value_ref.linear_path is None:
-            return  # No linear path, nothing to transfer
-        
-        var_name = value_ref.var_name
-        base_path = value_ref.linear_path
-        var_info = self.lookup_variable(var_name)
-        
-        if not var_info:
-            return  # Variable not found, skip
-        
-        # Get all linear paths in this value (starting from base_path)
-        linear_paths = self._get_linear_paths(value_ref.type_hint, base_path)
-        logger.debug(f"_transfer_linear_ownership: {var_name} has {len(linear_paths)} linear paths: {linear_paths}")
-        
-        # Transfer each linear path
-        for path in linear_paths:
-            # Emit LinearTransition event: valid -> invalid (token consumed)
-            # CFG checker will validate that current state is 'valid'
-            cf = self._get_cf_builder()
-            if cf is not None:
-                line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
+        for value in iter_value_ref_leaves(value_ref):
+            if not self._is_linear_type(value.type_hint):
+                continue
+            owner_id = value.linear_owner_id
+            if owner_id is None and value.var_name:
+                variable = self.lookup_variable(value.var_name)
+                owner_id = variable.var_id if variable else None
+            if owner_id is None:
+                if value.has_place():
+                    # Raw pointer storage has no local binding identity.
+                    # Moving out of it produces a tracked call result.
+                    continue
+                raise TypeError('Owned value has no CFG ownership identity')
+            name = value.var_name or f'<temporary {owner_id}>'
+            for path in self._get_linear_paths(value.type_hint, value.linear_path or ()):
                 cf.record_linear_transition(
-                    var_info.var_id, var_name, path, 'valid', 'invalid',
-                    line_number=line_num, node=node
-                )
-
+                    owner_id, name, path, 'valid', 'invalid',
+                    line_number=getattr(node, 'lineno', None), node=node)

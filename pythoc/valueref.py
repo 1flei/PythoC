@@ -71,7 +71,8 @@ class ValueRef:
                   When present, enables use in both lvalue and rvalue contexts
         source_node: original AST node for debugging (optional)
         var_name: Optional variable name for linear tracking (lvalue only)
-        linear_path: Optional index path for linear token tracking (lvalue only)
+        linear_path: Field path within the CFG owner (binding or temporary)
+        linear_owner_id: Identity in the existing CFG ownership state
     """
     _kind: str
     value: Union[ir.Value, AnyType]  # Changed from ir_value to value
@@ -80,7 +81,7 @@ class ValueRef:
     source_node: Optional[ast.AST] = None  # Source AST node
     var_name: Optional[str] = None  # Variable name for linear tracking
     linear_path: Optional[tuple] = None  # Index path for linear tracking
-    vref_id: Optional[str] = None  # Unique ID for ValueRef tracking (replaces temp_linear_id)
+    linear_owner_id: Optional[int] = None
     _storage: AnyType = None
 
     def __init__(self,
@@ -91,7 +92,7 @@ class ValueRef:
                  source_node: Optional[ast.AST] = None,
                  var_name: Optional[str] = None,
                  linear_path: Optional[tuple] = None,
-                 vref_id: Optional[str] = None,
+                 linear_owner_id: Optional[int] = None,
                  storage: AnyType = None):
         self._kind = kind
         self.value = value
@@ -100,7 +101,7 @@ class ValueRef:
         self.source_node = source_node
         self.var_name = var_name
         self.linear_path = linear_path
-        self.vref_id = vref_id
+        self.linear_owner_id = linear_owner_id
         self._storage = storage
         self.__post_init__()
     
@@ -259,7 +260,7 @@ class ValueRef:
               source_node=_UNSET,
               var_name=_UNSET,
               linear_path=_UNSET,
-              vref_id=_UNSET) -> "ValueRef":
+              linear_owner_id=_UNSET) -> "ValueRef":
         """Copy this ValueRef while preserving internal storage semantics."""
         cloned = ValueRef(
             kind=self._kind,
@@ -269,8 +270,9 @@ class ValueRef:
             source_node=self.source_node if source_node is _UNSET else source_node,
             var_name=self.var_name if var_name is _UNSET else var_name,
             linear_path=self.linear_path if linear_path is _UNSET else linear_path,
-            vref_id=self.vref_id if vref_id is _UNSET else vref_id,
             storage=self._storage,
+            linear_owner_id=(self.linear_owner_id if linear_owner_id is _UNSET
+                             else linear_owner_id),
         )
 
         core_fields = {
@@ -281,7 +283,7 @@ class ValueRef:
             'source_node',
             'var_name',
             'linear_path',
-            'vref_id',
+            'linear_owner_id',
             '_storage',
         }
         for attr_name, attr_value in self.__dict__.items():
@@ -569,7 +571,7 @@ def wrap_value(value: Union[ir.Value, AnyType],
                source_node: Optional[ast.AST] = None,
                var_name: Optional[str] = None,  # Variable name for linear tracking
                linear_path: Optional[tuple] = None,  # Linear path for tracking
-               vref_id: Optional[str] = None,
+               linear_owner_id: Optional[int] = None,
                node: Optional[ast.AST] = None) -> ValueRef:  # Unique ID for ValueRef tracking
     """Wrap a value (LLVM IR or Python) in ValueRef with type information.
     
@@ -582,7 +584,6 @@ def wrap_value(value: Union[ir.Value, AnyType],
         source_node: Optional source AST node for debugging
         var_name: Optional variable name for linear token tracking
         linear_path: Optional index path tuple for linear token tracking
-        vref_id: Optional unique ID for ValueRef tracking
         node: Optional AST node for error reporting
     
     Returns:
@@ -626,7 +627,7 @@ def wrap_value(value: Union[ir.Value, AnyType],
         source_node=source_node,
         var_name=var_name,
         linear_path=linear_path,
-        vref_id=vref_id
+        linear_owner_id=linear_owner_id
     )
 
 
@@ -651,4 +652,4 @@ def read_rvalue(value_ref, builder, *, name=None):
     return wrap_value(loaded, kind='address', type_hint=value_ref.type_hint,
                       address=place, source_node=value_ref.source_node,
                       var_name=value_ref.var_name, linear_path=value_ref.linear_path,
-                      vref_id=value_ref.vref_id)
+                      linear_owner_id=value_ref.linear_owner_id)

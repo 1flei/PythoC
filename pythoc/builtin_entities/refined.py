@@ -380,9 +380,10 @@ class RefinedType(CompositeType):
             )
         
         base_ir = ensure_ir(base)
+        from ..ir_helpers import propagate_qualifiers
         base_with_underlying_type = base.clone(
             value=base_ir,
-            type_hint=underlying_type,
+            type_hint=propagate_qualifiers(base.type_hint, underlying_type),
         )
         return underlying_type.handle_subscript(visitor, base_with_underlying_type, index, node)
     
@@ -538,9 +539,10 @@ class RefinedType(CompositeType):
             underlying_type = cls._base_type
             if underlying_type and hasattr(underlying_type, 'handle_attribute'):
                 base_ir = ensure_ir(base)
+                from ..ir_helpers import propagate_qualifiers
                 base_with_underlying_type = base.clone(
                     value=base_ir,
-                    type_hint=underlying_type,
+                    type_hint=propagate_qualifiers(base.type_hint, underlying_type),
                 )
                 return underlying_type.handle_attribute(visitor, base_with_underlying_type, attr_name, node)
             else:

@@ -497,6 +497,11 @@ class ControlFlowBuilder:
         cfg_block = self._cfg.blocks[self._current_block_id]
         cfg_block.linear_events.append(event)
 
+    def record_linear_copy(self, var_id, var_name, path, node):
+        from ..cfg.linear_checker import LinearCopy
+        self._add_linear_event(LinearCopy(
+            var_id, var_name, path, getattr(node, 'lineno', None), node))
+
     def mark_return(self):
         """Mark current block as containing a return statement."""
         self._cfg.add_edge(self._current_block_id, self._exit_block.id, kind='return')

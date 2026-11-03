@@ -372,7 +372,7 @@ def array_decay_type(source):
     """Array storage qualifiers qualify the decayed pointee, not the pointer."""
     from .builtin_entities.array import array
     from .builtin_entities.types import ptr
-    from .builtin_entities.qualifiers import const, volatile
+    from .ir_helpers import propagate_qualifiers
     from .type_converter import get_base_type
     base = get_base_type(source)
     if getattr(base, 'element_type', None) is None:
@@ -380,11 +380,7 @@ def array_decay_type(source):
     dimensions = base.dimensions
     element = (array[(base.element_type,) + tuple(dimensions[1:])]
                if len(dimensions) > 1 else base.element_type)
-    flags = _flags(source)
-    if flags.get('const'):
-        element = const[element]
-    if flags.get('volatile'):
-        element = volatile[element]
+    element = propagate_qualifiers(source, element)
     return ptr[element]
 
 
@@ -654,6 +650,11 @@ def can_convert(source, target, *, mode='implicit', value=None, context=None, _s
         return False
     source_refinements, source_base = _refinement_chain(source)
     target_refinements, target_base = _refinement_chain(target)
+    if (source_refinements and not target_refinements
+            and getattr(source_base, 'dimensions', None) is not None
+            and getattr(target, '_is_pointer', False)):
+        return can_convert(array_decay_type(original_source), target,
+                           mode=mode, context=context)
     if source_refinements or target_refinements:
         if not target_refinements:
             return can_convert(source_base, target_base, mode=mode, value=value,

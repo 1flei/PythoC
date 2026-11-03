@@ -92,7 +92,8 @@ def project_tracking_metadata(
     base_var_name = getattr(base_value_ref, 'var_name', None)
     base_linear_path = getattr(base_value_ref, 'linear_path', None)
 
-    if base_var_name and base_linear_path is not None:
+    if ((base_var_name or base_value_ref.linear_owner_id is not None)
+            and base_linear_path is not None):
         return base_var_name, base_linear_path + (child_index,)
 
     return None, None

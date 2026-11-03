@@ -48,7 +48,7 @@ class LinearRegister:
     Uses var_id (unique ID) instead of var_name to distinguish shadowed variables.
     var_name and line_number are stored for error reporting.
     """
-    var_id: int            # Unique variable ID from VariableInfo.var_id
+    var_id: int            # Binding or temporary owner ID
     var_name: str          # Variable name for error messages
     path: Tuple[int, ...]  # Index path for composite types, () for simple
     initial_state: str     # 'valid' (function param) or 'invalid' (declaration)
@@ -69,7 +69,7 @@ class LinearTransition:
     Uses var_id (unique ID) instead of var_name to distinguish shadowed variables.
     var_name and line_number are stored for error reporting.
     """
-    var_id: int            # Unique variable ID from VariableInfo.var_id
+    var_id: int            # Binding or temporary owner ID
     var_name: str          # Variable name for error messages
     path: Tuple[int, ...]  # Index path for composite types, () for simple
     old_state: str         # 'valid' or 'invalid' - expected current state
@@ -78,12 +78,21 @@ class LinearTransition:
     node: Optional[ast.AST] = None
 
 
-# Union type for all linear events
-LinearEvent = Union[LinearRegister, LinearTransition]
+@dataclass
+class LinearCopy:
+    """A borrowed linear reference was used where an owned value is required."""
+    var_id: int
+    var_name: str
+    path: Tuple[int, ...]
+    line_number: Optional[int] = None
+    node: Optional[ast.AST] = None
 
 
-# Type alias: var_id -> {path -> state}
-# var_id is unique ID from VariableInfo.var_id (distinguishes shadowed variables)
+LinearEvent = Union[LinearRegister, LinearTransition, LinearCopy]
+
+
+# Type alias: owner ID -> {path -> state}
+# Bindings and temporary values share the VariableInfo ID allocator.
 # path is a tuple of integers representing field access path
 # state is 'valid' (active/usable) or 'invalid' (consumed/undefined)
 LinearSnapshot = Dict[int, Dict[Tuple[int, ...], str]]
@@ -592,7 +601,15 @@ class LinearChecker:
         
         # Process each linear event in the block
         for event in block.linear_events:
-            if isinstance(event, LinearRegister):
+            if isinstance(event, LinearCopy):
+                path_str = (f"{event.var_name}[{']['.join(map(str, event.path))}]"
+                            if event.path else event.var_name)
+                self.errors.append(LinearError(
+                    kind='illegal_copy', block_id=block.id,
+                    message=f"Cannot assign linear token '{path_str}' "
+                            '(use move() to transfer ownership)',
+                    source_node=event.node))
+            elif isinstance(event, LinearRegister):
                 # Variable enters scope with initial state
                 var_id = event.var_id
                 path = event.path

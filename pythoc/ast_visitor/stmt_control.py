@@ -135,15 +135,8 @@ class ControlFlowMixin:
         """Handle expression statements (like function calls)"""
         result = self.visit_expression(node.value)
         
-        # Check for dangling linear expressions
-        # Linear values must be either assigned to a variable or passed to a function
-        if isinstance(result, ValueRef) and self._is_linear_type(result.type_hint):
-            logger.error(
-                f"Linear expression at line {node.lineno} is not consumed. "
-                f"Assign it to a variable or pass it to a function.",
-                node=node, exc_type=TypeError
-            )
-        
+        # Fresh owned expression results remain live in the CFG until an
+        # assignment, call or return explicitly takes responsibility for them.
         return result
 
     def visit_Pass(self, node: ast.Pass):
