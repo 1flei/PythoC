@@ -140,6 +140,39 @@ def fingerprint_function_content(
     return FunctionContentFingerprint(digest, captured_entries)
 
 
+def function_registration_identity(info, fn_ast, user_globals, content):
+    """Lossless admission identity for one compiled symbol and its type inputs."""
+    import json
+    from ..type_descriptor import specialization_key
+    from ..builtin_entities.base import _is_type_like
+    from ..type_id import get_type_id
+
+    def has_type(key):
+        return (isinstance(key, tuple)
+                and ((len(key) == 2 and key[0] == 'pc-type')
+                     or any(has_type(item) for item in key)))
+
+    inputs = {}
+    names = {node.id for node in ast.walk(fn_ast)
+             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    projections = {}
+    for name in sorted(names):
+        value = user_globals.get(name, _MISSING)
+        if (type(value) not in (tuple, list, dict)
+                and not _is_type_like(value)):
+            continue
+        address = id(value)
+        if address not in projections:
+            projections[address] = specialization_key(value)
+        key = projections[address]
+        if has_type(key):
+            inputs[name] = key
+    identity = (get_type_id(info.callable_pc_type), ast.dump(fn_ast),
+                tuple(sorted(inputs.items())), content.captured,
+                info.linkage, tuple(sorted(info.fn_attrs)))
+    return json.dumps(identity, ensure_ascii=False, separators=(',', ':'))
+
+
 def function_content_hash(fn_ast, user_globals: Optional[Dict[str, Any]] = None):
     """Hash a function AST plus bakeable captured constants."""
     return fingerprint_function_content(fn_ast, user_globals).digest

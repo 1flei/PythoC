@@ -31,14 +31,14 @@ class ValueRefDispatcher:
         comparisons like ``ptr != arr``. This helper converts array operands to
         their decayed pointer type before the generic icmp lowering path runs.
         """
-        from .ir_helpers import strip_qualifiers, propagate_qualifiers
+        from .ir_helpers import strip_qualifiers
 
         type_hint = getattr(value, "type_hint", None)
         base_type = strip_qualifiers(type_hint)
         if base_type is None or not getattr(base_type, "is_array", lambda: False)():
             return value
-        decay_ptr_type = base_type.get_decay_pointer_type()
-        decay_ptr_type = propagate_qualifiers(type_hint, decay_ptr_type)
+        from .type_descriptor import array_decay_type
+        decay_ptr_type = array_decay_type(type_hint)
         return self.visitor.type_converter.convert(value, decay_ptr_type)
 
     @staticmethod
@@ -71,44 +71,10 @@ class ValueRefDispatcher:
             node=getattr(value_ref, "source_node", None),
         )
 
-        if value_ref.has_storage():
-            return wrap_value(
-                value_ref.get_ir_value(), kind='value',
-                type_hint=value_ref.type_hint,
-                source_node=value_ref.source_node,
-            )
-        if value_ref.is_python_value() or not value_ref.has_place():
+        if not value_ref.has_place() and not value_ref.has_storage():
             return value_ref
-
-        place = value_ref.require_place()
-        if value_ref.value is not place:
-            return value_ref
-
-        base_type = get_base_type(value_ref.type_hint)
-        if (
-            base_type is not None
-            and isinstance(base_type, type)
-            and issubclass(base_type, BuiltinType)
-            and base_type.is_array()
-        ):
-            return value_ref
-
-        loaded_val = safe_load(
-            self.visitor.builder,
-            ensure_ir(place),
-            value_ref.type_hint,
-            name=name or getattr(value_ref, "var_name", "") or "",
-        )
-        return wrap_value(
-            loaded_val,
-            kind="address",
-            type_hint=value_ref.type_hint,
-            address=place,
-            source_node=value_ref.source_node,
-            var_name=value_ref.var_name,
-            linear_path=value_ref.linear_path,
-            vref_id=value_ref.vref_id,
-        )
+        from .valueref import read_rvalue
+        return read_rvalue(value_ref, self.visitor.builder, name=name)
 
     def prepare_protocol_base(self, value_ref: ValueRef) -> ValueRef:
         """Prepare a ValueRef before protocol dispatch."""

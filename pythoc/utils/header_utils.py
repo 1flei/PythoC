@@ -376,8 +376,13 @@ class _AggregateCollector:
         base_name = _aggregate_base_name(pc_type)
         name = base_name
         if name in self._used_names:
-            digest = hashlib.sha1(repr(pc_type).encode("utf-8")).hexdigest()[:8]
+            from ..type_id import get_type_id
+            digest = hashlib.sha256(get_type_id(pc_type).encode('utf-8')).hexdigest()[:8]
             name = f"{base_name}_{digest}"
+            serial = 2
+            while name in self._used_names:
+                name = f"{base_name}_{digest}_{serial}"
+                serial += 1
 
         self._names[pc_type] = name
         self._used_names.add(name)

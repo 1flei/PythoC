@@ -204,10 +204,12 @@ class ExpressionsMixin:
 
         self.builder.position_at_end(then_block)
         then_val = self.visit_rvalue_expression(node.body)
+        self._check_linear_rvalue_copy(then_val, node.body)
         then_block = self.builder.block  # Update in case of nested blocks
 
         self.builder.position_at_end(else_block)
         else_val = self.visit_rvalue_expression(node.orelse)
+        self._check_linear_rvalue_copy(else_val, node.orelse)
         else_block = self.builder.block  # Update in case of nested blocks
 
         from ..builtin_entities.types import void as _void_type
@@ -235,7 +237,7 @@ class ExpressionsMixin:
             if not isinstance(val, ValueRef):
                 return val
             self.builder.position_at_end(block)
-            return self.type_converter.convert(val, result_type)
+            return self.implicit_coercer.coerce(val, result_type, node)
 
         then_val = _coerce_branch(then_val, then_block)
         else_val = _coerce_branch(else_val, else_block)
@@ -294,43 +296,14 @@ class ExpressionsMixin:
                 return func_info.callable_pc_type
 
         if getattr(python_val, '_is_extern', False):
-            # Extern wrappers declare their signature explicitly.
-            from ..builtin_entities.func import func as func_type_cls
-            from ..builtin_entities.types import void
-            import inspect
-
-            signature = python_val._extern_config.get('signature')
-            param_type_map = dict(python_val.param_types)
-            fixed_params = []
-            for param in signature.parameters.values():
-                if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                    continue
-                if param.kind == inspect.Parameter.VAR_KEYWORD:
-                    continue
-                fixed_params.append((param.name, param_type_map[param.name]))
-            ret_type = python_val.return_type if python_val.return_type is not None else void
-            callable_items = tuple(fixed_params) + ((None, ret_type),)
-            return func_type_cls.handle_type_subscript(callable_items)
+            from ..callable_lowering import extern_callable_type
+            callable_type, _, _ = extern_callable_type(python_val)
+            return callable_type
 
         try:
             return TypeConverter.infer_default_pc_type_from_python(python_val)
         except TypeError:
             return None
-
-    def _runtime_types_equal(self, a, b) -> bool:
-        """Check whether two inferred runtime PC types are equivalent.
-
-        Parameterized types (ptr[T], array[T,N], func[...]) may be represented
-        by different type objects even when structurally identical, so we use
-        the canonical type_id for comparison.
-        """
-        if a == b:
-            return True
-        from ..type_id import get_type_id
-        try:
-            return get_type_id(a) == get_type_id(b)
-        except Exception:
-            return False
 
     def visit_List(self, node: ast.List):
         """Handle list expressions as pc_list literal carriers."""
@@ -468,38 +441,22 @@ class ExpressionsMixin:
         Returns (left_ir, right_ir) with matching LLVM pointer types.
         """
         IC = ImplicitCoercer
-
-        # Fast path: same LLVM type
-        if left_ir.type == right_ir.type:
-            return left_ir, right_ir
-
         left_type = get_base_type(left.type_hint)
         right_type = get_base_type(right.type_hint)
-
-        # Null constant: retarget to other side's type
+        from ..type_descriptor import can_compare_pointers
+        if not can_compare_pointers(
+                left_type, right_type, left_value=left, right_value=right,
+                context=self.implicit_coercer._resolve_lazy_type_name):
+            logger.error(
+                f"Cannot compare incompatible pointer types '{left_type.get_name()}' "
+                f"and '{right_type.get_name()}'", node=node, exc_type=TypeError)
+        if left_ir.type == right_ir.type:
+            return left_ir, right_ir
         if IC.is_null_pointer_constant(left):
             return ir.Constant(right_ir.type, None), right_ir
         if IC.is_null_pointer_constant(right):
             return left_ir, ir.Constant(left_ir.type, None)
-
-        # Void pointer bridging: bitcast both to i8*
-        void_ptr = ir.PointerType(ir.IntType(8))
-        if IC.is_void_pointer(left_type) or IC.is_void_pointer(right_type):
-            l = self.builder.bitcast(left_ir, void_ptr) if left_ir.type != void_ptr else left_ir
-            r = self.builder.bitcast(right_ir, void_ptr) if right_ir.type != void_ptr else right_ir
-            return l, r
-
-        # Same pointee type but different LLVM repr
-        if IC.are_compatible_pointers(left_type, right_type):
-            right_ir = self.builder.bitcast(right_ir, left_ir.type)
-            return left_ir, right_ir
-
-        # Reject incompatible pointers
-        left_name = left_type.get_name() if hasattr(left_type, 'get_name') else str(left_type)
-        right_name = right_type.get_name() if hasattr(right_type, 'get_name') else str(right_type)
-        logger.error(
-            f"Cannot compare incompatible pointer types '{left_name}' and '{right_name}'",
-            node=node, exc_type=TypeError)
+        return left_ir, self.builder.bitcast(right_ir, left_ir.type)
 
     def _perform_binary_operation(self, op: ast.operator, left: ValueRef, right: ValueRef,
                                    node: ast.AST = None) -> ValueRef:
@@ -540,7 +497,11 @@ class ExpressionsMixin:
 
         # Unified type promotion for numeric operations
         # (Python values are auto-promoted by TypeConverter)
-        left, right, is_float_op = self.type_converter.unify_binop_types(left, right)
+        if isinstance(op, (ast.LShift, ast.RShift)):
+            left, right = self.type_converter.unify_shift_types(left, right)
+            is_float_op = False
+        else:
+            left, right, is_float_op = self.type_converter.unify_binop_types(left, right)
 
         # Operation dispatch table: maps (op_type, is_float) to builder method
         # This eliminates the long isinstance chain

@@ -10,7 +10,6 @@ with shared functionality for:
 """
 
 import ast
-import hashlib
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 from llvmlite import ir
@@ -144,8 +143,7 @@ class CompositeType(BuiltinType):
         idx = ir.Constant(ir.IntType(32), index)
         field_ptr = visitor.builder.gep(ptr, [zero, idx], inbounds=True)
         
-        loaded_value = visitor.builder.load(field_ptr)
-        return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr)
+        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr)
     
     @classmethod
     def _create_undef_constructor(cls, visitor, args, node):
@@ -171,6 +169,10 @@ class CompositeType(BuiltinType):
             logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given)",
                         node=node, exc_type=TypeError)
         
+        from ..type_descriptor import can_zero_initialize
+        if not can_zero_initialize(cls):
+            logger.error('Cannot default-construct an aggregate with proof-bearing fields; '
+                         'provide an explicit initializer', node=node, exc_type=TypeError)
         llvm_type = cls.get_llvm_type(visitor.module.context)
         value = ir.Constant(llvm_type, ir.Undefined)
         
@@ -311,48 +313,6 @@ class CompositeType(BuiltinType):
         if cls._field_types is None or index >= len(cls._field_types):
             logger.error(f"{cls.get_name()} field index {index} out of range", node=None, exc_type=IndexError)
         return cls._field_types[index]
-    
-    @classmethod
-    def get_type_id_suffix(cls, _visited=None) -> str:
-        """Generate type ID suffix based on field structure
-
-        This creates a hash-based suffix that uniquely identifies the composite type
-        by its field types and names. Same structure = same hash = same type.
-
-        Returns:
-            8-character hex hash suffix
-
-        Examples:
-            struct[x: i32, y: i32] -> "a3b4c5d6"
-            union[i32, f64] -> "f1e2d3c4"
-        """
-        from ..type_id import get_type_id
-
-        if not cls._field_types and cls._layout_config.is_natural:
-            return "empty"
-
-        if _visited is None:
-            _visited = set()
-
-        # Build field structure string for hashing
-        field_ids = []
-        field_names = cls._field_names or [None] * len(cls._field_types)
-
-        for fname, ftype in zip(field_names, cls._field_types):
-            ftype_id = get_type_id(ftype, _visited) if ftype is not None else "void"
-            if fname:
-                field_ids.append(f"{fname}:{ftype_id}")
-            else:
-                field_ids.append(ftype_id)
-
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            field_ids.append(f"layout:{layout_config.identity()}")
-
-        field_str = ','.join(field_ids)
-        field_hash = hashlib.md5(field_str.encode()).hexdigest()[:8]
-        return field_hash
     
     @classmethod
     def can_be_called(cls) -> bool:

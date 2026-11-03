@@ -61,6 +61,12 @@ def _create_refined_type_class(
     This is the unified factory that creates the actual type class.
     Both Python-level and AST visitor paths should use this.
     """
+    from ..type_descriptor import validate_type_argument
+    if base_type is not None:
+        validate_type_argument(base_type, 'refined base', allow_void=False)
+    for parameter in param_types or ():
+        validate_type_argument(parameter, 'refined parameter',
+                               allow_void=False, allow_incomplete=True)
     class_name = _generate_refined_class_name(base_type, predicates, tags)
 
     # Determine field info
@@ -262,6 +268,12 @@ class RefinedType(CompositeType):
     _param_types: Optional[List[Any]] = None
     _param_names: Optional[List[str]] = None
     
+    @classmethod
+    def get_qualifier_flags(cls):
+        """Refinement preserves the storage qualifiers of its base."""
+        from ..type_descriptor import _flags
+        return _flags(cls)
+
     @classmethod
     def get_name(cls) -> str:
         """Return refined type name"""
@@ -573,6 +585,8 @@ class refined(metaclass=type):
 
         Called by `PythonType.handle_subscript` after normalization.
         """
+        if any(name is not None for name, _ in items):
+            raise TypeError('refined does not accept named type arguments')
         # Extract raw arguments from normalized format: ((name?, value), ...)
         args = tuple(item[1] for item in items)
 
@@ -612,50 +626,8 @@ class refined(metaclass=type):
         return _create_from_base_and_constraints_internal(base_type, predicates, tags)
 
     def __class_getitem__(cls, args):
-        """Create refined type: refined[...]
-
-        Python-level operation that creates a RefinedType class.
-        Uses unified internal helpers.
-
-        Note: This runtime path is kept for normal Python evaluation; the compiler
-        uses `handle_type_subscript` via `PythonType.handle_subscript`.
-        """
-        # Handle both single arg and tuple
-        if not isinstance(args, tuple):
-            args = (args,)
-
-        # Check for simple single predicate case (backward compat at Python level)
-        if len(args) == 1 and callable(args[0]) and not isinstance(args[0], type):
-            # refined[pred] - use internal helper (no type resolver at Python level)
-            return _create_from_single_predicate_internal(args[0], type_resolver=None)
-
-        # For other cases: base + tags/predicates
-        # Parse arguments: base_type, predicates, tags
-        base_type = None
-        predicates = []
-        tags = []
-
-        for i, arg in enumerate(args):
-            if isinstance(arg, str):
-                tags.append(arg)
-            elif callable(arg) and not isinstance(arg, type):
-                predicates.append(arg)
-            elif isinstance(arg, type):
-                if base_type is None and i == 0:
-                    base_type = arg
-                else:
-                    logger.error(f"refined can only have one base type at position 0",
-                                node=None, exc_type=TypeError)
-            else:
-                logger.error(f"refined argument must be a type, callable predicate, or string tag",
-                            node=None, exc_type=TypeError)
-
-        if base_type is None:
-            logger.error("refined[...] requires a base type as first argument",
-                        node=None, exc_type=TypeError)
-
-        # Use internal helper for base type + constraints
-        return _create_from_base_and_constraints_internal(base_type, predicates, tags)
+        """Use the same parser for Python and compiler type construction."""
+        return cls.handle_type_subscript(cls.normalize_subscript_items(args))
 
 
 __all__ = ['refined', 'RefinedType']

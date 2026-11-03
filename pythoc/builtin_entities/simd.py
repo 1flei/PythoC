@@ -61,14 +61,8 @@ def _declare(module, name, fn_ty):
 
 
 def _same_simd_type(left, right):
-    return (
-        isinstance(left, type)
-        and isinstance(right, type)
-        and issubclass(left, simd)
-        and issubclass(right, simd)
-        and left.element_type is right.element_type
-        and left.lanes == right.lanes
-    )
+    from ..type_descriptor import same_type
+    return same_type(left, right)
 
 
 def _simd_type_argument(arg, fn_name, node):
@@ -83,20 +77,28 @@ def _simd_type_argument(arg, fn_name, node):
 
 
 def _vector_pointer(visitor, arg, simd_type, fn_name, node):
-    base_ir = ensure_ir(arg)
-    if not isinstance(base_ir.type, ir.PointerType):
-        logger.error(
-            "%s expects a pointer operand" % fn_name,
-            node=node,
-            exc_type=TypeError,
-        )
-    return visitor.builder.bitcast(
-        base_ir,
-        ir.PointerType(
-            simd_type.get_llvm_type(visitor.module.context),
-            addrspace=getattr(base_ir.type, "addrspace", 0),
-        ),
-    )
+    from ..type_converter import get_base_type, strip_qualifiers
+    from ..type_descriptor import same_type
+    from .types import ptr, void
+    source = get_base_type(arg.type_hint)
+    if not getattr(source, '_is_pointer', False) or getattr(source, 'param_types', None) is not None:
+        logger.error("%s expects a data pointer operand" % fn_name,
+                     node=node, exc_type=TypeError)
+    pointee = source._resolve_pointee(getattr(visitor, 'ctx', None))
+    plain = strip_qualifiers(pointee)
+    if plain not in (None, void) and not (
+            same_type(plain, strip_qualifiers(simd_type.element_type))
+            or same_type(plain, simd_type)):
+        logger.error("%s pointer must address its lane type or vector type; "
+                     "use an explicit void pointer cast for raw memory" % fn_name,
+                     node=node, exc_type=TypeError)
+    if fn_name == 'simd_store':
+        from ..ir_helpers import is_const
+        if is_const(pointee):
+            logger.error('Cannot store through a pointer to const data',
+                         node=node, exc_type=TypeError)
+    converted = visitor.type_converter.convert(arg, ptr[simd_type], node)
+    return ensure_ir(converted), pointee
 
 
 class simd(BuiltinType):
@@ -114,11 +116,8 @@ class simd(BuiltinType):
 
     @classmethod
     def get_type_id(cls, _visited=None):
-        if cls.element_type is None or cls.lanes is None:
-            return "Vx"
         from ..type_id import get_type_id
-
-        return "V%s_%d" % (get_type_id(cls.element_type, _visited), cls.lanes)
+        return get_type_id(cls)
 
     @classmethod
     def get_llvm_type(cls, module_context=None):
@@ -146,6 +145,8 @@ class simd(BuiltinType):
                 node=None,
                 exc_type=TypeError,
             )
+        if any(name is not None for name, _ in items):
+            raise TypeError('simd type arguments cannot have member names')
         (_, element_type), (_, lanes) = items
         if not (
             isinstance(element_type, type)
@@ -156,11 +157,14 @@ class simd(BuiltinType):
                 node=None,
                 exc_type=TypeError,
             )
-        element_ir = element_type.get_llvm_type()
-        is_vector_element = isinstance(
-            element_ir,
-            (ir.IntType, ir.HalfType, ir.FloatType, ir.DoubleType),
-        ) or element_ir.__class__.__name__ == "BFloatType"
+        from ..type_converter import strip_qualifiers
+        element = strip_qualifiers(element_type)
+        is_vector_element = (
+            not getattr(element, '_is_refined', False)
+            and (getattr(element, '_is_integer', False)
+                 or getattr(element, '_is_bool', False)
+                 or (getattr(element, '_is_float', False)
+                     and element._size_bytes in (2, 4, 8))))
         if not is_vector_element:
             logger.error(
                 "simd element type %s is not numeric"
@@ -168,7 +172,7 @@ class simd(BuiltinType):
                 node=None,
                 exc_type=TypeError,
             )
-        if not isinstance(lanes, int) or lanes <= 0:
+        if type(lanes) is not int or lanes <= 0:
             logger.error(
                 "simd lane count must be a positive integer, got %r" % lanes,
                 node=None,
@@ -278,9 +282,10 @@ class simd_load(BuiltinFunction):
             logger.error("simd_load(ptr, type) takes two arguments",
                          node=node, exc_type=TypeError)
         simd_type = _simd_type_argument(args[1], "simd_load", node)
-        ptr_ir = _vector_pointer(
+        ptr_ir, pointee = _vector_pointer(
             visitor, args[0], simd_type, "simd_load", node)
-        result = visitor.builder.load(ptr_ir, align=1)
+        from ..ir_helpers import safe_load
+        result = safe_load(visitor.builder, ptr_ir, pointee, align=1)
         return wrap_value(result, kind="value", type_hint=simd_type)
 
 
@@ -297,9 +302,10 @@ class simd_store(BuiltinFunction):
             logger.error("simd_store(ptr, value) takes two arguments",
                          node=node, exc_type=TypeError)
         simd_type = _require_simd(args[1], "simd_store", node)
-        ptr_ir = _vector_pointer(
+        ptr_ir, pointee = _vector_pointer(
             visitor, args[0], simd_type, "simd_store", node)
-        visitor.builder.store(ensure_ir(args[1]), ptr_ir, align=1)
+        from ..ir_helpers import safe_store
+        safe_store(visitor.builder, ensure_ir(args[1]), ptr_ir, pointee, align=1, node=node)
         from .types import void
 
         return wrap_value(None, kind="python", type_hint=void)

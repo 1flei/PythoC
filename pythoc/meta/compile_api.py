@@ -201,8 +201,10 @@ def compile_ast(
 
     if group_key is None:
         group_key = (source_file, safe_scope, safe_csuffix, safe_esuffix)
+        identity_parts = (scope_name, suffix, effect_suffix)
     else:
         group_source, group_scope, group_csuffix, group_esuffix = group_key
+        identity_parts = (group_scope, group_csuffix, group_esuffix)
         group_source = os.path.realpath(group_source)
         if group_source != source_file:
             raise ValueError(
@@ -221,10 +223,6 @@ def compile_ast(
             safe_csuffix,
             safe_esuffix,
         )
-    existing = output_manager.existing_flushed_wrapper(group_key, actual_func_name)
-    if existing is not None:
-        return existing
-
     # Build output file paths
     if safe_scope or safe_csuffix or safe_esuffix:
         cwd = os.getcwd()
@@ -255,6 +253,10 @@ def compile_ast(
     else:
         _, ir_file, obj_file, so_file = get_build_paths(source_file)
 
+    from ..build.artifact_identity import verify_artifact_identity
+    verify_artifact_identity(
+        obj_file, so_file, scope=identity_parts[0],
+        suffix=identity_parts[1], effect_suffix=identity_parts[2])
     # Create FunctionInfo
     func_info = FunctionInfo(
         name=func_name,
@@ -267,6 +269,18 @@ def compile_ast(
         fn_attrs=fn_attrs,
         linkage=linkage,
     )
+
+    from ..build.cache import function_registration_identity
+    registration_identity = function_registration_identity(
+        func_info, fn_ast, user_globals, _content)
+    existing = next((item for item in output_manager.get_group_wrappers(group_key)
+                     if item._binding.actual_func_name == actual_func_name), None)
+    if existing is not None:
+        if existing._binding.registration_identity != registration_identity:
+            raise TypeError(
+                f"Function specialization collision for '{func_name}': "
+                'signature, body or compile-time inputs differ; use distinct suffixes')
+        return existing
 
     from ..python_call import create_compiled_callable, try_bind_installed_adapter
 
@@ -283,6 +297,7 @@ def compile_ast(
         group_key, compiler, ir_file, obj_file, so_file, source_file
     )
     compiler = group['compiler']
+    group.setdefault('_registration_identities', {})[actual_func_name] = registration_identity
 
     # #1/#9: Store content hash for cache invalidation
     if _ast_content_hash:
@@ -310,6 +325,7 @@ def compile_ast(
         group_key=group_key,
         compile_suffix=compile_suffix,
         effect_suffix=effect_suffix,
+        registration_identity=registration_identity,
         captured_effect_context=captured_effect_ctx,
         effect_override_names=effect_override_names,
         compilation_globals=dict(user_globals),

@@ -61,6 +61,7 @@ class FunctionBindingState:
     effect_specialized_cache: Dict[str, Any] = field(default_factory=dict)
     template_compile_callback: Optional[Any] = None
     compilation_globals: Dict[str, Any] = field(default_factory=dict)
+    registration_identity: Optional[str] = None
     wrapper: Optional[Any] = None
     # Ephemeral: ActiveCompileFrame of this binding's in-flight (or last)
     # compile, set by compiler.py so compile callbacks can harvest

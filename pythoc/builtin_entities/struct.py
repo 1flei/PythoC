@@ -80,7 +80,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         _struct_info: Reference to StructInfo in registry
         _needs_type_resolution: Whether field types need lazy resolution
         _field_types_resolved: Whether lazy resolution has been performed
-        _structure_hash: Hash of field types and names for fast compatibility check
     """
     
     _canonical_name: str = None
@@ -94,7 +93,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     # to name the identified type.
     _pc_record = True
     _force_identified: bool = False
-    _structure_hash: Optional[int] = None  # Hash for fast type compatibility check
     _llvm_field_map: Optional[Dict[int, int]] = None  # PC field idx -> LLVM field idx
     
     @classmethod
@@ -354,88 +352,9 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
 
     
     @classmethod
-    def _compute_structure_hash(cls) -> int:
-        """Compute hash based on field types and field names
-        
-        Hash includes:
-        - Field types (order matters)
-        - Field names (order matters)
-        
-        Hash excludes:
-        - Type name (so @compile class and anonymous struct can be compatible)
-        """
-        cls._ensure_field_types_resolved()
-        
-        # Build tuple of (field_type_id, field_name) for hashing
-        hash_components = []
-        for i, field_type in enumerate(cls._field_types):
-            # Use type identity for hashing
-            type_id = id(field_type) if field_type is not None else 0
-            field_name = cls._field_names[i] if cls._field_names and i < len(cls._field_names) else None
-            hash_components.append((type_id, field_name))
-
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            hash_components.append(("layout", layout_config.identity()))
-        
-        return hash(tuple(hash_components))
-    
-    @classmethod
-    def _get_structure_hash(cls) -> int:
-        """Get or compute structure hash (cached)"""
-        if cls._structure_hash is None:
-            cls._structure_hash = cls._compute_structure_hash()
-        return cls._structure_hash
-    
-    @classmethod
     def get_type_id(cls, _visited=None) -> str:
-        """Generate unique type ID for struct types"""
-        from ..type_graph import canonical_record_type
-        canonical = canonical_record_type(cls)
-        if canonical is not cls:
-            return canonical.get_type_id(_visited)
-        struct_name = cls._canonical_name or getattr(cls, '__name__', 'S')
-        suffix = cls.get_type_id_suffix(_visited)
-        return f"{len(struct_name)}{struct_name}_{suffix}"
-    
-    @classmethod
-    def is_compatible_with(cls, other) -> bool:
-        """Check if this struct type is compatible with another type
-        
-        Strict Rule (Option 1):
-        - struct types are compatible if they have identical field types AND field names
-        - Field names matter: struct[a: i32, b: f64] != struct[i32, f64]
-        - Field names matter: struct[a: i32, b: f64] != struct[x: i32, y: f64]
-        - @compile class can be compatible with anonymous struct if structure matches
-        
-        Uses structure hash for fast comparison.
-        """
-        # Check if other is a struct type
-        if not (hasattr(other, '_field_types') and hasattr(other, '_get_structure_hash')):
-            return False
-        
-        # Fast path: compare structure hashes
-        try:
-            return cls._get_structure_hash() == other._get_structure_hash()
-        except:
-            # Fallback to slow path if hash computation fails
-            pass
-        
-        # Slow path: direct comparison
-        cls._ensure_field_types_resolved()
-        if hasattr(other, '_ensure_field_types_resolved'):
-            other._ensure_field_types_resolved()
-        
-        # Compare field types
-        if cls._field_types != other._field_types:
-            return False
-        
-        # Compare field names
-        cls_names = cls._field_names if cls._field_names else [None] * len(cls._field_types)
-        other_names = other._field_names if other._field_names else [None] * len(other._field_types)
-        
-        return cls_names == other_names
+        from ..type_id import get_type_id
+        return get_type_id(cls)
     
     @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node):
@@ -580,13 +499,12 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             field_ptr, ir.PointerType(field_type.get_llvm_type(module_context)))
         
         # Load value and return with address for lvalue support
-        loaded_value = visitor.builder.load(field_ptr)
         
         from ..literal_protocol import project_tracking_metadata
 
         result_var_name, result_linear_path = project_tracking_metadata(base, field_index)
         return wrap_value(
-            loaded_value,
+            field_ptr,
             kind="address",
             type_hint=field_type,
             address=field_ptr,
@@ -687,8 +605,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             field_ptr, ir.PointerType(field_type.get_llvm_type(module_context)))
         
         # Load value and return with address for lvalue support
-        loaded_value = visitor.builder.load(field_ptr)
-        return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr,
+        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr,
                         var_name=result_var_name, linear_path=result_linear_path)
 
     @classmethod
@@ -717,7 +634,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         for i in range(field_count):
             field_vref = cls.handle_subscript(visitor, base, 
                 wrap_value(i, kind='python', type_hint=pyconst[i]), node)
-            fields.append(field_vref)
+            fields.append(visitor.value_dispatcher.read_rvalue(field_vref))
         
         return fields
 
@@ -737,6 +654,10 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
     Returns:
         StructType subclass
     """
+    from ..type_descriptor import validate_member_names, validate_type_argument
+    validate_member_names(field_names, 'struct')
+    for field in field_types:
+        validate_type_argument(field, 'struct field', allow_incomplete=True, allow_void=False)
     from ..target_layout import NATURAL_LAYOUT
     layout_config = layout_config or NATURAL_LAYOUT
 
@@ -748,8 +669,8 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
         # Use get_name() / __name__ instead of get_type_id() to avoid
         # infinite recursion when a field type contains a self-referential
         # pointer (e.g. struct Expr { ptr['Expr'] lhs; }).
-        # The full type identity is captured by get_type_id_suffix() later,
-        # which is only called lazily — not during struct creation.
+        # The full type identity is projected lazily by type_id.get_type_id,
+        # after recursive fields have been bound.
         parts = ["struct"]
         for i, ftype in enumerate(field_types):
             if ftype is None:
@@ -775,7 +696,6 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
             '_field_names': field_names,
             '_python_class': python_class,
             '_struct_info': None,
-            '_structure_hash': None,
             '_elements': elements,  # Store original ValueRef elements for iteration
             '_layout_config': layout_config,
         }

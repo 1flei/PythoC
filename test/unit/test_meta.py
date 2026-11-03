@@ -517,6 +517,17 @@ class TestNormalizeFactoryKey(unittest.TestCase):
         d2 = {"a": 1, "b": 2}
         self.assertEqual(self.normalize(d1), self.normalize(d2))
 
+    def test_factory_key_distinguishes_nan_instances(self):
+        first = float('nan')
+        second = float('nan')
+        self.assertEqual(self.normalize(first), self.normalize(first))
+        self.assertNotEqual(self.normalize(first), self.normalize(second))
+
+    def test_factory_key_uses_nested_type_identity(self):
+        from pythoc import i32, i64, ptr
+        self.assertNotEqual(self.normalize({'value': [ptr[i32]]}),
+                            self.normalize({'value': [ptr[i64]]}))
+
 
 # ============================================================================
 # Factory decorator tests (unchanged)

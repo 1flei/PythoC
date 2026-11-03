@@ -141,7 +141,6 @@ def create_pc_list_type(elements: List['ValueRef']) -> type:
             '_field_names': None,  # pc_list has no named fields
             '_python_class': None,
             '_struct_info': None,
-            '_structure_hash': None,
             '_elements': elements,
             '_is_pc_list': True,
         }
@@ -201,7 +200,6 @@ class pc_list(PCListType):
                 '_field_names': None,
                 '_python_class': None,
                 '_struct_info': None,
-                '_structure_hash': None,
                 '_elements': None,  # No elements when created via subscript
                 '_is_pc_list': True,
             }

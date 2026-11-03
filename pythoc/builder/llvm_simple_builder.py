@@ -250,13 +250,14 @@ class LLVMBuilder(AbstractBuilder):
     # ========== Function Calls ==========
     
     def call(self, fn: Any, args: List[Any], name: str = "",
-             return_type_hint: Any = None, arg_type_hints: List[Any] = None) -> Any:
+             return_type_hint: Any = None, arg_type_hints: List[Any] = None,
+             cconv: Optional[str] = None) -> Any:
         """Call a function.
         
         Note: return_type_hint and arg_type_hints are ignored in this simple builder.
         Use LLVMCBuilder for ABI-aware calls.
         """
-        return self._builder.call(fn, args, name=name)
+        return self._builder.call(fn, args, name=name, cconv=cconv)
     
     # ========== Aggregate Operations ==========
     

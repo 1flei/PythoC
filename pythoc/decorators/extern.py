@@ -76,6 +76,8 @@ def _load_lib_handle(lib):
 
 class ExternFunctionWrapper:
     def __init__(self, func, lib, calling_convention, **kwargs):
+        if calling_convention not in ('cdecl', 'stdcall'):
+            raise TypeError(f'Unsupported calling convention: {calling_convention}')
         self.func = func
         self.func_name = func.__name__
         # The C symbol name used for linking and ctypes lookup.  Defaults to

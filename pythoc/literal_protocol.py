@@ -98,29 +98,27 @@ def project_tracking_metadata(
     return None, None
 
 
-def iter_literal_value_refs(value: Any) -> Iterable[ValueRef]:
-    """Yield runtime-tracked ValueRefs stored inside literal carriers.
-
-    Python-backed carrier wrappers are traversed recursively, but are not yielded
-    themselves. This lets callers reason about embedded ownership without knowing
-    whether the source was tuple/list/dict or pc_tuple/pc_list/pc_dict.
-    """
-    if isinstance(value, ValueRef):
-        if value.is_python_value():
-            yield from iter_literal_value_refs(value.get_python_value())
-            return
-        yield value
+def iter_literal_value_refs(value: Any, _active=None) -> Iterable[ValueRef]:
+    """Yield resource leaves without following cyclic container edges forever."""
+    active = set() if _active is None else _active
+    if id(value) in active:
         return
-
-    if is_sequence_carrier(value):
-        for item in get_sequence_elements(value):
-            yield from iter_literal_value_refs(item)
-        return
-
-    if is_mapping_carrier(value):
-        for key, mapped_value in get_mapping_entries(value):
-            yield from iter_literal_value_refs(key)
-            yield from iter_literal_value_refs(mapped_value)
+    active.add(id(value))
+    try:
+        if isinstance(value, ValueRef):
+            if value.is_python_value():
+                yield from iter_literal_value_refs(value.get_python_value(), active)
+            else:
+                yield value
+        elif is_sequence_carrier(value):
+            for item in get_sequence_elements(value):
+                yield from iter_literal_value_refs(item, active)
+        elif is_mapping_carrier(value):
+            for key, mapped_value in get_mapping_entries(value):
+                yield from iter_literal_value_refs(key, active)
+                yield from iter_literal_value_refs(mapped_value, active)
+    finally:
+        active.remove(id(value))
 
 
 def iter_value_ref_leaves(value_ref: ValueRef) -> Iterable[ValueRef]:

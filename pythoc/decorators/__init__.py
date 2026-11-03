@@ -13,7 +13,6 @@ from typing import Any, List
 from ..registry import get_unified_registry
 
 from .structs import (
-    add_struct_handle_call as _add_struct_handle_call,
     compile_dynamic_class as _compile_dynamic_class,
 )
 from .extern import (

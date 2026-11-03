@@ -9,14 +9,29 @@ Supported types:
   - None, bool, int, float, str, bytes
   - tuple/list of supported values
   - dict with supported keys and values
-  - PythoC builtin type objects (via canonical identity / get_name())
+  - PythoC type objects (via the lossless type ID projection)
 """
 
+import base64
+import json
 
-_SCALAR_TYPES = (type(None), bool, int, float, str, bytes)
+from ..type_descriptor import specialization_key
 
 
-def _normalize_value(value):
+def _normalize_value(value, _active=None):
+    active = set() if _active is None else _active
+    if not isinstance(value, (tuple, list, dict)):
+        return _display_value(value, active)
+    if id(value) in active:
+        raise TypeError('Cannot normalize cyclic factory input')
+    active.add(id(value))
+    try:
+        return _display_value(value, active)
+    finally:
+        active.remove(id(value))
+
+
+def _display_value(value, active):
     """Recursively normalize a single value into a canonical string.
 
     Returns a string fragment that is deterministic for equal inputs.
@@ -44,23 +59,25 @@ def _normalize_value(value):
         return "b{}".format(repr(value))
 
     if isinstance(value, tuple):
-        inner = ",".join(_normalize_value(v) for v in value)
+        inner = ",".join(_normalize_value(v, active) for v in value)
         return "T({})".format(inner)
 
     if isinstance(value, list):
-        inner = ",".join(_normalize_value(v) for v in value)
+        inner = ",".join(_normalize_value(v, active) for v in value)
         return "L({})".format(inner)
 
     if isinstance(value, dict):
         # Sort by normalized key for determinism
         pairs = []
-        for k in sorted(value.keys(), key=lambda k: _normalize_value(k)):
-            pairs.append("{}:{}".format(_normalize_value(k), _normalize_value(value[k])))
+        for k in sorted(value.keys(), key=lambda k: _normalize_value(k, active)):
+            pairs.append("{}:{}".format(_normalize_value(k, active), _normalize_value(value[k])))
         return "D({})".format(",".join(pairs))
 
     # PythoC builtin type objects (have get_name + get_llvm_type)
-    if hasattr(value, 'get_name') and hasattr(value, 'get_llvm_type'):
-        return "PC({})".format(value.get_name())
+    from ..builtin_entities.base import _is_type_like
+    if _is_type_like(value):
+        from ..type_id import get_type_id
+        return "PC({})".format(get_type_id(value))
 
     # PythoC builtin entities (have _name attribute)
     if hasattr(value, '_name') and hasattr(value, '__class__'):
@@ -109,4 +126,10 @@ def normalize_factory_key(*args, **kwargs):
             parts.append(key)
             parts.append(_normalize_value(kwargs[key]))
 
-    return "_".join(parts) if parts else "empty"
+    if not parts:
+        return "empty"
+    display = "_".join(parts)
+    identity = (specialization_key(args), specialization_key(kwargs))
+    wire = json.dumps(identity, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    encoded = base64.urlsafe_b64encode(wire).decode('ascii').rstrip('=')
+    return display + '__id_' + encoded

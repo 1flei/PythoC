@@ -313,12 +313,10 @@ def lower_compile_handle_call(wrapper, visitor, func_ref, args, node):
     Converts the Python wrapper to a func type pointer and delegates
     to func.handle_call (which handles normalization if needed).
     """
-    from .valueref import wrap_value
-    from .builtin_entities import func as func_type_cls
-    from .builtin_entities.python_type import PythonType
+    from .callable_lowering import lower_compile_wrapper
 
-    wrapper_ref = wrap_value(wrapper, kind="python", type_hint=PythonType.wrap(wrapper))
-    converted_func_ref = visitor.type_converter.convert(wrapper_ref, func_type_cls, node)
+    converted_func_ref = lower_compile_wrapper(
+        wrapper, visitor.module, getattr(visitor, 'current_group_key', None), node=node)
     func_type = converted_func_ref.type_hint
     return func_type.handle_call(visitor, converted_func_ref, args, node)
 

@@ -69,15 +69,25 @@ def _shape(pc_type):
         base = pc_type._base_type
         if base is None:
             base = pc_type._struct_type
-        predicates = tuple(pc_type._predicates or ())
-        return ('refined', predicates, tuple(pc_type._tags)), ((base, True),)
+        from .type_descriptor import leaf_key, predicate_shape
+        if base is None and pc_type._predicates is None:
+            return ('leaf', leaf_key(pc_type)), ()
+        shapes = [predicate_shape(pred) for pred in pc_type._predicates or ()]
+        predicates = tuple((head, len(types)) for head, types in shapes)
+        children = ((base, True),) + tuple(
+            (parameter, None) for _, types in shapes for parameter in types)
+        return ('refined', predicates, tuple(pc_type._tags or ())), children
     params = getattr(pc_type, 'param_types', None)
+    if params is None and getattr(pc_type, '_is_function_type', False):
+        from .type_descriptor import leaf_key
+        return ('leaf', leaf_key(pc_type)), ()
     if params is not None:
         flags = tuple(bool(getattr(pc_type, name, False)) for name in (
             'has_varargs', 'has_llvm_varargs', 'has_kwargs'))
         names = pc_type._get_parameter_names()
         components = (*params, pc_type.return_type)
-        return ('function', names, flags), tuple((t, False) for t in components)
+        head = ('function', names, flags, pc_type.calling_convention)
+        return head, tuple((t, False) for t in components)
     if getattr(pc_type, '_is_pointer', False):
         from .builtin_entities.types import void
         pointee = getattr(pc_type, 'pointee_type', None)
@@ -87,6 +97,9 @@ def _shape(pc_type):
     dimensions = getattr(pc_type, 'dimensions', None)
     if dimensions is not None:
         return ('array', tuple(dimensions)), ((pc_type.element_type, True),)
+    lanes = getattr(pc_type, 'lanes', None)
+    if lanes is not None and getattr(pc_type, 'element_type', None) is not None:
+        return ('simd', lanes), ((pc_type.element_type, True),)
     fields = getattr(pc_type, '_field_types', None)
     if fields is not None:
         ensure = getattr(pc_type, '_ensure_field_types_resolved', None)
@@ -102,17 +115,39 @@ def _shape(pc_type):
         name = (record_name(pc_type) if named_record(pc_type) is not None
                 else pc_type.get_name())
         layout = pc_type._layout_config.identity()
+        if kind == 'enum':
+            from .type_descriptor import atom
+            variants = (tuple(pc_type._variant_names or ()),
+                        atom(pc_type._tag_values),
+                        tuple(pc_type._variant_types or ()))
+            return (kind, name, names, layout, variants[:2]), (
+                tuple((t, True) for t in fields)
+                + tuple((t, None) for t in variants[2]))
         return (kind, name, names, layout), tuple((t, True) for t in fields)
-    from .type_id import get_type_id
-    return ('leaf', get_type_id(pc_type)), ()
+    from .type_descriptor import leaf_key
+    return ('leaf', leaf_key(pc_type)), ()
 
 
-def _equivalent(first, second, seen=None):
+def _equivalent(first, second, seen=None, resolver=None):
     if first is second:
         return True
-    a, b = _resolve(first), _resolve(second)
+    def resolve(current):
+        if isinstance(current, str) and resolver is not None:
+            local = resolver(current)
+            if local is not None:
+                current = local
+        return _resolve(current)
+
+    a, b = resolve(first), resolve(second)
     if a is None or b is None:
         return isinstance(first, str) and first == second
+    first_record, second_record = named_record(a), named_record(b)
+    if first_record is not None or second_record is not None:
+        first_fields = tuple(getattr(first_record, '_field_types', ()) or ())
+        second_fields = tuple(getattr(second_record, '_field_types', ()) or ())
+        if any(field is None for field in first_fields + second_fields):
+            return (first_record is not None and second_record is not None
+                    and _owner(first_record) is _owner(second_record))
     seen = set() if seen is None else seen
     pair = (id(a), id(b))
     if pair in seen:
@@ -120,8 +155,9 @@ def _equivalent(first, second, seen=None):
     seen.add(pair)
     head_a, children_a = _shape(a)
     head_b, children_b = _shape(b)
-    return (head_a == head_b and len(children_a) == len(children_b)
-            and all(_equivalent(x, y, seen)
+    from .type_descriptor import _wire
+    return (_wire(head_a) == _wire(head_b) and len(children_a) == len(children_b)
+            and all(_equivalent(x, y, seen, resolver)
                     for (x, _), (y, _) in zip(children_a, children_b)))
 
 
@@ -165,7 +201,10 @@ class TypeGraph:
             nodes[key] = (pc_type, children)
             if named_record(pc_type) is not None:
                 records.append(pc_type)
-            pending.extend(children)
+            # Identity-only enum variant edges are compared and projected,
+            # but the union payload already owns their storage validation.
+            pending.extend((child, stored) for child, stored in children
+                           if stored is not None)
         return nodes, records
 
     def _check_storage(self, nodes):

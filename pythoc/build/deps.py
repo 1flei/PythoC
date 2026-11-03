@@ -212,6 +212,7 @@ class GroupDeps:
     # Used to detect stale cache entries when source_file stays the same but
     # the generated AST changes (common in meta-generated code).
     ast_content_hash: Optional[str] = None
+    registration_identities: List[str] = field(default_factory=list)
 
     # Whether this object was built with debug info enabled.  Changing the
     # flag must invalidate the cached object.
@@ -251,6 +252,9 @@ class GroupDeps:
 
         if self.compiled_symbols:
             result['compiled_symbols'] = sorted(self.compiled_symbols)
+
+        if self.registration_identities:
+            result['registration_identities'] = sorted(self.registration_identities)
 
         if self.ast_content_hash:
             result['ast_content_hash'] = self.ast_content_hash
@@ -314,6 +318,7 @@ class GroupDeps:
             link_libraries=d.get('link_libraries', []),
             compiled_symbols=compiled_symbols,
             ast_content_hash=ast_content_hash,
+            registration_identities=d.get('registration_identities', []),
             debug_info=debug_info,
             target_cpu=target_cpu,
             target_features=target_features,

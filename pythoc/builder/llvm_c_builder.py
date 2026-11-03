@@ -381,7 +381,8 @@ class LLVMCBuilder(LLVMBuilder):
         return self._builder.ret(coerced_value)
     
     def call(self, fn: Any, args: List[Any], name: str = "",
-             return_type_hint: Any = None, arg_type_hints: List[Any] = None) -> Any:
+             return_type_hint: Any = None, arg_type_hints: List[Any] = None,
+             cconv: Optional[str] = None) -> Any:
         """Call a function with automatic ABI coercion for struct returns and arguments.
         
         Handles:
@@ -451,7 +452,8 @@ class LLVMCBuilder(LLVMBuilder):
                     for byval_index in byval_arg_indices:
                         call_arg_attrs[byval_index + 1] = ['byval']
                     logger.debug(f"LLVMCBuilder.call: sret call_args={len(call_args)}, fn.function_type={fn.function_type}")
-                    self._builder.call(fn, call_args, name=name, arg_attrs=call_arg_attrs)
+                    self._builder.call(fn, call_args, name=name, cconv=cconv,
+                                       arg_attrs=call_arg_attrs)
                     # Load and return the aggregate value
                     return self._builder.load(sret_buf, name="sret.load")
                 
@@ -463,6 +465,7 @@ class LLVMCBuilder(LLVMBuilder):
                         coerced_args,
                         name=name,
                         arg_attrs=call_arg_attrs or None,
+                        cconv=cconv,
                     )
                     from .abi.coercion import unpack_struct_from_return
                     return unpack_struct_from_return(self._builder, call_result, coercion)
@@ -474,4 +477,5 @@ class LLVMCBuilder(LLVMBuilder):
             coerced_args,
             name=name,
             arg_attrs=call_arg_attrs or None,
+            cconv=cconv,
         )

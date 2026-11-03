@@ -13,5 +13,9 @@ def mangle_function_name(func_name: str, param_types: List[Any]) -> str:
 
     from ..type_id import get_type_id
     
-    param_encodings = ''.join(get_type_id(pt) for pt in param_types)
+    # IDs are lossless but variable length; frame each component so adjacent
+    # parameter types cannot be parsed as a different signature.
+    param_encodings = ''.join(
+        f'{len(type_id)}_{type_id}' for type_id in
+        (get_type_id(pt) for pt in param_types))
     return f'_Z{len(func_name)}{func_name}{param_encodings}'

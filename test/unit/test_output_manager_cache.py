@@ -85,6 +85,19 @@ class TestCachedObjectCoversPendingSymbols(unittest.TestCase):
             self.om._cached_object_covers_pending_symbols(self.group_key, group)
         )
 
+    def test_registration_keys_are_compared_in_full_and_persisted(self):
+        self._save_cached_deps(['same-short-index'])
+        deps = self.tracker.get_or_create_group_deps(self.group_key)
+        deps.registration_identities = ['full-old-type-id']
+        self.tracker.save_deps(self.group_key, self.obj_file)
+        self.assertEqual(self.tracker.load_deps(self.obj_file).registration_identities,
+                         ['full-old-type-id'])
+        group = self._group(['same-short-index'])
+        group['_registration_identities'] = {'f': 'full-new-type-id'}
+        self.assertFalse(self.om._cached_object_covers_pending_symbols(self.group_key, group))
+        group['_registration_identities']['f'] = 'full-old-type-id'
+        self.assertTrue(self.om._cached_object_covers_pending_symbols(self.group_key, group))
+
     def test_changed_target_is_not_covered(self):
         self._save_cached_deps(['aaa'])
         group_deps = self.tracker.get_or_create_group_deps(self.group_key)

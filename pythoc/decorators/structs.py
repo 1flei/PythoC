@@ -7,134 +7,6 @@ from ..builtin_entities.struct import create_struct_type
 from ..logger import set_source_context, logger
 
 
-def add_struct_handle_call(cls):
-    def handle_type_call(visitor, func_ref, args, node):
-        """Handle struct construction with new protocol
-        
-        Args:
-            visitor: AST visitor
-            func_ref: ValueRef of the callable (the struct type itself)
-            args: Pre-evaluated arguments (should be empty)
-            node: Original ast.Call node
-        """
-        from llvmlite import ir
-        from ..valueref import wrap_value
-        from ..registry import get_unified_registry
-        
-        if len(args) != 0:
-            raise TypeError(f"{cls.__name__}() takes no arguments ({len(args)} given)")
-        
-        struct_name = cls.__name__
-        struct_info = get_unified_registry().get_struct(struct_name)
-        if not struct_info:
-            raise NameError(f"Struct '{struct_name}' not found in registry")
-        struct_type = visitor.module.context.get_identified_type(struct_name)
-        struct_value = ir.Constant(struct_type, ir.Undefined)
-        return wrap_value(struct_value, kind="value", type_hint=cls)
-    
-    def get_llvm_type(module_context=None):
-        """Get LLVM type for this struct class
-        
-        Args:
-            module_context: Optional IR module context. If provided, returns IdentifiedStructType.
-                          If None, tries to get from struct_info.llvm_type or creates LiteralStructType.
-        """
-        from ..registry import get_unified_registry
-        from llvmlite import ir
-        
-        struct_name = cls.__name__
-        struct_info = get_unified_registry().get_struct(struct_name)
-        if not struct_info:
-            raise NameError(f"Struct '{struct_name}' not found in registry")
-        
-        # If module_context is provided, return identified struct type
-        if module_context:
-            return module_context.get_identified_type(struct_name)
-        
-        # Try to use the llvm_type from struct_info (which should be IdentifiedStructType)
-        if struct_info.llvm_type:
-            return struct_info.llvm_type
-        
-        # Otherwise, create a literal struct type
-        field_llvm_types = []
-        for field_name, field_type in struct_info.fields:
-            if hasattr(field_type, 'get_llvm_type'):
-                # All PC types now accept module_context parameter uniformly
-                # Pass None since we don't have module_context here (old struct system)
-                field_llvm_types.append(field_type.get_llvm_type(module_context))
-            elif isinstance(field_type, ir.Type):
-                # ANTI-PATTERN: LLVM types should not be used in struct field definitions
-                raise TypeError(
-                    f"Struct field '{field_name}' has raw LLVM type {field_type}. "
-                    f"This is a bug - use BuiltinEntity types (i32, f64, ptr[T], etc.) instead."
-                )
-            else:
-                # Fallback for unknown types - this should also be an error
-                raise TypeError(
-                    f"Struct field '{field_name}' has unknown type {field_type} (type: {type(field_type)}). "
-                    f"Use BuiltinEntity types (i32, f64, ptr[T], etc.)."
-                )
-    
-    def get_name():
-        """Get type name"""
-        return cls.__name__
-
-    def handle_attribute(visitor, base, attr_name, node):
-        """Handle attribute access on struct instances (unified duck typing protocol)
-        
-        Args:
-            visitor: AST visitor
-            base: Pre-evaluated base object (ValueRef)
-            attr_name: Attribute name (string)
-            node: Original ast.Attribute node
-        """
-        import ast
-        from llvmlite import ir
-        from ..valueref import wrap_value, ensure_ir, get_type
-        from ..registry import get_unified_registry
-        
-        struct_name = cls.__name__
-        struct_info = get_unified_registry().get_struct(struct_name)
-        
-        if not struct_info or not struct_info.has_field(attr_name):
-            raise AttributeError(f"struct '{struct_name}' has no field named '{attr_name}'")
-        
-        field_index = struct_info.get_field_index(attr_name)
-        field_type = struct_info.get_field_type_hint(attr_name, visitor.type_resolver)
-        
-        # Priority 1: Check if base has an address (for lvalue support)
-        if base.is_pointer_typed():
-            # base is a pointer to struct
-            struct_ptr = ensure_ir(base)
-        elif base.has_place():
-            # base is a loaded value with address (common case for variables)
-            struct_ptr = base.require_place()
-        else:
-            # Priority 2: base is a pure struct value without address
-            # Use extract_value (no lvalue support)
-            if base.is_struct_value():
-                struct_value = ensure_ir(base)
-                field_value = visitor.builder.extract_value(struct_value, field_index)
-                return wrap_value(field_value, kind="value", type_hint=field_type)
-            else:
-                raise ValueError(f"Cannot access field '{attr_name}' on non-struct type {base.type_hint}")
-        
-        # Use GEP to get field address
-        zero = ir.Constant(ir.IntType(32), 0)
-        idx = ir.Constant(ir.IntType(32), field_index)
-        field_ptr = visitor.builder.gep(struct_ptr, [zero, idx])
-        
-        # Load value and return with address for lvalue support
-        loaded_value = visitor.builder.load(field_ptr)
-        return wrap_value(loaded_value, kind="value", type_hint=field_type, address=field_ptr)
-    
-    cls.handle_type_call = staticmethod(handle_type_call)
-    cls.handle_attribute = staticmethod(handle_attribute)
-    cls.get_llvm_type = staticmethod(get_llvm_type)
-    cls.get_name = staticmethod(get_name)
-    return cls
-
-
 def compile_dynamic_class(
     cls,
     suffix=None,
@@ -208,8 +80,9 @@ def compile_dynamic_class(
     # This prevents errors when ptr[TreeNode] tries to call TreeNode.get_type_id()
     # before TreeNode is fully defined
     @classmethod
-    def _temp_get_type_id(cls_arg):
-        return f'{len(cls_name)}{cls_name}'
+    def _temp_get_type_id(cls_arg, _visited=None):
+        from ..type_id import get_type_id
+        return get_type_id(cls_arg)
     cls.get_type_id = _temp_get_type_id
     
     # === BUILD TYPE RESOLUTION NAMESPACE ===
@@ -356,10 +229,6 @@ def compile_dynamic_class(
     cls._layout_config = unified_type._layout_config
     
     # Delegate struct-specific methods if available
-    if hasattr(unified_type, '_get_structure_hash'):
-        cls._get_structure_hash = unified_type._get_structure_hash
-    if hasattr(unified_type, '_compute_structure_hash'):
-        cls._compute_structure_hash = unified_type._compute_structure_hash
     
     # Add __iter__ method to support *struct unpacking in Python
     def __iter__(self):

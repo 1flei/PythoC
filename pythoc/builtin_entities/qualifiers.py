@@ -72,14 +72,10 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
     
     @classmethod
     def get_qualifier_flags(cls):
-        """Get all qualifier flags for this type (including nested qualifiers)"""
-        flags = cls._qualifier_flags.copy()
-        if cls.qualified_type and hasattr(cls.qualified_type, 'get_qualifier_flags'):
-            # Merge with nested qualifier flags
-            nested_flags = cls.qualified_type.get_qualifier_flags()
-            flags.update(nested_flags)
-        return flags
-    
+        """Use the shared storage projection, including refined bases."""
+        from ..type_descriptor import _flags
+        return _flags(cls)
+
     @classmethod
     def _normalize_qualifiers(cls, item):
         """Normalize nested qualifiers: const[static[T]] -> const_static[T]
@@ -160,11 +156,8 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
 
     @classmethod
     def get_type_id(cls, _visited=None) -> str:
-        base_type = cls._resolve_qualified_type()
-        if base_type is None:
-            return super().get_type_id(_visited)
         from ..type_id import get_type_id
-        return get_type_id(base_type, _visited)
+        return get_type_id(cls)
     
     @classmethod
     def handle_type_subscript(cls, item):
@@ -185,9 +178,13 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         import builtins
         if isinstance(item, builtins.tuple) and len(item) == 1 and isinstance(item[0], builtins.tuple):
             # Normalized format: ((None, type),) -> extract type
-            _, actual_type = item[0]
+            name, actual_type = item[0]
+            if name is not None:
+                raise TypeError('Type qualifiers do not accept named type arguments')
             item = actual_type
-        
+        from ..type_descriptor import validate_type_argument
+        validate_type_argument(item, cls.get_qualifier_name())
+
         # Normalize qualifiers
         base_type, flags = cls._normalize_qualifiers(item)
         

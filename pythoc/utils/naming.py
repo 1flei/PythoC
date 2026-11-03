@@ -1,7 +1,18 @@
 import hashlib
+import json
 import re
 
 from .id_generator import get_next_id
+from ..type_descriptor import specialization_key
+
+
+class NormalizedSuffix(str):
+    """Short display/path suffix with its lossless input identity attached."""
+
+    def __new__(cls, value, identity):
+        result = str.__new__(cls, value)
+        result.identity = identity
+        return result
 
 
 _SYMBOL_SAFE_RE = re.compile(r'[^0-9A-Za-z_]+')
@@ -50,37 +61,28 @@ def normalize_suffix(suffix):
     """
     if suffix is None:
         return None
+    if isinstance(suffix, NormalizedSuffix):
+        return suffix
     
     if isinstance(suffix, str):
-        return _symbol_safe_suffix(suffix)
+        return NormalizedSuffix(_symbol_safe_suffix(suffix), specialization_key(suffix))
     
-    if isinstance(suffix, (tuple, list)):
-        # Convert type parameters to string
-        parts = []
-        for item in suffix:
-            if hasattr(item, 'get_name'):
-                # PC type with get_name method
-                name = item.get_name()
-            elif isinstance(item, type):
-                # Python type
-                name = item.__name__
-            elif isinstance(item, (int, str)):
-                # Literal value
-                name = str(item)
-            else:
-                # Fallback to str()
-                name = str(item)
-            parts.append(name)
-        
-        return _symbol_safe_suffix('_'.join(parts))
+    if type(suffix) in (tuple, list, dict):
+        identity = specialization_key(suffix)
+        text = json.dumps(identity, ensure_ascii=True, separators=(',', ':'))
+        return NormalizedSuffix(_symbol_safe_suffix(text), identity)
     
     # Handle single type object (PC type or Python type)
-    if hasattr(suffix, 'get_name'):
+    from ..builtin_entities.base import _is_type_like
+    if _is_type_like(suffix):
         # PC type with get_name method (i32, f64, etc.)
-        return _symbol_safe_suffix(suffix.get_name())
+        from ..type_id import get_type_id
+        return NormalizedSuffix(_symbol_safe_suffix(get_type_id(suffix)),
+                                specialization_key(suffix))
     elif isinstance(suffix, type):
         # Python type
-        return _symbol_safe_suffix(suffix.__name__)
+        return NormalizedSuffix(_symbol_safe_suffix(suffix.__name__),
+                                specialization_key(suffix))
     
     # Fallback: convert to string
-    return _symbol_safe_suffix(suffix)
+    return NormalizedSuffix(_symbol_safe_suffix(suffix), specialization_key(suffix))

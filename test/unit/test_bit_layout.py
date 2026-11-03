@@ -132,16 +132,17 @@ class TestBitLayout(unittest.TestCase):
             ({'unit_break_before': {'x': 4}}, u3, None),
         ):
             with self.subTest(options=options):
-                cls = struct(**options)(type('Invalid', (), {
-                    '__annotations__': {'x': field_type},
-                    '__module__': __name__,
-                }))
+                def layout():
+                    cls = struct(**options)(type('Invalid', (), {
+                        '__annotations__': {'x': field_type},
+                        '__module__': __name__,
+                    }))
+                    return cls._struct_type.get_layout()
                 if error is None:
-                    self.assertEqual(cls._struct_type.get_layout()
-                                     .field_offsets_bits, (0,))
+                    self.assertEqual(layout().field_offsets_bits, (0,))
                 else:
                     with self.assertRaises(error):
-                        cls._struct_type.get_layout()
+                        layout()
 
     def test_layout_identity_is_normalized_and_distinct(self):
         a = make_aggregate_layout_config(

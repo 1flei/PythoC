@@ -112,6 +112,11 @@ def get_or_create_static_global(visitor, decorated_cls, attr_name: str, node):
             node=node, exc_type=AttributeError,
         )
     pc_type, init_value, owner_cls = found
+    from ..type_descriptor import validate_static_storage
+    is_decl = getattr(owner_cls, '_static_is_decl', False)
+    validate_static_storage(
+        pc_type, zero_initialized=not is_decl and init_value is _NO_INIT,
+    )
 
     name_parts = [owner_cls.__name__]
     suffix = getattr(owner_cls, '_compile_suffix', None)
@@ -126,7 +131,6 @@ def get_or_create_static_global(visitor, decorated_cls, attr_name: str, node):
 
     if global_var is None:
         llvm_type = pc_type.get_llvm_type(visitor.module.context)
-        is_decl = getattr(owner_cls, '_static_is_decl', False)
         linkage = getattr(owner_cls, '_static_linkage', 'weak_odr')
 
         global_var = ir.GlobalVariable(visitor.module, llvm_type, global_name)
@@ -158,12 +162,16 @@ def _fold_static_initializer(visitor, pc_type, llvm_type, init_value,
     constant -- static storage cannot run instructions.
     """
     from ..ir_helpers import is_link_time_constant
-    from ..literal_protocol import _lower_element_to_constant
+    from ..literal_protocol import wrap_literal_result
+    from ..valueref import ensure_ir
 
     if init_value is _NO_INIT:
         return visitor.type_converter.create_zero_constant(llvm_type)
 
-    seed = _lower_element_to_constant(visitor, init_value, pc_type)
+    value = wrap_literal_result(init_value)
+    seed = visitor.type_converter.try_const_aggregate(value, pc_type)
+    if seed is None:
+        seed = ensure_ir(visitor.implicit_coercer.coerce(value, pc_type, node))
     if seed is None or not is_link_time_constant(seed):
         logger.error(
             f"Class static member '{attr_name}' requires compile-time "

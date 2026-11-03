@@ -10,6 +10,7 @@ class UnionType(CompositeType):
     
     Supports subscript syntax: union[i32, f64] or union[x: i32, y: f64]
     """
+    _is_union = True
     
     @classmethod
     def get_name(cls) -> str:
@@ -17,9 +18,8 @@ class UnionType(CompositeType):
     
     @classmethod
     def get_type_id(cls, _visited=None) -> str:
-        """Generate unique type ID for union types"""
-        suffix = cls.get_type_id_suffix(_visited)
-        return f'U{suffix}'
+        from ..type_id import get_type_id
+        return get_type_id(cls)
     
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
@@ -179,8 +179,7 @@ class UnionType(CompositeType):
         field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
 
         # Load value and return with address for lvalue support
-        loaded_value = visitor.builder.load(field_ptr)
-        return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr)
+        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr)
     
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
@@ -255,8 +254,7 @@ class UnionType(CompositeType):
         field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
         
         # Load value and return with address
-        loaded_value = visitor.builder.load(field_ptr)
-        return wrap_value(loaded_value, kind="address", type_hint=field_type, address=field_ptr)
+        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr)
 
 
 def create_union_type(
@@ -275,6 +273,10 @@ def create_union_type(
     Returns:
         UnionType subclass
     """
+    from ..type_descriptor import validate_member_names, validate_type_argument
+    validate_member_names(field_names, 'union')
+    for field in field_types:
+        validate_type_argument(field, 'union field', allow_incomplete=True)
     from ..target_layout import NATURAL_LAYOUT
     layout_config = layout_config or NATURAL_LAYOUT
 

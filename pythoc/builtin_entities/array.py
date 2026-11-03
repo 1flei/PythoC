@@ -51,19 +51,8 @@ class array(BuiltinType):
     
     @classmethod
     def get_type_id(cls, _visited=None) -> str:
-        """Generate unique type ID for array types."""
-        if cls.element_type and cls.dimensions:
-            from ..type_id import get_type_id
-            element_type = cls.element_type
-            if isinstance(element_type, str):
-                from ..forward_ref import get_defined_type
-                resolved = get_defined_type(element_type)
-                if resolved is not None:
-                    element_type = resolved
-            elem_id = get_type_id(element_type, _visited)
-            dims_str = '_'.join(str(d) for d in cls.dimensions)
-            return f'A{elem_id}_{dims_str}'
-        return 'Ax'  # unknown array
+        from ..type_id import get_type_id
+        return get_type_id(cls)
 
     @classmethod
     def _get_element_type(cls):
@@ -76,7 +65,11 @@ class array(BuiltinType):
                     f"array: unresolved forward reference '{element_type}'",
                     node=None, exc_type=NameError,
                 )
-            return resolved
+            element_type = resolved
+        from ..type_descriptor import contains_linear_storage
+        if (cls.dimensions and all(cls.dimensions)
+                and contains_linear_storage(element_type)):
+            raise TypeError('Arrays of linear values are unsupported; use a struct for ownership tracking')
         return element_type
 
     @classmethod
@@ -190,8 +183,12 @@ class array(BuiltinType):
         
         if len(args) != 0:
             logger.error(f"array[T, N]() takes no arguments ({len(args)} given)", node=node, exc_type=TypeError)
+        from ..type_descriptor import can_zero_initialize
+        if not can_zero_initialize(cls):
+            logger.error('Cannot zero-initialize an array with proof-bearing elements',
+                         node=node, exc_type=TypeError)
         # Get LLVM array type
-        array_type = cls.get_llvm_type()
+        array_type = cls.get_llvm_type(visitor.module.context)
 
         from ..type_converter import TypeConverter
         converter = TypeConverter(visitor)
@@ -213,22 +210,8 @@ class array(BuiltinType):
         Raises:
             TypeError: If element_type is None
         """
-        if cls.element_type is None:
-            logger.error("Cannot decay array without element_type", node=None, exc_type=TypeError)
-        
-        from .types import ptr as ptr_class
-        
-        # For multi-dimensional arrays, decay to pointer to inner array
-        # array[array[i32, 5], 3] -> ptr[array[i32, 5]]
-        if cls.dimensions and len(cls.dimensions) > 1:
-            # Create inner array type
-            # Use tuple unpacking compatible with Python 3.9+
-            inner_array = array[(cls.element_type,) + tuple(cls.dimensions[1:])]
-            return ptr_class[inner_array]
-        
-        # For single-dimensional arrays, decay to pointer to element
-        # array[i32, 10] -> ptr[i32]
-        return ptr_class[cls.element_type]
+        from ..type_descriptor import array_decay_type
+        return array_decay_type(cls)
 
     @classmethod
     def handle_assign_decay(cls, visitor, value_ref):
@@ -244,7 +227,8 @@ class array(BuiltinType):
         Returns:
             ValueRef with decayed pointer type
         """
-        decay_ptr_type = cls.get_decay_pointer_type()
+        from ..type_descriptor import array_decay_type
+        decay_ptr_type = array_decay_type(value_ref.type_hint)
         return visitor.type_converter.convert(value_ref, decay_ptr_type)
 
     
@@ -265,58 +249,35 @@ class array(BuiltinType):
         Returns:
             ValueRef with element value
         """
-        from llvmlite import ir
-        from ..valueref import ensure_ir
-        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
-        
-        # Value subscript: arr[index] or arr[i, j, k]
-        # Always decay to ptr for both single dimensional and multi-dimensional indices
-        base_type = base.type_hint
-        
-        # Strip qualifiers to get base array type, then get decay pointer type
-        base_array_type = strip_qualifiers(base_type)
-        ptr_type = base_array_type.get_decay_pointer_type()
-        
-        # Propagate qualifiers from array to pointer
-        # const[array[i32, 3]] -> const[ptr[i32]]
-        ptr_type = propagate_qualifiers(base_type, ptr_type)
-        
+        from ..type_descriptor import array_decay_type
+        ptr_type = array_decay_type(base.type_hint)
         ptr_base = visitor.type_converter.convert(base, ptr_type)
         return ptr_type.handle_subscript(visitor, ptr_base, index, node)
 
     @classmethod
     def handle_add(cls, visitor, left, right, node):
         """Handle array + int: decay to pointer and delegate to ptr.handle_add"""
-        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
-        
-        base_array_type = strip_qualifiers(left.type_hint)
-        ptr_type = base_array_type.get_decay_pointer_type()
-        ptr_type = propagate_qualifiers(left.type_hint, ptr_type)
-        
+        from ..type_descriptor import array_decay_type
+        ptr_type = array_decay_type(left.type_hint)
+
         ptr_left = visitor.type_converter.convert(left, ptr_type)
         return ptr_type.handle_add(visitor, ptr_left, right, node)
 
     @classmethod
     def handle_radd(cls, visitor, left, right, node):
         """Handle int + array: decay to pointer and delegate to ptr.handle_radd"""
-        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
-        
-        base_array_type = strip_qualifiers(right.type_hint)
-        ptr_type = base_array_type.get_decay_pointer_type()
-        ptr_type = propagate_qualifiers(right.type_hint, ptr_type)
-        
+        from ..type_descriptor import array_decay_type
+        ptr_type = array_decay_type(right.type_hint)
+
         ptr_right = visitor.type_converter.convert(right, ptr_type)
         return ptr_type.handle_radd(visitor, left, ptr_right, node)
 
     @classmethod
     def handle_sub(cls, visitor, left, right, node):
         """Handle array - int: decay to pointer and delegate to ptr.handle_sub"""
-        from ..ir_helpers import propagate_qualifiers, strip_qualifiers
-        
-        base_array_type = strip_qualifiers(left.type_hint)
-        ptr_type = base_array_type.get_decay_pointer_type()
-        ptr_type = propagate_qualifiers(left.type_hint, ptr_type)
-        
+        from ..type_descriptor import array_decay_type
+        ptr_type = array_decay_type(left.type_hint)
+
         ptr_left = visitor.type_converter.convert(left, ptr_type)
         return ptr_type.handle_sub(visitor, ptr_left, right, node)
     
@@ -341,13 +302,17 @@ class array(BuiltinType):
         # the registry at subscript time would bake in a time-of-check
         # answer from a mutable table.
         elem_name_opt, element_type = items[0]
+        from ..type_descriptor import validate_type_argument
+        if any(name is not None for name, _ in items):
+            raise TypeError('array type arguments cannot have member names')
+        validate_type_argument(element_type, 'array element', allow_void=False)
         # Remaining items are dimensions
         dimensions = []
         for name_opt, dim in items[1:]:
             # dim == 0 is the C zero-length array extension: the field
             # contributes its element alignment and no storage. Only a
             # negative dimension is malformed.
-            if not isinstance(dim, int) or dim < 0:
+            if type(dim) is not int or dim < 0:
                 logger.error(f"array dimensions must be non-negative integers, got {dim}",
                             node=None, exc_type=TypeError)
             dimensions.append(dim)

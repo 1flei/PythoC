@@ -27,6 +27,7 @@ for _w in range(1, 129):
     _name = f'i{_w}'
     _attrs = {
         '_llvm_type': ir.IntType(_w),
+        '_bit_width': _w,
         '_size_bytes': max(1, (_w + 7) // 8),
         '_is_signed': True,
         '_is_integer': True,
@@ -37,6 +38,7 @@ for _w in range(1, 129):
     _name_u = f'u{_w}'
     _attrs_u = {
         '_llvm_type': ir.IntType(_w),
+        '_bit_width': _w,
         '_size_bytes': max(1, (_w + 7) // 8),
         '_is_signed': False,
         '_is_integer': True,
@@ -83,6 +85,7 @@ class bool(BuiltinType):
     _size_bytes = 1
     _is_signed = False
     _is_bool = True
+    _bit_width = 1
     
     @classmethod
     def get_name(cls) -> str:
@@ -124,6 +127,11 @@ class ptr(BuiltinType):
     # Linear tracking ends when a value enters ptr
     
     @classmethod
+    def borrows_args(cls):
+        """Taking an address or casting a pointer does not consume its owner."""
+        return True
+
+    @classmethod
     def _resolve_pointee(cls, ctx=None):
         """Resolve a pointee using visible bindings, then the session namespace."""
         pointee = cls.pointee_type
@@ -147,29 +155,8 @@ class ptr(BuiltinType):
     
     @classmethod
     def get_type_id(cls, _visited=None) -> str:
-        """Generate unique type ID for pointer types."""
-        if cls.pointee_type is not None:
-            pointee = cls.pointee_type
-            
-            # Resolve forward reference if pointee_type is a string.
-            # A name the registry never saw is an incomplete type behind a
-            # pointer (legal in C); use the name itself as the identity
-            # token so such pointers keep a stable type ID.
-            if isinstance(pointee, str):
-                from ..forward_ref import get_defined_type
-                resolved = get_defined_type(pointee)
-                if resolved is None:
-                    # Unresolved name token: not memoizable -- the name may
-                    # be defined later in the session.
-                    from ..type_id import note_unresolved_name_token
-                    note_unresolved_name_token()
-                    return f'P{len(pointee)}{pointee}'
-                pointee = resolved
-            
-            from ..type_id import get_type_id
-            pointee_id = get_type_id(pointee, _visited)
-            return f'P{pointee_id}'
-        return 'Pv'  # void pointer
+        from ..type_id import get_type_id
+        return get_type_id(cls)
     
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
@@ -183,7 +170,8 @@ class ptr(BuiltinType):
                 return ir.PointerType(ir.IntType(8))
 
             # ptr[void] -> i8* (same as unspecialized ptr)
-            if pointee is void:
+            from ..type_converter import strip_qualifiers
+            if strip_qualifiers(pointee) is void:
                 return ir.PointerType(ir.IntType(8))
 
             # Determine pointee LLVM type from either PC type or direct LLVM type
@@ -291,8 +279,7 @@ class ptr(BuiltinType):
         from ..valueref import wrap_value, ensure_ir, get_type
 
         # cast to pc type for python value
-        if right.is_python_value():
-            right = visitor.type_converter.convert(right, i64)
+        right = visitor.type_converter.integer_operand(right, node)
         
         # Pointer arithmetic operates on runtime pcvalues plus their type hints.
         from ..type_converter import get_base_type
@@ -323,15 +310,19 @@ class ptr(BuiltinType):
         
         # Check if right is an array - decay to pointer first
         if right_type and hasattr(right_type, 'is_array') and right_type.is_array():
-            from ..ir_helpers import propagate_qualifiers, strip_qualifiers
-            base_array_type = strip_qualifiers(right_type)
-            ptr_type = base_array_type.get_decay_pointer_type()
-            ptr_type = propagate_qualifiers(right_type, ptr_type)
+            from ..type_descriptor import array_decay_type
+            ptr_type = array_decay_type(right_type)
             right = visitor.type_converter.convert(right, ptr_type)
             right_type = ptr_type
         
         # Check if right is a pointer (ptr - ptr case)
         if right_type and hasattr(right_type, '_is_pointer') and right_type._is_pointer:
+            from ..type_descriptor import can_subtract_pointers
+            if not can_subtract_pointers(
+                    left.type_hint, right_type,
+                    visitor.implicit_coercer._resolve_lazy_type_name):
+                logger.error('Pointer subtraction requires matching pointee types',
+                             node=node, exc_type=TypeError)
             # ptr - ptr: compute element difference
             # Result is (ptr1 - ptr2) / sizeof(element)
             left_int = visitor.builder.ptrtoint(ensure_ir(left), i64.get_llvm_type())
@@ -359,8 +350,7 @@ class ptr(BuiltinType):
             return wrap_value(elem_diff, kind="value", type_hint=i64)
         
         # ptr - int case
-        if right.is_python_value():
-            right = visitor.type_converter.convert(right, i64)
+        right = visitor.type_converter.integer_operand(right, node)
         
         neg_right = visitor.builder.neg(ensure_ir(right))
         neg_value = wrap_value(neg_right, kind="value", type_hint=right.type_hint)
@@ -395,11 +385,6 @@ class ptr(BuiltinType):
                 "Cannot dereference ptr[void]. Cast to a concrete pointer type first, e.g. ptr[u8](p)[0]",
                 node=node, exc_type=TypeError)
 
-        # Propagate qualifiers from pointer type to pointee type
-        # If we have const[ptr[i32]], accessing it should give const[i32]
-        if base.type_hint:
-            pointee_type_hint = propagate_qualifiers(base.type_hint, pointee_type_hint)
-
         # For array, let the result decay to pointer as in C.
         # Keep the address: `p[i]` where the element is an array is still an
         # lvalue in C, so &p[i] / ptr(p[i]) must work (e.g. pcc-emitted
@@ -411,8 +396,7 @@ class ptr(BuiltinType):
         base_ir = ensure_ir(base)
         pointee_llvm = pointee_type_hint.get_llvm_type(visitor.module.context)
         typed_ptr = visitor.builder.bitcast(base_ir, ir.PointerType(pointee_llvm))
-        loaded_value = visitor.builder.load(typed_ptr)
-        return wrap_value(loaded_value, kind="address", type_hint=pointee_type_hint, address=typed_ptr)
+        return wrap_value(typed_ptr, kind="address", type_hint=pointee_type_hint, address=typed_ptr)
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node: ast.Subscript):
@@ -466,6 +450,15 @@ class ptr(BuiltinType):
         
         # Extract types from normalized format
         types_and_dims = [item[1] for item in items]
+        from ..type_descriptor import validate_type_argument
+        if any(name is not None for name, _ in items):
+            raise TypeError('ptr type arguments cannot have member names')
+        validate_type_argument(types_and_dims[0], 'pointer pointee', allow_incomplete=True)
+        for index, dimension in enumerate(types_and_dims[1:]):
+            if index == 0 and dimension is None:
+                continue
+            if type(dimension) is not int or dimension < 0:
+                raise TypeError('ptr dimensions must be non-negative integers')
         
         if len(types_and_dims) == 1:
             # ptr[T] - simple pointer
@@ -525,13 +518,11 @@ class ptr(BuiltinType):
             
             # After first dereference, we might have an array
             # If so, switch to using the array's type for subsequent subscripts
-            if current.type_hint and hasattr(current.type_hint, 'get_decay_pointer_type'):
-                # This is an array, get its decay pointer type for next iteration
-                from .array import array
-                if isinstance(current.type_hint, type) and issubclass(current.type_hint, array):
-                    # Convert to pointer for next subscript
-                    ptr_type = current.type_hint.get_decay_pointer_type()
-                    current = visitor.type_converter.convert(current, ptr_type)
+            from ..type_converter import get_base_type
+            from ..type_descriptor import array_decay_type
+            if getattr(get_base_type(current.type_hint), 'dimensions', None) is not None:
+                ptr_type = array_decay_type(current.type_hint)
+                current = visitor.type_converter.convert(current, ptr_type)
         
         return current
 

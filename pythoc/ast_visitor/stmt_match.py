@@ -798,12 +798,15 @@ class MatchStatementMixin:
 
         # For arrays, keep the explicit decay step, then use the same dispatcher
         # path as normal pointer subscripting.
-        if hasattr(subject_type, 'get_decay_pointer_type'):
-            ptr_type = subject_type.get_decay_pointer_type()
+        from ..type_converter import get_base_type
+        from ..type_descriptor import array_decay_type
+        if getattr(get_base_type(subject_type), 'dimensions', None) is not None:
+            ptr_type = array_decay_type(subject_type)
             ptr_subject = self.type_converter.convert(subject, ptr_type)
-            return self.value_dispatcher.handle_subscript(ptr_subject, index_const, fake_node)
-
-        return self.value_dispatcher.handle_subscript(subject, index_const, fake_node)
+            element = self.value_dispatcher.handle_subscript(ptr_subject, index_const, fake_node)
+        else:
+            element = self.value_dispatcher.handle_subscript(subject, index_const, fake_node)
+        return self.value_dispatcher.read_rvalue(element)
     
     def _compare_values(self, left, right, op):
         """Helper to compare two values (used by match)."""

@@ -628,3 +628,27 @@ def wrap_value(value: Union[ir.Value, AnyType],
         linear_path=linear_path,
         vref_id=vref_id
     )
+
+
+def read_rvalue(value_ref, builder, *, name=None):
+    """Materialize a place once; arrays retain their address for decay."""
+    from .type_converter import get_base_type
+    from .ir_helpers import safe_load
+    if value_ref.has_storage():
+        return wrap_value(value_ref.get_ir_value(), kind='value',
+                          type_hint=value_ref.type_hint,
+                          source_node=value_ref.source_node)
+    if value_ref.is_python_value() or not value_ref.has_place():
+        return value_ref
+    place = value_ref.require_place()
+    if value_ref.value is not place:
+        return value_ref
+    base_type = get_base_type(value_ref.type_hint)
+    if getattr(base_type, 'dimensions', None) is not None:
+        return value_ref
+    loaded = safe_load(builder, ensure_ir(place), value_ref.type_hint,
+                       name=name or value_ref.var_name or '')
+    return wrap_value(loaded, kind='address', type_hint=value_ref.type_hint,
+                      address=place, source_node=value_ref.source_node,
+                      var_name=value_ref.var_name, linear_path=value_ref.linear_path,
+                      vref_id=value_ref.vref_id)

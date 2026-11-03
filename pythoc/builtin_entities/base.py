@@ -29,6 +29,8 @@ class _Int128Struct(ctypes.Structure):
 def _is_type_like(obj) -> bool:
     """Whether obj can serve as a PC type (builtin entity class or a
     processed struct/enum/union class)."""
+    if isinstance(obj, BuiltinEntity):
+        return obj.can_be_type()
     if not isinstance(obj, type):
         return False
     if getattr(obj, '_is_builtin_entity', False):
@@ -562,32 +564,15 @@ class BuiltinType(BuiltinEntity):
         Generate unique type ID for this type.
         Default implementation for primitive types based on their structural properties.
         """
-        return cls.get_name()
+        from ..type_id import get_type_id
+        return get_type_id(cls)
     
     @classmethod
     def is_compatible_with(cls, other) -> bool:
-        """Check if this type is compatible with another type"""
-        if cls == other:
-            return True
-        
-        # Integer promotion rules
-        if cls.is_integer() and hasattr(other, 'is_integer') and other.is_integer():
-            return cls.get_layout().bit_width <= other.get_layout().bit_width
-        
-        # Float promotion rules
-        if cls.is_float() and hasattr(other, 'is_float') and other.is_float():
-            return cls.get_size_bytes() <= other.get_size_bytes()
-        
-        # Integer to float promotion
-        if cls.is_integer() and hasattr(other, 'is_float') and other.is_float():
-            return True
-        
-        # Bool to integer promotion
-        if cls.is_bool() and hasattr(other, 'is_integer') and other.is_integer():
-            return True
-        
-        return False
-    
+        """Compatibility alias for the directional implicit PythoC relation."""
+        from ..type_descriptor import can_convert
+        return can_convert(cls, other, mode='implicit')
+
     @classmethod
     def pointer_to(cls):
         """Create a pointer type to this type"""
@@ -747,7 +732,7 @@ class BuiltinType(BuiltinEntity):
         """Handle left shift for integer types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, _ = visitor.type_converter.unify_binop_types(left, right)
+        left, right = visitor.type_converter.unify_shift_types(left, right)
         
         result = visitor.builder.shl(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
@@ -761,7 +746,7 @@ class BuiltinType(BuiltinEntity):
         """
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, _ = visitor.type_converter.unify_binop_types(left, right)
+        left, right = visitor.type_converter.unify_shift_types(left, right)
         
         # Check if the type is signed or unsigned
         type_hint = left.type_hint

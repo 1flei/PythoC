@@ -163,7 +163,7 @@ def test_static_enum_suffix() -> i32:
 
 # Test 6: Dynamic enum with suffix
 def make_result(T):
-    @enum(T, suffix=T)
+    @enum(i32, suffix=T)
     class Result:
         Ok: T
         Error: None

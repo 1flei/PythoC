@@ -247,7 +247,8 @@ class TestTypeSubscriptUnified(unittest.TestCase):
         self.assertEqual(func_binary_rt.get_name(), "func[i32, i32, i32]")
         self.assertEqual(func_nullary_rt.get_name(), "func[i32]")
         self.assertEqual(func_named_rt.get_name(), "func[a: i32, b: i32, i32]")
-        self.assertEqual(func_named_rt.get_type_id(), "func[a: i32, b: i32, i32]")
+        self.assertTrue(func_named_rt.get_type_id().startswith('t2_'))
+        self.assertNotEqual(func_named_rt.get_type_id(), func_binary_rt.get_type_id())
 
     def test_func_legacy_runtime_syntax_rejected(self):
         """Legacy func syntax should be rejected"""

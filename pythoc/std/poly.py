@@ -30,31 +30,40 @@ class Poly:
         self._funcs: List[Any] = list(compiled_funcs)
         self._sig_map: Dict[Tuple[type, ...], Any] = {}
         self._dynamic_dispatch_cache = {}
-        for f in self._funcs:
-            self._register_function(f)
-    
+        self._signature_revision = None
+        self._refresh_signatures()
+
     def append(self, compiled_func):
-        """Add another function overload to the dispatcher"""
+        """Add an overload; the latest exact signature takes precedence."""
+        self._signature(compiled_func)
         self._funcs.append(compiled_func)
-        self._register_function(compiled_func)
+        self._refresh_signatures()
         return self
-    
-    def _register_function(self, f):
-        """Extract function signature and register in map"""
-        # Get func_info directly from wrapper instead of registry lookup
-        func_info = getattr(f, '_func_info', None)
-        if not func_info:
-            raise NameError(f"Function '{getattr(f, '__name__', f)}' not found - missing _func_info attribute")
-        
-        param_types = tuple(
-            func_info.param_type_hints[name] 
-            for name in func_info.param_names
-        )
-        # Use get_type_id() as key for semantic equivalence
+
+    @staticmethod
+    def _signature(function):
+        info = getattr(function, '_func_info', None)
+        if info is None:
+            raise NameError(f"Function '{getattr(function, '__name__', function)}' "
+                            'not found - missing _func_info attribute')
+        return tuple(info.param_type_hints[name] for name in info.param_names), info.return_type_hint
+
+    def _refresh_signatures(self):
+        """Rebuild derived indexes when authoritative type objects complete."""
         from ..type_id import get_type_id
-        sig_key = tuple(get_type_id(t) for t in param_types)
-        self._sig_map[sig_key] = (f, param_types)
-    
+        signatures = {}
+        revision = []
+        for function in self._funcs:
+            parameters, result = self._signature(function)
+            key = tuple(get_type_id(parameter) for parameter in parameters)
+            signatures[key] = (function, parameters)
+            revision.append((id(function), key, get_type_id(result)))
+        revision = tuple(revision)
+        if revision != self._signature_revision:
+            self._sig_map = signatures
+            self._dynamic_dispatch_cache.clear()
+            self._signature_revision = revision
+
     def can_be_called(self) -> bool:
         return True
 
@@ -86,6 +95,7 @@ class Poly:
         1. Try static dispatch by argument type hints
         2. If args contain Enum types, generate dynamic dispatch function
         """
+        self._refresh_signatures()
         # Try static dispatch first
         arg_types = tuple(self._get_type_hint(a) for a in args)
         from ..type_id import get_type_id
@@ -140,6 +150,7 @@ class Poly:
         4. Call the compiled dispatch function
         """
         import itertools
+        self._refresh_signatures()
 
         logger.debug(f"Poly _get_dynamic_dispatch_func: arg_types={arg_types}, enum_indices={enum_indices}")
         from ..type_id import get_type_id

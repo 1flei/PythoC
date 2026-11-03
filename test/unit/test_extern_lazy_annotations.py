@@ -11,7 +11,7 @@ forward-ref registry as the fallback for plain names.
 import unittest
 
 import pythoc
-from pythoc import extern, func, i32, ptr, void
+from pythoc import compile, extern, func, i32, ptr, void
 from pythoc.forward_ref import (
     clear_forward_ref_state,
     mark_type_defined,
@@ -19,6 +19,7 @@ from pythoc.forward_ref import (
 
 
 def _make_visitproc():
+    @compile
     class _PyObject:
         pass
 

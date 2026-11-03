@@ -5,25 +5,17 @@ Type identity system for generating unique type identifiers.
 This module provides a canonical way to identify types for function mangling.
 Two types are considered identical if and only if they produce the same type ID.
 
-Design: Each type implements its own get_type_id() classmethod.
+The public ID is a lossless projection of authoritative Python type objects.
+Individual type methods are compatibility entry points and delegate here.
 """
 
 import weakref
 from typing import Any, Optional, Set
 
-# Memoized type IDs.  get_type_id is called for every coercion decision and
-# recursively walks composite types; large interlinked type graphs (e.g. the
-# SQLite internal structs) are DAGs with massive sharing, and re-walking
-# every shared subtree is exponential.  Results are cached per type object
-# after the type's own computation completes, so every shared subtree is
-# walked once.  Cycle-back edges still resolve through _visited tokens;
-# entries containing such tokens are context-dependent in the same way the
-# uncached computation was, so caching does not change semantics.
-#
-# The cache is a WeakKeyDictionary keyed by the type object itself, so dead
-# type objects (e.g. specialized classes from a discarded compilation) do
-# not pin memory forever.  Keys that cannot be weak-referenced simply skip
-# the cache.
+# Only scalar leaves can be cached across calls. Composite Python type
+# objects can gain fields or resolve forward names after their first use, so
+# an object-keyed cache would silently return an obsolete identity. The graph
+# projection itself processes each reachable node once per call.
 _type_id_cache: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 # Bumped whenever a computation emits a name token for a *currently
@@ -56,52 +48,37 @@ def _cache_store(pc_type: Any, result: str):
         pass
 
 
-def _recursive_type_token(pc_type: Any) -> str:
-    type_name = getattr(pc_type, '_canonical_name', None) or getattr(pc_type, '__name__', None)
-    if not type_name and hasattr(pc_type, 'get_name'):
-        try:
-            type_name = pc_type.get_name()
-        except Exception:
-            type_name = None
-    if not type_name:
-        type_name = type(pc_type).__name__
-    return f'R{len(type_name)}{type_name}'
+def _cacheable_leaf(pc_type: Any) -> bool:
+    if pc_type is None or not isinstance(pc_type, type):
+        return False
+    if (getattr(pc_type, 'qualified_type', None) is not None
+            or getattr(pc_type, '_is_refined', False)
+            or getattr(pc_type, 'param_types', None) is not None
+            or getattr(pc_type, 'pointee_type', None) is not None
+            or getattr(pc_type, 'dimensions', None) is not None
+            or getattr(pc_type, 'lanes', None) is not None
+            or getattr(pc_type, '_field_types', None) is not None):
+        return False
+    from .builtin_entities import types as builtin_types
+    return vars(builtin_types).get(pc_type.__name__) is pc_type
 
 
 def get_type_id(pc_type: Any, _visited: Optional[Set[int]] = None) -> str:
     """
     Get the unique type ID for a PC type.
 
-    Delegates to the type's get_type_id() method if available.
-    Backend representations are not PythoC type identities.
-
-    Returns a compact string that uniquely identifies the type.
+    Return a lossless, unambiguous descriptor encoding. Backend
+    representations and short hashes are not PythoC type identities.
     """
-    from .type_graph import canonical_record_type, validation_in_progress
-    pc_type = canonical_record_type(pc_type)
+    from .type_graph import validation_in_progress
     validating = validation_in_progress()
-    cached = None if validating else _cache_lookup(pc_type)
+    cacheable = _cacheable_leaf(pc_type)
+    cached = None if validating or not cacheable else _cache_lookup(pc_type)
     if cached is not None:
         return cached
-    if _visited is None:
-        _visited = set()
-
-    if pc_type is None:
-        return 'v'
-
-    type_key = id(pc_type)
-    if type_key in _visited:
-        return _recursive_type_token(pc_type)
-
-    if hasattr(pc_type, 'get_type_id'):
-        _visited.add(type_key)
-        misses_before = _name_token_misses
-        try:
-            result = pc_type.get_type_id(_visited)
-        finally:
-            _visited.remove(type_key)
-        if not validating and misses_before == _name_token_misses:
-            _cache_store(pc_type, result)
-        return result
-
-    raise TypeError(f"Type {pc_type} (type={type(pc_type)}) does not have a get_type_id() method")
+    from .type_descriptor import encode_type_key, type_key
+    misses_before = _name_token_misses
+    result = encode_type_key(type_key(pc_type))
+    if cacheable and not validating and misses_before == _name_token_misses:
+        _cache_store(pc_type, result)
+    return result

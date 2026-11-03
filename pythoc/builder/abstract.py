@@ -185,6 +185,32 @@ class AbstractBuilder(ABC):
         """Store value to memory."""
         pass
     
+    def load_volatile(self, ptr: Any, name: str = "", align: Any = None) -> Any:
+        """Emit an observable load; PCIR records this operation explicitly."""
+        from ..ir_helpers import make_load_volatile
+        return make_load_volatile(self.load(ptr, name=name, align=align))
+
+    def store_volatile(self, value: Any, ptr: Any, align: Any = None) -> Any:
+        """Emit an observable store; PCIR records this operation explicitly."""
+        from ..ir_helpers import make_store_volatile
+        return make_store_volatile(self.store(value, ptr, align=align))
+
+    def load_atomic_volatile(self, *args, **kwargs):
+        from ..ir_helpers import make_memory_volatile
+        return make_memory_volatile(self.load_atomic(*args, **kwargs))
+
+    def store_atomic_volatile(self, *args, **kwargs):
+        from ..ir_helpers import make_memory_volatile
+        return make_memory_volatile(self.store_atomic(*args, **kwargs))
+
+    def atomic_rmw_volatile(self, *args, **kwargs):
+        from ..ir_helpers import make_memory_volatile
+        return make_memory_volatile(self.atomic_rmw(*args, **kwargs))
+
+    def cmpxchg_volatile(self, *args, **kwargs):
+        from ..ir_helpers import make_memory_volatile
+        return make_memory_volatile(self.cmpxchg(*args, **kwargs))
+
     @abstractmethod
     def gep(self, ptr: Any, indices: List[Any], inbounds: bool = False, name: str = "") -> Any:
         """Get element pointer."""
@@ -300,7 +326,8 @@ class AbstractBuilder(ABC):
     
     @abstractmethod
     def call(self, fn: Any, args: List[Any], name: str = "",
-             return_type_hint: Any = None) -> Any:
+             return_type_hint: Any = None, arg_type_hints: List[Any] = None,
+             cconv: Optional[str] = None) -> Any:
         """Call a function.
         
         Args:

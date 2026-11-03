@@ -368,6 +368,11 @@ class AssignmentsMixin:
             logger.error(
                 f"AnnAssign requires valid PC type annotation. annotation: {annotation_str}", node)
 
+        from ..type_descriptor import validate_static_storage
+        from ..ir_helpers import is_thread_local
+        if is_static(pc_type) or is_thread_local(pc_type):
+            validate_static_storage(pc_type, zero_initialized=node.value is None)
+        ownership_source = None
         # Now parse the RHS
         if node is None or node.value is None:
             llvm_type = pc_type.get_llvm_type(self.module.context)
@@ -384,6 +389,7 @@ class AssignmentsMixin:
             rvalue = wrap_value(seed_value, kind="value", type_hint=pc_type)
         else:
             rvalue = self.visit_rvalue_expression(node.value)
+            ownership_source = rvalue
 
             # A static aggregate initialized by a braced literal needs a
             # compile-time constant seed (C constant aggregate init), not the
@@ -394,10 +400,13 @@ class AssignmentsMixin:
                 const_seed = self.type_converter.try_const_aggregate(rvalue, pc_type)
             if const_seed is not None:
                 rvalue = wrap_value(const_seed, kind="value", type_hint=pc_type)
-            # If the type of RHS does not match pc_type, convert it
-            elif rvalue.type_hint != pc_type:
+            # Always validate the semantic relation, including qualifiers and
+            # refinements whose backend representations may be identical.
+            else:
                 rvalue = self.implicit_coercer.coerce(rvalue, pc_type, node)
             
+        if ownership_source is not None and self._is_linear_type(pc_type):
+            self._transfer_linear_ownership(ownership_source, reason="assignment", node=node)
         # Store the value
         self._store_to_new_lvalue(node, var_name, pc_type, rvalue)
         
@@ -405,14 +414,8 @@ class AssignmentsMixin:
         if self._is_linear_type(pc_type):
             is_undefined = rvalue.is_undefined_pcvalue()
             
-            if hasattr(rvalue, 'var_name') and rvalue.var_name:
-                # Variable reference - transfer ownership
+            if not is_undefined:
                 self._register_linear_token(var_name, pc_type, node, path=())
-                self._transfer_linear_ownership(rvalue, reason="assignment", node=node)
-            elif not is_undefined:
-                # Initialized value (function return, linear(), etc.)
-                self._register_linear_token(var_name, pc_type, node, path=())
-    
 
     def visit_AugAssign(self, node: ast.AugAssign):
         """Handle augmented assignment statements through the unified dispatcher."""

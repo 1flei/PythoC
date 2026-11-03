@@ -26,7 +26,6 @@ from ..registry import register_struct_from_class, get_unified_registry
 from ..context import FunctionBindingState
 
 from .structs import (
-    add_struct_handle_call as _add_struct_handle_call,
     compile_dynamic_class as _compile_dynamic_class,
 )
 from .visible import AccessibleSymbols
@@ -1191,20 +1190,14 @@ def _compile_impl(func_or_class,
     else:
         # No suffix: use standard paths
         build_dir, ir_file, obj_file, so_file = get_build_paths(source_file)
+
+    from ..build.artifact_identity import verify_artifact_identity
+    verify_artifact_identity(
+        obj_file, so_file, scope=scope_name, suffix=compile_suffix,
+        effect_suffix=effect_suffix)
     
     # Note: We do NOT check cache here. Cache is checked at flush time.
     # This allows all @compile decorators to register before any flush happens.
-
-    # --- Registration-phase cache: if the same group was already compiled
-    # and its object file is still up-to-date, reuse the existing wrapper
-    # instead of rebuilding AST / binding_state / compile_callback.
-    existing_wrapper = _try_reuse_cached_wrapper(
-        output_manager, group_key, func, wrapper,
-        compile_suffix, effect_suffix,
-    )
-    if existing_wrapper is not None:
-        try_bind_installed_adapter(existing_wrapper)
-        return existing_wrapper
 
     func_info = FunctionInfo(
         name=func.__name__,
@@ -1221,6 +1214,23 @@ def _compile_impl(func_or_class,
         has_kwargs=resolved_kwargs.is_typed,
     )
 
+    from ..build.cache import fingerprint_function_content, function_registration_identity
+    content = fingerprint_function_content(
+        func_ast, user_globals, include_ast=hasattr(func, '__pc_source__'))
+    registration_identity = function_registration_identity(
+        func_info, func_ast, user_globals, content)
+
+    # --- Registration-phase cache: if the same group was already compiled
+    # and its object file is still up-to-date, reuse the existing wrapper
+    # instead of rebuilding AST / binding_state / compile_callback.
+    existing_wrapper = _try_reuse_cached_wrapper(
+        output_manager, group_key, func, wrapper,
+        compile_suffix, effect_suffix, registration_identity,
+    )
+    if existing_wrapper is not None:
+        try_bind_installed_adapter(existing_wrapper)
+        return existing_wrapper
+
     group_compiler = compiler
     
     group = output_manager.get_or_create_group(
@@ -1228,15 +1238,13 @@ def _compile_impl(func_or_class,
         source_file
     )
     compiler = group['compiler']
-    from ..build.cache import fingerprint_function_content
+    group.setdefault('_registration_identities', {})[actual_func_name] = registration_identity
     # File-backed functions (source parsed from source_file) need no AST
     # component in the fingerprint: the file's mtime already keys its
     # content.  The fingerprint then only covers captured environment
     # values.  Functions with pre-stored source (__pc_source__, e.g.
     # yield-generated wrappers) may not match the file's current text, so
     # they keep the full AST digest.
-    content = fingerprint_function_content(
-        func_ast, user_globals, include_ast=hasattr(func, '__pc_source__'))
     if content.digest:
         group.setdefault('_ast_content_hashes', []).append(content.digest)
         if content.captured:
@@ -1263,6 +1271,7 @@ def _compile_impl(func_or_class,
         group_key=group_key,
         compile_suffix=compile_suffix,
         effect_suffix=effect_suffix,
+        registration_identity=registration_identity,
         captured_effect_context=_captured_effect_context,
         effect_override_names=_effect_override_names,
         captured_symbols=captured_symbols,
@@ -1422,7 +1431,7 @@ def _clone_binding_to_wrapper(binding, existing, wrapper):
 
 def _try_reuse_cached_wrapper(
     output_manager, group_key, func, wrapper,
-    compile_suffix, effect_suffix,
+    compile_suffix, effect_suffix, registration_identity,
 ):
     """Try to reuse an existing wrapper from a previously-registered group.
 
@@ -1469,6 +1478,10 @@ def _try_reuse_cached_wrapper(
     # cached one, producing guaranteed-miss noise (plus a deps-file read)
     # for every decorated function.
     existing, binding = _find_match()
+    if existing is not None and binding.registration_identity != registration_identity:
+        raise TypeError(
+            f"Function specialization collision for '{func.__name__}': "
+            'signature, body or compile-time inputs differ; use distinct suffixes')
     if existing is not None and output_manager._group_object_cache_hit(group_key, group):
         _clone_binding_to_wrapper(binding, existing, wrapper)
         # We still record type-layout dependencies from the current globals so

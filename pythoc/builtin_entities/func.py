@@ -10,12 +10,14 @@ class func(BuiltinType):
     _size_bytes = 8  # Function pointer is 8 bytes (64-bit)
     _is_signed = False
     _is_pointer = True
+    _is_function_type = True
     param_types = None   # Tuple of parameter types (T1, T2, ...)
     param_names = None   # Optional names in parameter order
     return_type = None   # Return type
     has_varargs = False  # Whether the function was declared with *args: T
     has_llvm_varargs = False  # Whether the function uses bare LLVM/C varargs
     has_kwargs = False   # Whether the function was declared with **kwargs: T
+    calling_convention = 'cdecl'
 
     @classmethod
     def _get_parameter_names(cls):
@@ -230,21 +232,20 @@ class func(BuiltinType):
                 exc_type=TypeError,
             )
 
+        if is_varargs and len(args) < len(cls.param_types):
+            logger.error(
+                f"Function expects at least {len(cls.param_types)} arguments, got {len(args)}",
+                node=node, exc_type=TypeError)
+
         # Type conversion for fixed arguments
         converted_args = []
         for idx, (arg, expected_type) in enumerate(zip(args, param_llvm_types)):
             target_pc_type = cls.param_types[idx]
 
-            # Check if PC types match (including refined types)
-            # Even if LLVM types match, PC types might be different (e.g., refined vs base)
-            pc_types_match = hasattr(arg, 'type_hint') and arg.type_hint == target_pc_type
-
-            if arg.is_python_value() or get_type(arg) != expected_type or not pc_types_match:
-                # Convert using PC param type directly - this will enforce refined type checking
-                converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
-                converted_args.append(ensure_ir(converted))
-            else:
-                converted_args.append(ensure_ir(arg))
+            # The PythoC relation is authoritative even when the IR type
+            # happens to match the parameter's backend representation.
+            converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
+            converted_args.append(ensure_ir(converted))
 
         # For varargs functions, pass remaining arguments beyond the fixed
         # params. Apply C default argument promotions (i8/i16 -> i32, f32 -> f64).
@@ -252,18 +253,16 @@ class func(BuiltinType):
         # a preferred PC type are materialized to that type so they are passed as
         # real varargs values instead of zero-sized pyconst placeholders.
         if is_varargs and len(args) > len(param_llvm_types):
-            from . import i8 as pc_i8, i16 as pc_i16, i32 as pc_i32
-            from . import f32 as pc_f32, f64 as pc_f64
+            from . import i8 as pc_i8
+            from ..type_descriptor import default_argument_promotion
             from . import ptr as pc_ptr
             from ..valueref import wrap_value
             for extra_arg in args[len(param_llvm_types):]:
                 hint = getattr(extra_arg, 'type_hint', None)
                 # C default argument promotions for varargs
-                if hint in (pc_i8, pc_i16):
-                    promoted = visitor.type_converter.convert(extra_arg, pc_i32, node)
-                    converted_args.append(ensure_ir(promoted))
-                elif hint == pc_f32:
-                    promoted = visitor.type_converter.convert(extra_arg, pc_f64, node)
+                promotion = default_argument_promotion(hint)
+                if promotion is not None:
+                    promoted = visitor.implicit_coercer.coerce(extra_arg, promotion, node)
                     converted_args.append(ensure_ir(promoted))
                 elif extra_arg.is_python_value() and isinstance(extra_arg.get_python_value(), str):
                     # String literals in varargs decay to ptr[i8].
@@ -306,6 +305,7 @@ class func(BuiltinType):
             converted_args,
             return_type_hint=cls.return_type,
             arg_type_hints=cls.param_types,
+            cconv='x86_stdcallcc' if cls.calling_convention == 'stdcall' else None,
         )
 
         # Wrap result with return type hint (tracking happens in visit_expression)
@@ -314,6 +314,8 @@ class func(BuiltinType):
     @classmethod
     def get_function_type(cls, module_context=None):
         """Get the C ABI lowered LLVM function type (not pointer)."""
+        if cls.param_types is None:
+            raise TypeError('Function values require a specialized func[...] type')
         param_llvm_types, return_llvm_type = cls._get_user_signature(module_context)
         actual_param_types, actual_return_type = cls._lower_c_abi_signature(
             param_llvm_types, return_llvm_type,
@@ -345,6 +347,12 @@ class func(BuiltinType):
         # Last item is return type
         *param_items, ret_item = items
         _ret_name_opt, return_type = ret_item
+        from ..type_descriptor import validate_member_names, validate_type_argument
+        from .types import void
+        if _ret_name_opt is not None:
+            raise TypeError('func return type cannot have a parameter name')
+        return_type = void if return_type is None else return_type
+        validate_type_argument(return_type, 'func return')
         if is_sequence_carrier(return_type):
             logger.error(
                 "func return type must be a type, not a sequence literal",
@@ -363,10 +371,12 @@ class func(BuiltinType):
                     node=None,
                     exc_type=TypeError,
                 )
+            validate_type_argument(ptype, 'func parameter', allow_void=False)
             param_types.append(ptype)
             param_names.append(name_opt)
             if name_opt is not None:
                 has_any_name = True
+        validate_member_names(param_names, 'func')
         if not has_any_name:
             param_names = None
 

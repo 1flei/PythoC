@@ -60,6 +60,30 @@ def _create_enum_type(variants, tag_type, class_name=None):
 
     Also stores valid tag values for discriminant type semantics.
     """
+    from ..type_descriptor import validate_member_names, validate_type_argument, _unqualified
+    from ..type_converter import get_base_type
+    validate_type_argument(tag_type, 'enum tag')
+    plain_tag = _unqualified(tag_type)
+    if (getattr(plain_tag, '_is_refined', False)
+            or not getattr(plain_tag, '_is_integer', False)):
+        raise TypeError('enum tag type must be an integer without refinement')
+    base_tag = get_base_type(tag_type)
+    width = base_tag._bit_width
+    lower = -(1 << (width - 1)) if base_tag._is_signed else 0
+    upper = (1 << (width - int(base_tag._is_signed))) - 1
+    variants = [(name, None if payload is void else payload, tag)
+                for name, payload, tag in variants]
+    validate_member_names([name for name, _, _ in variants], 'enum')
+    seen_tags = {}
+    for name, payload, tag in variants:
+        if type(tag) is not int or not lower <= tag <= upper:
+            raise TypeError(f'enum tag {tag!r} is not representable by {tag_type.get_name()}')
+        if tag in seen_tags and (payload is not None or seen_tags[tag] is not None):
+            raise TypeError('enum payload variants require distinct tag values')
+        seen_tags[tag] = payload
+        if payload is not None:
+            validate_type_argument(payload, 'enum payload')
+
     # Build union for payloads (use variant names as field names)
     payload_items = []
     for var_name, ptype, _tag in variants:
@@ -260,107 +284,62 @@ class EnumType(CompositeType):
             args: [tag_value] or [tag_value, payload_value]
             node: ast.Call node
         """
-        from ..valueref import wrap_value, ensure_ir, get_type_hint
-        from ..type_converter import TypeConverter
-        from llvmlite import ir
+        from ..valueref import wrap_value, ensure_ir
+        from ..type_descriptor import (enum_constructor_payload,
+                                       enum_runtime_variants, _constant_value)
         from .types import void
-        
-        if len(args) < 1 or len(args) > 2:
-            logger.error(f"{cls.get_name()}() requires 1-2 arguments: (tag) or (tag, payload)",
-                        node=node, exc_type=TypeError)
-        
-        tag_val = args[0]
-        payload_val = args[1] if len(args) == 2 else None
-        
-        # Convert tag to correct type
-        converter = TypeConverter(visitor)
-        tag_converted = converter.convert(tag_val, cls._tag_type)
-        tag_ir = ensure_ir(tag_converted)
-        
-        # Try to infer which variant this is from constant tag value
-        variant_idx = None
-        variant_payload_type = None
-        if isinstance(tag_ir, ir.Constant):
-            tag_const_val = tag_ir.constant
-            # Search through variants to find matching tag
-            if hasattr(cls, '_variant_names') and hasattr(cls, '_variant_types'):
-                variant_names = cls._variant_names or []
-                variant_types = cls._variant_types or []
-                
-                # _tag_values can be either a dict (from @enum decorator) or a list (from enum[...])
-                tag_values = cls._tag_values if hasattr(cls, '_tag_values') else None
-                if isinstance(tag_values, dict):
-                    # @enum decorator format: Dict[str, int]
-                    for idx, (var_name, var_type) in enumerate(zip(variant_names, variant_types)):
-                        if var_name in tag_values and tag_values[var_name] == tag_const_val:
-                            variant_idx = idx
-                            variant_payload_type = var_type
-                            break
-                elif tag_values:
-                    # enum[...] subscript format: List[int]
-                    for idx, (var_name, var_type, var_tag) in enumerate(zip(
-                        variant_names, variant_types, tag_values
-                    )):
-                        if var_tag == tag_const_val:
-                            variant_idx = idx
-                            variant_payload_type = var_type
-                            break
-        
-        # Build enum struct: { tag, payload }
-        tag_llvm = cls._tag_type.get_llvm_type(visitor.module.context)
-        payload_llvm = cls._union_payload.get_llvm_type(visitor.module.context)
-        enum_struct_t = ir.LiteralStructType([tag_llvm, payload_llvm])
-        enum_alloca = visitor.builder.alloca(enum_struct_t, name="enum.value")
-        
-        # Store tag
+        from llvmlite import ir
+
+        admitted, payload_type = enum_constructor_payload(cls, args)
+        known_tag, _ = _constant_value(args[0]) if args else (False, None)
+        runtime_variants = (() if known_tag or admitted else
+                            enum_runtime_variants(cls, args))
+        if not admitted and not runtime_variants:
+            logger.error(
+                f"{cls.get_name()} requires a known valid variant tag and its "
+                "declared payload; payload conversion must be implicit",
+                node=node, exc_type=TypeError)
+        tag_value = visitor.implicit_coercer.coerce(args[0], cls._tag_type, node)
+        enum_llvm = cls.get_llvm_type(visitor.module.context)
+        allocation = visitor.builder.alloca(enum_llvm, name="enum.value")
+        visitor.builder.store(ir.Constant(enum_llvm, None), allocation)
         zero = ir.Constant(ir.IntType(32), 0)
-        tag_idx = ir.Constant(ir.IntType(32), 0)
-        tag_ptr = visitor.builder.gep(enum_alloca, [zero, tag_idx], inbounds=True)
-        visitor.builder.store(tag_ir, tag_ptr)
-        
-        # Store payload if provided
-        if payload_val is not None:
-            payload_idx = ir.Constant(ir.IntType(32), 1)
-            payload_ptr = visitor.builder.gep(enum_alloca, [zero, payload_idx], inbounds=True)
-            
-            # If we know the variant type from constant tag, use it for conversion
-            if variant_payload_type is not None:
-                if variant_payload_type == void:
-                    # Void variant - skip payload storage
-                    pass
-                else:
-                    # Convert payload to the correct variant payload type
-                    payload_converted = converter.convert(payload_val, variant_payload_type)
-                    val_ir = ensure_ir(payload_converted)
-                    variant_llvm = variant_payload_type.get_llvm_type(visitor.module.context)
-                    variant_ptr = visitor.builder.bitcast(payload_ptr, ir.PointerType(variant_llvm))
-                    visitor.builder.store(val_ir, variant_ptr)
-            else:
-                # Unknown variant or runtime tag - infer type from payload
-                val_type = get_type_hint(payload_val)
-                if val_type is None:
-                    logger.error(f"Enum payload requires PC type hint when tag is not compile-time constant",
-                                node=node, exc_type=TypeError)
-                
-                # Skip void types
-                if val_type == void:
-                    pass
-                else:
-                    # Convert payload if it's a Python value
-                    if isinstance(payload_val, ValueRef) and payload_val.is_python_value():
-                        payload_converted = converter.convert(payload_val, val_type)
-                        val_ir = ensure_ir(payload_converted)
-                    else:
-                        val_ir = ensure_ir(payload_val)
-                    
-                    variant_llvm = val_type.get_llvm_type(visitor.module.context)
-                    variant_ptr = visitor.builder.bitcast(payload_ptr, ir.PointerType(variant_llvm))
-                    visitor.builder.store(val_ir, variant_ptr)
-        
-        # Load and return constructed value
-        result = visitor.builder.load(enum_alloca)
-        return wrap_value(result, kind="address", type_hint=cls, address=enum_alloca)
-    
+        tag_pointer = visitor.builder.gep(allocation, [zero, zero], inbounds=True)
+        visitor.builder.store(ensure_ir(tag_value), tag_pointer)
+        def store_payload(payload_type):
+            if payload_type in (None, void):
+                return
+            payload = visitor.implicit_coercer.coerce(args[1], payload_type, node)
+            payload_pointer = visitor.builder.gep(
+                allocation, [zero, ir.Constant(ir.IntType(32), 1)], inbounds=True)
+            payload_pointer = visitor.builder.bitcast(
+                payload_pointer,
+                ir.PointerType(payload_type.get_llvm_type(visitor.module.context)))
+            visitor.builder.store(ensure_ir(payload), payload_pointer)
+
+        if runtime_variants:
+            merge = visitor.builder.create_block('enum.constructed')
+            invalid = visitor.builder.create_block('enum.invalid_tag')
+            switch = visitor.builder.switch(ensure_ir(tag_value), invalid)
+            for tag, variant_type in runtime_variants:
+                branch = visitor.builder.create_block('enum.variant')
+                switch.add_case(ir.Constant(ensure_ir(tag_value).type, tag), branch)
+                visitor.builder.position_at_end(branch)
+                store_payload(variant_type)
+                visitor.builder.branch(merge)
+            visitor.builder.position_at_end(invalid)
+            trap = visitor.module.globals.get('llvm.trap')
+            if trap is None:
+                trap = ir.Function(visitor.module, ir.FunctionType(ir.VoidType(), []),
+                                   name='llvm.trap')
+            visitor.builder.call(trap, [])
+            visitor.builder.unreachable()
+            visitor.builder.position_at_end(merge)
+        else:
+            store_payload(payload_type)
+        result = visitor.builder.load(allocation)
+        return wrap_value(result, kind="address", type_hint=cls, address=allocation)
+
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
         """Handle attribute access on enum type (for constants like EnumType.VARIANT)

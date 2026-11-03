@@ -242,8 +242,9 @@ class TestTargetLayout(unittest.TestCase):
             self.assertEqual(target.primitive(named).allocation_size, 16)
 
     def test_integer_promotion_uses_value_width_not_allocation(self):
-        self.assertFalse(i32.is_compatible_with(i24))
-        self.assertTrue(i24.is_compatible_with(i32))
+        from pythoc.type_descriptor import common_numeric_type
+        self.assertIs(common_numeric_type(i32, i24), i32)
+        self.assertIs(common_numeric_type(i24, i32), i32)
 
     def test_ctypes_rejects_unrepresentable_storage(self):
         for pc_type in (struct[i8, simd[i32, 4]], union[simd[i32, 4]],

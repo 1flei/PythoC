@@ -192,23 +192,35 @@ class TypeConverter:
         """
         if isinstance(value, ir.Value):
             raise ValueError(f"Cannot convert raw LLVM value {value}")
+        if value.has_place() or value.has_storage():
+            from .valueref import read_rvalue
+            value = read_rvalue(value, self.builder)
+        if value.is_python_value():
+            raise_if_compile_level_callable(value.get_python_value())
         
-        # Check if target is a refined type but source is not
-        # This check MUST happen before stripping qualifiers, because refined types
-        # can only be constructed via assume() or refine(), not by direct conversion
-        target_is_refined = hasattr(target_type, '_is_refined') and target_type._is_refined
-        source_is_refined = value.type_hint and hasattr(value.type_hint, '_is_refined') and value.type_hint._is_refined
-        
-        if target_is_refined and not source_is_refined:
-            # Direct conversion from base type to refined type is not allowed
+        # A qualifier can wrap a refinement. Decide the semantic relation
+        # before the LLVM fast path or storage qualifier erasure.
+        from .type_descriptor import can_convert
+        target_is_refined = getattr(strip_qualifiers(target_type), '_is_refined', False)
+        if target_is_refined and not can_convert(
+                value.type_hint, target_type, mode='explicit', value=value):
             target_name = target_type.get_name() if hasattr(target_type, 'get_name') else str(target_type)
             source_name = value.type_hint.get_name() if value.type_hint and hasattr(value.type_hint, 'get_name') else str(value.type_hint)
             logger.error(f"Cannot directly convert from {source_name} to refined type {target_name}. "
-                f"Refined types must be constructed using assume() or refine().", node)
-            # raise TypeError(
-            #     f"Cannot directly convert from {source_name} to refined type {target_name}. "
-            #     f"Refined types must be constructed using assume() or refine()."
-            # )
+                f"Refined types must be constructed using assume() or refine().",
+                node, exc_type=TypeError)
+        if not can_convert(value.type_hint, target_type, mode='explicit', value=value):
+            from .type_descriptor import conversion_failure
+            detail = conversion_failure(value.type_hint, target_type, value)
+            if detail is not None:
+                raise TypeError(detail)
+            source_name = (value.type_hint.get_name()
+                           if value.type_hint is not None and hasattr(value.type_hint, 'get_name')
+                           else str(value.type_hint))
+            target_name = (target_type.get_name() if hasattr(target_type, 'get_name')
+                           else str(target_type))
+            logger.error(f"Cannot convert {source_name} to {target_name}",
+                         node, exc_type=TypeError)
         
         # Strip qualifiers for comparison and conversion
         stripped_target = strip_qualifiers(target_type)
@@ -220,9 +232,23 @@ class TypeConverter:
         if stripped_target is _void_type:
             return wrap_value(None, kind="python", type_hint=_void_type)
 
-        if stripped_source == stripped_target:
-            # Types match after stripping qualifiers, just update type_hint
-            return value.clone(type_hint=target_type)
+        from .type_descriptor import same_type
+        if stripped_source is not None and same_type(stripped_source, stripped_target):
+            # Equal PythoC types can still carry different LLVM pointer
+            # representations while an identified record is being completed.
+            # Skip lowering only when the actual IR type already matches.
+            if value.is_python_value():
+                return value.clone(type_hint=target_type)
+            base = get_base_type(target_type)
+            module = getattr(self._visitor, 'module', None)
+            module_context = getattr(module, 'context', None)
+            target_ir_type = base.get_llvm_type(module_context)
+            source_ir_type = ensure_ir(value).type
+            if (source_ir_type == target_ir_type
+                    or (value.has_place()
+                        and isinstance(source_ir_type, ir.PointerType)
+                        and source_ir_type.pointee == target_ir_type)):
+                return value.clone(type_hint=target_type)
         
         # Step 0: Handle PythonType (pyconst) target - type checking only, no IR conversion
         from .builtin_entities.python_type import PythonType
@@ -293,7 +319,7 @@ class TypeConverter:
                         f"but is being used as {stripped_target.get_name()}",
                         node=node, exc_type=TypeError,
                     )
-                return lowered
+                return lowered.clone(type_hint=target_type)
             if getattr(python_val, '_is_extern', False):
                 from .callable_lowering import lower_extern_wrapper
                 caller_group_key = getattr(self._visitor, 'current_group_key', None)
@@ -311,7 +337,7 @@ class TypeConverter:
                         f"but is being used as {stripped_target.get_name()}",
                         node=node, exc_type=TypeError,
                     )
-                return lowered
+                return lowered.clone(type_hint=target_type)
             # Otherwise, auto-promote Python values to PC values
             value = self._promote_python_to_pc(python_val, stripped_target)
             return value
@@ -329,6 +355,10 @@ class TypeConverter:
 
         # Step 4: Handle struct to struct conversion (field-by-field)
         if is_struct_type(base_source) and is_struct_type(base_target):
+            if not can_convert(value.type_hint, target_type, mode='explicit', value=value):
+                raise TypeError(
+                    f'Cannot convert {base_source.get_name()} to '
+                    f'{base_target.get_name()}')
             return self._convert_struct_to_struct(value, base_source, base_target, target_type)
 
         # Validate target is a PC type (use base version)
@@ -347,6 +377,11 @@ class TypeConverter:
 
         # Fast path: same IR type
         if source_type == target_llvm_type:
+            if value.type_hint is not None and not can_convert(
+                    value.type_hint, target_type, mode='explicit', value=value):
+                raise TypeError(
+                    f'Cannot convert {value.type_hint.get_name()} to '
+                    f'{target_type.get_name()}')
             return wrap_value(source_ir, kind="value", type_hint=target_type)
 
         # Infer signedness from pythoc types (use base versions)
@@ -442,7 +477,11 @@ class TypeConverter:
             # Otherwise create global string constant as ptr[i8]
             from .builtin_entities import ptr, i8
             str_const = self._visitor._create_string_constant(python_val)
-            return wrap_value(str_const, kind="value", type_hint=ptr[i8])
+            string_pointer = wrap_value(str_const, kind="value", type_hint=ptr[i8])
+            from .type_descriptor import same_type
+            if same_type(ptr[i8], target_type):
+                return string_pointer
+            return self.convert(string_pointer, target_type)
 
         # Get module_context for types that require it (e.g., structs with forward refs)
         module = getattr(self._visitor, 'module', None)
@@ -488,103 +527,9 @@ class TypeConverter:
 
     @staticmethod
     def _func_types_compatible(source_func_type, target_func_type, module_context=None) -> bool:
-        """Check whether two func[...] types have the same callable signature.
-
-        Parameter names are ignored.  The comparison first checks structural
-        equality of the PC parameter/return types (so named and unnamed
-        parameter lists are compatible), then falls back to the lowered LLVM
-        function type when a module context is available.
-        The bare, unspecialized ``func`` type is treated as compatible with any
-        function pointer.
-        """
-        if source_func_type == target_func_type:
-            return True
-        # Bare func type is an untyped function pointer: accept any func value.
-        if (getattr(target_func_type, 'param_types', None) is None
-                and getattr(target_func_type, 'return_type', None) is None):
-            return True
-        if (getattr(source_func_type, 'param_types', None) is None
-                or getattr(target_func_type, 'param_types', None) is None):
-            return False
-        if len(source_func_type.param_types) != len(target_func_type.param_types):
-            return False
-
-        # C-nominal comparison: parameter names ignored, typedef aliases
-        # transparent, named aggregates compare by tag.  See
-        # _signature_type_key for why this is not the structural type ID.
-        source_keys = [TypeConverter._sig_component_key(p)
-                       for p in source_func_type.param_types]
-        target_keys = [TypeConverter._sig_component_key(p)
-                       for p in target_func_type.param_types]
-        source_ret = TypeConverter._sig_component_key(source_func_type.return_type)
-        target_ret = TypeConverter._sig_component_key(target_func_type.return_type)
-
-        if source_keys == target_keys and source_ret == target_ret:
-            return True
-
-        # Fall back to the lowered LLVM function type when a module context is
-        # available; this catches cases where distinct PC types lower to the
-        # same C ABI signature.
-        if module_context is not None:
-            try:
-                source_llvm = source_func_type.get_function_type(module_context)
-                target_llvm = target_func_type.get_function_type(module_context)
-                return source_llvm == target_llvm
-            except Exception:
-                pass
-
-        return False
-
-    @staticmethod
-    def _sig_component_key(t):
-        """C-nominal key for one parameter/return type in a signature.
-
-        Typedef aliases are transparent (quoted spellings resolve through
-        the forward-ref registry) and named aggregates compare by tag, so
-        ``ptr["PyObject"]`` and ``ptr[_object]`` key the same while
-        ``ptr[void]`` stays distinct.  Structural type IDs are deliberately
-        not used here: they expand the whole field graph, and cycle-break
-        tokens make the expansion depend on where the walk started.
-        """
-        t = strip_qualifiers(t)
-        if isinstance(t, str):
-            from .forward_ref import get_defined_type
-            resolved = get_defined_type(t)
-            if resolved is None or isinstance(resolved, str):
-                return ('opaque', t)
-            t = strip_qualifiers(resolved)
-        if isinstance(t, type):
-            pointee = getattr(t, 'pointee_type', None)
-            if getattr(t, '_is_pointer', False) and hasattr(t, 'get_function_type'):
-                # func[...] specialization: recurse into the signature
-                if t.param_types is not None and t.return_type is not None:
-                    inner = tuple(TypeConverter._sig_component_key(p)
-                                  for p in t.param_types)
-                    return ('func', inner,
-                            TypeConverter._sig_component_key(t.return_type),
-                            bool(getattr(t, 'has_llvm_varargs', False)),
-                            bool(getattr(t, 'has_varargs', False)),
-                            bool(getattr(t, 'has_kwargs', False)))
-            if getattr(t, '_is_pointer', False):
-                if pointee is None:
-                    return ('ptr', 'void')
-                return ('ptr', TypeConverter._sig_component_key(pointee))
-            if getattr(t, 'is_array', None) is not None and t.is_array():
-                dims = getattr(t, 'dimensions', None) or ()
-                return ('array', TypeConverter._sig_component_key(
-                    getattr(t, 'element_type', None)), tuple(dims))
-            if getattr(t, '_is_struct', False) or getattr(t, '_is_union', False) \
-                    or getattr(t, '_is_enum', False):
-                kind = ('struct' if getattr(t, '_is_struct', False)
-                        else 'union' if getattr(t, '_is_union', False) else 'enum')
-                return ('tag', kind, getattr(t, '_canonical_name', None)
-                        or getattr(t, '__name__', None) or repr(t))
-            if getattr(t, '_is_builtin_entity', False) or hasattr(t, 'get_name'):
-                try:
-                    return ('scalar', t.get_name())
-                except Exception:
-                    pass
-        return ('other', getattr(t, '__name__', None) or str(t))
+        """Compare callable signatures in the PythoC type layer."""
+        from .type_descriptor import can_convert
+        return can_convert(source_func_type, target_func_type, mode='implicit')
 
     @staticmethod
     def _is_byte_array_type(pc_type) -> bool:
@@ -793,6 +738,14 @@ class TypeConverter:
         carrier = value_ref.get_python_value()
         if not is_sequence_carrier(carrier):
             return None
+        from .type_descriptor import can_convert
+        resolver = getattr(getattr(self._visitor, 'implicit_coercer', None),
+                           '_resolve_lazy_type_name', None)
+        if not can_convert(value_ref.type_hint, target_pc_type,
+                           mode='implicit', value=value_ref, context=resolver):
+            raise TypeError(
+                f'Cannot implicitly convert static aggregate initializer '
+                f'to {target_pc_type.get_name()}')
         return lower_sequence_to_constant(self._visitor, carrier, target_pc_type)
 
     def _convert_tuple_to_struct(self, python_tuple, target_struct_type):
@@ -882,10 +835,7 @@ class TypeConverter:
         for fname, ftype in zip(field_names, field_types):
             elem = key_value_map[fname]
             if isinstance(elem, ValueRef):
-                if elem.type_hint != ftype:
-                    field_val = self.convert(elem, ftype)
-                else:
-                    field_val = elem
+                field_val = self.convert(elem, ftype)
                 field_values.append(ensure_ir(field_val))
             else:
                 from .builtin_entities import PythonType
@@ -1018,7 +968,8 @@ class TypeConverter:
         
         if len(source_fields) == 1:
             # No payload - just tag
-            if variant_payload_type is not None and variant_payload_type != void:
+            from .type_descriptor import same_type
+            if variant_payload_type is not None and not same_type(variant_payload_type, void):
                 raise TypeError(
                     f"Variant {variant_names[variant_idx]} requires payload of type {variant_payload_type}, "
                     f"but struct has no payload field"
@@ -1034,16 +985,14 @@ class TypeConverter:
             payload_vref = source_field_values[1]
             
             # Check if payload is void variant
-            if variant_payload_type is None or variant_payload_type == void:
+            if variant_payload_type is None or same_type(variant_payload_type, void):
                 raise TypeError(
                     f"Variant {variant_names[variant_idx]} has no payload, "
                     f"but struct has payload field"
                 )
             
             # Convert payload to variant's payload type if needed
-            payload_type = payload_vref.type_hint
-            if payload_type != variant_payload_type:
-                payload_vref = self.convert(payload_vref, variant_payload_type)
+            payload_vref = self.convert(payload_vref, variant_payload_type)
             
             target_enum_ref = wrap_python_constant(target_enum_type)
             return self._visitor.value_dispatcher.handle_type_call(
@@ -1109,25 +1058,12 @@ class TypeConverter:
         # cast constexpr (sext/zext/trunc), because newer LLVM versions reject
         # those constexprs as instruction operands.
         if isinstance(value_ir, ir.Constant) and value_ir.constant is not None and value_ir.constant is not ir.Undefined:
-            v = value_ir.constant
-            sw = source_type.width
-            tw = target_type.width
-            if sw < tw:
-                if source_is_unsigned:
-                    v = v & ((1 << sw) - 1)
-                else:
-                    # sign-extend from sw bits
-                    if v & (1 << (sw - 1)):
-                        v = v - (1 << sw)
-            elif sw > tw:
-                if target_is_bool:
-                    v = int(v != 0)
-                else:
-                    v = v & ((1 << tw) - 1)
-            else:
-                if source_is_unsigned:
-                    v = v & ((1 << sw) - 1)
-                # same-width signed: keep Python int as-is
+            from .type_descriptor import integer_value
+            v = int(integer_value(value.type_hint, value_ir.constant))
+            if target_is_bool:
+                v = int(v != 0)
+            elif source_type.width >= target_type.width or target_is_unsigned:
+                v &= (1 << target_type.width) - 1
             result = ir.Constant(target_type, v)
             return wrap_value(result, kind="value", type_hint=type_hint)
 
@@ -1164,13 +1100,8 @@ class TypeConverter:
         # directly. Avoids emitting a sitofp/uitofp constexpr, which LLVM 20+
         # rejects as an instruction operand.
         if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, int) and value_ir.constant is not ir.Undefined:
-            v = value_ir.constant
-            sw = source_type.width
-            if source_is_unsigned:
-                v = v & ((1 << sw) - 1)
-            else:
-                if v & (1 << (sw - 1)):
-                    v = v - (1 << sw)
+            from .type_descriptor import integer_value
+            v = integer_value(value.type_hint, value_ir.constant)
             result = ir.Constant(target_type, float(v))
             return wrap_value(result, kind="value", type_hint=type_hint)
 
@@ -1460,89 +1391,47 @@ class TypeConverter:
 
     def unify_integer_types(self, left: Union[ir.Value, ValueRef], right: Union[ir.Value, ValueRef]) -> Tuple[ValueRef, ValueRef]:
         """Unify two integer operands to the same width using PC type hints."""
-        left_type = get_type(left)
-        right_type = get_type(right)
-        # If not both integers, return as-is (must be ValueRef)
-        if not isinstance(left_type, ir.IntType) or not isinstance(right_type, ir.IntType):
-            if not isinstance(left, ValueRef) or not isinstance(right, ValueRef):
-                raise TypeError("unify_integer_types requires ValueRef inputs with type_hint")
+        from .type_descriptor import common_numeric_type
+        target = common_numeric_type(left.type_hint, right.type_hint)
+        if target is None or getattr(target, '_is_float', False):
             return left, right
-        # Ensure we have type hints
-        if not isinstance(left, ValueRef) or left.type_hint is None:
-            raise TypeError("unify_integer_types requires ValueRef with type_hint")
-        if not isinstance(right, ValueRef) or right.type_hint is None:
-            raise TypeError("unify_integer_types requires ValueRef with type_hint")
-        # Same width
-        if left_type.width == right_type.width:
-            return left, right
-        # Promote narrower to wider using the wider one's PC type
-        if left_type.width < right_type.width:
-            left_promoted = self.convert(left, right.type_hint)
-            return left_promoted, right
-        else:
-            right_promoted = self.convert(right, left.type_hint)
-            return left, right_promoted
+        coercer = ImplicitCoercer(self)
+        return coercer.coerce(left, target), coercer.coerce(right, target)
 
     @staticmethod
     def infer_unified_pc_type(left_pc_type, right_pc_type):
-        """Return the least upper bound of two runtime PC types, or None.
+        """Project the common value relation without consulting LLVM types."""
+        from .type_descriptor import common_value_type
+        return common_value_type(left_pc_type, right_pc_type)
 
-        This is the type-only counterpart of ``unify_binop_types``: it computes
-        the common PC type without emitting IR, so it can be used by control-flow
-        constructs such as ternary expressions.
+    def integer_operand(self, value, node=None):
+        """Validate an index or offset and materialize it at pointer precision."""
+        from .builtin_entities.types import i64
+        from .type_descriptor import is_integer_operand
+        if not is_integer_operand(value.type_hint, value=value):
+            logger.error('Pointer offset or array index must have an integer type',
+                         node=node, exc_type=TypeError)
+        return ImplicitCoercer(self).coerce(value, i64, node)
 
-        Rules mirror C usual arithmetic conversions / conditional expressions:
-        - identical type -> that type
-        - both integer -> wider integer
-        - any float involved -> float (f64 wins over f32)
-        - compatible pointers (same pointee, void ptr, null) -> concrete ptr
-        - no common type -> None
-        """
-        if left_pc_type is None or right_pc_type is None:
-            return None
+    def unify_shift_types(self, left, right):
+        """Shifts preserve the left operand's PythoC width and signedness."""
+        for value in (left, right):
+            if (value.is_python_value()
+                    and type(value.get_python_value()) not in (int, bool)):
+                raise TypeError('Shift operands must have integer types')
+        target = get_base_type(right.type_hint if left.is_python_value()
+                               else left.type_hint)
+        right_type = get_base_type(right.type_hint)
 
-        # Identity / canonical equality
-        if left_pc_type == right_pc_type:
-            return left_pc_type
-        try:
-            from .type_id import get_type_id
-            if get_type_id(left_pc_type) == get_type_id(right_pc_type):
-                return left_pc_type
-        except Exception:
-            pass
+        def integer(item):
+            return (getattr(item, '_is_integer', False)
+                    or getattr(item, '_is_bool', False))
 
-        # Arithmetic types
-        left_is_float = hasattr(left_pc_type, '_is_float') and left_pc_type._is_float
-        right_is_float = hasattr(right_pc_type, '_is_float') and right_pc_type._is_float
-        if left_is_float or right_is_float:
-            from .builtin_entities import f64
-            if left_is_float and right_is_float:
-                return f64 if (left_pc_type == f64 or right_pc_type == f64) else left_pc_type
-            return left_pc_type if left_is_float else right_pc_type
-
-        left_is_int = hasattr(left_pc_type, '_is_integer') and left_pc_type._is_integer
-        right_is_int = hasattr(right_pc_type, '_is_integer') and right_pc_type._is_integer
-        if left_is_int and right_is_int:
-            left_width = left_pc_type.get_llvm_type(None).width
-            right_width = right_pc_type.get_llvm_type(None).width
-            if left_width >= right_width:
-                return left_pc_type
-            return right_pc_type
-
-        # Pointer types
-        left_is_ptr = hasattr(left_pc_type, '_is_pointer') and left_pc_type._is_pointer
-        right_is_ptr = hasattr(right_pc_type, '_is_pointer') and right_pc_type._is_pointer
-        if left_is_ptr and right_is_ptr:
-            # void pointer unifies with any concrete pointer
-            if ImplicitCoercer.is_void_pointer(left_pc_type):
-                return right_pc_type
-            if ImplicitCoercer.is_void_pointer(right_pc_type):
-                return left_pc_type
-            # compatible pointees -> concrete pointer type
-            if ImplicitCoercer.are_compatible_pointers(left_pc_type, right_pc_type):
-                return left_pc_type
-
-        return None
+        if not integer(target) or (not right.is_python_value()
+                                   and not integer(right_type)):
+            raise TypeError('Shift operands must have integer types')
+        coercer = ImplicitCoercer(self)
+        return coercer.coerce(left, target), coercer.coerce(right, target)
 
     def unify_binop_types(self, left: Union[ir.Value, ValueRef], right: Union[ir.Value, ValueRef]) -> Tuple[ValueRef, ValueRef, bool]:
         """Unify operands for binary operations via PC types."""
@@ -1550,36 +1439,20 @@ class TypeConverter:
             # Both are Python values - return as-is, let caller handle Python-level operations
             return left, right, False
         if not right.is_python_value() and left.is_python_value():
-            left = self._promote_python_to_pc(left.get_python_value(), right.type_hint)
+            left = self._promote_python_to_pc(left.get_python_value(), get_base_type(right.type_hint))
         if not left.is_python_value() and right.is_python_value():
-            right = self._promote_python_to_pc(right.get_python_value(), left.type_hint)
+            right = self._promote_python_to_pc(right.get_python_value(), get_base_type(left.type_hint))
         if not isinstance(left, ValueRef) or left.type_hint is None:
             raise TypeError("unify_binop_types requires ValueRef with type_hint")
         if not isinstance(right, ValueRef) or right.type_hint is None:
             raise TypeError("unify_binop_types requires ValueRef with type_hint")
-        left_pc_type = left.type_hint
-        right_pc_type = right.type_hint
-        left_is_float = hasattr(left_pc_type, '_is_float') and left_pc_type._is_float
-        right_is_float = hasattr(right_pc_type, '_is_float') and right_pc_type._is_float
-        if left_is_float or right_is_float:
-            from .builtin_entities import f64
-            if left_is_float and right_is_float:
-                target_pc_type = f64 if (left_pc_type == f64 or right_pc_type == f64) else left_pc_type
-            elif left_is_float:
-                target_pc_type = left_pc_type
-            else:
-                target_pc_type = right_pc_type
-            if not left_is_float:
-                left = self.promote_to_float(left, target_pc_type)
-            elif left_pc_type != target_pc_type:
-                left = self.convert(left, target_pc_type)
-            if not right_is_float:
-                right = self.promote_to_float(right, target_pc_type)
-            elif right_pc_type != target_pc_type:
-                right = self.convert(right, target_pc_type)
-            return left, right, True
-        left, right = self.unify_integer_types(left, right)
-        return left, right, False
+        from .type_descriptor import common_numeric_type
+        target = common_numeric_type(left.type_hint, right.type_hint)
+        if target is None:
+            return left, right, False
+        coercer = ImplicitCoercer(self)
+        return (coercer.coerce(left, target), coercer.coerce(right, target),
+                bool(getattr(target, '_is_float', False)))
 
 
 class ImplicitCoercer:
@@ -1618,24 +1491,56 @@ class ImplicitCoercer:
     def coerce(self, value: ValueRef, target_type, node=None) -> ValueRef:
         """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""
         source_type = value.type_hint
+        from .type_descriptor import can_convert
+        if value.is_python_value():
+            raise_if_compile_level_callable(value.get_python_value())
+
+        def check_relation():
+            if not can_convert(source_type, target_type, mode='implicit',
+                               value=value, context=self._resolve_lazy_type_name):
+                from .type_descriptor import conversion_failure
+                detail = conversion_failure(source_type, target_type, value)
+                if detail is not None:
+                    raise TypeError(detail)
+                source_name = (source_type.get_name() if hasattr(source_type, 'get_name')
+                               else str(source_type))
+                target_name = (target_type.get_name() if hasattr(target_type, 'get_name')
+                               else str(target_type))
+                logger.error(f"Cannot implicitly convert '{source_name}' to '{target_name}'",
+                             node, exc_type=TypeError)
+
+        if getattr(strip_qualifiers(target_type), '_is_refined', False) and not can_convert(
+                source_type, target_type, mode='implicit',
+                context=self._resolve_lazy_type_name):
+            logger.error(
+                f"Cannot implicitly convert to refined type {target_type.get_name()}; "
+                "use assume() or refine().", node, exc_type=TypeError)
 
         # Early exit: same type after stripping qualifiers
         stripped_source = strip_qualifiers(source_type) if source_type else None
         stripped_target = strip_qualifiers(target_type)
         if stripped_source is not None and stripped_source == stripped_target:
+            check_relation()
             return self._tc.convert(value, target_type, node)
 
         # Early exit: same type_id (handles SpecializedPtr identity issues)
         if stripped_source is not None and stripped_source is not stripped_target:
-            try:
-                from .type_id import get_type_id
-                if get_type_id(stripped_source) == get_type_id(stripped_target):
-                    return self._tc.convert(value, target_type, node)
-            except BaseException:
-                pass
+            from .type_descriptor import same_type
+            if same_type(stripped_source, stripped_target,
+                         resolver=self._resolve_lazy_type_name):
+                check_relation()
+                return self._tc.convert(value, target_type, node)
 
         base_source = get_base_type(source_type) if source_type else None
         base_target = get_base_type(target_type)
+
+        if (is_struct_type(base_source) and is_struct_type(base_target)
+                and not can_convert(source_type, target_type, mode='implicit',
+                                    context=self._resolve_lazy_type_name)):
+            logger.error(
+                f"Cannot implicitly convert '{base_source.get_name()}' to "
+                f"'{base_target.get_name()}': incompatible fields.",
+                node, exc_type=TypeError)
 
         # --- Pointer policy ---
         source_is_ptr = base_source is not None and hasattr(base_source, '_is_pointer') and base_source._is_pointer
@@ -1654,14 +1559,14 @@ class ImplicitCoercer:
         if source_is_ptr and target_is_ptr:
             # Null pointer constant -> any pointer: allowed
             if self.is_null_pointer_constant(value):
+                check_relation()
                 return self._tc.convert(value, target_type, node)
-            # Either side is void pointer: allowed
-            if self.is_void_pointer(base_source) or self.is_void_pointer(base_target):
-                return self._tc.convert(value, target_type, node)
-            # Same pointee type: allowed
+            # The PythoC relation checks void pointers, function signatures,
+            # pointee qualifiers and aliases in one place.
             if self.are_compatible_pointers(
                     base_source, base_target,
                     resolve_name=self._resolve_lazy_type_name):
+                check_relation()
                 return self._tc.convert(value, target_type, node)
             # Incompatible pointers
             source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
@@ -1691,6 +1596,7 @@ class ImplicitCoercer:
                 node, exc_type=TypeError)
 
         # All other cases: delegate to convert()
+        check_relation()
         return self._tc.convert(value, target_type, node)
 
     # --- Policy predicates ---
@@ -1708,7 +1614,8 @@ class ImplicitCoercer:
         base = get_base_type(pc_type)
         if base is None:
             return False
-        if not (hasattr(base, '_is_pointer') and base._is_pointer):
+        from .builtin_entities.types import ptr
+        if not (isinstance(base, type) and issubclass(base, ptr)):
             return False
         pointee = getattr(base, 'pointee_type', ...)
         if pointee is None:
@@ -1728,67 +1635,7 @@ class ImplicitCoercer:
 
     @staticmethod
     def are_compatible_pointers(source_type, target_type, resolve_name=None) -> bool:
-        """True if two pointer types have the same pointee (by identity or type_id).
-
-        Function pointer types (func[...]) are compared by their lowered LLVM
-        function type so that differently-named but structurally identical
-        signatures are still compatible.
-
-        ``resolve_name`` (optional) maps a lazy string pointee (quoted type
-        name) to its type object; callers with access to the compiling
-        module's namespace pass one so typedef-style aliases compare equal
-        to their target type.
-        """
-        from .builtin_entities.func import func as func_type_cls
-        if (isinstance(source_type, type) and issubclass(source_type, func_type_cls)
-                and isinstance(target_type, type) and issubclass(target_type, func_type_cls)):
-            return TypeConverter._func_types_compatible(source_type, target_type)
-
-        src_pointee = getattr(source_type, 'pointee_type', None)
-        tgt_pointee = getattr(target_type, 'pointee_type', None)
-        if src_pointee is None or tgt_pointee is None:
-            return False
-        # Strip storage/const qualifiers from the pointee; e.g. ptr[static[T]]
-        # should be compatible with ptr[T].
-        src_pointee = strip_qualifiers(src_pointee)
-        tgt_pointee = strip_qualifiers(tgt_pointee)
-        # Resolve lazy string pointees (quoted names) when a resolver with
-        # namespace access is provided.
-        if resolve_name is not None:
-            if isinstance(src_pointee, str):
-                resolved = resolve_name(src_pointee)
-                if resolved is not None and not isinstance(resolved, str):
-                    src_pointee = resolved
-            if isinstance(tgt_pointee, str):
-                resolved = resolve_name(tgt_pointee)
-                if resolved is not None and not isinstance(resolved, str):
-                    tgt_pointee = resolved
-        # Identity check
-        if src_pointee is tgt_pointee:
-            return True
-        # String forward ref equality
-        if isinstance(src_pointee, str) and isinstance(tgt_pointee, str):
-            return src_pointee == tgt_pointee
-        # Mixed: one resolved, one string forward ref
-        if isinstance(src_pointee, str) and hasattr(tgt_pointee, 'get_name'):
-            return src_pointee == tgt_pointee.get_name()
-        if isinstance(tgt_pointee, str) and hasattr(src_pointee, 'get_name'):
-            return tgt_pointee == src_pointee.get_name()
-        # Name check (handles different SpecializedPtr classes for same user type)
-        src_name = src_pointee.get_name() if hasattr(src_pointee, 'get_name') else None
-        tgt_name = tgt_pointee.get_name() if hasattr(tgt_pointee, 'get_name') else None
-        if src_name is not None and src_name == tgt_name:
-            return True
-        # Nested pointers: ptr[ptr[T]] vs ptr[ptr["AliasT"]] -- recurse so a
-        # lazy name one level down resolves (via resolve_name) to the same
-        # type as its already-bound counterpart.
-        if (getattr(src_pointee, 'pointee_type', None) is not None
-                and getattr(tgt_pointee, 'pointee_type', None) is not None):
-            return ImplicitCoercer.are_compatible_pointers(
-                src_pointee, tgt_pointee, resolve_name=resolve_name)
-        # type_id check (handles forward refs etc.)
-        from .type_id import get_type_id
-        try:
-            return get_type_id(src_pointee) == get_type_id(tgt_pointee)
-        except BaseException:
-            return False
+        """Directional PythoC pointer compatibility, including pointee qualifiers."""
+        from .type_descriptor import can_convert
+        return can_convert(source_type, target_type, mode='implicit',
+                           context=resolve_name)

@@ -203,7 +203,10 @@ def compile_python_extension(
         init_symbol=init_symbol,
         module_name=module_name.split('.')[-1],
     )
-    adapter_group = _adapter_group_key(adapter_key)
+    adapter_group = _adapter_group_key(
+        adapter_key,
+        _adapter_identity_payload(specs, init_symbol, module_name.split('.')[-1]),
+    )
     adapter_object = _adapter_group_object(adapter_group)
     version_script = (
         output_path + '.map' if sys.platform == 'linux' else None
@@ -299,6 +302,17 @@ def _write_manifest(path: str, manifest: dict) -> str:
     return path
 
 
+def _python_boundary_failure(info):
+    from .type_descriptor import contains_refinement_storage
+    for name in info.param_names:
+        if contains_refinement_storage(info.param_type_hints.get(name)):
+            return (
+                f"Python argument '{name}' requires refinement proof; "
+                'use a PythoC entry function with an explicit refine/assume operation'
+            )
+    return None
+
+
 def function_spec(wrapper) -> Optional[dict]:
     """Return a C-ABI export spec, or None when the signature cannot be lowered."""
     info = getattr(wrapper, '_func_info', None)
@@ -308,6 +322,8 @@ def function_spec(wrapper) -> Optional[dict]:
     if info.has_varargs or info.has_kwargs or info.has_llvm_varargs:
         return None
     if info.linkage in ('internal', 'linkonce_odr'):
+        return None
+    if _python_boundary_failure(info) is not None:
         return None
     abi = _Abi()
     names = list(info.param_names)
@@ -405,77 +421,11 @@ def _matching_defaults(wrapper, names: List[str]):
 
 
 def _boundary_type_identity(pc_type, seen=None):
+    """Use the public, lossless PythoC type identity in adapter cache keys."""
     if pc_type is None:
         return None
-    seen = set() if seen is None else seen
-    peeled = _peel_type(pc_type)
-    marker = id(peeled)
-    name = (
-        pc_type.get_name()
-        if hasattr(pc_type, 'get_name')
-        else repr(pc_type)
-    )
-    base_name = (
-        peeled.get_name()
-        if hasattr(peeled, 'get_name')
-        else repr(peeled)
-    )
-    identity = {
-        'name': name,
-        'base': base_name,
-        'size': _size_of(peeled),
-        'align': _align_of(peeled),
-    }
-    if marker in seen:
-        identity['recursive'] = True
-        return identity
-    seen.add(marker)
-    try:
-        fields = getattr(peeled, '_field_types', None)
-        if fields is not None:
-            identity['fields'] = [
-                _boundary_type_identity(field, seen)
-                for field in fields
-            ]
-            identity['field_names'] = list(
-                getattr(peeled, '_field_names', None) or []
-            )
-        element = getattr(peeled, 'element_type', None)
-        if element is not None:
-            identity['element'] = _boundary_type_identity(element, seen)
-            dims = getattr(peeled, 'dimensions', None)
-            if dims is not None:
-                identity['dimensions'] = (
-                    list(dims) if isinstance(dims, tuple) else dims
-                )
-        variants = list(getattr(peeled, '_variant_names', None) or [])
-        if variants:
-            variant_types = list(
-                getattr(peeled, '_variant_types', None) or []
-            )
-            tags = getattr(peeled, '_tag_values', None)
-            identity['variants'] = [
-                {
-                    'name': variant,
-                    'tag': (
-                        int(tags[variant])
-                        if isinstance(tags, dict)
-                        else int(tags[index])
-                    ),
-                    'payload': _boundary_type_identity(
-                        (
-                            variant_types[index]
-                            if index < len(variant_types)
-                            else None
-                        ),
-                        seen,
-                    ),
-                }
-                for index, variant in enumerate(variants)
-            ]
-        return identity
-    finally:
-        seen.remove(marker)
+    from .type_id import get_type_id
+    return get_type_id(pc_type)
 
 
 def _literal_default(value):
@@ -730,7 +680,7 @@ _C_RESERVED = {
 def _adapter_symbol(symbol: str) -> str:
     if _is_identifier(symbol):
         return 'pythoc_pyadapter_' + symbol
-    digest = hashlib.sha256(symbol.encode('utf-8')).hexdigest()[:16]
+    digest = hashlib.sha256(symbol.encode('utf-8')).hexdigest()
     return 'pythoc_pyadapter_' + digest
 
 
@@ -800,14 +750,14 @@ def _kernel_link_input(lib: str) -> str:
 
 def _development_adapter_path(wrapper, specs: List[dict]) -> str:
     so_file = os.path.abspath(wrapper._binding.so_file)
-    adapters = tuple(spec['adapter'] for spec in specs)
-    key = (so_file, adapters)
+    payload = _adapter_identity_payload(specs, None, None)
+    key = (so_file, payload)
     cached = _ADAPTER_SO.get(key)
     if cached and os.path.exists(cached):
         return cached
     root, _extension = os.path.splitext(so_file)
     identity = _adapter_identity(specs, None, None)
-    base = '{}.pythoc_pyadapter_group.{}'.format(root, identity[:16])
+    base = '{}.pythoc_pyadapter_group.{}'.format(root, identity)
     output = base + _shared_suffix()
     kernel_libs = []
     for spec in specs:
@@ -858,7 +808,8 @@ def _compile_adapter_library(
         build_artifact,
     )
     adapter_key = _adapter_object_path(output_path, specs)
-    adapter_group = _adapter_group_key(adapter_key)
+    adapter_group = _adapter_group_key(
+        adapter_key, _adapter_identity_payload(specs, None, None))
     object_path = _adapter_group_object(adapter_group)
     steps = [
         ArtifactStep(
@@ -904,7 +855,7 @@ def _write_and_compile(specs, group_key, init_symbol, module_name) -> str:
 
 
 
-def _adapter_identity(specs, init_symbol, module_name) -> str:
+def _adapter_identity_payload(specs, init_symbol, module_name) -> str:
     payload = {
         'runtime': {
             'cache_tag': getattr(sys.implementation, 'cache_tag', None),
@@ -928,12 +879,16 @@ def _adapter_identity(specs, init_symbol, module_name) -> str:
             for spec in specs
         ],
     }
-    encoded = json.dumps(
+    return json.dumps(
         payload,
         sort_keys=True,
         separators=(',', ':'),
-    ).encode('utf-8')
-    return hashlib.sha256(encoded).hexdigest()
+    )
+
+
+def _adapter_identity(specs, init_symbol, module_name) -> str:
+    payload = _adapter_identity_payload(specs, init_symbol, module_name)
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
 def _adapter_object_path(
@@ -944,19 +899,22 @@ def _adapter_object_path(
 ) -> str:
     root, _ext = os.path.splitext(output_path)
     identity = _adapter_identity(specs, init_symbol, module_name)
-    return '{}.{}.adapter.o'.format(root, identity[:20])
+    return '{}.{}.adapter.o'.format(root, identity)
 
 
-def _adapter_group_key(adapter_key):
+def _adapter_group_key(adapter_key, identity=None):
+    from .utils.naming import NormalizedSuffix
     source_file = os.path.realpath(
         os.path.join(os.path.dirname(__file__), 'python_entry_bind.py')
     )
     cache_key = os.path.abspath(adapter_key).encode('utf-8')
-    digest = hashlib.sha256(cache_key).hexdigest()[:20]
+    digest = hashlib.sha256(cache_key).hexdigest()
     return (
         source_file,
         'meta',
-        'pyadapter2_{}'.format(digest),
+        NormalizedSuffix('pyadapter3_{}'.format(digest[:20]),
+                         ('python-adapter', identity if identity is not None
+                          else os.path.abspath(adapter_key))),
         None,
     )
 
@@ -1112,6 +1070,9 @@ def _publish_group_kernels(entries, kernel_lib) -> Dict[str, int]:
 
 def _slow_implementation(wrapper):
     def slow(*args, **kwargs):
+        failure = _python_boundary_failure(wrapper._func_info)
+        if failure is not None:
+            raise TypeError(failure)
         from .call_normalization import pack_native_call_args
         from .native_executor import get_multi_so_executor
 

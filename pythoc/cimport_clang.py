@@ -165,7 +165,7 @@ def parse_to_ir(
     # the emitted module can bind names sequentially; dedup keeps the
     # first-seen slot and a main-file declaration wins the slot over an
     # included-file one.
-    for cursor in tu.cursor.get_children():
+    for cursor in _declaration_cursors(cindex, tu.cursor):
         is_main = _is_from_main_file(cursor, main_file)
         if not is_main:
             if not includes:
@@ -222,6 +222,18 @@ def parse_to_ir(
         seen_is_main[key] = is_main
         module.declarations.append(decl)
     return module
+
+
+def _declaration_cursors(cindex, root):
+    """Include enum declarations nested inside public record/typedef types."""
+    containers = (cindex.CursorKind.STRUCT_DECL, cindex.CursorKind.UNION_DECL,
+                  cindex.CursorKind.TYPEDEF_DECL)
+    for cursor in root.get_children():
+        if cursor.kind in containers:
+            for nested in cursor.walk_preorder():
+                if nested.kind == cindex.CursorKind.ENUM_DECL:
+                    yield nested
+        yield cursor
 
 
 def _resolve_target_arch(target: Optional[str]) -> str:
@@ -471,7 +483,9 @@ def _cursor_to_decl(cindex, tu, cursor, target_arch: str,
         for child in cursor.get_children():
             if child.kind == cindex.CursorKind.ENUM_CONSTANT_DECL:
                 values.append(CEnumValueIR(child.spelling, child.enum_value))
-        return CDeclIR("enum", name, values=values)
+        underlying = _type_to_ir(cindex, cursor.enum_type, target_arch, main_file, include_all)
+        return CDeclIR("enum", name, type=underlying, values=values,
+                       is_definition=cursor.is_definition())
 
     if kind == cindex.CursorKind.TYPEDEF_DECL:
         if not cursor.spelling:

@@ -6,7 +6,7 @@ where no actual IR should be generated. Any attempt to generate IR will raise
 a CompileTimeOnlyError.
 """
 
-from typing import Any, List
+from typing import Any, List, Optional
 
 from .abstract import AbstractBuilder
 
@@ -219,7 +219,8 @@ class NullBuilder(AbstractBuilder):
     # ========== Function Calls ==========
     
     def call(self, fn: Any, args: List[Any], name: str = "",
-             return_type_hint: Any = None) -> Any:
+             return_type_hint: Any = None, arg_type_hints: List[Any] = None,
+             cconv: Optional[str] = None) -> Any:
         self._raise_error("call")
     
     # ========== Aggregate Operations ==========

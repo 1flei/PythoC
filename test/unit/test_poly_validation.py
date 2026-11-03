@@ -57,6 +57,25 @@ class PolyValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, 'requires a payload'):
             call_with_enum(dispatch, OptionalNumber)
 
+    def test_forward_signature_refreshes_after_completion(self):
+        from pythoc import ptr, mark_type_defined
+        from pythoc.session import CompileSession
+        with CompileSession():
+            function = overload(ptr['PolyLateType'], i32)
+            function.handle_call = lambda *args: 'selected'
+            dispatch = Poly(function)
+            mark_type_defined('PolyLateType', i32)
+            value = wrap_value(ir.Constant(ptr[i32].get_llvm_type(), None),
+                               kind='value', type_hint=ptr[i32])
+            self.assertEqual(dispatch.handle_call(None, None, [value], None), 'selected')
+
+    def test_invalid_append_does_not_change_dispatcher(self):
+        function = overload(i32, i32)
+        dispatch = Poly(function)
+        with self.assertRaises(NameError):
+            dispatch.append(object())
+        self.assertEqual(dispatch._funcs, [function])
+
 
 if __name__ == '__main__':
     unittest.main()

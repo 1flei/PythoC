@@ -219,6 +219,44 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
 # Extern wrapper lowering
 # ---------------------------------------------------------------------------
 
+def extern_callable_type(extern_wrapper, node=None):
+    """Project an extern declaration to its PythoC callable type."""
+    signature = extern_wrapper._extern_config.get('signature')
+    param_type_map = dict(extern_wrapper.param_types)
+    fixed_params = []
+    varargs_name = None
+
+    for param in signature.parameters.values():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            varargs_name = param.name
+            continue
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            logger.error(
+                f"Extern function '{extern_wrapper.func_name}' does not support **kwargs",
+                node=node, exc_type=TypeError,
+            )
+        param_type = param_type_map.get(param.name)
+        if param_type is None:
+            logger.error(
+                f"Extern function '{extern_wrapper.func_name}': parameter '{param.name}' "
+                "has no type annotation",
+                node=node, exc_type=TypeError,
+            )
+        fixed_params.append((param.name, param_type))
+
+    from .builtin_entities.func import func as func_type_cls
+    from .builtin_entities.types import void
+    ret_type = extern_wrapper.return_type if extern_wrapper.return_type is not None else void
+    callable_items = tuple(fixed_params) + ((None, ret_type),)
+    callable_pc_type = func_type_cls.handle_type_subscript(callable_items)
+    callable_pc_type.calling_convention = extern_wrapper.calling_convention
+    if varargs_name is not None and callable_pc_type.calling_convention != 'cdecl':
+        raise TypeError('Variadic extern functions require the cdecl calling convention')
+    if varargs_name is not None:
+        callable_pc_type.has_llvm_varargs = True
+        callable_pc_type.param_names = [name for name, _ in fixed_params] + [varargs_name]
+    return callable_pc_type, fixed_params, varargs_name
+
 def lower_extern_wrapper(
     extern_wrapper,
     module: ir.Module,
@@ -247,29 +285,8 @@ def lower_extern_wrapper(
     # The C symbol name may differ from the Python function name when the
     # wrapper uses @extern(name='...') to avoid identifier collisions.
     c_name = getattr(extern_wrapper, 'c_name', func_name)
-    signature = extern_wrapper._extern_config.get('signature')
-    param_type_map = dict(extern_wrapper.param_types)
-    fixed_params = []
-    varargs_name = None
-
-    for param in signature.parameters.values():
-        if param.kind == inspect.Parameter.VAR_POSITIONAL:
-            varargs_name = param.name
-            continue
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            logger.error(
-                f"Extern function '{func_name}' does not support **kwargs",
-                node=node, exc_type=TypeError,
-            )
-        param_type = param_type_map.get(param.name)
-        if param_type is None:
-            logger.error(
-                f"Extern function '{func_name}': parameter '{param.name}' "
-                f"has no type annotation",
-                node=node, exc_type=TypeError,
-            )
-        fixed_params.append((param.name, param_type))
-
+    callable_pc_type, fixed_params, varargs_name = extern_callable_type(
+        extern_wrapper, node)
     has_varargs = varargs_name is not None
 
     module_context = module.context
@@ -283,7 +300,7 @@ def lower_extern_wrapper(
     )
     convention = (
         'x86_stdcallcc'
-        if extern_wrapper.calling_convention == 'stdcall' else 'ccc'
+        if callable_pc_type.calling_convention == 'stdcall' else 'ccc'
     )
     existing = module.globals.get(c_name)
     if existing is not None:
@@ -313,16 +330,5 @@ def lower_extern_wrapper(
             get_dependency_tracker().record_extern_dependency(
                 caller_group_key, [lib],
             )
-
-    # --- Build PC func type ---
-    from .builtin_entities.func import func as func_type_cls
-    from .builtin_entities.types import void
-
-    ret_type = extern_wrapper.return_type if extern_wrapper.return_type is not None else void
-    callable_items = tuple(fixed_params) + ((None, ret_type),)
-    callable_pc_type = func_type_cls.handle_type_subscript(callable_items)
-    if has_varargs:
-        callable_pc_type.has_llvm_varargs = True
-        callable_pc_type.param_names = [name for name, _ in fixed_params] + [varargs_name]
 
     return wrap_value(ir_func, kind='pointer', type_hint=callable_pc_type)

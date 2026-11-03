@@ -447,6 +447,13 @@ class OutputManager:
                 )
                 return False
 
+        identities = group.get('_registration_identities')
+        if identities:
+            from .deps import get_dependency_tracker
+            cached = get_dependency_tracker().load_deps(group['obj_file'])
+            if cached is None or cached.registration_identities != sorted(identities.values()):
+                return False
+
         # #1/#9: Check AST content hash — detect stale cache when source_file
         # stays the same but the generated AST body changed.  This must run
         # even when pending_symbols is empty: the phase-split compile task
@@ -1551,6 +1558,10 @@ class OutputManager:
             
             if compiled_symbols is not None:
                 group_deps.compiled_symbols = sorted(compiled_symbols)
+
+            if group:
+                group_deps.registration_identities = sorted(
+                    group.get('_registration_identities', {}).values())
 
             # Persist AST content hash for meta-generated code invalidation.
             if group and group.get('_ast_content_hashes'):

@@ -211,9 +211,12 @@ class _LayoutModel:
     def __init__(self, declarations: list[CDeclIR]):
         self._records: dict[str, CDeclIR] = {}
         self._typedefs: dict[str, CTypeIR] = {}
+        self._enums: dict[str, CTypeIR] = {}
         for decl in declarations:
             if decl.kind in _TAG_KINDS and decl.kind != "enum":
                 self._records.setdefault(_ident(decl.name), decl)
+            elif decl.kind == "enum":
+                self._enums.setdefault(_ident(decl.name), decl.type or CTypeIR('primitive', 'i32'))
             elif decl.kind == "typedef":
                 self._typedefs.setdefault(_ident(decl.name), decl.type)
         self._record_layouts: dict[int, tuple[int, int]] = {}
@@ -240,7 +243,8 @@ class _LayoutModel:
             elem_size, elem_align = element
             return (_align_up(elem_size, elem_align) * ty.size, elem_align)
         if kind == "enum":
-            return _emitted_type_layout("i32")
+            underlying = self._enums.get(_ident(ty.name))
+            return self.type_layout(underlying, _visiting) if underlying is not None else None
         if kind in ("struct", "union"):
             decl = self._records.get(_ident(ty.name)) if ty.name else None
             if decl is None:
@@ -467,7 +471,7 @@ def _emit_union(lines: list[str], decl: CDeclIR,
 def _emit_enum(lines: list[str], decl: CDeclIR,
                renames: dict[str, str] | None = None) -> None:
     name = _decl_ident(decl, renames, "_AnonymousEnum")
-    lines.append("@enum(i32)")
+    lines.append(f"@enum({_type_expr(decl.type, renames) if decl.type is not None else 'i32'})")
     lines.append(f"class {name}:")
     if not decl.values:
         lines.append("    pass")

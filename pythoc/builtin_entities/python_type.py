@@ -134,14 +134,8 @@ class PythonType(_PythonTypeBase):
         return 1
     
     def get_type_id(self, _visited=None) -> str:
-        """Get type ID for pyconst[value]."""
-        if self._is_constant:
-            # Use value repr for type ID
-            value_repr = repr(self._constant_value)
-            # Sanitize for valid identifier
-            value_repr = value_repr.replace("'", "").replace('"', "").replace(" ", "_")
-            return f"pyconst_{value_repr}"
-        return "python_object"
+        from ..type_id import get_type_id
+        return get_type_id(self)
     
     def can_be_called(self) -> bool:
         """Python objects might be callable."""
@@ -264,7 +258,9 @@ class PythonType(_PythonTypeBase):
     
     @property
     def defer_linear_transfer(self):
-        return getattr(self._python_object, 'defer_linear_transfer', False)
+        borrows = getattr(self._python_object, 'borrows_args', None)
+        return bool(getattr(self._python_object, 'defer_linear_transfer', False)
+                    or (callable(borrows) and borrows()))
 
     def evaluate_call_argument(self, visitor, node):
         """Let compile-time callables request a place instead of an rvalue."""

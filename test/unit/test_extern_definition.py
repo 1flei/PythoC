@@ -54,6 +54,32 @@ class TestExternDefinition(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "calling convention"):
             lower_extern_wrapper(wrong_convention, module)
 
+    def test_calling_convention_is_a_pythoc_signature_property(self):
+        from pythoc.callable_lowering import extern_callable_type
+        from pythoc.type_descriptor import same_type, can_convert
+        from pythoc.type_id import get_type_id
+        ordinary, _, _ = extern_callable_type(declared)
+        alternate, _, _ = extern_callable_type(wrong_convention)
+        self.assertEqual(ordinary.calling_convention, 'cdecl')
+        self.assertEqual(alternate.calling_convention, 'stdcall')
+        self.assertFalse(same_type(ordinary, alternate))
+        self.assertNotEqual(get_type_id(ordinary), get_type_id(alternate))
+        for mode in ('implicit', 'explicit'):
+            self.assertFalse(can_convert(ordinary, alternate, mode=mode))
+            self.assertFalse(can_convert(alternate, ordinary, mode=mode))
+
+    def test_unknown_convention_and_variadic_stdcall_are_rejected(self):
+        from pythoc.callable_lowering import extern_callable_type
+        with self.assertRaisesRegex(TypeError, 'Unsupported calling convention'):
+            extern(calling_convention='typo')(lambda: None)
+
+        @extern(calling_convention='stdcall')
+        def variadic(value: i32, *args) -> i32:
+            pass
+
+        with self.assertRaisesRegex(TypeError, 'require the cdecl'):
+            extern_callable_type(variadic)
+
     def test_data_symbol_is_not_callable(self):
         module = ir.Module()
         ir.GlobalVariable(module, ir.IntType(32), "native_function")

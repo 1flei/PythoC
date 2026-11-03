@@ -186,6 +186,9 @@ class TestFrozenLinkInputs(unittest.TestCase):
 
         with patch("pythoc.python_adapter._adapter_object_path",
                    side_effect=adapter_path), patch(
+                       "pythoc.python_adapter._adapter_identity_payload",
+                       side_effect=lambda specs, *_: tuple(
+                           spec["adapter"] for spec in specs)), patch(
                        "pythoc.artifact.build_artifact") as build:
             specs = [{"adapter": "first"}, {"adapter": "second"}]
             _compile_adapter_library(specs, "adapter.so", (), ())
