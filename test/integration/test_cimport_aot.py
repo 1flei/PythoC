@@ -109,6 +109,7 @@ lib = cimport(D + '/aot_lib.h', sources=[D + '/aot_lib.c'],
 # SDKs (macOS _stdio.h, glibc stdlib.h sub-headers).
 stdio = cimport('stdio.h', lib='c', includes=True)
 stdlib = cimport('stdlib.h', lib='c', includes=True)
+_cchar = stdio.snprintf.param_types[0][1].pointee_type
 
 AotPair = lib.AotPair
 aot_counter = lib.aot_counter
@@ -130,7 +131,7 @@ def main() -> i32:
     enum_val: i32 = lib.AOT_MAX + lib.AOT_NEG         # 2
     # libc calls: atoi + snprintf + printf
     parsed: i32 = stdlib.atoi("8")               # 8
-    buf: array[i8, 64] = ""
+    buf: array[_cchar, 64] = ""
     stdio.snprintf(buf, 64, "sum=%d", struct_val)
     stdio.printf("AOT inline=%d struct=%d counter=%d macro=%d enum=%d text=%s\\n",
                  inline_val, struct_val, bumped, macro_val, enum_val, buf)

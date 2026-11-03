@@ -638,6 +638,21 @@ class TypeRelationsTest(unittest.TestCase):
         self.assertTrue(can_convert(i32, ptr[i32], mode='explicit'))
         self.assertTrue(can_convert(PythonType.wrap('hello'), ptr[void]))
 
+    def test_string_literal_adapts_to_signed_and_unsigned_c_char(self):
+        from pythoc import bool as pc_bool, i8, u8
+
+        literal = PythonType.wrap('hello')
+        for byte in (i8, u8):
+            for pointee in (byte, const[byte], volatile[byte]):
+                with self.subTest(pointee=pointee):
+                    self.assertTrue(can_convert(literal, ptr[pointee]))
+            other = u8 if byte is i8 else i8
+            self.assertFalse(can_convert(ptr[byte], ptr[other]))
+            self.assertFalse(can_convert(array[byte, 4], ptr[other]))
+        for pointee in (pc_bool, i32, refined[u8, 'checked']):
+            with self.subTest(pointee=pointee):
+                self.assertFalse(can_convert(literal, ptr[pointee]))
+
     def test_full_id_tracks_additional_composites(self):
         result = _create_enum_type([('Ok', i32, 0), ('Err', i64, 1)], i32)
         near = _create_enum_type([('Ok', i32, 0), ('Err', i64, 2)], i32)

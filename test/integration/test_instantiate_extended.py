@@ -7,6 +7,7 @@ break/continue, complex genexpr, compile-time for-unroll, error paths.
 from __future__ import annotations
 import ast
 import unittest
+from unittest.mock import patch
 from pythoc import compile, i32, f64, bool, ptr
 from pythoc.builtin_entities.instantiate import instantiate
 
@@ -73,6 +74,28 @@ def run_bool_all() -> i32:
 
 sealed_const_f64 = instantiate([1.5, 2.5, 3.5])
 sealed_const_bool = instantiate([True, False, True])
+
+# Model allocator address reuse while both generated APIs remain live.
+with patch('pythoc.meta.instantiate.id', return_value=123, create=True):
+    sealed_const_first = instantiate([17, 19])
+    sealed_const_second = instantiate([23, 29])
+    sealed_const_repeated = instantiate([17, 19])
+
+
+@compile
+def run_distinct_const_iterables() -> i32:
+    first: sealed_const_first.Iter
+    second: sealed_const_second.Iter
+    repeated: sealed_const_repeated.Iter
+    sealed_const_first.init(ptr(first))
+    sealed_const_second.init(ptr(second))
+    sealed_const_repeated.init(ptr(repeated))
+    sealed_const_first.next(ptr(first))
+    sealed_const_second.next(ptr(second))
+    sealed_const_repeated.next(ptr(repeated))
+    return (sealed_const_first.value(ptr(first)) * 10000
+            + sealed_const_second.value(ptr(second)) * 100
+            + sealed_const_repeated.value(ptr(repeated)))
 
 
 @compile
@@ -285,6 +308,9 @@ class TestBoolYield(unittest.TestCase):
 class TestTypedConst(unittest.TestCase):
     def test_f64_const(self): self.assertEqual(run_const_f64_all(), 7)
     def test_bool_const(self): self.assertEqual(run_const_bool_all(), 2)
+
+    def test_distinct_and_repeated_constants_survive_address_reuse(self):
+        self.assertEqual(run_distinct_const_iterables(), 172317)
 
 class TestAnnotationAlias(unittest.TestCase):
     def test_f64_alias(self): self.assertEqual(run_alias_f64(), 4)

@@ -548,10 +548,11 @@ def _literal_relation(literal, target, mode, context):
                         for name, field in zip(names, get_schema_field_types(target))))
     if type(literal) is str:
         if getattr(target, '_is_pointer', False):
-            from .builtin_entities.types import i8, void
-            pointee = getattr(target, 'pointee_type', None)
+            from .builtin_entities.types import i8, u8, void
+            pointee = _unqualified(getattr(target, 'pointee_type', None))
             return (mode == 'explicit' or pointee is None or pointee is void
-                    or same_type(pointee, i8, resolver=context))
+                    or any(same_type(pointee, byte, resolver=context)
+                           for byte in (i8, u8)))
         if getattr(target, 'dimensions', None) is not None:
             element = target.element_type
             size = getattr(element, '_size_bytes', None)

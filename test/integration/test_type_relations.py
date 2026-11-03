@@ -1,6 +1,6 @@
 """Compiler boundaries use PythoC type relations before LLVM lowering."""
 
-from contextlib import chdir
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import tempfile
@@ -14,6 +14,8 @@ from pythoc.builtin_entities.python_type import PythonType
 from pythoc.builtin_entities.struct import create_struct_type
 from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
 from pythoc.logger import set_raise_on_error
+from pythoc.session import CompileSession
+from pythoc.target_layout import default_target_triple
 
 from fixtures.type_relation_matrix import (
     CASES, ENTRIES, build_conversion, build_probe,
@@ -37,7 +39,9 @@ def _subprocess_environment():
 
 class TypeRelationsTest(unittest.TestCase):
     def setUp(self):
-        self.tmp_path = Path(self.enterContext(tempfile.TemporaryDirectory(
+        contexts = ExitStack()
+        self.addCleanup(contexts.close)
+        self.tmp_path = Path(contexts.enter_context(tempfile.TemporaryDirectory(
             prefix='type-relations-')))
         self.addCleanup(os.chdir, Path.cwd())
 
@@ -165,6 +169,27 @@ class TypeRelationsTest(unittest.TestCase):
 
         flush_all_pending_outputs()
         self.assertEqual(read(), ord('h'))
+
+    def test_string_literal_adapts_to_c_char_signedness(self):
+        from pythoc import i8, u8
+
+        for byte in (i8, u8, const[i8], const[u8]):
+            with self.subTest(byte=byte):
+                @compile(suffix=('relation_literal_char_return', byte))
+                def make_string() -> ptr[byte]:
+                    return 'hello'
+
+                @compile(suffix=('relation_literal_char_argument', byte))
+                def read(value: ptr[byte]) -> i32:
+                    return value[0]
+
+                @compile(suffix=('relation_literal_char_runtime', byte))
+                def run() -> i32:
+                    local: ptr[byte] = 'hello'
+                    return read('hello') + local[1] + make_string()[4]
+
+                flush_all_pending_outputs()
+                self.assertEqual(run(), ord('h') + ord('e') + ord('o'))
 
     def test_struct_to_enum_checks_tag_and_payload_before_lowering(self):
         target = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32)
@@ -766,8 +791,10 @@ class TypeRelationsTest(unittest.TestCase):
             name = 'WideMode' if wide else 'SmallMode'
             source.write_text(text.replace(declaration + ';\n', '')
                               .replace('enum ' + name + ' value;', declaration + ' value;'))
+        # Match native code generation, including the GNU ABI used by Zig.
         bindings = cimport(str(source), compile_sources=True,
-                           cflags=[] if wide else ['-fshort-enums'])
+                           cflags=[] if wide else ['-fshort-enums'],
+                           target=default_target_triple())
         holder_type = bindings.WideHolder if wide else bindings.SmallHolder
         mode_type = bindings.WideMode if wide else bindings.SmallMode
         tag = bindings.BIG if wide else bindings.SMALL
@@ -1082,7 +1109,10 @@ class TypeRelationsTest(unittest.TestCase):
         for wide in [False, True]:
             for nested in [False, True]:
                 with self.subTest(wide=wide, nested=nested):
-                    with tempfile.TemporaryDirectory(prefix='type-matrix-case-') as temp:
+                    # C objects register with the session. Each case defines
+                    # the same C symbols and must have its own link inputs.
+                    with CompileSession(), tempfile.TemporaryDirectory(
+                            prefix='type-matrix-case-') as temp:
                         self.tmp_path = Path(temp)
                         self._check_cimport_enum_representation_matches_c_consumer(wide, nested)
 
@@ -1101,13 +1131,16 @@ class TypeRelationsTest(unittest.TestCase):
             with self.subTest(right_type=right_type):
                 self._check_pointer_difference_rejects_unrelated_pointees(right_type)
 
+    @unittest.skipUnless(
+        default_target_triple().split('-')[0] in
+        ('x86_64', 'i386', 'i486', 'i586', 'i686'),
+        'x86_stdcallcc requires an x86 code generation target')
     def test_indirect_call_preserves_semantic_calling_convention(self):
+        os.chdir(self.tmp_path)
         for result in [i32, create_struct_type([i32, i32]),
                                   create_struct_type([i64, i64, i64])]:
             with self.subTest(result=result):
-                with tempfile.TemporaryDirectory(prefix='type-matrix-case-') as temp:
-                    with chdir(temp):
-                        self._check_indirect_call_preserves_semantic_calling_convention(result)
+                self._check_indirect_call_preserves_semantic_calling_convention(result)
 
     def test_wrapper_reuse_requires_exact_registration_inputs(self):
         for flushed in [False, True]:

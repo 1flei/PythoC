@@ -76,6 +76,7 @@ if _BACKEND_AVAILABLE:
     snprintf = _stdio.snprintf
     sprintf = _stdio.sprintf
     strcmp = _string.strcmp
+    _cchar = strcmp.param_types[0][1].pointee_type
 
     # --- Custom variadic C functions (va_arg consumers) ---
     _va_header = _write_fixture('va_lib.h', '''
@@ -144,7 +145,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_ints() -> i32:
-        buf: array[i8, 96] = ""
+        buf: array[_cchar, 96] = ""
         snprintf(buf, 96, "%d %d %d", 1, -20, 300)
         if strcmp(buf, "1 -20 300") != 0:
             return -1
@@ -152,7 +153,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_doubles() -> i32:
-        buf: array[i8, 96] = ""
+        buf: array[_cchar, 96] = ""
         snprintf(buf, 96, "%.1f %.2f %g", 1.5, 2.25, 3.0)
         if strcmp(buf, "1.5 2.25 3") != 0:
             return -1
@@ -160,7 +161,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_strings() -> i32:
-        buf: array[i8, 96] = ""
+        buf: array[_cchar, 96] = ""
         snprintf(buf, 96, "[%s|%s]", "ab", "cd")
         if strcmp(buf, "[ab|cd]") != 0:
             return -1
@@ -168,7 +169,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_mixed() -> i32:
-        buf: array[i8, 128] = ""
+        buf: array[_cchar, 128] = ""
         n: i32 = snprintf(buf, 128, "%s=%d (%.3f)", "pi", 3, 3.14159)
         if strcmp(buf, "pi=3 (3.142)") != 0:
             return -1
@@ -177,7 +178,7 @@ double va_weighted(double w, int n, ...) {
     @compile
     def fmt_promotions() -> i32:
         # C default argument promotions: i8/i16 -> i32, f32 -> f64.
-        buf: array[i8, 96] = ""
+        buf: array[_cchar, 96] = ""
         small: i8 = 65
         mid: i16 = -320
         flt: f32 = f32(1.5)
@@ -188,7 +189,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_wide() -> i32:
-        buf: array[i8, 96] = ""
+        buf: array[_cchar, 96] = ""
         big: i64 = 5000000000
         ubig: u64 = 18000000000000000000
         snprintf(buf, 96, "%lld %llu", big, ubig)
@@ -198,7 +199,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_no_varargs() -> i32:
-        buf: array[i8, 32] = ""
+        buf: array[_cchar, 32] = ""
         n: i32 = snprintf(buf, 32, "literal only")
         if strcmp(buf, "literal only") != 0:
             return -1
@@ -207,7 +208,7 @@ double va_weighted(double w, int n, ...) {
     @compile
     def fmt_truncation() -> i32:
         # snprintf returns the would-be length even when truncated.
-        buf: array[i8, 8] = ""
+        buf: array[_cchar, 8] = ""
         n: i32 = snprintf(buf, 8, "%d", 123456789)
         if strcmp(buf, "1234567") != 0:
             return -1
@@ -215,7 +216,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def sprintf_into_buffer() -> i32:
-        buf: array[i8, 64] = ""
+        buf: array[_cchar, 64] = ""
         n: i32 = sprintf(buf, "%x", 255)
         if strcmp(buf, "ff") != 0:
             return -1
@@ -223,7 +224,7 @@ double va_weighted(double w, int n, ...) {
 
     @compile
     def fmt_runtime_args(x: i32, y: f64, s: ptr[i8]) -> i32:
-        buf: array[i8, 96] = ""
+        buf: array[_cchar, 96] = ""
         snprintf(buf, 96, "%d:%.1f:%s", x, y, s)
         return strcmp(buf, "7:2.5:ok")
 

@@ -128,10 +128,10 @@ if _BACKEND_AVAILABLE:
     # 'char *' parameter is ptr[u8] on some targets and ptr[i8] on others.
     # Derive the char pointer type from a real declaration and use it for
     # wrapper parameters/locals that cross a libc 'char *' boundary, so
-    # the wrappers compile with either signedness.  (Arrays and string
-    # literals adapt to the parameter type on their own; only typed
-    # pointer values need this.)
+    # the wrappers compile with either signedness. String literals adapt
+    # to the parameter type; typed arrays must use the declared element type.
     _cchar_ptr = atoi.param_types[0][1]
+    _cchar = _cchar_ptr.pointee_type
 
     # ------------------------------------------------------------------
     # stdlib: numeric conversions
@@ -162,7 +162,7 @@ if _BACKEND_AVAILABLE:
 
     @compile
     def string_ops() -> i32:
-        buf: array[i8, 64] = ""
+        buf: array[_cchar, 64] = ""
         strcpy(buf, "foo")
         strcat(buf, "bar")
         if strcmp(buf, "foobar") != 0:
@@ -226,7 +226,7 @@ if _BACKEND_AVAILABLE:
 
     @compile
     def snprintf_basic() -> i32:
-        buf: array[i8, 64] = ""
+        buf: array[_cchar, 64] = ""
         n: i32 = snprintf(buf, 64, "v=%d f=%.2f s=%s", 42, 3.25, "xy")
         if strcmp(buf, "v=42 f=3.25 s=xy") != 0:
             return -1
@@ -245,7 +245,7 @@ if _BACKEND_AVAILABLE:
         if fseek(f, 0, SEEK_SET_C) != 0:
             fclose(f)
             return 3
-        out: array[i8, 8] = ""
+        out: array[_cchar, 8] = ""
         got: u64 = fread(out, 1, 5, f)
         if got != 5:
             fclose(f)
@@ -345,7 +345,7 @@ if _BACKEND_AVAILABLE:
         va: i32 = atoi(a)
         vb: i32 = atoi(b)
         product: i32 = va * vb
-        buf: array[i8, 64] = ""
+        buf: array[_cchar, 64] = ""
         snprintf(buf, 64, "R=%d", product)
         if strcmp(buf, expect) != 0:
             return 1

@@ -393,10 +393,9 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
                 f"instantiate: heterogeneous element types: "
                 f"{elem_type.__name__} vs {vt.__name__}")
 
-    suffix = ("_c", "const", id(values) % 10007)
+    suffix = ("_c", "const", elem_type, tuple(values))
     _State = _build_state_struct({"_pc": i32}, suffix)
     ip = pc_ptr[_State]
-    sfx = "_".join(str(p) for p in suffix)
     gv = {"i32": i32, "bool": pc_bool, "ptr": pc_ptr, "_State": _State}
     elem_type_name = getattr(elem_type, "__name__", None)
     if elem_type_name:
@@ -404,10 +403,10 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
 
     nf = _cq(
         _next_tmpl.instantiate(N=len(values)),
-        sfx + "_n", {"s": ip}, pc_bool, gv)
+        (suffix, "next"), {"s": ip}, pc_bool, gv)
     init_into_fn = _cq(
         _init_tmpl.instantiate(),
-        sfx + "_i", {"s": ip}, None, gv)
+        (suffix, "init"), {"s": ip}, None, gv)
 
     # Build value-case statements via template
     elem_converter = _type_to_annotation_ast(elem_type)
@@ -420,7 +419,7 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
             cases=case_stmts,
             default_value=_typed_zero(elem_type),
         ),
-        sfx + "_v", {"s": ip}, elem_type, gv)
+        (suffix, "value"), {"s": ip}, elem_type, gv)
 
     class _Api:
         State = _State
@@ -1172,8 +1171,11 @@ def _build_state_struct(fields_dict: Dict[str, type], suffix: Tuple) -> type:
 
 
 def _cq(frag, sfx, pt, rt, gv):
+    from ..utils.naming import normalize_suffix
+
     if not frag.stmts or not isinstance(frag.stmts[0], ast.FunctionDef):
         raise TypeError("instantiate: expected function template fragment")
-    f = frag.with_func_name(frag.stmts[0].name + '_' + sfx).stmts[0]
+    f = frag.with_func_name(
+        frag.stmts[0].name + '_' + normalize_suffix(sfx)).stmts[0]
     return meta_compile_ast(f, param_types=pt, return_type=rt,
                             suffix=sfx, user_globals=gv, source_file=_SOURCE_FILE)
