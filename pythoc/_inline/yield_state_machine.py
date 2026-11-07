@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ..meta.template import quote, const as meta_const
 from .state_field_rewriter import StateFieldRewriter, StateFieldRewritePolicy
+from .names import ExpansionNames
 
 _DONE_LABEL = "_done"
 
@@ -113,6 +114,10 @@ def inline_yield_function_iterators(
         callee: Any,
     ) -> Optional[List[ast.stmt]]:
         fa = getattr(callee, "_original_ast")
+        if for_node.iter.keywords:
+            raise TypeError(
+                'instantiate: nested yield keyword calls must be bound before '
+                'state-machine expansion')
         callee_globals = dict(getattr(callee, "__globals__", None) or {})
         callee_globals.update(compiletime_globals)
 
@@ -208,10 +213,14 @@ def lower_yield_state_machine(
     states: Dict[str, List[ast.stmt]] = {}
     label_order: List[str] = []
     label_pc: Dict[str, int] = {}
+    names = ExpansionNames()
+    names.reserve_ast(request.func_ast)
+    names.reserve(locals_set | protect_set)
+    done_label = names.fresh(_DONE_LABEL)
 
     def fresh(prefix: str = "_st") -> str:
         idx = len(label_order)
-        name = f"_{prefix}{idx}"
+        name = names.fresh(f"_{prefix}{idx}")
         label_order.append(name)
         label_pc[name] = idx
         return name
@@ -331,12 +340,12 @@ def lower_yield_state_machine(
     body_stmts = _expand_compiletime_fors(request.func_ast.body, constexpr)
 
     entry = fresh("_st")
-    lower_stmts(body_stmts, entry, _DONE_LABEL)
+    lower_stmts(body_stmts, entry, done_label)
 
     body = _dispatch_cases(label_order, state_arg)
     for label_name in label_order:
         body.append(_label_block(label_name, states[label_name]))
-    body.append(_label_block(_DONE_LABEL, [_return_false()]))
+    body.append(_label_block(done_label, [_return_false()]))
 
     fn_ast = _yield_next_template(body).stmts[0]
     fn_ast.args = ast.arguments(

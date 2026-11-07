@@ -37,12 +37,10 @@ def bind(function, positional, keywords):
         for name, parameter in inspect.signature(function).parameters.items()
         if parameter.default is not inspect.Parameter.empty
     }
-    keyword_nodes = [ast.keyword(arg=name, value=ast.Name(id=name))
-                     for name in keywords]
     return bind_call_args(
         _build_sig_from_ast(arguments, defaults),
-        [value_ref(value) for value in positional], keyword_nodes,
-        lambda expression: value_ref(keywords[expression.id]), None)
+        [value_ref(value) for value in positional],
+        {name: value_ref(value) for name, value in keywords.items()}, None)
 
 
 class CallBindingTest(unittest.TestCase):

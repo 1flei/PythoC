@@ -14,6 +14,8 @@ from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
 from ..meta.template import quote, const as meta_const
+from .names import ExpansionNames
+from .renaming import ScopedVariableRenamer
 
 if TYPE_CHECKING:
     from .transformers import InlineContext
@@ -308,6 +310,8 @@ class YieldExitRule(ExitPointRule):
         self.return_type_annotation = return_type_annotation
         self.after_else_label = after_else_label
         self.gen_done_label = gen_done_label
+        self.names = ExpansionNames()
+        self.names.reserve_ast(loop_var, *loop_body)
 
         # Check if loop body has break or continue
         self._body_has_break_or_continue = _has_break_or_continue(loop_body)
@@ -361,7 +365,7 @@ class YieldExitRule(ExitPointRule):
 
         has_value = bool(yield_val)
         yield_label = (
-            f"_yield_{get_next_id()}"
+            self.names.fresh(f"_yield_{get_next_id()}")
             if self._body_has_break_or_continue else None
         )
         has_label = yield_label is not None
@@ -437,22 +441,12 @@ class MacroExitRule(ExitPointRule):
 # Helpers
 # ---------------------------------------------------------------------------
 
-class VariableRenamer(ast.NodeTransformer):
+class VariableRenamer(ScopedVariableRenamer):
     """
     Helper: Rename variables in AST according to rename_map
 
     Only renames Name nodes, preserves everything else
     """
-
-    def __init__(self, rename_map: dict):
-        self.rename_map = rename_map
-
-    def visit_Name(self, node: ast.Name) -> ast.Name:
-        """Rename if in map, otherwise keep original"""
-        if node.id in self.rename_map:
-            return ast.Name(id=self.rename_map[node.id], ctx=node.ctx)
-        return node
-
 
 def _has_break_or_continue(body: List[ast.stmt]) -> bool:
     """Check if body contains any break or continue statement

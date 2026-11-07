@@ -605,20 +605,10 @@ class BuiltinType(BuiltinEntity):
         return cls.handle_type_conversion(visitor, args[0], node)
     
     @classmethod
-    def handle_type_conversion(cls, visitor, value_or_node, node: ast.Call = None) -> ir.Value:
+    def handle_type_conversion(cls, visitor, value_ref, node: ast.Call = None) -> ir.Value:
         """Convert a value to this type through the unified value path."""
-        value_ref = value_or_node
-        if isinstance(value_or_node, ast.Call):
-            node = value_or_node
-            if len(node.args) != 1:
-                logger.error(
-                    f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
-                    node=node,
-                    exc_type=TypeError,
-                )
-            value_ref = visitor.visit_rvalue_expression(node.args[0])
-
         return visitor.value_dispatcher.explicit_cast(cls, value_ref, node)
+
     
     # Binary operation handlers for numeric types (unified call protocol)
     @classmethod

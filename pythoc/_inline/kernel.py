@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from ..meta.template import quote, const as meta_const
+from .names import ExpansionNames
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +75,7 @@ class MetaInlineRequest:
     call_site: ast.expr
     caller_context: Any  # ScopeContext
     exit_rule: Any  # ExitPointRule
+    names: Optional[ExpansionNames] = None
 
 
 # ---------------------------------------------------------------------------
@@ -171,36 +173,34 @@ def _count_returns(body):
     return counter.count
 
 
-def _build_rename_map(local_vars, param_vars, captured_vars, inline_id):
+def _build_rename_map(local_vars, param_vars, captured_vars, inline_id, names):
     """Build rename map: suffix locals + params, keep captured unchanged."""
     rename_map = {}
     suffix = "_{}".format(inline_id)
     for var in local_vars:
         if var not in captured_vars:
-            rename_map[var] = "{}{}".format(var, suffix)
+            rename_map[var] = names.fresh("{}{}".format(var, suffix))
     for var in param_vars:
         if var not in captured_vars:
-            rename_map[var] = "{}{}".format(var, suffix)
+            rename_map[var] = names.fresh("{}{}".format(var, suffix))
     return rename_map
 
 
-def _build_param_bindings(callee_params, call_args, rename_map, inline_id):
+def _build_param_bindings(callee_params, call_args, rename_map):
     """Build parameter binding statements via unified template.
 
     Each param is a single _param_binding call with has_annotation as
     const guard. Returns list of Fragments (auto-spliced by consumers).
     """
+    if len(callee_params) != len(call_args):
+        raise TypeError(
+            f'AST expansion argument count mismatch: expected {len(callee_params)}, '
+            f'got {len(call_args)}')
     frags = []
-    for i, param in enumerate(callee_params):
+    for param, argument in zip(callee_params, call_args):
         param_name = param.arg
         renamed = rename_map.get(param_name, param_name)
-
-        if i < len(call_args):
-            arg_value = copy.deepcopy(call_args[i])
-        else:
-            raise ValueError(
-                "Missing argument for parameter '{}' in {}".format(
-                    param_name, inline_id))
+        arg_value = copy.deepcopy(argument)
 
         # Type-convert constants when param has annotation
         if param.annotation and isinstance(arg_value, ast.Constant):
@@ -360,6 +360,7 @@ def _build_inline_request(
     call_site,
     caller_context,
     exit_rule,
+    names=None,
 ) -> MetaInlineRequest:
     """Build a ``MetaInlineRequest`` from the standard adapter inputs."""
     return MetaInlineRequest(
@@ -369,6 +370,7 @@ def _build_inline_request(
         call_site=call_site,
         caller_context=caller_context,
         exit_rule=exit_rule,
+        names=names,
     )
 
 
@@ -381,6 +383,7 @@ def expand_inline_or_raise(
     caller_context,
     exit_rule,
     tag: str = "InlineAdapter",
+    names=None,
 ) -> InlineResult:
     """Build a request, expand it, and raise on failure.
 
@@ -394,6 +397,7 @@ def expand_inline_or_raise(
         call_site=call_site,
         caller_context=caller_context,
         exit_rule=exit_rule,
+        names=names,
     )
     try:
         return expand_inline(request)
@@ -412,6 +416,7 @@ def try_expand_inline(
     caller_context,
     exit_rule,
     tag: str = "YieldInlineAdapter",
+    names=None,
 ) -> Optional[InlineResult]:
     """Build a request, expand it, and return ``None`` on failure.
 
@@ -425,6 +430,7 @@ def try_expand_inline(
         call_site=call_site,
         caller_context=caller_context,
         exit_rule=exit_rule,
+        names=names,
     )
     try:
         return expand_inline(request)
@@ -478,6 +484,16 @@ def expand_inline(request):
 
     callee_ast = request.callee_ast
     inline_id = "inline_{}".format(get_next_id())
+    names = request.names if request.names is not None else ExpansionNames()
+    names.reserve(request.caller_context.available_vars)
+    names.reserve(request.callee_globals or {})
+    names.reserve_ast(callee_ast, request.call_site, *request.call_args)
+    result_var = getattr(request.exit_rule, 'result_var', None)
+    if result_var is not None:
+        names.reserve([result_var])
+    if isinstance(request.exit_rule, YieldExitRule):
+        names.reserve_ast(request.exit_rule.loop_var, *request.exit_rule.loop_body)
+        request.exit_rule.names = names
 
     # --- Extract callee body and params ---
     callee_body, callee_params = _extract_callee(callee_ast)
@@ -489,16 +505,16 @@ def expand_inline(request):
 
     # --- Rename map ---
     rename_map = _build_rename_map(
-        local_vars, param_vars, captured_vars, inline_id)
+        local_vars, param_vars, captured_vars, inline_id, names)
 
     # --- Build param bindings (list[Fragment]) ---
     binding_frags = _build_param_bindings(
-        callee_params, request.call_args, rename_map, inline_id)
+        callee_params, request.call_args, rename_map)
 
     # --- Set exit label BEFORE body transform so goto_end nodes see it ---
     exit_label = None
     if isinstance(request.exit_rule, ReturnExitRule):
-        exit_label = "_inline_exit_{}".format(inline_id)
+        exit_label = names.fresh("_inline_exit_{}".format(inline_id))
         request.exit_rule.exit_label = exit_label
 
     # --- Single terminal return (unannotated callees) ---

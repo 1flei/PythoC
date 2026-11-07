@@ -17,22 +17,17 @@ class offsetof(BuiltinFunction):
     @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
         """Handle offsetof(type, "field_name") call."""
-        if len(node.args) != 2:
-            logger.error(f"offsetof() takes exactly 2 arguments ({len(node.args)} given)",
+        if len(args) != 2:
+            logger.error(f"offsetof() takes exactly 2 arguments ({len(args)} given)",
                         node=node, exc_type=TypeError)
 
-        type_arg = node.args[0]
-        field_arg = node.args[1]
-
-        pc_type = visitor.type_resolver.parse_annotation(type_arg)
-        if pc_type is None:
-            logger.error(f"offsetof() first argument must be a type, got: {ast.dump(type_arg)}",
+        pc_type = visitor.type_resolver.resolve_type_value(args[0])
+        field_arg = args[1]
+        if not (field_arg.is_python_value()
+                and isinstance(field_arg.get_python_value(), str)):
+            logger.error("offsetof() second argument must be a constant field name",
                         node=node, exc_type=TypeError)
-
-        if not (isinstance(field_arg, ast.Constant) and isinstance(field_arg.value, str)):
-            logger.error("offsetof() second argument must be a string literal field name",
-                        node=node, exc_type=TypeError)
-        field_name = field_arg.value
+        field_name = field_arg.get_python_value()
 
         offset = cls._get_field_offset(pc_type, field_name)
         # offsetof() is a compile-time constant; represent it as a Python value

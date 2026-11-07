@@ -89,7 +89,22 @@ def lower_compile_wrapper(
     # --- Step 5: Declare or find function in module ---
     ir_func = _declare_or_get(func_info, actual_func_name, module, node)
 
+    ir_func._pc_python_callable = wrapper
     return wrap_value(ir_func, kind='pointer', type_hint=func_info.callable_pc_type)
+
+
+def get_compile_time_callable(value_ref):
+    """Recover identity only from a Python callable or a direct symbol."""
+    if value_ref.is_python_value():
+        target = value_ref.get_python_value()
+    elif isinstance(value_ref.value, ir.Function):
+        target = getattr(value_ref.value, '_pc_python_callable', None)
+    else:
+        target = None
+    if not callable(target):
+        raise TypeError('predicate must be a compile-time callable; '
+                        'runtime function pointers have no static identity')
+    return getattr(target, '_original_func', target)
 
 
 # ---------------------------------------------------------------------------

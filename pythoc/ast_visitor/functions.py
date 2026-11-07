@@ -66,8 +66,7 @@ class _ClosureWrapper:
 
         if not isinstance(args, NormalizedCallArgs):
             args = bind_call_args(
-                self._pc_call_signature, args, [],
-                visitor.visit_rvalue_expression, call_node)
+                self._pc_call_signature, args, {}, call_node)
         if self._has_yield:
             from ..builtin_entities.python_type import PythonType
             result = wrap_value(self, kind='python', type_hint=PythonType(self))
@@ -77,7 +76,6 @@ class _ClosureWrapper:
                 'placeholder': self,
                 'original_ast': self.func_ast,
                 'call_node': call_node,
-                'evaluated_args': True,
                 'call_args': args,
                 # Closures capture by reference from ALL enclosing scopes,
                 # unlike module-level yield functions (whose free names

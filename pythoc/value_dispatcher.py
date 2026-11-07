@@ -130,7 +130,7 @@ class ValueRefDispatcher:
                 exc_type=TypeError,
             )
 
-        return handle_type_call(self.visitor, func_ref, list(args), node)
+        return handle_type_call(self.visitor, func_ref, args, node)
 
     def explicit_cast(self, target_type, value: ValueRef, node: Optional[ast.AST] = None):
         """Perform an explicit conversion through TypeConverter."""
@@ -172,12 +172,12 @@ class ValueRefDispatcher:
         func_ref, callable_protocol = self._resolve_callable_protocol(
             func_ref,
             name=name,
-            node=node.func,
+            node=node,
         )
 
         defer_linear = getattr(callable_protocol, "defer_linear_transfer", False)
         if not defer_linear:
-            for arg in args:
+            for arg in [*args, *getattr(args, 'keywords', {}).values()]:
                 self.visitor._transfer_linear_ownership(
                     arg,
                     reason="function argument",

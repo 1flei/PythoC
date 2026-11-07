@@ -108,7 +108,6 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
             'placeholder': placeholder_wrapper,
             'original_ast': func_ast,
             'call_node': node,
-            'evaluated_args': True,
             'call_args': args
         }
         return result

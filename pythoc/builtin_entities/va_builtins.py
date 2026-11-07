@@ -58,7 +58,7 @@ class va_arg(BuiltinFunction):
 
     @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
-        if len(node.args) != 2:
+        if len(args) != 2:
             logger.error(
                 "va_arg() takes exactly 2 arguments: va_arg(ap, T)",
                 node=node, exc_type=TypeError,
@@ -67,13 +67,7 @@ class va_arg(BuiltinFunction):
         from ..valueref import ensure_ir
         ap_val = ensure_ir(args[0])
 
-        # Second arg: the target type (parse from AST node, like sizeof does)
-        target_pc_type = visitor.type_resolver.parse_annotation(node.args[1])
-        if target_pc_type is None:
-            logger.error(
-                f"va_arg() second argument must be a type",
-                node=node, exc_type=TypeError,
-            )
+        target_pc_type = visitor.type_resolver.resolve_type_value(args[1])
 
         target_llvm_type = target_pc_type.get_llvm_type(visitor.module.context)
         value = visitor.builder.va_arg(ap_val, target_llvm_type, name="va.arg")

@@ -86,14 +86,18 @@ class YieldInlineAdapter:
 
         # Generate unique label for after-else (used by break to skip else)
         from ..utils import get_next_id
-        after_else_label = f"_for_after_else_{get_next_id()}" if body_has_break_or_continue else None
+        from .names import visitor_expansion_names
+        names = visitor_expansion_names(self.visitor)
+        names.reserve_ast(func_ast, for_node)
+        after_else_label = (names.fresh(f"_for_after_else_{get_next_id()}")
+                            if body_has_break_or_continue else None)
 
         # A return anywhere in the generator body exhausts the iterator: it
         # jumps to a label placed at the end of the spliced body (before the
         # consumer's else clause, which runs on normal exhaustion).
         gen_done_label = None
         if _contains_return(func_ast.body):
-            gen_done_label = f"_gen_done_{get_next_id()}"
+            gen_done_label = names.fresh(f"_gen_done_{get_next_id()}")
 
         # Create exit rule for yield transformation with type annotation
         exit_rule = YieldExitRule(
@@ -124,6 +128,7 @@ class YieldInlineAdapter:
             call_site=for_node.iter,
             caller_context=caller_context,
             exit_rule=exit_rule,
+            names=names,
         )
         if inline_result is None:
             return (None, None, None)

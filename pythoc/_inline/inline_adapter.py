@@ -27,9 +27,10 @@ from .exit_rules import ReturnExitRule
 from .scope_analyzer import ScopeContext, build_caller_context
 from .kernel import ReturnValueChecker
 from ..valueref import ValueRef, wrap_value
-from ..context import VariableInfo
 from ..logger import logger
 from ..utils import get_next_id
+from .arguments import bind_argument_values
+from .names import visitor_expansion_names
 
 if TYPE_CHECKING:
     from ..ast_visitor.visitor_impl import LLVMIRVisitor
@@ -55,14 +56,13 @@ class InlineAdapter:
     """
 
     def __init__(self, parent_visitor: 'LLVMIRVisitor',
-                 param_bindings: Dict[str, Any],
+                 param_bindings: Dict[str, ValueRef],
                  func_globals: Dict[str, Any] = None,
                  kind: str = "inline"):
         """
         Args:
             parent_visitor: The visitor that's calling the inline function.
-            param_bindings: Mapping of parameter name -> ValueRef / Python
-                object.
+            param_bindings: Mapping of parameter name -> evaluated ValueRef.
             func_globals: The callee's ``__globals__`` (for name
                 resolution inside the inlined body).
             kind: Either ``'inline'`` (for @inline) or ``'closure'`` (for
@@ -93,7 +93,9 @@ class InlineAdapter:
 
         # Determine result variable name using global ID
         unique_id = get_next_id()
-        result_var = f"_{self.kind}_result_{unique_id}"
+        names = visitor_expansion_names(self.visitor)
+        names.reserve_ast(func_ast)
+        result_var = names.fresh(f"_{self.kind}_result_{unique_id}")
 
         # Exit rule (goto-based approach, no flag_var needed).
         exit_rule = ReturnExitRule(result_var=result_var)
@@ -128,6 +130,7 @@ class InlineAdapter:
             caller_context=caller_context,
             exit_rule=exit_rule,
             tag=tag,
+            names=names,
         )
 
         with inline_globals_scope(self.visitor, inline_result):
@@ -244,26 +247,3 @@ class InlineAdapter:
             kind='value',
             type_hint=var_info.type_hint,
         )
-
-
-def bind_argument_values(visitor, values, *, preserve_linear=False):
-    """Expose evaluated call arguments to AST expansion without replaying them.
-
-    Expanded parameter bindings perform ownership transfer for inline,
-    closure and yield calls. These aliases retain the source CFG owner.
-    """
-    names = []
-    call_id = get_next_id()
-    for index, value in enumerate(values):
-        name = f"_arg_inline_{call_id}_{index}"
-        if not isinstance(value, ValueRef):
-            from ..builtin_entities.python_type import PythonType
-            value = wrap_value(value, kind="python",
-                               type_hint=PythonType.wrap(value, is_constant=True))
-        elif not preserve_linear:
-            value = value.clone(var_name=None, linear_path=None)
-        info = VariableInfo(name=name, value_ref=value, alloca=None,
-                            source="inline_arg_temp", is_parameter=False)
-        visitor.scope_manager.declare_variable(info, allow_shadow=True)
-        names.append(name)
-    return names

@@ -192,6 +192,10 @@ class TypeResolver:
             _ANNOTATION_MEMO[memo_key] = (memo_ns, deps, result)
         return result
 
+    def resolve_type_value(self, value_ref):
+        """Validate an evaluated type value without executing syntax."""
+        return self._extract_type_from_valueref(value_ref)
+
     def _evaluate_type_expression(self, node):
         """
         Evaluate type annotation AST, returning ValueRef(kind='python').

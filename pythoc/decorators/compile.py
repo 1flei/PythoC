@@ -410,14 +410,9 @@ def _create_parametric_factory_wrapper(
 
         # Yield placeholders cannot be lowered like normal compiled wrappers;
         # they must return inline-expansion metadata to the for-loop visitor.
-        # The specialized AST has parametric parameters removed, so the call
-        # node forwarded to the placeholder must only contain concrete args.
         if getattr(specialized, '_is_yield_generated', False):
-            import copy
-            specialized_call_node = copy.deepcopy(node)
-            specialized_call_node.args = [node.args[i] for i in concrete_indices]
             return specialized.handle_call(
-                visitor, func_ref, concrete_args, specialized_call_node
+                visitor, func_ref, concrete_args, node
             )
 
         from ..call_normalization import lower_compile_handle_call

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Tuple
 
 from ..logger import logger
 from ..builtin_entities import i64, f64, ptr, i8, bool as pc_bool
+from .. import inline, typeof
 
 class Poly:
     """Polymorphism dispatcher for @compile functions.
@@ -64,9 +65,6 @@ class Poly:
             self._dynamic_dispatch_cache.clear()
             self._signature_revision = revision
 
-    def can_be_called(self) -> bool:
-        return True
-
     def _infer_default_pc_type(self, python_val):
         if isinstance(python_val, str):
             return ptr[i8]
@@ -81,32 +79,31 @@ class Poly:
                 f"Poly: unsupported Python type {type(python_val).__name__}"
             )
 
-    def _get_type_hint(self, arg):
-        """Get type hint for argument"""
-        if arg.is_python_value():
-            return self._infer_default_pc_type(arg.get_python_value())
-        else:
-            return arg.type_hint
-    
-    def handle_call(self, visitor, func_ref, args, node: ast.Call):
-        """PC callable protocol: dispatch to correct compiled function
-        
-        Strategy:
-        1. Try static dispatch by argument type hints
-        2. If args contain Enum types, generate dynamic dispatch function
-        """
+    @inline
+    def __call__(self, *args):
+        return self._resolve_carrier_type(typeof(args))(*args)
+
+    def _resolve_carrier_type(self, carrier_type):
+        """Select using type metadata; native arguments stay in inline code."""
+        carrier = carrier_type.get_python_object()
+        arg_types = []
+        for arg_type in carrier.get_element_types():
+            if getattr(arg_type, 'is_python_type', lambda: False)():
+                arg_type = self._infer_default_pc_type(arg_type.get_python_object())
+            arg_types.append(arg_type)
+        return self.resolve(*arg_types)
+
+    def resolve(self, *arg_types):
+        """Return an ordinary compiled function for the supplied PC types."""
         self._refresh_signatures()
-        # Try static dispatch first
-        arg_types = tuple(self._get_type_hint(a) for a in args)
+        arg_types = tuple(arg_types)
         from ..type_id import get_type_id
         sig_key = tuple(get_type_id(t) for t in arg_types)
 
-        logger.debug(f"Poly handle_call: sig_map={self._sig_map}, sig_key={sig_key}")
-        
         target_info = self._sig_map.get(sig_key)
         if target_info is not None:
             target_func, _ = target_info
-            return target_func.handle_call(visitor, target_func, args, node)
+            return target_func
         
         # Find all enum arguments
         enum_indices = []
@@ -118,12 +115,11 @@ class Poly:
             logger.error(
                 f"Poly: no matching signature for {arg_types} "
                 f"and no Enum argument for dynamic dispatch",
-                node
+                node=None
             )
         
         # Generate or reuse dynamic dispatch for enum arguments.
-        dynamic_dispatch = self._get_dynamic_dispatch_func(arg_types, enum_indices, node)
-        return dynamic_dispatch.handle_call(visitor, dynamic_dispatch, args, node)
+        return self._get_dynamic_dispatch_func(arg_types, enum_indices, None)
 
     def prepare_dynamic_dispatch(self, *arg_types):
         """Optionally pre-generate a wrapper for an argument-type combination.

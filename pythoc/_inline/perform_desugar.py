@@ -23,6 +23,7 @@ import ast
 import copy
 
 from ..utils import get_next_id
+from .names import ExpansionNames
 
 
 def _is_perform_call(node) -> bool:
@@ -72,21 +73,21 @@ def _match_perform(stmt):
     return None
 
 
-def _desugar_block(stmts):
+def _desugar_block(stmts, names):
     out = []
     i = 0
     while i < len(stmts):
         stmt = stmts[i]
         matched = _match_perform(stmt)
         if matched is None:
-            out.append(_desugar_nested(stmt))
+            out.append(_desugar_nested(stmt, names))
             i += 1
             continue
         target, op_call = matched
-        rest = _desugar_block(stmts[i + 1:])
+        rest = _desugar_block(stmts[i + 1:], names)
         if target is None:
             target = ast.Name(
-                id=f"_perform_val_{get_next_id()}", ctx=ast.Store())
+                id=names.fresh(f"_perform_val_{get_next_id()}"), ctx=ast.Store())
             body = [ast.Expr(value=ast.Yield(
                 value=ast.Name(id=target.id, ctx=ast.Load())))] + rest
         else:
@@ -103,20 +104,20 @@ def _desugar_block(stmts):
     return out
 
 
-def _desugar_nested(stmt):
+def _desugar_nested(stmt, names):
     """Recursively desugar performs in nested blocks."""
     for field in ('body', 'orelse', 'finalbody'):
         block = getattr(stmt, field, None)
         if isinstance(block, list) and block:
-            setattr(stmt, field, _desugar_block(block))
+            setattr(stmt, field, _desugar_block(block, names))
     handlers = getattr(stmt, 'handlers', None)
     if handlers:
         for h in handlers:
-            h.body = _desugar_block(h.body)
+            h.body = _desugar_block(h.body, names)
     cases = getattr(stmt, 'cases', None)
     if cases:
         for c in cases:
-            c.body = _desugar_block(c.body)
+            c.body = _desugar_block(c.body, names)
     return stmt
 
 
@@ -127,5 +128,7 @@ def desugar_effect_performs(func_ast):
     perform markers remain after one pass).
     """
     func_ast = copy.deepcopy(func_ast)
-    func_ast.body = _desugar_block(func_ast.body)
+    names = ExpansionNames()
+    names.reserve_ast(func_ast)
+    func_ast.body = _desugar_block(func_ast.body, names)
     return func_ast

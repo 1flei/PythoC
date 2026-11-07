@@ -392,6 +392,7 @@ class LLVMCompiler:
             compiler=self,
             user_globals=user_globals,
         )
+        visitor.expansion_names.reserve_ast(ast_node)
 
         normal_param_hints = {}
         for arg in ast_node.args.args:

@@ -1,5 +1,5 @@
 from .base import BuiltinFunction
-from ..valueref import wrap_python_constant, wrap_value
+from ..valueref import wrap_python_constant
 from ..logger import logger
 import ast
 
@@ -54,118 +54,31 @@ class assume(BuiltinFunction):
         from .refined import refined
         from ..valueref import ValueRef
         
+        from ..callable_lowering import get_compile_time_callable
+        import inspect
+
         if len(args) < 2:
-            logger.error("assume() requires at least 2 arguments", node=node, exc_type=TypeError)
-        if len(node.args) < 2:
-            logger.error("assume() requires at least 2 arguments", node=node, exc_type=TypeError)
-        
-        last_arg = args[-1]
-        is_multi_param_form = False
-        
-        if isinstance(last_arg, ValueRef):
-            if last_arg.is_python_value() and last_arg.value is not None and callable(last_arg.value):
-                predicate = last_arg.value
-                import inspect
-                try:
-                    sig = inspect.signature(predicate)
-                    params = list(sig.parameters.values())
-                    if len(params) > 1 and len(args) == len(params) + 1:
-                        is_multi_param_form = True
-                except:
-                    pass
-            elif last_arg.is_pointer_typed():
-                arg_idx = len(args) - 1
-                if arg_idx < len(node.args):
-                    arg_node = node.args[arg_idx]
-                    if isinstance(arg_node, ast.Name):
-                        user_globals = {}
-                        if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
-                            user_globals = visitor.ctx.user_globals
-                        elif hasattr(visitor, 'user_globals'):
-                            user_globals = visitor.user_globals
-                        
-                        if arg_node.id in user_globals:
-                            obj = user_globals[arg_node.id]
-                            if hasattr(obj, '_original_func'):
-                                predicate = obj._original_func
-                            elif callable(obj):
-                                predicate = obj
-                            else:
-                                predicate = None
-                            
-                            if predicate:
-                                import inspect
-                                try:
-                                    sig = inspect.signature(predicate)
-                                    params = list(sig.parameters.values())
-                                    if len(params) > 1 and len(args) == len(params) + 1:
-                                        is_multi_param_form = True
-                                except:
-                                    pass
-        
-        if is_multi_param_form:
-            value_args = args[:-1]
-            predicate_arg = args[-1]
-            
-            if isinstance(predicate_arg, ValueRef):
-                if predicate_arg.is_python_value() and predicate_arg.value is not None:
-                    pred_callable = predicate_arg.value
-                elif predicate_arg.is_pointer_typed():
-                    pred_callable = predicate
-                else:
-                    logger.error("assume() last argument must be a predicate", node=node, exc_type=TypeError)
-            else:
-                pred_callable = predicate_arg
-            
-            refined_type = refined[pred_callable]
-            refined_type_ref = wrap_python_constant(refined_type)
+            logger.error('assume() requires at least 2 arguments',
+                         node=node, exc_type=TypeError)
+
+        def constraint(argument):
+            if (argument.is_python_value()
+                    and isinstance(argument.get_python_value(), str)):
+                return argument.get_python_value()
+            try:
+                return get_compile_time_callable(argument)
+            except TypeError as error:
+                logger.error(str(error), node=node, exc_type=TypeError)
+
+        last = constraint(args[-1])
+        arity = len(inspect.signature(last).parameters) if callable(last) else 0
+        if arity > 1 and len(args) == arity + 1:
             return visitor.value_dispatcher.handle_type_call(
-                refined_type_ref,
-                value_args,
-                node,
-            )
-        
+                wrap_python_constant(refined[last]), args[:-1], node)
+
         value_arg = args[0]
-        
-        constraint_args = []
-        for arg in args[1:]:
-            if isinstance(arg, ValueRef):
-                if arg.is_python_value() and arg.value is not None:
-                    constraint_args.append(arg.value)
-                elif arg.is_pointer_typed():
-                    arg_idx = len(constraint_args) + 1
-                    if arg_idx < len(node.args):
-                        arg_node = node.args[arg_idx]
-                        if isinstance(arg_node, ast.Name):
-                            user_globals = {}
-                            if hasattr(visitor, 'ctx') and hasattr(visitor.ctx, 'user_globals'):
-                                user_globals = visitor.ctx.user_globals
-                            elif hasattr(visitor, 'user_globals'):
-                                user_globals = visitor.user_globals
-                            
-                            if arg_node.id in user_globals:
-                                obj = user_globals[arg_node.id]
-                                if hasattr(obj, '_original_func'):
-                                    constraint_args.append(obj._original_func)
-                                elif callable(obj):
-                                    constraint_args.append(obj)
-                                else:
-                                    logger.error(f"assume() constraint must be callable or string, got {type(obj)}",
-                                                node=node, exc_type=TypeError)
-                            else:
-                                logger.error(f"assume() constraint '{arg_node.id}' not found",
-                                            node=node, exc_type=TypeError)
-                        else:
-                            logger.error(f"assume() constraint must be a name reference",
-                                        node=node, exc_type=TypeError)
-                    else:
-                        logger.error(f"Cannot resolve constraint argument", node=node, exc_type=TypeError)
-                else:
-                    logger.error(f"assume() constraint must be Python value or function reference",
-                                node=node, exc_type=TypeError)
-            else:
-                constraint_args.append(arg)
-        
+        constraint_args = [constraint(arg) for arg in args[1:-1]] + [last]
+
         if not isinstance(value_arg, ValueRef):
             logger.error("assume() first argument must be a value", node=node, exc_type=TypeError)
         

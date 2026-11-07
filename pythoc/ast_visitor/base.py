@@ -87,6 +87,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # Unified scope manager for defer, linear types, and variable lifetime
         self.scope_manager = self.ctx.scope_manager
         self.scope_manager.set_visitor(self)
+        from .._inline.names import ExpansionNames
+        self.expansion_names = ExpansionNames()
 
         # Per-compilation state; populated by compiler.py just before
         # the visitor starts walking the function body.
@@ -487,10 +489,11 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
         if value_ref.has_place():
             place = value_ref.require_place()
-            if value_ref.value is place:
+            variable = self.lookup_variable(name)
+            if value_ref.value is place and variable.alloca is not None:
                 return value_ref.clone(
                     var_name=name, linear_path=(),
-                    linear_owner_id=self.lookup_variable(name).var_id)
+                    linear_owner_id=variable.var_id)
 
         return value_ref
 

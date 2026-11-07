@@ -17,19 +17,13 @@ class sizeof(BuiltinFunction):
     def handle_type_call(cls, visitor, func_ref, args, node: ast.Call) -> ir.Value:
         """Handle sizeof(type) call
         
-        Unified implementation using TypeResolver to parse all types.
-        This eliminates ~150 lines of duplicate type parsing logic.
+        Resolve the already evaluated type argument.
         """
-        if len(node.args) != 1:
-            logger.error(f"sizeof() takes exactly 1 argument ({len(node.args)} given)",
+        if len(args) != 1:
+            logger.error(f"sizeof() takes exactly 1 argument ({len(args)} given)",
                         node=node, exc_type=TypeError)
         
-        arg = node.args[0]
-        
-        pc_type = visitor.type_resolver.parse_annotation(arg)
-        if pc_type is None:
-            logger.error(f"sizeof() argument must be a type, got: {ast.dump(arg)}",
-                        node=node, exc_type=TypeError)
+        pc_type = visitor.type_resolver.resolve_type_value(args[0])
         
         size = cls._get_type_size(pc_type, visitor)
         from .python_type import PythonType

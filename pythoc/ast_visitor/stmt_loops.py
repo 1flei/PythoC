@@ -291,15 +291,9 @@ class LoopsMixin:
 
         # visit_Call has evaluated and normalized arguments in source order.
         # The expansion binds these values, not the original expressions.
-        call_node = inline_info['call_node']
-        if inline_info.get('evaluated_args', False):
-            import copy
-            from .._inline.inline_adapter import bind_argument_values
-            names = bind_argument_values(self, inline_info['call_args'],
-                                         preserve_linear=True)
-            call_node = copy.copy(call_node)
-            call_node.args = [ast.Name(id=name, ctx=ast.Load()) for name in names]
-            call_node.keywords = []
+        from .._inline.arguments import bind_evaluated_call
+        call_node = bind_evaluated_call(
+            self, inline_info['call_args'], inline_info['call_node'])
 
         # Extract callee context for resolving names during yield inlining
         func_obj = inline_info.get('func_obj', None)

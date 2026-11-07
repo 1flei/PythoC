@@ -2,7 +2,7 @@
 Call argument normalization for typed *args / **kwargs.
 
 Public API:
-- ``normalize_ast_call_args``  -- AST visit_Call path (keyword binding + carrier packing)
+- ``normalize_call_args``      -- bind evaluated values and pack collectors
 - ``normalize_typed_collectors`` -- func.handle_call convergence point (carrier packing only)
 - ``pack_native_call_args``    -- Python wrapper -> native call (ctypes struct packing)
 - ``build_varargs_carrier``    -- pc_tuple carrier builder (shared by the above)
@@ -27,7 +27,15 @@ if TYPE_CHECKING:
     import ast
 
 
-class NormalizedCallArgs(list):
+class CallArguments(list):
+    """Evaluated positional and keyword arguments of an ordinary call."""
+
+    def __init__(self, positional=(), keywords=None):
+        super().__init__(positional)
+        self.keywords = dict(keywords or {})
+
+
+class NormalizedCallArgs(CallArguments):
     """Arguments bound to formal parameters, including collector carriers.
 
     Plain sequences contain source-level positional arguments. Only binders
@@ -116,10 +124,10 @@ def normalize_typed_collectors(
 # AST-level normalization (keyword binding + carrier packing)
 # ---------------------------------------------------------------------------
 
-def _get_callee_signature_for_ast(func_ref: ValueRef) -> Optional[Dict[str, Any]]:
+def _get_callee_signature(func_ref: ValueRef) -> Optional[Dict[str, Any]]:
     """Extract signature metadata from a callee for AST keyword binding.
 
-    This is only used by ``normalize_ast_call_args`` to resolve keyword
+    This is only used by ``normalize_call_args`` to resolve keyword
     argument names and detect typed collectors.  It does NOT need to handle
     the ``func.handle_call`` convergence case (that uses ``cls`` directly).
     """
@@ -184,45 +192,44 @@ def _get_callee_signature_for_ast(func_ref: ValueRef) -> Optional[Dict[str, Any]
     return None
 
 
-def normalize_ast_call_args(
-    func_ref: ValueRef,
-    positional_args: List[ValueRef],
-    keywords: List,  # List[ast.keyword]
-    visit_rvalue_expression,  # callable: ast.expr -> ValueRef
-    node: 'ast.Call',
-) -> List[ValueRef]:
-    """Normalize call arguments from an AST Call node.
+def prepare_call_target(func_ref):
+    """Resolve inline callable objects and bind ordinary inline methods."""
+    from .valueref import wrap_python_constant
 
-    Handles keyword binding, positional/keyword conflict detection,
-    typed *args packing, typed **kwargs packing, and bare LLVM varargs
-    pass-through.
-    """
-    signature = _get_callee_signature_for_ast(func_ref)
+    if not func_ref.is_python_value():
+        return func_ref, []
+    target = func_ref.get_python_value()
+    if not getattr(target, '_is_inline', False):
+        inline_call = getattr(target, '__call__', None)
+        if getattr(inline_call, '_is_inline', False):
+            target = inline_call
+            func_ref = wrap_python_constant(target)
+    bound_self = getattr(target, '__self__', None)
+    if bound_self is not None and getattr(target, '_is_inline', False):
+        return func_ref, [wrap_python_constant(bound_self)]
+    return func_ref, []
+
+
+def normalize_call_args(func_ref, args, node):
+    """Bind values without evaluating or inspecting argument expressions."""
+    signature = _get_callee_signature(func_ref)
     if signature is None:
-        # BuiltinFunction (e.g. llvm_asm) handles keyword args itself via
-        # handle_type_call, so bypass normalization and pass through.
         type_hint = getattr(func_ref, 'type_hint', None)
         py_obj = getattr(type_hint, '_python_object', None)
-        from .builtin_entities import BuiltinFunction
-        if isinstance(py_obj, type) and issubclass(py_obj, BuiltinFunction):
-            return positional_args
-        # Python-constant callables (PythonType) also bypass: keyword
-        # arguments are evaluated as constants by PythonType._eval_call.
-        if py_obj is not None:
-            return positional_args
-        if keywords:
-            logger.error(
-                "keyword arguments require a callable with named parameters",
-                node=node, exc_type=TypeError,
-            )
-        return positional_args
+        compiler_call = (callable(getattr(py_obj, 'handle_call', None))
+                         or callable(getattr(py_obj, 'handle_type_call', None)))
+        if py_obj is None or compiler_call:
+            allowed = getattr(py_obj, '_pc_call_keywords', ())
+            for name in args.keywords:
+                if name not in allowed:
+                    logger.error(f"unexpected keyword argument: '{name}'",
+                                 node=node, exc_type=TypeError)
+        return args
 
-    return bind_call_args(signature, positional_args, keywords,
-                          visit_rvalue_expression, node)
+    return bind_call_args(signature, args, args.keywords, node)
 
 
-def bind_call_args(signature, positional_args, keywords,
-                   visit_rvalue_expression, node):
+def bind_call_args(signature, positional_args, keywords, node):
     """Bind evaluated arguments using the shared parameter-kind metadata."""
     fixed_param_names = signature['fixed_param_names']
     has_varargs = signature['has_varargs']
@@ -239,45 +246,32 @@ def bind_call_args(signature, positional_args, keywords,
     bound = dict(zip(positional_names, positional_args))
     kwargs_payload: Dict[str, ValueRef] = {}
 
-    for kw in keywords:
-        if kw.arg is None:
-            logger.error(
-                "**kwargs splat in calls is not supported",
-                node=node, exc_type=TypeError,
-            )
-
-        value_ref = visit_rvalue_expression(kw.value)
-        if kw.arg in positional_only and not has_kwargs:
-            logger.error(f"argument '{kw.arg}' is positional-only", node=node,
+    for name, value_ref in keywords.items():
+        if name in positional_only and not has_kwargs:
+            logger.error(f"argument '{name}' is positional-only", node=node,
                          exc_type=TypeError)
-        if kw.arg in fixed_param_names and kw.arg not in positional_only:
-            if kw.arg in bound:
+        if name in fixed_param_names and name not in positional_only:
+            if name in bound:
                 from_positional = (
-                    kw.arg in positional_names
-                    and positional_names.index(kw.arg) < len(positional_args))
+                    name in positional_names
+                    and positional_names.index(name) < len(positional_args))
                 origin = ('both as positional and keyword' if from_positional
                           else 'more than once as keyword')
                 logger.error(
-                    f"argument '{kw.arg}' given {origin}",
+                    f"argument '{name}' given {origin}",
                     node=node, exc_type=TypeError,
                 )
-            bound[kw.arg] = value_ref
+            bound[name] = value_ref
             continue
-
-        if kw.arg in kwargs_payload:
-            logger.error(
-                f"duplicate keyword argument: '{kw.arg}'",
-                node=node, exc_type=TypeError,
-            )
 
         if not has_kwargs:
             logger.error(
-                f"unexpected keyword argument: '{kw.arg}' "
+                f"unexpected keyword argument: '{name}' "
                 f"(valid: {', '.join(fixed_param_names)})",
                 node=node, exc_type=TypeError,
             )
 
-        kwargs_payload[kw.arg] = value_ref
+        kwargs_payload[name] = value_ref
 
     for name in fixed_param_names:
         if name not in bound:
@@ -490,9 +484,6 @@ def lower_inline_signature(func_ast, defaults):
     arguments = lowered.args
     collectors = [arg for arg in (arguments.vararg, arguments.kwarg)
                   if arg is not None]
-    for arg in collectors:
-        if arg.annotation is None:
-            raise TypeError('Inline collectors require a type annotation')
     arguments.args = (arguments.posonlyargs + arguments.args
                       + arguments.kwonlyargs + collectors)
     arguments.posonlyargs = []

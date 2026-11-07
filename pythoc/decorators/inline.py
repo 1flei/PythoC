@@ -57,8 +57,20 @@ def inline(func=None, *, cls_method=False, method=False):
         except (OSError, TypeError) as e:
             raise RuntimeError(f"Cannot get source code for function {f.__name__}: {e}")
 
-        param_names = [arg.arg for arg in func_ast.args.args]
-        default_values = f.__defaults__ or ()
+        from ..call_normalization import (
+            NormalizedCallArgs, bind_call_args, lower_inline_signature,
+        )
+        from ..builtin_entities.python_type import PythonType
+        from ..valueref import wrap_value
+
+        defaults = {
+            name: wrap_value(parameter.default, kind='python',
+                             type_hint=PythonType.wrap(parameter.default))
+            for name, parameter in inspect.signature(f).parameters.items()
+            if parameter.default is not inspect.Parameter.empty
+        }
+        func_ast, signature = lower_inline_signature(func_ast, defaults)
+        param_names = signature['param_names']
 
         from .visible import capture_caller_symbols, get_closure_variables
         captured_symbols = capture_caller_symbols(depth=1)
@@ -71,48 +83,11 @@ def inline(func=None, *, cls_method=False, method=False):
         merged_func_globals.update(captured_symbols)
         merged_func_globals.update(captured_symbols_deep)
 
-        def _bind_with_defaults(arg_values, bind_names):
-            total_count = len(bind_names)
-            default_count = len(default_values)
-            required_count = total_count - default_count
-
-            if len(arg_values) < required_count or len(arg_values) > total_count:
-                raise TypeError(
-                    f"{f.__name__}() takes {required_count} to {total_count} arguments, got {len(arg_values)}"
-                )
-
-            bindings = dict(zip(bind_names[:len(arg_values)], arg_values))
-            if len(arg_values) < total_count:
-                missing_names = bind_names[len(arg_values):]
-                default_start = len(arg_values) - required_count
-                for idx, name in enumerate(missing_names):
-                    bindings[name] = default_values[default_start + idx]
-            return bindings
-
-        def create_handler(visitor, args, node, self_obj=None):
-            # For method=True, first arg is self (Python object), rest are IR args
-            if method:
-                if len(args) < 1:
-                    raise TypeError(f"{f.__name__}() missing self argument")
-                # args[0] is iterable (Python object or wrapped value)
-                # Extract the actual Python object
-                if hasattr(args[0], 'is_python_value') and args[0].is_python_value():
-                    self_obj = args[0].get_python_value()
-                elif hasattr(args[0], 'value') and hasattr(args[0].value, '__class__'):
-                    # Direct Python object
-                    self_obj = args[0].value
-                else:
-                    # Assume it's the object itself
-                    self_obj = args[0]
-
-                method_param_names = param_names[1:]
-                method_bindings = _bind_with_defaults(args[1:], method_param_names)
-                param_bindings = {param_names[0]: self_obj}
-                param_bindings.update(method_bindings)
-            else:
-                # Standard inline or cls_method
-                param_bindings = _bind_with_defaults(args, param_names)
-            
+        def create_handler(visitor, args, node):
+            if not isinstance(args, NormalizedCallArgs):
+                args = bind_call_args(
+                    signature, args, {}, node)
+            param_bindings = dict(zip(param_names, args))
             # Execute inline to generate IR using unified kernel
             # Pass merged globals (module + closure + captured caller locals)
             from .._inline import InlineAdapter
@@ -149,6 +124,7 @@ def inline(func=None, *, cls_method=False, method=False):
         wrapper._pc_compile_level_callable = True
         wrapper._func_ast = func_ast
         wrapper._param_names = param_names
+        wrapper._pc_call_signature = signature
         wrapper._original_func = f
         wrapper._inline_cls_method = cls_method
         wrapper._inline_method = method

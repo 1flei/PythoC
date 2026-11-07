@@ -1,6 +1,4 @@
-from llvmlite import ir
 from .base import BuiltinFunction, BuiltinEntity
-from ..valueref import wrap_value
 from ..logger import logger
 import ast
 
@@ -50,40 +48,32 @@ class typeof(BuiltinFunction):
             from .python_type import pyconst
             return pyconst[value_or_type]
     
+    _borrows_args = True
+
     @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
-        """Handle typeof(x) call in @compile context
-        
-        Strategy:
-        1. If arg is a type annotation (Name/Attribute/Subscript) -> parse as type
-        2. If arg evaluates to ValueRef with Python value -> wrap as pyconst
-        3. If arg evaluates to ValueRef with LLVM value -> return its type_hint
-        """
-        if len(node.args) != 1:
-            logger.error(f"typeof() takes exactly 1 argument ({len(node.args)} given)",
-                        node=node, exc_type=TypeError)
-        
-        arg_node = node.args[0]
-        
-        try:
-            pc_type = visitor.type_resolver.parse_annotation(arg_node)
-            if pc_type is not None:
-                from .python_type import PythonType
-                return wrap_value(pc_type, kind="python", type_hint=PythonType.wrap(pc_type))
-        except:
-            pass
-        
-        value_ref = visitor.visit_rvalue_expression(arg_node)
-        
-        if value_ref.is_python_value():
-            from .python_type import PythonType
-            py_value = value_ref.value
-            pyconst_type = PythonType.wrap(py_value, is_constant=True)
-            return wrap_value(pyconst_type, kind="python", type_hint=PythonType.wrap(pyconst_type))
-        
-        if value_ref.type_hint is not None:
-            from .python_type import PythonType
-            return wrap_value(value_ref.type_hint, kind="python", type_hint=PythonType.wrap(value_ref.type_hint))
-        
-        logger.error(f"typeof() cannot determine type of {ast.dump(arg_node)}",
-                    node=node, exc_type=TypeError)
+        """Determine the type of an evaluated value without replaying it."""
+        from .python_type import PythonType
+        from ..valueref import wrap_python_constant
+
+        if len(args) != 1:
+            logger.error(f"typeof() takes exactly 1 argument ({len(args)} given)",
+                         node=node, exc_type=TypeError)
+        value = args[0]
+        if value.is_python_value():
+            python_value = value.get_python_value()
+            if (isinstance(python_value, BuiltinEntity)
+                    or isinstance(python_value, type)
+                    and (getattr(python_value, 'can_be_type', lambda: False)()
+                         or getattr(python_value, '_is_struct', False)
+                         or getattr(python_value, '_is_enum', False)
+                         or getattr(python_value, '_is_union', False))):
+                result = visitor.type_resolver.resolve_type_value(value)
+            else:
+                result = PythonType.wrap(python_value, is_constant=True)
+        else:
+            result = value.type_hint
+        if result is None:
+            logger.error('typeof() cannot determine the argument type',
+                         node=node, exc_type=TypeError)
+        return wrap_python_constant(result)

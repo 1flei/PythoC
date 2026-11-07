@@ -11,6 +11,7 @@ import ast
 import copy
 from typing import List, Dict, Optional, TYPE_CHECKING
 from dataclasses import dataclass
+from .renaming import ScopedVariableRenamer
 
 if TYPE_CHECKING:
     from .exit_rules import ExitPointRule
@@ -183,41 +184,8 @@ class InlineBodyTransformer(ast.NodeTransformer):
         )
     
     def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        """Transform nested function definition (rename the function name if needed)
-        
-        Nested functions are treated as local variables, so their names get renamed.
-        We also need to rename captured variables from outer scope in the function body,
-        but we must NOT transform return statements (those belong to the nested function).
-        """
-        # Rename the function name if it's in the rename map
-        new_name = self.rename_map.get(node.name, node.name)
-        
-        # Create a transformer that only renames variables, without exit transformation
-        # We use a simple Name visitor instead of full transformer
-        class VariableRenamer(ast.NodeTransformer):
-            def __init__(self, rename_map):
-                self.rename_map = rename_map
-            
-            def visit_Name(self, node):
-                if node.id in self.rename_map:
-                    return ast.Name(id=self.rename_map[node.id], ctx=node.ctx)
-                return node
-            
-            def visit_FunctionDef(self, node):
-                # Don't recurse into nested nested functions
-                # They will be handled when their closure is called
-                return node
-        
-        # Rename variables in the body but preserve return statements
-        renamer = VariableRenamer(self.rename_map)
-        new_body = [renamer.visit(stmt) for stmt in node.body]
-        
-        # Return a new FunctionDef with renamed name and body with renamed variables
-        return ast.FunctionDef(
-            name=new_name,
-            args=node.args,
-            body=new_body,
-            decorator_list=node.decorator_list,
-            returns=node.returns,
-            type_comment=node.type_comment if hasattr(node, 'type_comment') else None
-        )
+        """Rename captures without rewriting nested locals or exit points."""
+        return ScopedVariableRenamer(self.rename_map).visit(copy.deepcopy(node))
+
+    def visit_Lambda(self, node: ast.Lambda) -> ast.Lambda:
+        return ScopedVariableRenamer(self.rename_map).visit(node)

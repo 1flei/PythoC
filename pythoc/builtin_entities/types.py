@@ -258,20 +258,10 @@ class ptr(BuiltinType):
                           type_hint=cls[lvalue.type_hint])
 
     @classmethod
-    def handle_type_conversion(cls, visitor, value_or_node, node: ast.Call = None) -> ir.Value:
+    def handle_type_conversion(cls, visitor, value_ref, node: ast.Call = None) -> ir.Value:
         """Handle explicit pointer conversion through the unified value path."""
-        value_ref = value_or_node
-        if isinstance(value_or_node, ast.Call):
-            node = value_or_node
-            if len(node.args) != 1:
-                logger.error(
-                    f"{cls.get_name()}() takes exactly 1 argument ({len(node.args)} given)",
-                    node=node,
-                    exc_type=TypeError,
-                )
-            value_ref = visitor.visit_rvalue_expression(node.args[0])
-
         return visitor.value_dispatcher.explicit_cast(cls, value_ref, node)
+
     
     @classmethod
     def handle_add(cls, visitor, left, right, node: ast.BinOp):

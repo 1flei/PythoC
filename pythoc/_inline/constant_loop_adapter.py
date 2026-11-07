@@ -40,6 +40,7 @@ from ..context import VariableInfo
 from ..meta.template import quote, const as meta_const
 from ._intrinsics import _PC_INTRINSICS
 from .exit_rules import _empty_label_block, _goto_begin, _goto_end
+from .names import visitor_expansion_names
 
 if TYPE_CHECKING:
     from ..ast_visitor.visitor_impl import LLVMIRVisitor
@@ -117,16 +118,18 @@ class ConstantLoopAdapter:
         """
         elements = list(iterable)
         required_globals = {'__pc_intrinsics': _PC_INTRINSICS}
+        names = visitor_expansion_names(self.visitor)
+        names.reserve_ast(for_node)
 
         loop_id = get_next_id()
-        exit_label = f"_const_loop_exit_{loop_id}"
+        exit_label = names.fresh(f"_const_loop_exit_{loop_id}")
 
         body_has_break = _has_break_in_body(for_node.body)
         body_has_continue = _has_continue_in_body(for_node.body)
 
         has_else = bool(for_node.orelse and len(for_node.orelse) > 0)
         after_else_label = (
-            f"_const_loop_after_else_{loop_id}"
+            names.fresh(f"_const_loop_after_else_{loop_id}")
             if has_else and body_has_break else None
         )
         break_target = after_else_label if after_else_label else exit_label
@@ -135,12 +138,12 @@ class ConstantLoopAdapter:
         iter_var_names = []
         if elements:
             iter_value_vars = self._register_iteration_values(elements, loop_id)
-            iter_var_names = list(iter_value_vars.keys())
+            iter_var_names = list(iter_value_vars.values())
 
         # Build per-iteration fragments
         iter_block_frags = []
         for i, _element in enumerate(elements):
-            iter_label = f"_const_loop_iter_{loop_id}_{i}"
+            iter_label = names.fresh(f"_const_loop_iter_{loop_id}_{i}")
             transformed_body = self._transform_body(
                 for_node.body, break_target, iter_label,
                 body_has_break, body_has_continue)
@@ -186,7 +189,7 @@ class ConstantLoopAdapter:
         iter_vars = {}
         
         for i, element in enumerate(elements):
-            var_name = f"_iter_val_{loop_id}_{i}"
+            var_name = self.visitor.expansion_names.fresh(f"_iter_val_{loop_id}_{i}")
             
             # Convert element to ValueRef if needed
             value_ref = self._element_to_valueref(element)
@@ -199,7 +202,7 @@ class ConstantLoopAdapter:
                 source="const_loop_iter_val",
                 is_parameter=False
             )
-            self.visitor.scope_manager.declare_variable(var_info, allow_shadow=True)
+            self.visitor.scope_manager.declare_variable(var_info, allow_shadow=False)
             
             iter_vars[i] = var_name
         
@@ -207,9 +210,9 @@ class ConstantLoopAdapter:
     
     def _element_to_valueref(self, element: Any) -> ValueRef:
         """Convert iteration element to ValueRef"""
-        # If already ValueRef, use it (but create fresh copy without var_name)
+        # The loop binding transfers this value. Retain its owner and field path.
         if isinstance(element, ValueRef):
-            return element.clone(var_name=None, linear_path=None)
+            return element.clone(var_name=None)
         
         # Wrap Python value
         from ..builtin_entities.python_type import PythonType

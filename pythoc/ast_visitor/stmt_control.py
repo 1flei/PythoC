@@ -170,9 +170,9 @@ class ControlFlowMixin:
                 if func_val.get_python_value() is _effect_proxy:
                     self._visit_with_effect_binding(node, item.context_expr)
                     return
-
-        # Evaluate the context expression
-        ctx_expr = self.visit_expression(item.context_expr)
+            ctx_expr = self._visit_call_with_target(item.context_expr, func_val)
+        else:
+            ctx_expr = self.visit_expression(item.context_expr)
 
         # Check if this is a scoped label
         if ctx_expr.is_python_value():

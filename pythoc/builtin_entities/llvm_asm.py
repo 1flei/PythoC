@@ -50,6 +50,8 @@ class llvm_asm(BuiltinFunction):
     Emit inline assembly directly into the LLVM IR output.
     """
 
+    _pc_call_keywords = ('side_effect', 'ret_type', 'inputs')
+
     @classmethod
     def get_name(cls) -> str:
         return 'llvm_asm'
@@ -92,29 +94,25 @@ class llvm_asm(BuiltinFunction):
                 positional_operands.append(item)
 
         kw_inputs = None
-        if node.keywords:
-            for kw in node.keywords:
-                if kw.arg == 'side_effect':
-                    se_val = cls._eval_const_keyword(kw.value, visitor)
+        keywords = getattr(args, 'keywords', {})
+        if keywords:
+            for name, value in keywords.items():
+                if name == 'side_effect':
+                    se_val = cls._try_get_python_value(value)
                     if type(se_val) is not bool:
                         logger.error(
                             "llvm_asm() side_effect= must be a bool constant",
                             node=node, exc_type=TypeError,
                         )
                     side_effect = se_val
-                elif kw.arg == 'ret_type':
-                    parsed = visitor.type_resolver.parse_annotation(kw.value)
-                    if parsed is None:
-                        logger.error(
-                            "llvm_asm() ret_type= must be a PythoC type",
-                            node=node, exc_type=TypeError,
-                        )
-                    ret_type = parsed
-                elif kw.arg == 'inputs':
-                    kw_inputs = cls._eval_inputs(kw.value, visitor, node)
+                elif name == 'ret_type':
+                    ret_type = visitor.type_resolver.resolve_type_value(value)
+                elif name == 'inputs':
+                    from ..literal_protocol import get_unpack_values
+                    kw_inputs = get_unpack_values(visitor, value, node)
                 else:
                     logger.error(
-                        "llvm_asm() unexpected keyword '{}'".format(kw.arg),
+                        "llvm_asm() unexpected keyword '{}'".format(name),
                         node=node, exc_type=TypeError,
                     )
 
@@ -158,15 +156,6 @@ class llvm_asm(BuiltinFunction):
         return isinstance(value, type) and hasattr(value, 'get_llvm_type')
 
     @classmethod
-    def _eval_inputs(cls, value_node, visitor, node):
-        if not isinstance(value_node, ast.List):
-            logger.error(
-                "llvm_asm() inputs= must be a list of operands",
-                node=node, exc_type=TypeError,
-            )
-        return [visitor.visit_rvalue_expression(elt) for elt in value_node.elts]
-
-    @classmethod
     def _extract_const_str(cls, arg, param_name, node) -> str:
         """Extract a compile-time string constant from an argument ValueRef."""
         if hasattr(arg, 'get_python_value'):
@@ -191,17 +180,3 @@ class llvm_asm(BuiltinFunction):
         if hasattr(arg, 'get_python_value') and arg.is_python_value():
             return arg.get_python_value()
         return arg
-
-    @classmethod
-    def _eval_const_keyword(cls, value_node, visitor):
-        """Evaluate a keyword argument node as a compile-time Python value."""
-        if isinstance(value_node, ast.Constant):
-            return value_node.value
-        if isinstance(value_node, ast.NameConstant):
-            return value_node.value
-        if isinstance(value_node, ast.Name):
-            name = value_node.id
-            binding = visitor._lookup_python_global_binding(name)
-            if binding is not None:
-                return binding.value_ref.get_python_value()
-        return None

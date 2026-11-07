@@ -362,9 +362,8 @@ class PythonType(_PythonTypeBase):
 
         args_py = [_as_python(arg) for arg in args]
         kwargs_py = {}
-        for kw in (node.keywords if node is not None else []):
-            kwargs_py[kw.arg] = _as_python(
-                visitor.visit_rvalue_expression(kw.value))
+        for name, value in getattr(args, 'keywords', {}).items():
+            kwargs_py[name] = _as_python(value)
 
         try:
             result = target_callable(*args_py, **kwargs_py)

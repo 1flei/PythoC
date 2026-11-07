@@ -4,11 +4,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from llvmlite import ir
 from pythoc import enum, f64, i32
 from pythoc.logger import logger
 from pythoc.std.poly import Poly
-from pythoc.valueref import wrap_value
 
 
 @enum(i32)
@@ -31,9 +29,7 @@ def overload(argument, result):
 
 
 def call_with_enum(dispatch, enum_type):
-    value = wrap_value(ir.Constant(enum_type.get_llvm_type(ir.Context()), None),
-                       kind='value', type_hint=enum_type)
-    return dispatch.handle_call(None, None, [value], None)
+    return dispatch.resolve(enum_type)
 
 
 class PolyValidationTest(unittest.TestCase):
@@ -62,12 +58,9 @@ class PolyValidationTest(unittest.TestCase):
         from pythoc.session import CompileSession
         with CompileSession():
             function = overload(ptr['PolyLateType'], i32)
-            function.handle_call = lambda *args: 'selected'
             dispatch = Poly(function)
             mark_type_defined('PolyLateType', i32)
-            value = wrap_value(ir.Constant(ptr[i32].get_llvm_type(), None),
-                               kind='value', type_hint=ptr[i32])
-            self.assertEqual(dispatch.handle_call(None, None, [value], None), 'selected')
+            self.assertIs(dispatch.resolve(ptr[i32]), function)
 
     def test_invalid_append_does_not_change_dispatcher(self):
         function = overload(i32, i32)
