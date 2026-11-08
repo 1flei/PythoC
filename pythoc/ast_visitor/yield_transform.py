@@ -119,8 +119,6 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
 def _specialize_compiled_value(value, suffix, effect_overrides):
     if not callable(value) or not getattr(value, '_is_compiled', False):
         return value
-    if getattr(value, '_pc_effect_impl', False):
-        return value
     from ..effect import resolve_effect_wrapper
     specialized = resolve_effect_wrapper(
         value, suffix=suffix, effect_overrides=effect_overrides,

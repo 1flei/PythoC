@@ -5,9 +5,7 @@ multiple threads.  Each function lives in its own group (distinct
 compile suffix => distinct group_key), does a distinct computation,
 and must return the correct value with a distinct mangled name.
 
-This does NOT exercise parallel `with effect(...)` blocks: the scoped
-builtins.__import__ hook is process-level and its enter/exit is known
-to race under that combination.
+Effect-context isolation and parallel import binding are tested separately.
 """
 
 import concurrent.futures

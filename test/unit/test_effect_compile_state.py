@@ -88,10 +88,7 @@ class TestEffectStackThreadIsolation(unittest.TestCase):
         self._saved_import = builtins.__import__
 
     def tearDown(self):
-        # Parallel EffectContext enter/exit races on the process-wide
-        # __import__ hook installation (out of scope for per-thread
-        # stacks); restore whatever was active before the test.
-        builtins.__import__ = self._saved_import
+        self.assertIs(builtins.__import__, self._saved_import)
 
     def _run_pair(self, worker):
         entered = threading.Barrier(2)

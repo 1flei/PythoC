@@ -24,22 +24,54 @@ with the overridden effect context. This produces new versions of functions
 with the specified suffix (e.g., func_custom).
 """
 
-import os
-import threading
-import sys
 import builtins
-import importlib
-import importlib.util
-from types import SimpleNamespace, ModuleType
-from typing import Any, Dict, Optional, Set, Tuple
+import inspect
+import os
+import sys
+import threading
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType, ModuleType
+from typing import Any, Dict, Mapping, Optional, Set
 
 from .effect_graph import node_id_from_group_key
 from .session import CompileSession
 
 
-# Store the original __import__ function
-_original_import = builtins.__import__
+@dataclass(frozen=True)
+class _EffectScope:
+    bindings: Mapping[str, Any] = field(
+        default_factory=lambda: MappingProxyType({}),
+    )
+    suffixes: tuple = ()
+    override_names: frozenset = frozenset()
+    replay: bool = False
+
+
+_EMPTY_SCOPE = _EffectScope()
+# (Effect, import suffix, owning CompileSession). A context never replaces
+# the process import function; this request is local to its execution context.
+_active_import_context = ContextVar('pythoc_effect_import_context', default=None)
+_context_tokens = ContextVar('pythoc_effect_context_tokens', default=())
+
+
+def _instance_dict(value):
+    """Inspect compiler metadata without invoking user __getattr__ hooks."""
+    try:
+        return object.__getattribute__(value, '__dict__')
+    except AttributeError:
+        return {}
+
+
+def _callable_metadata(value):
+    if not callable(value):
+        return {}
+    if not any(inspect.getattr_static(value, name, False) is True for name in (
+        '_is_compiled', '_is_yield_generated',
+    )):
+        return {}
+    return _instance_dict(value)
 
 
 def record_effect_usage(effect_name: str, compile_frame: Optional[Any] = None):
@@ -127,6 +159,10 @@ def resolve_effect_wrapper(wrapper, caller_group_key=None,
     use their lexical binding. Direct ``effect.xxx`` access still uses the
     captured effect context of the function being compiled.
 
+    Being registered as a provider is a property of an effect binding, not of
+    the callable. An explicit request may specialize that same declaration;
+    provider calls still use the reference stored in the captured binding.
+
     Args:
         wrapper: The @compile wrapper to potentially specialize.
         caller_group_key: Optional caller group for dependency recording.
@@ -151,10 +187,6 @@ def resolve_effect_wrapper(wrapper, caller_group_key=None,
 
     # Already effect-specialized for target suffix.
     if original_binding.effect_suffix is not None:
-        return wrapper
-
-    # Effect implementations are never transitively specialized.
-    if getattr(original_wrapper, '_pc_effect_impl', False):
         return wrapper
 
     # --- Check group-level effects via EffectGraph ---
@@ -225,127 +257,132 @@ def _do_effect_specialize(original_wrapper, suffix, effect_overrides):
     logger.error(f"Failed to specialize effect for {original_wrapper}")
 
 
-class EffectImportHook:
-    """
-    Import hook that intercepts imports within effect context.
+@dataclass(frozen=True)
+class _EffectImportRequest:
+    manager: 'Effect'
+    scope: _EffectScope
+    suffix: str
+    caller_file: Optional[str]
 
-    Uses builtins.__import__ to intercept all imports, including
-    `from module import name` for already-cached modules.
-    
-    Design principle (from dependency_cache.md):
-    - Same effect_suffix = same implementation = reused across ALL callers
-    - Cache key is (module, attr, suffix), NOT including caller_module
-    - If bindings differ but suffix is same -> user error
-    """
-
-    def __init__(self, effect_context: 'EffectContext'):
-        self._effect_context = effect_context
-        # Cache key: (module, attr, suffix) -> wrapped func
-        # NO caller_module in the key - same suffix reused across callers
-        self._wrapped_attrs: Dict[Tuple[str, str, str], Any] = {}
-
-    def __call__(self, name, globals=None, locals=None, fromlist=(), level=0):
-        """Custom __import__ that wraps @compile functions with effect context."""
-        # Import with caller effect context suppressed so that if this is the
-        # first import of the module, its body defines/captures its own defaults.
-        # The explicit import specialization below still uses the caller's
-        # active effect bindings.  Delegates to _recording_import (not bare
-        # _original_import) so EffectGraph import edges are still recorded,
-        # while an outer EffectImportHook stays bypassed as before.
-        with self._effect_context._suppress_for_module_import():
-            with suppress_effect_suffix():
-                module = _recording_import(name, globals, locals, fromlist, level)
-
-        suffix = self._effect_context._suffix
-        if suffix is None or not fromlist:
-            return module
-
-        # For `from module import name1, name2, ...`
-        # We need to wrap @compile functions in the returned module
-        effect_overrides = capture_effect_context()
-        for attr_name in fromlist:
-            if attr_name == '*':
-                continue
-
-            try:
-                attr = getattr(module, attr_name)
-            except AttributeError:
-                continue
-
-            # Check if this is a @compile decorated function or a yield-inline
-            # placeholder produced by @compile on a generator function.
-            is_compiled = callable(attr) and getattr(attr, '_is_compiled', False)
-            is_yield_generated = callable(attr) and getattr(attr, '_is_yield_generated', False)
-            if not is_compiled and not is_yield_generated:
-                continue
-
-            # Skip private/internal functions
-            if attr_name.startswith('_'):
-                continue
-
-            # Skip if this function already has the target suffix
-            existing_mangled = getattr(attr, '_mangled_name', None)
-            if existing_mangled and f'_{suffix}' in existing_mangled:
-                continue
-
-            # Cache key: (module, attr, suffix) - NO caller_module
-            # Same suffix means same implementation - reuse across callers
-            cache_key = (name, attr_name, suffix)
-            if cache_key in self._wrapped_attrs:
-                wrapped = self._wrapped_attrs[cache_key]
-            else:
-                if is_yield_generated:
-                    from .ast_visitor.yield_transform import specialize_yield_wrapper
-                    wrapped = specialize_yield_wrapper(
-                        attr, suffix=suffix, effect_overrides=effect_overrides,
-                    )
-                else:
-                    # Use the unified specialization entry point (phase 1: explicit args)
-                    wrapped = resolve_effect_wrapper(
-                        attr, suffix=suffix, effect_overrides=effect_overrides,
-                    )
-                # resolve_effect_wrapper returns the original when not needed
-                if wrapped is attr:
-                    wrapped = None
-                if wrapped is not None:
-                    self._wrapped_attrs[cache_key] = wrapped
-
-            if wrapped is not None:
-                # Save original attribute before modifying
-                # This allows restoration in __exit__
-                if name not in self._effect_context._saved_modules:
-                    self._effect_context._saved_modules[name] = {}
-                if attr_name not in self._effect_context._saved_modules[name]:
-                    self._effect_context._saved_modules[name][attr_name] = attr
-
-                # Replace the attribute in the module temporarily
-                # so that `from module import func` gets the wrapped version
-                setattr(module, attr_name, wrapped)
-
-                # --- Record import edge and layer in EffectGraph ---
-                import_binding = getattr(
-                    attr, '_binding', getattr(attr, '_state', None)
+    def capture(self):
+        """Freeze after loading, including the library's pinned declarations."""
+        with self.manager._lock:
+            bindings = self.manager._capture_context()
+            for name in self.manager._direct_assignments:
+                bindings[name] = object.__getattribute__(
+                    self.manager._effects[name], '_impl',
                 )
-                import_gk = getattr(import_binding, 'group_key', None) if import_binding else None
-                if import_gk:
-                    _om = _get_output_manager()
-                    imported_node = node_id_from_group_key(import_gk)
+        scope = replace(
+            self.scope, bindings=MappingProxyType(bindings), replay=True,
+        )
+        return replace(self, scope=scope)
 
-                    # Record layer membership for the imported node
-                    _om._effect_graph.add_layer(imported_node, suffix)
+    def bind(self, value):
+        metadata = _callable_metadata(value)
+        is_yield = metadata.get('_is_yield_generated', False)
+        if not metadata.get('_is_compiled', False) and not is_yield:
+            return value
+        binding = metadata.get('_binding', metadata.get('_state'))
+        bound_suffix = (
+            binding.effect_suffix if binding is not None
+            else metadata.get('_effect_suffix')
+        )
+        if bound_suffix is not None:
+            return value
 
-                    # Record edge + layer for the importing module so the
-                    # layer propagates through its (already recorded) import
-                    # edges to transitive dependencies.
-                    caller_file = (
-                        globals.get('__file__') if isinstance(globals, dict) else None
-                    )
-                    if caller_file and caller_file != import_gk[0]:
-                        caller_node = (caller_file, None, None)
-                        _om._effect_graph.add_edge(caller_node, imported_node)
-                        _om._effect_graph.add_layer(caller_node, suffix)
+        self.manager._register_import_bindings(self.suffix, self.scope)
+        token = self.manager._scope.set(self.scope)
+        try:
+            if is_yield:
+                from .ast_visitor.yield_transform import specialize_yield_wrapper
+                specialized = specialize_yield_wrapper(
+                    value, self.suffix, dict(self.scope.bindings),
+                )
+            else:
+                specialized = resolve_effect_wrapper(
+                    value, suffix=self.suffix,
+                    effect_overrides=dict(self.scope.bindings),
+                )
+        finally:
+            self.manager._scope.reset(token)
 
+        if specialized is not value and binding is not None and binding.group_key:
+            graph = _get_output_manager()._effect_graph
+            imported_node = node_id_from_group_key(binding.group_key)
+            graph.add_layer(imported_node, self.suffix)
+            if self.caller_file and self.caller_file != binding.group_key[0]:
+                caller_node = (self.caller_file, None, None)
+                graph.add_edge(caller_node, imported_node)
+                graph.add_layer(caller_node, self.suffix)
+        return specialized
+
+
+class _EffectImportView(ModuleType):
+    """One from-import's exports; never installed in sys.modules.
+
+    Ordinary attributes are forwarded exactly when IMPORT_FROM requests them.
+    In particular, dynamic Python exports are not probed during planning.
+    """
+
+    __slots__ = ('_source_module', '_request', '_requested_names', '_exports')
+
+    def __init__(self, module, request, names, replacements):
+        namespace = ModuleType.__getattribute__(module, '__dict__')
+        super().__init__(namespace.get('__name__', ''))
+        own_namespace = ModuleType.__getattribute__(self, '__dict__')
+        for name in ('__doc__', '__package__', '__spec__', '__loader__',
+                     '__file__', '__path__'):
+            if name in namespace:
+                own_namespace[name] = namespace[name]
+        object.__setattr__(self, '_source_module', module)
+        object.__setattr__(self, '_request', request)
+        object.__setattr__(self, '_requested_names', frozenset(names))
+        object.__setattr__(self, '_exports', replacements)
+
+    def __getattribute__(self, name):
+        names = object.__getattribute__(self, '_requested_names')
+        if name not in names:
+            return ModuleType.__getattribute__(self, name)
+        exports = object.__getattribute__(self, '_exports')
+        if name in exports:
+            return exports[name]
+        source = object.__getattribute__(self, '_source_module')
+        request = object.__getattribute__(self, '_request')
+        token = request.manager._scope.set(request.scope)
+        try:
+            value = getattr(source, name)
+        finally:
+            request.manager._scope.reset(token)
+        if not name.startswith('_'):
+            specialized = request.bind(value)
+            if specialized is not value:
+                exports[name] = specialized
+                return specialized
+        return value
+
+
+def _bind_import_exports(module, names, request):
+    """Build a private export view without touching the canonical module."""
+    if not names or '*' in names or not isinstance(module, ModuleType):
         return module
+    namespace = ModuleType.__getattribute__(module, '__dict__')
+    custom_lookup = type(module).__getattribute__ is not ModuleType.__getattribute__
+    replacements = {}
+    for name in names:
+        if not isinstance(name, str) or name.startswith('_'):
+            continue
+        if name in namespace and not custom_lookup:
+            value = namespace[name]
+            specialized = request.bind(value)
+            if specialized is not value:
+                replacements[name] = specialized
+    dynamic = (
+        '__getattr__' in namespace
+        or custom_lookup
+    )
+    if not replacements and not dynamic:
+        return module
+    return _EffectImportView(module, request, names, replacements)
 
 
 def _caller_module_from_visitor(visitor) -> Optional[str]:
@@ -408,6 +445,20 @@ def _compile_context_has_override(effect_name: str, visitor=None) -> bool:
     return effect_name in compilation_ctx.get('effect_override_names', set())
 
 
+def _resolve_compile_implementation(manager, name, visitor):
+    """Resolve scalar and namespace effects through the same binding rules."""
+    block = _block_bound_impl(name, visitor)
+    if block is not None:
+        return block
+    binding = getattr(visitor, 'binding_state', None)
+    captured = getattr(binding, 'captured_effect_context', None) or {}
+    if (manager.is_direct_assignment(name)
+            or _compile_context_has_override(name, visitor)):
+        return captured.get(name, manager._resolve_effect(name))
+    default = _module_default_impl(name, _caller_module_from_visitor(visitor))
+    return default if default is not None else manager._resolve_effect(name)
+
+
 class EffectNamespace:
     """
     A namespace object that represents an effect category (e.g., rng, allocator).
@@ -419,12 +470,13 @@ class EffectNamespace:
     to resolve effect.rng.next() to the actual function at compile time.
     """
 
-    def __init__(self, name: str, implementation: Any = None):
+    def __init__(self, name: str, implementation: Any = None, manager=None):
         object.__setattr__(self, '_name', name)
         object.__setattr__(self, '_impl', implementation)
+        object.__setattr__(self, '_manager', manager)
 
     def __getattr__(self, attr: str) -> Any:
-        impl = object.__getattribute__(self, '_impl')
+        impl = self._get_impl()
         if impl is None:
             name = object.__getattribute__(self, '_name')
             raise AttributeError(
@@ -443,7 +495,7 @@ class EffectNamespace:
 
     def __setattr__(self, attr: str, value: Any) -> None:
         # Setting attributes on the namespace sets them on the implementation
-        impl = object.__getattribute__(self, '_impl')
+        impl = self._get_impl()
         if impl is None:
             name = object.__getattribute__(self, '_name')
             raise AttributeError(
@@ -458,6 +510,9 @@ class EffectNamespace:
 
     def _get_impl(self) -> Any:
         """Internal: get the implementation"""
+        manager = object.__getattribute__(self, '_manager')
+        if manager is not None:
+            return manager._resolve_effect(object.__getattribute__(self, '_name'))
         return object.__getattribute__(self, '_impl')
 
     def handle_attribute(self, visitor, base, attr_name: str, node):
@@ -481,17 +536,11 @@ class EffectNamespace:
         # This tracks that the current function being compiled uses this effect
         record_effect_usage(name, getattr(visitor, 'func_state', None))
 
-        # Resolution order: block-scoped binding (with effect(...) in
-        # compiled code) > caller override > module default > namespace impl
-        impl = _block_bound_impl(name, visitor)
-
-        if impl is None and _compile_context_has_override(name, visitor):
-            impl = object.__getattribute__(self, '_impl')
-        if impl is None:
-            caller_module = _caller_module_from_visitor(visitor)
-            impl = _module_default_impl(name, caller_module)
-            if impl is None:
-                impl = object.__getattribute__(self, '_impl')
+        manager = object.__getattribute__(self, '_manager')
+        impl = (
+            _resolve_compile_implementation(manager, name, visitor)
+            if manager is not None else self._get_impl()
+        )
 
         if impl is None:
             from .logger import logger
@@ -519,155 +568,66 @@ class EffectNamespace:
 
     def __repr__(self) -> str:
         name = object.__getattribute__(self, '_name')
-        impl = object.__getattribute__(self, '_impl')
+        impl = self._get_impl()
         if impl is None:
             return f"<EffectNamespace '{name}' (unbound)>"
         return f"<EffectNamespace '{name}' -> {type(impl).__name__}>"
 
 
 class EffectContext:
-    """
-    Context manager for scoped effect overrides.
+    """Context-local effect bindings for definitions and explicit imports.
 
-    Usage:
-        with effect(rng=my_rng, suffix="custom"):
-            from mylib import func
-
-    When imports occur within this block, @compile functions are re-compiled
-    with the overridden effects and the specified suffix.
+    Binding an implementation stores its reference without modifying the
+    implementation or its members. This applies to default and pinned
+    registrations too; a callable can also be an ordinary specialization root.
     """
 
-    def __init__(self, effect_manager: 'Effect', overrides: Dict[str, Any], suffix: Optional[str] = None):
+    def __init__(self, effect_manager: 'Effect', overrides: Dict[str, Any],
+                 suffix: Optional[str] = None):
         self._effect = effect_manager
-        self._overrides = overrides
+        self._overrides = MappingProxyType(dict(overrides))
         self._suffix = suffix
-        self._saved: Dict[str, Any] = {}
-        self._saved_direct: Dict[str, bool] = {}
-        self._import_hook: Optional[EffectImportHook] = None
-        self._saved_modules: Dict[str, Dict[str, Any]] = {}  # module_name -> {attr_name -> original_func}
-        self._saved_import = None  # The __import__ that was active when we entered
-
-    @contextmanager
-    def _suppress_for_module_import(self):
-        """Temporarily hide this context's caller overrides during import."""
-        restored_effects = {}
-        saved_suffix_stack = None
-        with self._effect._lock:
-            saved_suffix_stack = list(self._effect._suffix_stack)
-            self._effect._suffix_stack.clear()
-
-            for name in self._overrides:
-                ns = self._effect._effects.get(name)
-                restored_effects[name] = ns._get_impl() if ns is not None else None
-                previous_impl = self._saved.get(name)
-                if previous_impl is None:
-                    if ns is not None:
-                        ns._set_impl(None)
-                else:
-                    self._effect._set_effect(name, previous_impl)
-
-        try:
-            yield
-        finally:
-            with self._effect._lock:
-                for name, active_impl in restored_effects.items():
-                    # If the module import established a default while this
-                    # effect had no previous implementation, remember it so
-                    # __exit__ restores that default instead of deleting it.
-                    if self._saved.get(name) is None:
-                        ns = self._effect._effects.get(name)
-                        imported_default = ns._get_impl() if ns is not None else None
-                        if imported_default is not None:
-                            self._saved[name] = imported_default
-
-                    if name not in self._effect._effects:
-                        self._effect._effects[name] = EffectNamespace(name, active_impl)
-                    else:
-                        self._effect._effects[name]._set_impl(active_impl)
-
-                self._effect._suffix_stack[:] = saved_suffix_stack
 
     def __enter__(self) -> 'EffectContext':
-        # Save current state and apply overrides
-        for name, impl in self._overrides.items():
-            # Save current implementation
-            if name in self._effect._effects:
-                ns = self._effect._effects[name]
-                self._saved[name] = ns._get_impl()
-            else:
-                self._saved[name] = None
-
-            # Save whether this was a direct assignment
-            self._saved_direct[name] = name in self._effect._direct_assignments
-
-            # Apply override (this is a caller override, so it can override defaults
-            # but NOT direct assignments in libraries)
-            # Note: The actual check happens during compilation when resolving effects
-            self._effect._set_effect(name, impl, is_caller_override=True)
-
-            # Mark effect-implementation callables so the compiler can avoid
-            # effect-specializing the implementation itself.
-            def _mark_impl(obj):
-                if obj is None:
-                    return
-                if callable(obj) and getattr(obj, '_is_compiled', False):
-                    setattr(obj, '_pc_effect_impl', True)
-                d = getattr(obj, '__dict__', None)
-                if isinstance(d, dict):
-                    for v in d.values():
-                        if callable(v) and getattr(v, '_is_compiled', False):
-                            setattr(v, '_pc_effect_impl', True)
-
-            _mark_impl(impl)
-
-        # Push suffix to stack
+        manager = self._effect
+        previous = manager._scope.get()
+        bindings = dict(previous.bindings)
+        for name, implementation in self._overrides.items():
+            bindings[name] = (
+                manager.get_effect_impl(name)
+                if manager.is_direct_assignment(name) else implementation
+            )
+        suffixes = previous.suffixes
         if self._suffix is not None:
-            self._effect._suffix_stack.append(self._suffix)
-        self._effect._override_stack.append(set(self._overrides.keys()))
-
-        # Install builtins.__import__ hook to intercept all imports
-        # Save whatever __import__ is currently active (may be an outer hook)
-        self._saved_import = builtins.__import__
-        self._import_hook = EffectImportHook(self)
-        builtins.__import__ = self._import_hook
-
+            suffixes += (self._suffix,)
+        scope = _EffectScope(
+            MappingProxyType(bindings), suffixes,
+            previous.override_names | frozenset(self._overrides), previous.replay,
+        )
+        scope_token = manager._scope.set(scope)
+        try:
+            session = CompileSession.current()
+        except RuntimeError:
+            session = None
+        if session is not None and session.effects is not manager:
+            session = None
+        import_token = _active_import_context.set((manager, self._suffix, session))
+        suppression_token = _suppress_compile_suffix.set(False)
+        _context_tokens.set(_context_tokens.get() + (
+            (self, scope_token, import_token, suppression_token),
+        ))
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        # Restore __import__ to what it was before __enter__
-        if self._import_hook is not None:
-            builtins.__import__ = self._saved_import
-
-            # Restore modified module attributes
-            for module_name, attrs in self._saved_modules.items():
-                if module_name in sys.modules:
-                    module = sys.modules[module_name]
-                    for attr_name, original_func in attrs.items():
-                        setattr(module, attr_name, original_func)
-
-            self._import_hook = None
-
-        # Restore saved state
-        for name, saved_impl in self._saved.items():
-            if saved_impl is None:
-                # Remove the effect if it didn't exist before
-                if name in self._effect._effects:
-                    del self._effect._effects[name]
-            else:
-                self._effect._effects[name]._set_impl(saved_impl)
-
-            # Restore direct assignment status
-            if self._saved_direct.get(name, False):
-                self._effect._direct_assignments.add(name)
-            elif name in self._effect._direct_assignments:
-                self._effect._direct_assignments.discard(name)
-
-        # Pop suffix from stack
-        if self._suffix is not None:
-            self._effect._suffix_stack.pop()
-        self._effect._override_stack.pop()
-
-        return False  # Don't suppress exceptions
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        tokens = _context_tokens.get()
+        context, scope_token, import_token, suppression_token = tokens[-1]
+        if context is not self:
+            raise RuntimeError('Effect contexts must exit in reverse entry order')
+        _context_tokens.set(tokens[:-1])
+        _suppress_compile_suffix.reset(suppression_token)
+        _active_import_context.reset(import_token)
+        self._effect._scope.reset(scope_token)
+        return False
 
 
 class Effect:
@@ -699,27 +659,43 @@ class Effect:
         object.__setattr__(self, '_defaults', {})  # module -> {name -> impl}
         object.__setattr__(self, '_direct_assignments', set())  # names with direct assignment
         object.__setattr__(self, '_lock', threading.RLock())
-        # Per-thread dynamic scope for `with effect(...)` blocks.  The
-        # suffix/override stacks are thread-local so that one thread
-        # compiling inside an effect context cannot leak its suffix or
-        # override names into compilations running on other threads.
-        object.__setattr__(self, '_local', threading.local())
+        object.__setattr__(self, '_import_binding_keys', {})
+        object.__setattr__(self, '_scope', ContextVar(
+            'pythoc_effect_scope', default=_EMPTY_SCOPE,
+        ))
 
     @property
-    def _suffix_stack(self) -> list:
-        """Per-thread stack of active effect suffixes."""
-        stack = getattr(self._local, 'suffix_stack', None)
-        if stack is None:
-            stack = self._local.suffix_stack = []
-        return stack
+    def _suffix_stack(self) -> tuple:
+        """Read-only suffixes in this execution context."""
+        return self._scope.get().suffixes
 
     @property
-    def _override_stack(self) -> list:
-        """Per-thread stack of active caller-override name sets."""
-        stack = getattr(self._local, 'override_stack', None)
-        if stack is None:
-            stack = self._local.override_stack = []
-        return stack
+    def _override_stack(self) -> tuple:
+        """Read-only override names in this execution context."""
+        names = self._scope.get().override_names
+        return (names,) if names else ()
+
+    def _capture_context(self):
+        with self._lock:
+            names = self._effects.keys() | self._scope.get().bindings.keys()
+            return {
+                name: value for name in names
+                if (value := self._resolve_effect(name)) is not None
+            }
+
+    def _register_import_bindings(self, suffix, scope):
+        """A suffix denotes one explicit import configuration per session."""
+        from .type_descriptor import specialization_key
+        bindings = {
+            name: scope.bindings.get(name) for name in scope.override_names
+        }
+        key = specialization_key(bindings)
+        with self._lock:
+            existing = self._import_binding_keys.setdefault(suffix, key)
+            if existing != key:
+                raise ValueError(
+                    f"Effect suffix {suffix!r} already has different import bindings"
+                )
 
     def __call__(self, suffix: Optional[str] = None, **overrides) -> EffectContext:
         """
@@ -773,43 +749,11 @@ class Effect:
                 # Store as module default
                 self._defaults[caller_module][name] = impl
 
-                # Mark default effect implementations too. They should not be
-                # transitively specialized as callees when compiling an effect
-                # context; the effect resolver chooses the right implementation.
-                def _mark_impl(obj):
-                    if obj is None:
-                        return
-                    if callable(obj) and getattr(obj, '_is_compiled', False):
-                        setattr(obj, '_pc_effect_impl', True)
-                    d = getattr(obj, '__dict__', None)
-                    if isinstance(d, dict):
-                        for v in d.values():
-                            if callable(v) and getattr(v, '_is_compiled', False):
-                                setattr(v, '_pc_effect_impl', True)
-
-                _mark_impl(impl)
-
-                # Also set as current effect if not already set by:
-                # 1. Direct assignment (effect.xxx = impl)
-                # 2. Active caller override (with effect(xxx=...) context)
-                # 
-                # This ensures that when code inside a `with effect()` block imports
-                # a module that calls effect.default(), the caller's override is preserved.
                 if name not in self._direct_assignments:
-                    # Check if there's an active caller override for this effect
-                    # If suffix_stack is non-empty and this effect is already set,
-                    # don't override it - the caller's override takes precedence
-                    if self._suffix_stack and name in self._effects:
-                        current_impl = self._effects[name]._get_impl()
-                        if current_impl is not None:
-                            # Caller override exists, don't replace it
-                            continue
-                    self._set_effect(name, impl, is_default=True)
+                    self._set_effect(name, impl)
 
-    def _set_effect(self, name: str, impl: Any, 
-                    is_direct: bool = False, 
-                    is_default: bool = False,
-                    is_caller_override: bool = False) -> None:
+    def _set_effect(self, name: str, impl: Any,
+                    is_direct: bool = False) -> None:
         """
         Internal: Set an effect implementation.
 
@@ -817,18 +761,11 @@ class Effect:
             name: Effect name
             impl: Implementation object
             is_direct: True if this is a direct assignment (effect.xxx = impl)
-            is_default: True if this is from effect.default()
-            is_caller_override: True if this is from caller's with effect() block
         """
         with self._lock:
-            # If this effect has a direct assignment, caller overrides cannot change it
-            if is_caller_override and name in self._direct_assignments:
-                # Direct assignments are immune to caller override
-                return
-
             # Create or update the effect namespace
             if name not in self._effects:
-                self._effects[name] = EffectNamespace(name, impl)
+                self._effects[name] = EffectNamespace(name, impl, self)
             else:
                 self._effects[name]._set_impl(impl)
 
@@ -859,22 +796,24 @@ class Effect:
             The resolved implementation, or None if not found
         """
         with self._lock:
+            scope = self._scope.get()
+            if scope.replay and name in scope.bindings:
+                return scope.bindings[name]
             ns = self._effects.get(name)
+            if name in self._direct_assignments and ns is not None:
+                return object.__getattribute__(ns, '_impl')
+            if name in scope.bindings:
+                return scope.bindings[name]
+            if caller_module:
+                defaults = self._defaults.get(caller_module, {})
+                if name in defaults:
+                    return defaults[name]
             if ns is not None:
-                impl = ns._get_impl()
-                if impl is not None:
-                    return impl
-
-            # Check module defaults
-            if caller_module and caller_module in self._defaults:
-                impl = self._defaults[caller_module].get(name)
-                if impl is not None:
-                    return impl
-
+                return object.__getattribute__(ns, '_impl')
             return None
 
     def _get_current_suffix(self) -> Optional[str]:
-        """Get the current suffix from the per-thread context stack"""
+        """Get the current suffix from the execution-context stack"""
         stack = self._suffix_stack
         if stack:
             return stack[-1]
@@ -894,7 +833,7 @@ class Effect:
                 return self._effects[name]
 
             # Create an unbound namespace - will error on access
-            ns = EffectNamespace(name, None)
+            ns = EffectNamespace(name, None, self)
             self._effects[name] = ns
             return ns
 
@@ -929,26 +868,14 @@ class Effect:
         from .valueref import wrap_value
         from .builtin_entities.python_type import PythonType
 
-        with self._lock:
-            if attr_name in self._effects:
-                ns = self._effects[attr_name]
-                impl = ns._get_impl()
-
-                # For simple value types (int, float, bool, str), return value directly
-                # This allows effect.MULTIPLIER to be used in expressions like x * effect.MULTIPLIER
-                if impl is not None and isinstance(impl, (int, float, bool, str)):
-                    value_type = PythonType.wrap(impl, is_constant=True)
-                    return wrap_value(impl, kind="python", type_hint=value_type)
-
-                # For namespace effects (SimpleNamespace, modules, etc.), return EffectNamespace
-                ns_type = PythonType.wrap(ns, is_constant=True)
-                return wrap_value(ns, kind="python", type_hint=ns_type)
-            else:
-                # Create an unbound namespace - will error on access
-                ns = EffectNamespace(attr_name, None)
-                self._effects[attr_name] = ns
-                ns_type = PythonType.wrap(ns, is_constant=True)
-                return wrap_value(ns, kind="python", type_hint=ns_type)
+        record_effect_usage(attr_name, getattr(visitor, 'func_state', None))
+        impl = _resolve_compile_implementation(self, attr_name, visitor)
+        if impl is not None and isinstance(impl, (int, float, bool, str)):
+            value_type = PythonType.wrap(impl, is_constant=True)
+            return wrap_value(impl, kind="python", type_hint=value_type)
+        ns = EffectNamespace(attr_name, impl)
+        ns_type = PythonType.wrap(ns, is_constant=True)
+        return wrap_value(ns, kind="python", type_hint=ns_type)
 
     def __setattr__(self, name: str, value: Any) -> None:
         """
@@ -988,17 +915,11 @@ class Effect:
 
         Returns None if the effect is not bound.
         """
-        with self._lock:
-            ns = self._effects.get(name)
-            if ns is not None:
-                return ns._get_impl()
-            return None
+        return self._resolve_effect(name)
 
     def has_effect(self, name: str) -> bool:
         """Check if an effect is bound"""
-        with self._lock:
-            ns = self._effects.get(name)
-            return ns is not None and ns._get_impl() is not None
+        return self._resolve_effect(name) is not None
 
     def list_effects(self) -> Dict[str, bool]:
         """
@@ -1008,10 +929,8 @@ class Effect:
             Dict mapping effect name to whether it's bound
         """
         with self._lock:
-            return {
-                name: ns._get_impl() is not None
-                for name, ns in self._effects.items()
-            }
+            names = self._effects.keys() | self._scope.get().bindings.keys()
+            return {name: self._resolve_effect(name) is not None for name in names}
 
     def is_direct_assignment(self, name: str) -> bool:
         """Check if an effect was set via direct assignment (non-overridable)"""
@@ -1086,10 +1005,9 @@ def get_current_effect_suffix() -> Optional[str]:
     return _current_effect()._get_current_suffix()
 
 
-# Kept as thread-local dynamic scope by design: suppression is active at
-# decoration/import time, before any ActiveCompileFrame exists, so there
-# is no compile frame to attach it to.
-_suppress_compile_suffix = threading.local()
+# Suppression is local to definition/import execution, before a compile frame
+# exists. Explicit nested EffectContexts restore their own definition scope.
+_suppress_compile_suffix = ContextVar('pythoc_suppress_effect_suffix', default=False)
 
 
 @contextmanager
@@ -1106,41 +1024,34 @@ def suppress_effect_suffix():
     still correctly detects active caller overrides and preserves the
     caller's effect bindings.
     """
-    prev = getattr(_suppress_compile_suffix, 'active', False)
-    _suppress_compile_suffix.active = True
+    token = _suppress_compile_suffix.set(True)
     try:
         yield
     finally:
-        _suppress_compile_suffix.active = prev
+        _suppress_compile_suffix.reset(token)
 
 
 def is_effect_suffix_suppressed() -> bool:
     """Check if the effect suffix is currently suppressed for @compile."""
-    return getattr(_suppress_compile_suffix, 'active', False)
+    return _suppress_compile_suffix.get()
 
 
 def capture_effect_context() -> Dict[str, Any]:
     """
     Capture the current effect context for later restoration.
 
+    Values are the exact bound implementations. Specialization rewrites a
+    variant's ordinary compilation globals, never these provider references.
+
     Returns:
         Dict mapping effect name to implementation
     """
-    eff = _current_effect()
-    with eff._lock:
-        return {
-            name: ns._get_impl()
-            for name, ns in eff._effects.items()
-            if ns._get_impl() is not None
-        }
+    return _current_effect()._capture_context()
 
 
 def capture_effect_override_names() -> Set[str]:
     """Return the active caller override names from nested effect contexts."""
-    names = set()
-    for overrides in _current_effect()._override_stack:
-        names.update(overrides)
-    return names
+    return set(_current_effect()._scope.get().override_names)
 
 
 @contextmanager
@@ -1151,38 +1062,15 @@ def restore_effect_context(captured: Dict[str, Any]):
     Args:
         captured: Dict from capture_effect_context()
     """
-    from .logger import logger
-
-    eff = _current_effect()
-
-    # Save current state
-    saved = {}
-    with eff._lock:
-        for name, impl in captured.items():
-            if name in eff._effects:
-                saved[name] = eff._effects[name]._get_impl()
-            else:
-                saved[name] = None
-
-            # Set captured implementation
-            if name not in eff._effects:
-                eff._effects[name] = EffectNamespace(name, impl)
-            else:
-                eff._effects[name]._set_impl(impl)
-
-        logger.debug(f"restore_effect_context: restored {captured}")
-
+    manager = _current_effect()
+    scope = replace(
+        manager._scope.get(), bindings=MappingProxyType(dict(captured)), replay=True,
+    )
+    token = manager._scope.set(scope)
     try:
         yield
     finally:
-        # Restore saved state
-        with eff._lock:
-            for name, saved_impl in saved.items():
-                if saved_impl is None:
-                    if name in eff._effects:
-                        eff._effects[name]._set_impl(None)
-                else:
-                    eff._effects[name]._set_impl(saved_impl)
+        manager._scope.reset(token)
 
 
 # ---------------------------------------------------------------------------
@@ -1192,9 +1080,8 @@ def restore_effect_context(captured: Dict[str, Any]):
 # statements — not by scanning each function's globals.  The recorder below
 # wraps builtins.__import__ for the whole process and, for every import,
 # records (caller_file, None, None) -> NodeID edges for compiled wrappers
-# visible at the imported module's top level.  EffectImportHook (installed
-# per effect context) delegates to _recording_import, so edge recording
-# stays active inside effect contexts as well.
+# visible at the imported module's top level. The same stable adapter handles
+# effect imports; contexts only change its context-local binding request.
 # ---------------------------------------------------------------------------
 
 
@@ -1273,7 +1160,9 @@ def _backfill_import_edges(source_file):
         except Exception:
             abs_source = source_file
         for mod in list(sys.modules.values()):
-            mod_file = getattr(mod, '__file__', None)
+            if not isinstance(mod, ModuleType):
+                continue
+            mod_file = ModuleType.__getattribute__(mod, '__dict__').get('__file__')
             if not mod_file:
                 continue
             if mod_file == source_file or mod_file == abs_source:
@@ -1294,16 +1183,19 @@ def _backfill_import_edges(source_file):
             if id(mod) in visited or depth > 8:
                 return
             visited.add(id(mod))
-            for value in list(vars(mod).values()):
+            namespace = ModuleType.__getattribute__(mod, '__dict__')
+            for value in list(namespace.values()):
                 if isinstance(value, ModuleType):
-                    if getattr(value, '__path__', None) is not None:
+                    nested = ModuleType.__getattribute__(value, '__dict__')
+                    if nested.get('__path__') is not None:
                         scan_module(value, depth + 1)
                 else:
                     _record_wrapper_import_edge(graph, caller_node, source_file, value)
 
-        for value in list(vars(module).values()):
+        namespace = ModuleType.__getattribute__(module, '__dict__')
+        for value in list(namespace.values()):
             if isinstance(value, ModuleType):
-                mod_file = getattr(value, '__file__', None)
+                mod_file = ModuleType.__getattribute__(value, '__dict__').get('__file__')
                 if not mod_file or mod_file == source_file or mod_file == abs_source:
                     continue
                 scan_module(value, 0)
@@ -1315,9 +1207,10 @@ def _backfill_import_edges(source_file):
 
 def _record_wrapper_import_edge(graph, caller_node, caller_file, value):
     """Record caller_node -> value's group node if value is a compiled wrapper."""
-    if not callable(value) or not getattr(value, '_is_compiled', False):
+    metadata = _callable_metadata(value)
+    if not metadata.get('_is_compiled', False):
         return
-    binding = getattr(value, '_binding', getattr(value, '_state', None))
+    binding = metadata.get('_binding', metadata.get('_state'))
     group_key = getattr(binding, 'group_key', None) if binding else None
     if not group_key or group_key[0] == caller_file:
         # Same-file dependencies are not cross-group planning edges.
@@ -1370,16 +1263,17 @@ def _record_import_edges(name, caller_globals, fromlist, level, module):
     caller_node = (caller_file, None, None)
 
     modules = []
-    if isinstance(module, ModuleType):
-        modules.append(module)
+    if not isinstance(module, ModuleType):
+        return
+    namespace = ModuleType.__getattribute__(module, '__dict__')
+    modules.append(module)
     if fromlist:
         for attr_name in fromlist:
             if attr_name == '*':
                 continue
-            try:
-                attr = getattr(module, attr_name)
-            except AttributeError:
+            if attr_name not in namespace:
                 continue
+            attr = namespace[attr_name]
             if isinstance(attr, ModuleType):
                 modules.append(attr)
             else:
@@ -1391,101 +1285,75 @@ def _record_import_edges(name, caller_globals, fromlist, level, module):
             modules.append(leaf)
 
     for mod in modules:
-        mod_file = getattr(mod, '__file__', None)
+        mod_namespace = ModuleType.__getattribute__(mod, '__dict__')
+        mod_file = mod_namespace.get('__file__')
         if not mod_file or mod_file == caller_file:
             continue
-        for value in vars(mod).values():
+        for value in list(mod_namespace.values()):
             _record_wrapper_import_edge(graph, caller_node, caller_file, value)
 
 
-_relname_cache: dict = {}
-
-
-def _resolve_relative_name(package, level, name):
-    """(package, level, name) -> absolute module name, memoized."""
-    key = (package, level, name)
-    resolved = _relname_cache.get(key, False)
-    if resolved is not False:
-        return resolved
-    bits = package.split('.')
-    result = None
-    if level - 1 <= len(bits):
-        if level > 1:
-            bits = bits[:len(bits) - (level - 1)]
-        base = '.'.join(bits)
-        if base:
-            result = base + '.' + name if name else base
-    if len(_relname_cache) > 100000:
-        _relname_cache.clear()
-    _relname_cache[key] = result
-    return result
-
-
-def _fast_cached_import(name, globals, fromlist, level):
-    """Resolve a __import__ call from sys.modules without the import machinery.
-
-    Returns the module object __import__ would have returned, or None when
-    the call must go through the real import (anything not fully determined
-    by the current sys.modules state).  Only fully-initialized cached
-    modules are served here; a module whose import is still in progress on
-    another thread falls through so the real import can wait on the
-    per-module import lock.
-    """
-    if level:
-        # Relative import: resolve to an absolute name via the caller's
-        # package (mirrors importlib._bootstrap._resolve_name).
-        if not isinstance(globals, dict):
-            return None
-        package = globals.get('__package__')
-        if not package:
-            name_attr = globals.get('__name__')
-            if not name_attr:
-                return None
-            if globals.get('__path__') is not None:
-                package = name_attr
-            else:
-                package = name_attr.rpartition('.')[0]
-                if not package:
-                    return None
-        name = _resolve_relative_name(package, level, name)
-        if name is None:
-            return None
-    if not name:
-        return None
-    mod = sys.modules.get(name)
-    if mod is None:
-        return None
-    spec = getattr(mod, '__spec__', None)
-    if spec is None or getattr(spec, '_initializing', True):
-        return None
-    if fromlist:
-        if '*' in fromlist:
-            return None
-        for attr in fromlist:
-            try:
-                if not hasattr(mod, attr):
-                    # May be a submodule the real import must load.
-                    return None
-            except Exception:
-                return None
-        return mod
-    top = name.partition('.')[0]
-    if top != name:
-        # `import a.b.c` binds/returns the top-level package.
-        return sys.modules.get(top)
-    return mod
-
-
-def _recording_import(name, globals=None, locals=None, fromlist=(), level=0):
-    """Process-wide __import__ wrapper that records EffectGraph edges."""
-    module = _fast_cached_import(name, globals, fromlist, level)
-    if module is None:
-        module = _original_import(name, globals, locals, fromlist, level)
+@contextmanager
+def _import_request_scope(active, caller_globals):
+    manager, suffix, owner_session = active
     try:
-        _record_import_edges(name, globals, fromlist, level, module)
-    except Exception:
-        pass  # Edge recording is best-effort and must never break imports.
-    return module
+        session = CompileSession.current()
+    except RuntimeError:
+        session = None
+    if owner_session is not None and owner_session is not session:
+        yield None
+        return
+    scope = manager._scope.get()
+    caller_file = (
+        caller_globals.get('__file__') if isinstance(caller_globals, dict) else None
+    )
+    request = (
+        _EffectImportRequest(manager, scope, suffix, caller_file) if suffix else None
+    )
+    scope_token = manager._scope.set(_EMPTY_SCOPE)
+    import_token = _active_import_context.set(None)
+    try:
+        with suppress_effect_suffix():
+            yield request
+    finally:
+        _active_import_context.reset(import_token)
+        manager._scope.reset(scope_token)
 
 
-builtins.__import__ = _recording_import
+def _make_import_hook(delegate):
+    def _recording_import(name, globals=None, locals=None, fromlist=(), level=0):
+        """Delegate ordinary imports and bind only this from-import's exports."""
+        active = _active_import_context.get()
+        request = None
+        if active is None:
+            module = delegate(name, globals, locals, fromlist, level)
+        else:
+            with _import_request_scope(active, globals) as request:
+                module = delegate(name, globals, locals, fromlist, level)
+        if request is not None:
+            # Module initialization can register defaults and pinned effects.
+            # Resolve them against the restored caller scope before freezing
+            # this import's bindings; no selection is deferred to a call.
+            request = request.capture()
+        try:
+            _record_import_edges(name, globals, fromlist, level, module)
+        except Exception:
+            pass  # Dependency observation must not change Python import behavior.
+        if request is not None:
+            return _bind_import_exports(module, fromlist, request)
+        return module
+
+    return _recording_import
+
+
+def _install_import_hook():
+    """Install once, preserving the preceding importer and later wrappers."""
+    installed = globals().get('_installed_import_hook')
+    if installed is None:
+        installed = _make_import_hook(builtins.__import__)
+        globals()['_installed_import_hook'] = installed
+        builtins.__import__ = installed
+    return installed
+
+
+_recording_import = _install_import_hook()

@@ -55,6 +55,7 @@ class FunctionBindingState:
     compiler: Optional[Any] = None
     so_file: Optional[str] = None
     is_template: bool = False
+    # Exact provider references, separate from rewritable compilation_globals.
     captured_effect_context: Optional[Any] = None
     effect_override_names: Optional[Any] = None
     captured_symbols: Optional[Any] = None

@@ -572,7 +572,11 @@ def _copy_with_effect_specialized_attrs(value, effect_key):
 
 
 def _rewrite_globals_to_effect_specializations(wrappers, effect_key, by_name=None):
-    """Point specialized wrappers' captured globals at specialized imports."""
+    """Point specialized wrappers' ordinary globals at specialized imports.
+
+    Only compilation_globals is rewritten. captured_effect_context owns fixed
+    provider references, even when the same object also occurs in globals.
+    """
     replacement_cache = {}
 
     def get_replacement(value):
@@ -605,11 +609,12 @@ def materialize_group_specialization(template_wrapper, effect_key, effect_bindin
     """Materialize a whole compilation group for one effect suffix.
 
     Effect specialization is group-level for build planning: once any symbol in
-    a group is required under an effect suffix, all non-effect-implementation
-    wrappers from the corresponding base group are materialized before object
-    build starts.  Imported compiled wrappers referenced from the group's global
-    namespace are conservatively expanded too; this is group/import based and
-    does not require call-site visitation.
+    a group is required under an effect suffix, all wrappers from the
+    corresponding base group are materialized before object build starts.
+    Provider bindings retain their original references; they do not exempt a
+    declaration from ordinary specialization. Imported compiled wrappers from
+    the group's global namespace are conservatively expanded too; this uses
+    groups/imports and does not require call-site visitation.
     """
     if effect_key == DEFAULT_EFFECT_KEY:
         return _materialize_single_specialization(
@@ -641,8 +646,6 @@ def materialize_group_specialization(template_wrapper, effect_key, effect_bindin
     for wrapper in group_wrappers:
         binding = getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
         if binding is None or binding.effect_suffix is not None:
-            continue
-        if getattr(wrapper, '_pc_effect_impl', False):
             continue
         eligible_wrappers.append(wrapper)
 
@@ -676,8 +679,6 @@ def materialize_group_specialization(template_wrapper, effect_key, effect_bindin
     for imported_wrapper in _iter_global_compiled_wrappers(group_wrappers):
         binding = getattr(imported_wrapper, '_binding', getattr(imported_wrapper, '_state', None))
         if binding is None:
-            continue
-        if getattr(imported_wrapper, '_pc_effect_impl', False):
             continue
         if binding.effect_suffix is not None:
             if binding.effect_suffix != effect_key or not binding.group_key or len(binding.group_key) != 4:

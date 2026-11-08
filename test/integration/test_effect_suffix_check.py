@@ -20,7 +20,7 @@ def run_tests():
             pass
     effect._defaults.clear()
     effect._direct_assignments.clear()
-    effect._suffix_stack.clear()
+    assert effect._get_current_suffix() is None
 
     # Create RNG implementation
     @compile
