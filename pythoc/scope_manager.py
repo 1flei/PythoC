@@ -20,6 +20,7 @@ with a single unified mechanism.
 from __future__ import annotations
 from typing import Dict, List, Optional, Any, Tuple, Callable
 from dataclasses import dataclass, field
+from contextlib import contextmanager
 from enum import Enum, auto
 import ast
 
@@ -122,6 +123,7 @@ class ScopeManager:
         """Initialize scope manager with its own internal variable registry."""
         from .registry import VariableInfo, _InternalVariableRegistry
         self._var_registry = _InternalVariableRegistry()
+        self._binding_aliases: Dict[str, Any] = {}
         self._scopes: List[Scope] = []
         self._visitor: Optional[Any] = None  # Set by visitor
 
@@ -362,7 +364,20 @@ class ScopeManager:
     
     def lookup_variable(self, name: str) -> Optional[Any]:
         """Look up a variable in the scope chain"""
-        return self._var_registry.lookup(name)
+        local = self._var_registry.lookup(name)
+        if local is not None:
+            return local
+        return self._binding_aliases.get(name)
+
+    @contextmanager
+    def binding_aliases(self, bindings: Dict[str, Any]):
+        """Expose existing bindings without declaring variables or owners."""
+        previous = self._binding_aliases
+        self._binding_aliases = {**previous, **bindings}
+        try:
+            yield
+        finally:
+            self._binding_aliases = previous
 
     def is_declared_in_current_scope(self, name: str) -> bool:
         """Check if variable is declared in the current scope"""
@@ -383,7 +398,7 @@ class ScopeManager:
 
     def get_all_visible(self) -> Dict[str, Any]:
         """Get all currently visible variables (from all scopes)"""
-        return self._var_registry.get_all_visible()
+        return {**self._binding_aliases, **self._var_registry.get_all_visible()}
 
     def scope(self, scope_type: ScopeType, cf: Any = None,
               continue_target: Any = None, break_target: Any = None,

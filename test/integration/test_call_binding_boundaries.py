@@ -1,14 +1,11 @@
 """Call binding preserves parameter kinds and rejects owned defaults."""
 
-import os
-from pathlib import Path
-import subprocess
-import sys
-import tempfile
 import unittest
 
-import pythoc
 from pythoc import compile, consume, i32, linear, ptr, struct
+from pythoc.build.output_manager import flush_all_pending_outputs
+from pythoc.session import CompileSession
+from test.utils.test_utils import DeferredTestCase
 
 
 @compile
@@ -85,7 +82,7 @@ def copyable_tuple_defaults() -> i32:
     return read() + read()
 
 
-class CallBindingBoundariesTest(unittest.TestCase):
+class CallBindingBoundariesTest(DeferredTestCase):
     def test_yield_keyword_only_defaults_and_overrides(self):
         self.assertEqual(keyword_binding(), 41)
 
@@ -101,33 +98,136 @@ class CallBindingBoundariesTest(unittest.TestCase):
     def test_copyable_aggregate_defaults_remain_reusable_snapshots(self):
         self.assertEqual(copyable_tuple_defaults(), 14)
 
-    def test_invalid_calls_and_owned_defaults_are_rejected(self):
-        fixtures = [
-            ('closure_owned_default.py', 'linear default arguments'),
-            ('lambda_owned_default.py', 'linear default arguments'),
-            ('yield_owned_default.py', 'linear default arguments'),
-            ('closure_owned_tuple_default.py', 'linear default arguments'),
-            ('closure_owned_record_default.py', 'linear default arguments'),
-            ('yield_keyword_only_positional.py', 'too many positional'),
-            ('yield_positional_only_keyword.py', 'positional-only'),
-            ('yield_missing_keyword_only.py', 'missing required'),
-        ]
-        env = os.environ.copy()
-        env['PYTHONPATH'] = os.pathsep.join([
-            str(Path(pythoc.__file__).resolve().parent.parent),
-            env.get('PYTHONPATH', ''),
-        ])
-        env['PC_RAISE_ON_ERROR'] = '1'
-        directory = Path(__file__).resolve().parent / 'fixtures'
-        for fixture, expected_error in fixtures:
-            with self.subTest(fixture=fixture):
-                with tempfile.TemporaryDirectory(prefix='binding-') as temp:
-                    result = subprocess.run(
-                        [sys.executable, str(directory / fixture)], cwd=temp,
-                        env=env, capture_output=True, text=True, timeout=120)
-                output = result.stdout + result.stderr
-                self.assertNotEqual(result.returncode, 0, output)
-                self.assertIn(expected_error, output)
+    def test_rejects_closure_owned_default(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'linear default arguments'):
+            @compile
+            def main() -> i32:
+                token = linear()
+
+                def take(value: linear = token) -> i32:
+                    consume(value)
+                    return 1
+
+                return take() + take()
+
+            flush_all_pending_outputs()
+
+    def test_rejects_lambda_owned_default(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'linear default arguments'):
+            @compile
+            def main() -> i32:
+                token = linear()
+                take = lambda value=token: consume(value)
+                take()
+                take()
+                return 2
+
+            flush_all_pending_outputs()
+
+    def test_rejects_yield_owned_default(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'linear default arguments'):
+            @compile
+            def main() -> i32:
+                token = linear()
+
+                def take(value: linear = token) -> i32:
+                    consume(value)
+                    yield 1
+
+                total: i32 = 0
+                for value in take():
+                    total += value
+                for value in take():
+                    total += value
+                return total
+
+            flush_all_pending_outputs()
+
+    def test_rejects_closure_owned_tuple_default(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'linear default arguments'):
+            @compile
+            def main() -> i32:
+                token = linear()
+
+                def take(value: struct[linear] = (token,)) -> i32:
+                    consume(value[0])
+                    return 1
+
+                return take() + take()
+
+            flush_all_pending_outputs()
+
+    def test_rejects_closure_owned_record_default(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'linear default arguments'):
+            @compile
+            class Owner:
+                value: i32
+                token: linear
+
+            @compile
+            def main() -> i32:
+                owner: Owner = (7, linear())
+
+                def take(value: Owner = owner) -> i32:
+                    consume(value.token)
+                    return value.value
+
+                return take() + take()
+
+            flush_all_pending_outputs()
+
+    def test_rejects_yield_keyword_only_positional(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'too many positional'):
+            @compile
+            def values(a: i32, *, b: i32 = 8) -> i32:
+                yield a * 10 + b
+
+            @compile
+            def main() -> i32:
+                total: i32 = 0
+                for value in values(1, 2):
+                    total += value
+                return total
+
+            flush_all_pending_outputs()
+
+    def test_rejects_yield_positional_only_keyword(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'positional-only'):
+            @compile
+            def values(a: i32, /) -> i32:
+                yield a
+
+            @compile
+            def main() -> i32:
+                total: i32 = 0
+                for value in values(a=1):
+                    total += value
+                return total
+
+            flush_all_pending_outputs()
+
+    def test_rejects_yield_missing_keyword_only(self):
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'missing required'):
+            @compile
+            def values(a: i32, *, b: i32) -> i32:
+                yield a + b
+
+            @compile
+            def main() -> i32:
+                total: i32 = 0
+                for value in values(1):
+                    total += value
+                return total
+
+            flush_all_pending_outputs()
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 
@@ -15,6 +15,7 @@ class RuntimeCapture:
 class ClosureCapturePlan:
     bindings: Dict[str, Any]
     runtime: List[RuntimeCapture]
+    references: Dict[str, Any] = field(default_factory=dict)
 
 
 def extract_value_from_vref(vref) -> Any:
@@ -33,11 +34,14 @@ def build_closure_capture_plan(
 ) -> ClosureCapturePlan:
     bindings: Dict[str, Any] = {}
     runtime: List[RuntimeCapture] = []
+    references: Dict[str, Any] = {}
 
     for var_name in captured_vars:
         vinfo = visible.get(var_name)
         if vinfo is None or vinfo.value_ref is None:
             continue
+
+        references[var_name] = vinfo
 
         vref = vinfo.value_ref
         if vref.is_python_value():
@@ -52,7 +56,7 @@ def build_closure_capture_plan(
             if pc_type is not None:
                 runtime.append(RuntimeCapture(var_name, pc_type, vref))
 
-    return ClosureCapturePlan(bindings=bindings, runtime=runtime)
+    return ClosureCapturePlan(bindings, runtime, references)
 
 
 def normalize_runtime_captures(captures) -> List[RuntimeCapture]:

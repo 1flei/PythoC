@@ -253,8 +253,11 @@ class LoopsMixin:
         ast.copy_location(call_node, for_node.iter)
         ast.fix_missing_locations(call_node)
 
+        definition = getattr(iter_val, '_pc_generator_expr_info', {})
         iter_val._yield_inline_info = {
             'func_obj': None,
+            'callee_globals': definition.get('globals', {}),
+            'capture_references': definition.get('capture_references', {}),
             'original_ast': func_ast,
             'call_node': call_node,
             'call_args': []
@@ -317,7 +320,7 @@ class LoopsMixin:
             call_node,
             func_obj=func_obj,
             callee_globals_override=callee_globals,
-            all_visible=inline_info.get('is_closure', False),
+            capture_references=inline_info.get('capture_references'),
         )
 
         if inline_result is None:

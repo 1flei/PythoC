@@ -183,6 +183,15 @@ class ControlFlowBuilder:
             },
         )
 
+    def bitcast(self, value, typ, name=''):
+        """Fold static addresses before assigning a runtime PCIR register."""
+        from ..builder.llvm_simple_builder import LLVMBuilder
+
+        constant = LLVMBuilder._constant_pointer_bitcast(value, typ)
+        if constant is not None:
+            return constant
+        return self.__getattr__('bitcast')(value, typ, name=name)
+
     def __getattr__(self, name):
         """Record PCIR instruction instead of delegating to real builder.
 

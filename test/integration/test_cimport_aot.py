@@ -26,13 +26,7 @@ import subprocess
 import sys
 import unittest
 
-
-def _clang_backend_available() -> bool:
-    try:
-        from pythoc.cimport_clang import is_clang_backend_available
-    except Exception:
-        return False
-    return is_clang_backend_available()
+from pythoc.cimport_clang import is_clang_backend_available
 
 
 def _cc_available() -> bool:
@@ -45,7 +39,7 @@ def _cc_available() -> bool:
 
 
 _BACKEND_AVAILABLE = (
-    _clang_backend_available()
+    is_clang_backend_available()
     and _cc_available()
     # The program imports real libc headers, which the pip libclang cannot
     # parse from zig's bundled mingw headers on Windows.

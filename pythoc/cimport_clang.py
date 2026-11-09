@@ -50,8 +50,11 @@ def _load_cindex():
 def is_clang_backend_available() -> bool:
     try:
         cindex = _load_cindex()
+    except ClangCImportError:
+        return False
+    try:
         cindex.Index.create()
-    except Exception:
+    except cindex.LibclangError:
         return False
     return True
 

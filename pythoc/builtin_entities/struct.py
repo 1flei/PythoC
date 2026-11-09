@@ -478,7 +478,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             # Use extract_value (no lvalue support)
             if base.is_struct_value():
                 struct_value = ensure_ir(base)
-                field_value = visitor.builder.extract_value(struct_value, llvm_field_index)
+                field_value = visitor.builder.extract_value(
+                    struct_value, llvm_field_index, value_type_hint=field_type)
                 # For struct values without address, we can't provide lvalue
                 return wrap_value(
                     field_value, kind="value", type_hint=field_type,
@@ -588,7 +589,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             # Base is a struct value without address (e.g., function return value)
             # Use extract_value - this cannot be used as lvalue
             struct_value = ensure_ir(base)
-            field_value = visitor.builder.extract_value(struct_value, llvm_index_val)
+            field_value = visitor.builder.extract_value(
+                struct_value, llvm_index_val, value_type_hint=field_type)
             return wrap_value(field_value, kind="value", type_hint=field_type,
                               var_name=result_var_name, linear_path=result_linear_path,
                               linear_owner_id=base.linear_owner_id)

@@ -11,6 +11,8 @@ import copy
 from typing import Optional
 
 from ..logger import logger
+from .names import ExpansionNames
+from .renaming import ScopedVariableRenamer
 
 
 def build_genexpr_yield_function_ast(
@@ -34,11 +36,27 @@ def build_genexpr_yield_function_ast(
                 exc_type=TypeError,
             )
 
-    current_body = [
-        ast.Expr(value=ast.Yield(value=copy.deepcopy(genexpr_ast.elt)))
-    ]
+    # A comprehension target shadows only the clauses after its iterable.
+    # Give it a distinct binding before lowering into ordinary for statements.
+    names = ExpansionNames()
+    names.reserve_ast(genexpr_ast)
+    renames = {}
+    generators = []
+    for original in genexpr_ast.generators:
+        comp = copy.deepcopy(original)
+        comp.iter = ScopedVariableRenamer(renames).visit(comp.iter)
+        targets = {node.id for node in ast.walk(comp.target)
+                   if isinstance(node, ast.Name)}
+        renames.update({name: names.fresh(f'{func_name}_{name}')
+                        for name in sorted(targets)})
+        renamer = ScopedVariableRenamer(renames)
+        comp.target = renamer.visit(comp.target)
+        comp.ifs = [renamer.visit(value) for value in comp.ifs]
+        generators.append(comp)
+    value = ScopedVariableRenamer(renames).visit(copy.deepcopy(genexpr_ast.elt))
+    current_body = [ast.Expr(value=ast.Yield(value=value))]
 
-    for comp in reversed(genexpr_ast.generators):
+    for comp in reversed(generators):
         body = current_body
         for cond in reversed(comp.ifs):
             body = [

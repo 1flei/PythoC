@@ -339,11 +339,18 @@ class AbstractBuilder(ABC):
         """
         pass
     
+    @abstractmethod
+    def call_inline_asm(self, fn: Any, args: List[Any], name: str = "",
+                        element_types: Any = None) -> Any:
+        """Emit an asm call with explicit indirect operand storage types."""
+        pass
+
     # ========== Aggregate Operations ==========
     
     @abstractmethod
-    def extract_value(self, agg: Any, idx: Any, name: str = "") -> Any:
-        """Extract value from aggregate."""
+    def extract_value(self, agg: Any, idx: Any, name: str = "",
+                      value_type_hint: Any = None) -> Any:
+        """Extract an aggregate member with its optional semantic type."""
         pass
     
     @abstractmethod

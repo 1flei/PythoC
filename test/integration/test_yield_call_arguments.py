@@ -1,14 +1,11 @@
 """Yield calls preserve argument binding, evaluation order and diagnostics."""
 
-import os
-from pathlib import Path
-import subprocess
-import sys
-import tempfile
 import unittest
 
-import pythoc
 from pythoc import compile, consume, i32, linear, param, ptr, struct
+from pythoc.build.output_manager import flush_all_pending_outputs
+from pythoc.session import CompileSession
+from test.utils.test_utils import DeferredTestCase
 
 
 @compile
@@ -141,7 +138,7 @@ def linear_collector() -> i32:
     return total
 
 
-class YieldCallArgumentsTest(unittest.TestCase):
+class YieldCallArgumentsTest(DeferredTestCase):
     def test_reordered_keywords_evaluate_once_in_source_order(self):
         self.assertEqual(reordered_keywords(), 212)
 
@@ -168,30 +165,40 @@ class YieldCallArgumentsTest(unittest.TestCase):
     def test_linear_typed_collector_transfers_ownership_once(self):
         self.assertEqual(linear_collector(), 7)
 
-    def assert_compile_failure(self, fixture, expected_error):
-        script = Path(__file__).resolve().parent / 'fixtures' / fixture
-        env = os.environ.copy()
-        env['PYTHONPATH'] = os.pathsep.join([
-            str(Path(pythoc.__file__).resolve().parent.parent),
-            env.get('PYTHONPATH', ''),
-        ])
-        env['PC_RAISE_ON_ERROR'] = '1'
-        with tempfile.TemporaryDirectory(prefix='pythoc-yield-failure-') as temp:
-            result = subprocess.run(
-                [sys.executable, str(script)], cwd=temp, env=env,
-                capture_output=True, text=True, timeout=120)
-        output = result.stdout + result.stderr
-        self.assertNotEqual(result.returncode, 0, output)
-        self.assertIn(expected_error, output)
-
     def test_linear_typed_collector_rejects_use_after_transfer(self):
-        self.assert_compile_failure(
-            'yield_linear_use_after_transfer.py', 'already consumed')
+        with CompileSession(), self.assertRaisesRegex(
+                RuntimeError, 'already consumed'):
+            @compile
+            def values(*tokens: struct[linear]) -> i32:
+                consume(tokens[0])
+                yield 7
+
+            @compile
+            def main() -> i32:
+                token = linear()
+                total: i32 = 0
+                for value in values(token):
+                    total += value
+                consume(token)
+                return total
+
+            flush_all_pending_outputs()
 
     def test_kwargs_splat_is_rejected_at_the_shared_call_boundary(self):
-        self.assert_compile_failure(
-            'yield_kwargs_splat.py',
-            '**kwargs splat in calls is not supported')
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, '\\*\\*kwargs splat in calls is not supported'):
+            @compile
+            def digits(a: i32, b: i32 = 8) -> i32:
+                yield a * 10 + b
+
+            @compile
+            def main() -> i32:
+                total: i32 = 0
+                for value in digits(**{'a': i32(1), 'b': i32(2)}):
+                    total += value
+                return total
+
+            flush_all_pending_outputs()
 
 
 if __name__ == '__main__':

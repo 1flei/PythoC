@@ -8,9 +8,9 @@ Transforms callee body by:
 """
 
 import ast
-import copy
 from typing import List, Dict, Optional, TYPE_CHECKING
 from dataclasses import dataclass
+
 from .renaming import ScopedVariableRenamer
 
 if TYPE_CHECKING:
@@ -27,7 +27,7 @@ class InlineContext:
     rename_map: Dict[str, str]
 
 
-class InlineBodyTransformer(ast.NodeTransformer):
+class InlineBodyTransformer(ScopedVariableRenamer):
     """
     Transform callee body by:
     1. Renaming variables according to rename_map
@@ -50,8 +50,8 @@ class InlineBodyTransformer(ast.NodeTransformer):
             rename_map: Mapping of old variable names to new names
             flag_var: DEPRECATED - kept for API compatibility, ignored
         """
+        super().__init__(rename_map)
         self.exit_rule = exit_rule
-        self.rename_map = rename_map
         self.exit_types = exit_rule.get_exit_node_types()
         self.context = InlineContext(rename_map=rename_map)
         # flag_var is no longer used with goto-based approach
@@ -74,12 +74,6 @@ class InlineBodyTransformer(ast.NodeTransformer):
             elif transformed is not None:
                 result.append(transformed)
         return result
-    
-    def visit_Name(self, node: ast.Name) -> ast.Name:
-        """Rename variables according to rename_map"""
-        if node.id in self.rename_map:
-            return ast.Name(id=self.rename_map[node.id], ctx=node.ctx)
-        return node
     
     def visit_Return(self, node: ast.Return):
         """Transform return using exit rule"""
@@ -182,10 +176,3 @@ class InlineBodyTransformer(ast.NodeTransformer):
             orelse=new_orelse,
             finalbody=new_finalbody
         )
-    
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.FunctionDef:
-        """Rename captures without rewriting nested locals or exit points."""
-        return ScopedVariableRenamer(self.rename_map).visit(copy.deepcopy(node))
-
-    def visit_Lambda(self, node: ast.Lambda) -> ast.Lambda:
-        return ScopedVariableRenamer(self.rename_map).visit(node)

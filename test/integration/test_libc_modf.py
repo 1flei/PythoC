@@ -1,66 +1,51 @@
-"""The modf binding preserves both results and the C output-pointer ABI."""
+"""The modf binding returns both parts without overwriting adjacent fields."""
 
-import ctypes
 import math
-from pathlib import Path
 import struct
 import sys
 import unittest
 
-from pythoc import compile, f64, ptr
-from test.native_reference import c_reference
+from pythoc import compile, f64, ptr, u64
 from pythoc.libc.math import modf
 
 
 @compile
-def split_value(x: f64, integral: ptr[f64]) -> f64:
-    return modf(x, integral)
+class SplitResult:
+    before: u64
+    integral: f64
+    after: u64
+    fraction: f64
 
 
-class GuardedOutput(ctypes.Structure):
-    _fields_ = [('before', ctypes.c_uint64), ('integral', ctypes.c_double),
-                ('after', ctypes.c_uint64)]
+@compile
+def split_value(value: f64) -> SplitResult:
+    result: SplitResult = (0xfedcba9876543210, 1234567.25,
+                           0x0123456789abcdef, 0.0)
+    result.fraction = modf(value, ptr(result.integral))
+    return result
 
 
 class ModfRuntimeTest(unittest.TestCase):
-    def test_fraction_and_integral_match_an_independent_c_call(self):
-        source = (Path(__file__).resolve().parent / 'fixtures'
-                  / 'libc_modf_reference.c')
-        with c_reference(source, ['m']) as library:
-            reference = library.split_reference
-            reference.argtypes = [ctypes.c_double, ctypes.POINTER(ctypes.c_double)]
-            reference.restype = ctypes.c_double
-            cases = [0.0, -0.0, 0.25, -0.25, 1.75, -1.75,
-                     2.0 ** 51 + 0.5, -(2.0 ** 51 + 0.5),
-                     float.fromhex('0x0.0000000000001p-1022'),
-                     -float.fromhex('0x0.0000000000001p-1022'),
-                     sys.float_info.max, -sys.float_info.max,
-                     math.inf, -math.inf, math.nan]
-            before = 0xfedcba9876543210
-            after = 0x0123456789abcdef
-            for value in cases:
-                with self.subTest(value=value):
-                    actual = GuardedOutput(before, 1234567.25, after)
-                    expected = GuardedOutput(before, 1234567.25, after)
-                    actual_pointer = (ctypes.addressof(actual)
-                                      + GuardedOutput.integral.offset)
-                    expected_pointer = ctypes.cast(
-                        ctypes.byref(expected, GuardedOutput.integral.offset),
-                        ctypes.POINTER(ctypes.c_double),
-                    )
-                    actual_fraction = split_value(value, actual_pointer)
-                    expected_fraction = reference(value, expected_pointer)
-                    for result, target in [
-                        (actual_fraction, expected_fraction),
-                        (actual.integral, expected.integral),
-                    ]:
-                        if math.isnan(target):
-                            self.assertTrue(math.isnan(result))
-                        else:
-                            self.assertEqual(struct.pack('=d', result),
-                                             struct.pack('=d', target))
-                    self.assertEqual((actual.before, actual.after),
-                                     (before, after))
+    def test_fraction_and_integral_match_math_modf(self):
+        cases = [0.0, -0.0, 0.25, -0.25, 1.75, -1.75,
+                 2.0 ** 51 + 0.5, -(2.0 ** 51 + 0.5),
+                 float.fromhex('0x0.0000000000001p-1022'),
+                 -float.fromhex('0x0.0000000000001p-1022'),
+                 sys.float_info.max, -sys.float_info.max,
+                 math.inf, -math.inf, math.nan]
+        for value in cases:
+            with self.subTest(value=value):
+                result = split_value(value)
+                fraction, integral = math.modf(value)
+                for actual, expected in ((result.fraction, fraction),
+                                         (result.integral, integral)):
+                    if math.isnan(expected):
+                        self.assertTrue(math.isnan(actual))
+                    else:
+                        self.assertEqual(struct.pack('=d', actual),
+                                         struct.pack('=d', expected))
+                self.assertEqual(result.before, 0xfedcba9876543210)
+                self.assertEqual(result.after, 0x0123456789abcdef)
 
 
 if __name__ == '__main__':

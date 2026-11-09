@@ -19,7 +19,7 @@ def storage_type(pc_type, context):
         return ir.PointerType(ir.IntType(8))
     dimensions = getattr(base, 'dimensions', None)
     if dimensions is not None:
-        result = storage_type(base.element_type, context)
+        result = storage_type(base._get_element_type(), context)
         for count in reversed(dimensions):
             result = ir.ArrayType(result, count)
         return result

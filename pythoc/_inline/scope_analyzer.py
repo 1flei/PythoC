@@ -234,6 +234,20 @@ class AssignmentCollector(ast.NodeVisitor):
             if item.optional_vars:
                 self._collect_names(item.optional_vars, annotated=False)
         self.generic_visit(node)
+
+    def visit_MatchAs(self, node: ast.MatchAs):
+        if node.name:
+            self.unannotated_assigned.add(node.name)
+        self.generic_visit(node)
+
+    def visit_MatchStar(self, node: ast.MatchStar):
+        if node.name:
+            self.unannotated_assigned.add(node.name)
+
+    def visit_MatchMapping(self, node: ast.MatchMapping):
+        if node.rest:
+            self.unannotated_assigned.add(node.rest)
+        self.generic_visit(node)
     
     def visit_FunctionDef(self, node: ast.FunctionDef):
         """def f(): ... (annotated - function name is a new binding)"""

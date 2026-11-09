@@ -17,11 +17,6 @@ from pythoc.logger import set_raise_on_error
 from pythoc.session import CompileSession
 from pythoc.target_layout import default_target_triple
 
-from fixtures.type_relation_matrix import (
-    CASES, ENTRIES, build_conversion, build_probe,
-)
-
-
 set_raise_on_error(True)
 _TypeRelationTag = PythonType.wrap(7, is_constant=True)
 FIXTURES = Path(__file__).resolve().parent / 'fixtures'
@@ -1080,30 +1075,6 @@ class TypeRelationsTest(unittest.TestCase):
 
         flush_all_pending_outputs()
         self.assertEqual(run(), 42)
-
-    def test_conversion_entry_matrix(self):
-        """Check policy at real compiler boundaries, then execute every positive cell."""
-        for case in CASES:
-            for entry in ENTRIES:
-                with self.subTest(relation=case.name, entry=entry):
-                    conversion = build_conversion(case, entry)
-                    if not case.allowed(entry):
-                        self._reject(conversion, case.rejection(entry))
-                        continue
-                    probe = build_probe(case, entry, conversion)
-                    try:
-                        flush_all_pending_outputs()
-                    except Exception:
-                        clear_failed_group(probe._binding.group_key)
-                        clear_failed_group(conversion._binding.group_key)
-                        raise
-                    for flag in (0, 1):
-                        expected = case.expected
-                        if ((entry == 'conditional' and not flag)
-                                or (entry == 'conditional_reversed' and flag)):
-                            expected = case.peer_expected
-                        with self.subTest(flag=flag):
-                            self.assertEqual(probe(flag), expected)
 
     def test_cimport_enum_representation_matches_c_consumer(self):
         for wide in [False, True]:

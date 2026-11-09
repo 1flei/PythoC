@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 20  # Invalidate pointer field storage and forward canonicalization.
+DEPS_VERSION = 22  # Invalidate definition-site capture and expansion binding code.
 
 
 # Memo for _type_source_file: id(type) -> (type, source_file).  The strong

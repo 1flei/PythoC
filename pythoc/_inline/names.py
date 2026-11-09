@@ -33,6 +33,8 @@ class ExpansionNames:
                 elif (isinstance(node, (ast.MatchAs, ast.MatchStar))
                       and node.name):
                     self.reserved.add(node.name)
+                elif isinstance(node, ast.MatchMapping) and node.rest:
+                    self.reserved.add(node.rest)
 
     def fresh(self, preferred):
         index = self._next_suffix.get(preferred, 0)

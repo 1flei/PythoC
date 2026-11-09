@@ -1,13 +1,11 @@
-"""Native finite classification agrees with an independent C implementation."""
+"""Native finite classification handles IEEE boundary bit patterns."""
 
-import ctypes
-from contextlib import ExitStack
-from pathlib import Path
+import math
 import random
+import struct
 import unittest
 
 from pythoc import compile, f32, f64, i32, u32, u64, union
-from test.native_reference import c_reference
 from pythoc.libc.math import (
     __inline_isfinitef as finite_float,
     __inline_isfinited as finite_double,
@@ -37,18 +35,6 @@ def classify_long_compat(bits: u64) -> i32:
 
 
 class LibcFiniteRuntimeTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        resources = ExitStack()
-        cls.addClassCleanup(resources.close)
-        source = (Path(__file__).resolve().parent / 'fixtures'
-                  / 'libc_finite_reference.c')
-        cls.reference = resources.enter_context(c_reference(source, ['m']))
-        cls.reference.finite32.argtypes = [ctypes.c_uint32]
-        cls.reference.finite32.restype = ctypes.c_int
-        cls.reference.finite64.argtypes = [ctypes.c_uint64]
-        cls.reference.finite64.restype = ctypes.c_int
-
     def test_float_boundaries_and_bit_patterns(self):
         cases = [0, 0x80000000, 1, 0x80000001, 0x007fffff, 0x00800000,
                  0x3f800000, 0xbf800000, 0x7f7fffff, 0xff7fffff,
@@ -58,8 +44,8 @@ class LibcFiniteRuntimeTest(unittest.TestCase):
         cases += [random_values.getrandbits(32) for _ in range(512)]
         for bits in cases:
             with self.subTest(bits=hex(bits)):
-                self.assertEqual(classify_float(bits),
-                                 self.reference.finite32(bits))
+                value = struct.unpack('=f', struct.pack('=I', bits))[0]
+                self.assertEqual(classify_float(bits), math.isfinite(value))
 
     def test_double_boundaries_and_bit_patterns(self):
         cases = [0, 0x8000000000000000, 1, 0x8000000000000001,
@@ -74,7 +60,8 @@ class LibcFiniteRuntimeTest(unittest.TestCase):
         cases += [random_values.getrandbits(64) for _ in range(512)]
         for bits in cases:
             with self.subTest(bits=hex(bits)):
-                expected = self.reference.finite64(bits)
+                value = struct.unpack('=d', struct.pack('=Q', bits))[0]
+                expected = math.isfinite(value)
                 self.assertEqual(classify_double(bits), expected)
                 self.assertEqual(classify_long_compat(bits), expected)
 

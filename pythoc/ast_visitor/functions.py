@@ -48,7 +48,7 @@ class _ClosureWrapper:
     defer_linear_transfer = True
 
     def __init__(self, func_ast, visitor, func_globals, capture_bindings,
-                 capture_runtime, defaults):
+                 capture_runtime, defaults, capture_references):
         from ..call_normalization import lower_inline_signature
 
         self.func_ast, self._pc_call_signature = lower_inline_signature(
@@ -58,6 +58,7 @@ class _ClosureWrapper:
         self.func_globals = func_globals
         self._capture_bindings = capture_bindings
         self._capture_runtime = capture_runtime
+        self._capture_references = capture_references
         self._has_yield = _contains_yield(func_ast)
 
     def handle_call(self, visitor, func_ref, args, call_node):
@@ -77,11 +78,10 @@ class _ClosureWrapper:
                 'original_ast': self.func_ast,
                 'call_node': call_node,
                 'call_args': args,
-                # Closures capture by reference from ALL enclosing scopes,
-                # unlike module-level yield functions (whose free names
-                # resolve via callee globals). The yield-inline path must
-                # use the matching caller visibility.
+                # Replay uses the bindings selected at this closure's
+                # definition, including when the call is stored for later.
                 'is_closure': True,
+                'capture_references': self._capture_references,
             }
             return result
 
@@ -91,7 +91,9 @@ class _ClosureWrapper:
             self._pc_call_signature['param_names'], args))
 
         # Use ClosureAdapter to inline the closure with captured globals
-        adapter = ClosureAdapter(visitor, param_bindings, func_globals=self.func_globals)
+        adapter = ClosureAdapter(
+            visitor, param_bindings, func_globals=self.func_globals,
+            capture_references=self._capture_references)
         return adapter.execute_closure(self.func_ast)
 
 
@@ -249,7 +251,7 @@ class FunctionsMixin:
 
         # Capture the current user_globals at closure definition time
         # This is the caller's globals context
-        closure_globals = self.ctx.user_globals
+        closure_globals = dict(self.ctx.user_globals)
 
         # Analyze captured variables for this closure
         caller_context = build_caller_context(
@@ -277,4 +279,5 @@ class FunctionsMixin:
             capture_plan.bindings,
             capture_plan.runtime,
             defaults,
+            capture_plan.references,
         )

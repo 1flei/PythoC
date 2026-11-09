@@ -29,11 +29,12 @@ templates. The call site picks the right frame and feeds all params.
 import ast
 import copy
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ..meta.template import quote, const as meta_const
 from .names import ExpansionNames
+from .scope_analyzer import ScopeContext
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +53,7 @@ class InlineResult:
     """
     stmts: List[ast.stmt]
     required_globals: Dict[str, Any]
+    reference_bindings: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -66,7 +68,8 @@ class MetaInlineRequest:
         callee_globals: Merged globals from the callee's definition site.
         call_args: AST expressions for each call argument.
         call_site: The call expression node (for location copying).
-        caller_context: Caller's scope context (for capture detection).
+        caller_context: Consumer bindings, including existing loop targets.
+        capture_context: Lexical bindings available to the callee.
         exit_rule: How to transform exit points (return, yield, etc.).
     """
     callee_ast: Any  # ast.FunctionDef | ast.Lambda
@@ -76,6 +79,7 @@ class MetaInlineRequest:
     caller_context: Any  # ScopeContext
     exit_rule: Any  # ExitPointRule
     names: Optional[ExpansionNames] = None
+    capture_context: ScopeContext = field(default_factory=ScopeContext.empty)
 
 
 # ---------------------------------------------------------------------------
@@ -231,12 +235,15 @@ def _transform_body(callee_body, exit_rule, rename_map):
     return transformer.transform(callee_body)
 
 
-def _get_result_type(callee_ast):
+def _get_result_type(callee_ast, globals_=None):
     """Extract non-void return type from callee, or None."""
     if callee_ast and hasattr(callee_ast, 'returns') and callee_ast.returns:
         ret = callee_ast.returns
-        if isinstance(ret, ast.Name) and ret.id == 'void':
-            return None
+        if isinstance(ret, ast.Name):
+            from ..builtin_entities import void
+            default = void if ret.id == 'void' else None
+            if (globals_ or {}).get(ret.id, default) is void:
+                return None
         return ret
     return None
 
@@ -347,7 +354,8 @@ def inline_globals_scope(visitor, inline_result):
 
     old_user_globals = merge_inline_globals(visitor, inline_result)
     try:
-        yield
+        with visitor.scope_manager.binding_aliases(inline_result.reference_bindings):
+            yield
     finally:
         restore_globals(visitor, old_user_globals)
 
@@ -361,6 +369,7 @@ def _build_inline_request(
     caller_context,
     exit_rule,
     names=None,
+    capture_context=None,
 ) -> MetaInlineRequest:
     """Build a ``MetaInlineRequest`` from the standard adapter inputs."""
     return MetaInlineRequest(
@@ -371,6 +380,8 @@ def _build_inline_request(
         caller_context=caller_context,
         exit_rule=exit_rule,
         names=names,
+        capture_context=(capture_context if capture_context is not None
+                         else ScopeContext.empty()),
     )
 
 
@@ -384,6 +395,7 @@ def expand_inline_or_raise(
     exit_rule,
     tag: str = "InlineAdapter",
     names=None,
+    capture_context=None,
 ) -> InlineResult:
     """Build a request, expand it, and raise on failure.
 
@@ -398,6 +410,7 @@ def expand_inline_or_raise(
         caller_context=caller_context,
         exit_rule=exit_rule,
         names=names,
+        capture_context=capture_context,
     )
     try:
         return expand_inline(request)
@@ -417,6 +430,7 @@ def try_expand_inline(
     exit_rule,
     tag: str = "YieldInlineAdapter",
     names=None,
+    capture_context=None,
 ) -> Optional[InlineResult]:
     """Build a request, expand it, and return ``None`` on failure.
 
@@ -431,6 +445,7 @@ def try_expand_inline(
         caller_context=caller_context,
         exit_rule=exit_rule,
         names=names,
+        capture_context=capture_context,
     )
     try:
         return expand_inline(request)
@@ -499,7 +514,7 @@ def expand_inline(request):
     callee_body, callee_params = _extract_callee(callee_ast)
 
     # --- Scope analysis ---
-    analyzer = ScopeAnalyzer(request.caller_context)
+    analyzer = ScopeAnalyzer(request.capture_context)
     captured_vars, local_vars, param_vars = analyzer.analyze(
         callee_body, callee_params)
 
@@ -532,7 +547,7 @@ def expand_inline(request):
     prefix_label = exit_label
     if (isinstance(request.exit_rule, ReturnExitRule)
             and result_var
-            and _get_result_type(callee_ast) is None):
+            and _get_result_type(callee_ast, request.callee_globals) is None):
         n_returns = _count_returns(callee_body)
         if n_returns == 1 and isinstance(callee_body[-1], ast.Return):
             terminal_value = callee_body[-1].value
@@ -566,7 +581,8 @@ def expand_inline(request):
 
     # --- Compute frame parameters ---
     has_label = exit_label is not None
-    result_type = _get_result_type(callee_ast) if has_label else None
+    result_type = (_get_result_type(callee_ast, request.callee_globals)
+                   if has_label else None)
     has_result_decl = bool(result_type and result_var)
 
     decl_stmts = []
@@ -574,10 +590,7 @@ def expand_inline(request):
         exit_rule = request.exit_rule
         # A void-returning producer yields no payload: no loop-var
         # declaration (declaring one would be a void-typed variable).
-        is_void_return = (
-            isinstance(exit_rule.return_type_annotation, ast.Name)
-            and exit_rule.return_type_annotation.id == 'void'
-        )
+        is_void_return = _get_result_type(callee_ast, request.callee_globals) is None
         if exit_rule.return_type_annotation and not is_void_return:
             decl_stmts = _build_loop_var_declarations(
                 exit_rule.loop_var,

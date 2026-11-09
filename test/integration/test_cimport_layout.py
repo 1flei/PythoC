@@ -27,14 +27,7 @@ import os
 import unittest
 
 from pythoc import compile, i32, nullptr, ptr
-
-
-def _clang_backend_available() -> bool:
-    try:
-        from pythoc.cimport_clang import is_clang_backend_available
-    except Exception:
-        return False
-    return is_clang_backend_available()
+from pythoc.cimport_clang import is_clang_backend_available
 
 
 def _cc_available() -> bool:
@@ -46,7 +39,7 @@ def _cc_available() -> bool:
     return True
 
 
-_BACKEND_AVAILABLE = _clang_backend_available() and _cc_available()
+_BACKEND_AVAILABLE = is_clang_backend_available() and _cc_available()
 
 _fixture_dir = os.path.abspath(os.path.join(
     os.path.dirname(__file__), '..', '..', 'build', 'test', 'cimport_layout'))

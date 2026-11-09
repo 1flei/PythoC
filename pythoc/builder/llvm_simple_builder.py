@@ -12,6 +12,21 @@ from typing import Any, List, Optional
 from llvmlite import ir
 
 from .abstract import AbstractBuilder
+from ..ir_helpers import is_link_time_constant
+
+
+class _AsmMemoryAttributes(ir.ArgumentAttributes):
+    """Render an explicit storage type even when the operand is an opaque ptr."""
+
+    def __init__(self, element_type):
+        super().__init__(['elementtype'])
+        self.element_type = element_type
+
+    def _expand(self, name, typ):
+        if name == 'elementtype':
+            return f'elementtype({self.element_type})'
+        return super()._expand(name, typ)
+
 
 
 class LLVMBuilder(AbstractBuilder):
@@ -214,7 +229,22 @@ class LLVMBuilder(AbstractBuilder):
     def inttoptr(self, value: Any, typ: Any, name: str = "") -> Any:
         return self._builder.inttoptr(value, typ, name=name)
     
+    @staticmethod
+    def _constant_pointer_bitcast(value: Any, typ: Any):
+        """Keep an address conversion usable in a static initializer."""
+        if not is_link_time_constant(value):
+            return None
+        if (not isinstance(value.type, ir.PointerType)
+                or not isinstance(typ, ir.PointerType)):
+            return None
+        if value.type.addrspace != typ.addrspace:
+            return None
+        return value.bitcast(typ)
+
     def bitcast(self, value: Any, typ: Any, name: str = "") -> Any:
+        constant = self._constant_pointer_bitcast(value, typ)
+        if constant is not None:
+            return constant
         return self._builder.bitcast(value, typ, name=name)
     
     # ========== Control Flow ==========
@@ -259,10 +289,23 @@ class LLVMBuilder(AbstractBuilder):
         """
         return self._builder.call(fn, args, name=name, cconv=cconv)
     
+    def call_inline_asm(self, fn: Any, args: List[Any], name: str = "",
+                        element_types: Any = None) -> Any:
+        result = self._builder.call(fn, args, name=name)
+        for index, element_type in (element_types or {}).items():
+            result.arg_attributes[index] = _AsmMemoryAttributes(element_type)
+        return result
+
     # ========== Aggregate Operations ==========
     
-    def extract_value(self, agg: Any, idx: Any, name: str = "") -> Any:
-        return self._builder.extract_value(agg, idx, name=name)
+    def extract_value(self, agg: Any, idx: Any, name: str = "",
+                      value_type_hint: Any = None) -> Any:
+        value = self._builder.extract_value(agg, idx, name=name)
+        if value_type_hint is not None:
+            from .record_types import storage_value
+            target = value_type_hint.get_llvm_type(self._builder.module.context)
+            return storage_value(self._builder, value, target)
+        return value
     
     def insert_value(self, agg: Any, value: Any, idx: Any, name: str = "") -> Any:
         from .record_types import storage_value

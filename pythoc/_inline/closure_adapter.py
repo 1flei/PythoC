@@ -23,10 +23,12 @@ class ClosureAdapter(InlineAdapter):
 
     def __init__(self, parent_visitor: 'LLVMIRVisitor',
                  param_bindings: Dict[str, Any],
-                 func_globals: Dict[str, Any] = None):
+                 func_globals: Dict[str, Any] = None,
+                 capture_references: Dict[str, Any] = None):
         super().__init__(
             parent_visitor,
             param_bindings,
             func_globals=func_globals,
             kind="closure",
+            capture_references=capture_references,
         )

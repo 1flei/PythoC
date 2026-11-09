@@ -223,9 +223,14 @@ class NullBuilder(AbstractBuilder):
              cconv: Optional[str] = None) -> Any:
         self._raise_error("call")
     
+    def call_inline_asm(self, fn: Any, args: List[Any], name: str = "",
+                        element_types: Any = None) -> Any:
+        self._raise_error("call_inline_asm")
+
     # ========== Aggregate Operations ==========
     
-    def extract_value(self, agg: Any, idx: Any, name: str = "") -> Any:
+    def extract_value(self, agg: Any, idx: Any, name: str = "",
+                      value_type_hint: Any = None) -> Any:
         self._raise_error("extract_value")
     
     def insert_value(self, agg: Any, value: Any, idx: Any, name: str = "") -> Any:

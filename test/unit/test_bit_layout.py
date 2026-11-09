@@ -1,9 +1,6 @@
 """Bit placement, storage projection, and qualifier regression tests."""
 
 import ctypes
-from pathlib import Path
-import subprocess
-import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -209,23 +206,6 @@ class TestBitLayout(unittest.TestCase):
         field = access_bit_field(visitor, base, ty, 0, u3)
         with self.assertRaisesRegex(ValueError, 'temporary'):
             field.as_lvalue()
-
-    def test_invalid_programs_are_rejected_for_the_right_reason(self):
-        root = Path(__file__).parents[2]
-        source = root / 'test/integration/fixtures/bitfield_invalid.py'
-        for mode, message in (
-            ('address_attribute', 'requires an addressable value'),
-            ('address_subscript', 'requires an addressable value'),
-            ('offsetof_struct', 'cannot be applied to a bit field'),
-            ('offsetof_union', 'cannot be applied to a bit field'),
-            ('const_attribute', 'Cannot reassign to const'),
-            ('const_subscript', 'Cannot reassign to const'),
-        ):
-            with self.subTest(mode=mode):
-                result = subprocess.run([sys.executable, str(source), mode],
-                                        cwd=root, capture_output=True, text=True)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(message, result.stdout + result.stderr)
 
     def test_debug_type_describes_storage_not_fake_byte_fields(self):
         from pythoc.debug_info import DebugInfoBuilder

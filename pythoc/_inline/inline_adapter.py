@@ -8,17 +8,15 @@ when it later processes the returned statements.
 
 Two call modes exist:
 
-- ``kind='inline'`` (@inline decorator): the callee's free variables are
-  looked up against the *current* visitor scope only. The @inline path
-  does not capture outer-scope variables.
-- ``kind='closure'``: a closure defined inside another compiled function
-  must be able to capture variables from *all visible* enclosing scopes.
+- ``kind='inline'`` (@inline decorator): free names use its Python definition
+  environment; runtime locals of the calling function are not captures.
+- ``kind='closure'``: runtime references use the bindings selected when the
+  closure was defined, including through later lexical shadows.
 
 The two modes differ only in:
 
 - the naming prefix used for argument / result temporaries,
-- which scope query is used when building ``ScopeContext`` for capture
-  detection.
+- the explicit definition-site references supplied by the closure wrapper.
 """
 
 import ast
@@ -58,7 +56,8 @@ class InlineAdapter:
     def __init__(self, parent_visitor: 'LLVMIRVisitor',
                  param_bindings: Dict[str, ValueRef],
                  func_globals: Dict[str, Any] = None,
-                 kind: str = "inline"):
+                 kind: str = "inline",
+                 capture_references: Dict[str, Any] = None):
         """
         Args:
             parent_visitor: The visitor that's calling the inline function.
@@ -77,6 +76,7 @@ class InlineAdapter:
         self.param_bindings = param_bindings
         self.func_globals = func_globals
         self.kind = kind
+        self.capture_references = capture_references or {}
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -95,6 +95,9 @@ class InlineAdapter:
         unique_id = get_next_id()
         names = visitor_expansion_names(self.visitor)
         names.reserve_ast(func_ast)
+        from .definition_bindings import bind_definition
+        definition = bind_definition(
+            self.visitor, func_ast, self.func_globals, self.capture_references)
         result_var = names.fresh(f"_{self.kind}_result_{unique_id}")
 
         # Exit rule (goto-based approach, no flag_var needed).
@@ -108,7 +111,7 @@ class InlineAdapter:
         arg_exprs = [ast.Name(id=temp_name, ctx=ast.Load())
                      for temp_name in arg_temps.values()]
 
-        # Caller context drives capture detection inside expand_inline.
+        # Consumer names protect generated bindings; they never select captures.
         caller_context = self._build_caller_context()
 
         # Dummy call site -- only used for location copying.
@@ -123,15 +126,17 @@ class InlineAdapter:
             inline_globals_scope,
         )
         inline_result = expand_inline_or_raise(
-            callee_ast=func_ast,
-            callee_globals=self.func_globals,
+            callee_ast=definition.syntax,
+            callee_globals=definition.globals,
             call_args=arg_exprs,
             call_site=call_site,
             caller_context=caller_context,
+            capture_context=ScopeContext(set(definition.references)),
             exit_rule=exit_rule,
             tag=tag,
             names=names,
         )
+        inline_result.reference_bindings = definition.references
 
         with inline_globals_scope(self.visitor, inline_result):
             for i, stmt in enumerate(inline_result.stmts):
@@ -174,26 +179,15 @@ class InlineAdapter:
         return dict(zip(self.param_bindings, names))
 
     def _build_caller_context(self) -> ScopeContext:
-        """Construct caller ScopeContext for kernel capture detection.
-
-        The two modes differ here:
-
-        - ``inline``: only variables declared in the *current* scope are
-          in scope for the inlined body.
-        - ``closure``: *all visible* variables from every enclosing scope
-          are available, which is essential for by-reference capture when
-          a closure is defined inside a nested scope (e.g. a loop body).
-        """
+        """Expose consumer names for declarations and generated-name avoidance."""
         scope_manager = getattr(self.visitor, 'scope_manager', None)
-        visibility = "all_visible" if self.kind == "closure" else "current"
-        return build_caller_context(scope_manager, visibility=visibility)
+        return build_caller_context(scope_manager, visibility="all_visible")
 
     def _has_return_value(self, func_ast: ast.FunctionDef) -> bool:
         """True if ``func_ast`` can return a non-void value."""
         if func_ast.returns:
-            if isinstance(func_ast.returns, ast.Name) and func_ast.returns.id == 'void':
-                return False
-            return True
+            from .kernel import _get_result_type
+            return _get_result_type(func_ast, self.func_globals) is not None
         checker = ReturnValueChecker()
         checker.visit(func_ast)
         return checker.has_return_value

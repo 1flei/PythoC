@@ -41,7 +41,7 @@ class YieldInlineAdapter:
         call_node: ast.Call,
         func_obj=None,
         callee_globals_override=None,
-        all_visible=False,
+        capture_references=None,
     ):
         """
         Try to inline a for loop over a yield function
@@ -51,9 +51,7 @@ class YieldInlineAdapter:
             func_ast: The yield function's AST
             call_node: The original call AST node
             func_obj: Original function object (to access __globals__)
-            all_visible: If True, the callee captures names from ALL
-                enclosing scopes (closure semantics); otherwise only the
-                current scope (module-level yield function semantics).
+            capture_references: Original bindings captured at definition time.
 
         Returns:
             (InlineResult, after_else_label, gen_done_label) tuple if
@@ -73,7 +71,7 @@ class YieldInlineAdapter:
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
 
         # Get caller context (available variables in current scope)
-        caller_context = self._build_caller_context(all_visible=all_visible)
+        caller_context = self._build_caller_context()
 
         # Extract return type annotation from function
         return_type_annotation = None
@@ -89,6 +87,9 @@ class YieldInlineAdapter:
         from .names import visitor_expansion_names
         names = visitor_expansion_names(self.visitor)
         names.reserve_ast(func_ast, for_node)
+        from .definition_bindings import bind_consumer_globals
+        loop_body, consumer_globals = bind_consumer_globals(
+            self.visitor, loop_body, loop_var)
         after_else_label = (names.fresh(f"_for_after_else_{get_next_id()}")
                             if body_has_break_or_continue else None)
 
@@ -120,18 +121,26 @@ class YieldInlineAdapter:
                 merged.update(callee_globals_override)
                 callee_globals = merged
 
+        from .definition_bindings import bind_definition
+        definition = bind_definition(
+            self.visitor, func_ast, callee_globals, capture_references)
+        exit_rule.return_type_annotation = definition.syntax.returns
+
         from .kernel import try_expand_inline
         inline_result = try_expand_inline(
-            callee_ast=func_ast,
-            callee_globals=callee_globals,
+            callee_ast=definition.syntax,
+            callee_globals=definition.globals,
             call_args=call_args,
             call_site=for_node.iter,
             caller_context=caller_context,
+            capture_context=ScopeContext(set(definition.references)),
             exit_rule=exit_rule,
             names=names,
         )
         if inline_result is None:
             return (None, None, None)
+        inline_result.reference_bindings = definition.references
+        inline_result.required_globals.update(consumer_globals)
 
         # Return InlineResult and labels for caller to own lifecycle
         return (inline_result, after_else_label, gen_done_label)
@@ -156,7 +165,7 @@ class YieldInlineAdapter:
         # Other complex targets not supported
         return None
     
-    def _build_caller_context(self, all_visible: bool = False) -> ScopeContext:
+    def _build_caller_context(self) -> ScopeContext:
         """
         Build caller scope context from visitor state
 
@@ -167,7 +176,7 @@ class YieldInlineAdapter:
         return build_caller_context(
             scope_manager,
             local_vars=local_vars,
-            visibility="all_visible" if all_visible else "current",
+            visibility="all_visible",
         )
     
     def _is_inlinable(self, func_ast: ast.FunctionDef) -> bool:

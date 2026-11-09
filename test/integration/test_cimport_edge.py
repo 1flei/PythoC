@@ -21,20 +21,14 @@ import shutil
 import tempfile
 import unittest
 
-
-def _clang_backend_available() -> bool:
-    try:
-        from pythoc.cimport_clang import is_clang_backend_available
-    except Exception:
-        return False
-    return is_clang_backend_available()
+from pythoc.cimport_clang import is_clang_backend_available
 
 
 class TestCimportPointers(unittest.TestCase):
     """Test cimport with various pointer types."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -76,7 +70,7 @@ class TestCimportFunctionPointers(unittest.TestCase):
     """Test cimport with function pointer typedefs."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -118,7 +112,7 @@ class TestCimportOpaqueStruct(unittest.TestCase):
     """Test cimport with forward declarations / opaque structs."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -149,7 +143,7 @@ class TestCimportVariadic(unittest.TestCase):
     """Test cimport with variadic functions."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -175,7 +169,7 @@ class TestCimportIncludeDirsAndDefines(unittest.TestCase):
     """Test cimport with include_dirs and defines parameters."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -226,7 +220,7 @@ class TestCimportEnums(unittest.TestCase):
     """Test cimport with various enum forms."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -286,7 +280,7 @@ class TestCimportNestedStruct(unittest.TestCase):
     """Test cimport with structs containing pointers to other structs."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -337,7 +331,7 @@ class TestCimportBitfields(unittest.TestCase):
     """Test cimport with bitfield struct fields."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -384,7 +378,7 @@ class TestCimportMacros(unittest.TestCase):
     """Test cimport extraction of numeric macro constants."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -461,7 +455,7 @@ class TestCimportLongDouble(unittest.TestCase):
     """Test cimport handling of long double across targets."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -522,7 +516,7 @@ class TestCimportGlobals(unittest.TestCase):
     """Test cimport with extern global variables."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -555,7 +549,7 @@ class TestCimportClangArgs(unittest.TestCase):
     """Test cimport with clang_args parameter."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -582,7 +576,7 @@ class TestCimportExport(unittest.TestCase):
     """Test cimport export / export_all parameters."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 
@@ -623,7 +617,7 @@ class TestCimportEndToEnd(unittest.TestCase):
     """End-to-end cimport tests: parse + compile + call."""
 
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         try:
             from pythoc.utils.cc_utils import find_available_cc

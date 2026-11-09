@@ -26,13 +26,7 @@ import shutil
 import tempfile
 import unittest
 
-
-def _clang_backend_available() -> bool:
-    try:
-        from pythoc.cimport_clang import is_clang_backend_available
-    except Exception:
-        return False
-    return is_clang_backend_available()
+from pythoc.cimport_clang import is_clang_backend_available
 
 
 def _cc_available() -> bool:
@@ -44,7 +38,7 @@ def _cc_available() -> bool:
     return True
 
 
-_BACKEND_AVAILABLE = _clang_backend_available() and _cc_available()
+_BACKEND_AVAILABLE = is_clang_backend_available() and _cc_available()
 
 
 @unittest.skipUnless(_BACKEND_AVAILABLE, "clang backend or cc not available")

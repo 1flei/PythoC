@@ -9,8 +9,11 @@ import tempfile
 import unittest
 
 import pythoc
-from pythoc import compile, consume, enum, i32, linear, static
+from pythoc import compile, consume, enum, f64, i32, linear, static
 from pythoc.std.poly import Poly
+from pythoc.build.output_manager import flush_all_pending_outputs
+from pythoc.session import CompileSession
+from test.utils.test_utils import DeferredTestCase
 
 
 FIXTURES = Path(__file__).resolve().parent / 'fixtures'
@@ -95,8 +98,8 @@ def compute(a: i32, b: i32) -> i32:
     return result * 100 + Counts.made * 10 + Counts.released
 
 
-class PolyBehaviorBoundariesTest(unittest.TestCase):
-    def run_script(self, script, cwd, expected_error=None):
+class PolyBehaviorBoundariesTest(DeferredTestCase):
+    def run_script(self, script, cwd):
         env = os.environ.copy()
         env['PYTHONPATH'] = os.pathsep.join([
             str(Path(pythoc.__file__).resolve().parent.parent),
@@ -109,11 +112,7 @@ class PolyBehaviorBoundariesTest(unittest.TestCase):
             [sys.executable, str(script)], cwd=cwd, env=env,
             capture_output=True, text=True, timeout=180)
         output = result.stdout + result.stderr
-        if expected_error is None:
-            self.assertEqual(result.returncode, 0, output)
-        else:
-            self.assertNotEqual(result.returncode, 0, output)
-            self.assertIn(expected_error, output)
+        self.assertEqual(result.returncode, 0, output)
 
     def test_two_linear_enum_arguments_cover_all_payload_combinations(self):
         for a, b, expected in ((1, 1, 103722), (1, 0, 203711),
@@ -121,23 +120,102 @@ class PolyBehaviorBoundariesTest(unittest.TestCase):
             with self.subTest(a=a, b=b):
                 self.assertEqual(compute(a, b), expected)
 
-    def test_invalid_plans_fail_through_real_compiled_calls(self):
-        cases = [
-            ('poly_missing_overload.py', 'missing function overloads'),
-            ('poly_inconsistent_returns.py', 'inconsistent return types'),
-            ('poly_payloadless_variant.py', 'requires a payload'),
-        ]
-        for fixture, error in cases:
-            with self.subTest(fixture=fixture):
-                with tempfile.TemporaryDirectory(prefix='poly-invalid-') as temp:
-                    self.run_script(
-                        FIXTURES / fixture, temp, expected_error=error)
+    def test_rejects_poly_missing_overload(self):
+        with CompileSession(), self.assertRaisesRegex(
+                ValueError, 'missing function overloads'):
+            @enum(i32)
+            class Input:
+                Integer: i32
+                Float: f64
 
-    def test_linear_sum_cannot_be_reused_after_dispatch(self):
-        with tempfile.TemporaryDirectory(prefix='poly-use-after-') as temp:
-            self.run_script(
-                FIXTURES / 'poly_linear_use_after_dispatch.py', temp,
-                expected_error='already consumed')
+            @compile
+            def integer(value: i32) -> i32:
+                return value
+
+            operation = Poly(integer)
+
+            @compile
+            def main() -> i32:
+                return operation(Input(Input.Integer, 7))
+
+            flush_all_pending_outputs()
+
+    def test_rejects_poly_inconsistent_returns(self):
+        with CompileSession(), self.assertRaisesRegex(
+                ValueError, 'inconsistent return types'):
+            @enum(i32)
+            class Input:
+                Integer: i32
+                Float: f64
+
+            @compile
+            def integer(value: i32) -> i32:
+                return value
+
+            @compile
+            def floating(value: f64) -> f64:
+                return value
+
+            operation = Poly(integer, floating)
+
+            @compile
+            def main() -> i32:
+                return operation(Input(Input.Integer, 7))
+
+            flush_all_pending_outputs()
+
+    def test_rejects_poly_payloadless_variant(self):
+        with CompileSession(), self.assertRaisesRegex(
+                ValueError, 'requires a payload'):
+            @enum(i32)
+            class Input:
+                Integer: i32
+                Absent: None
+
+            @compile
+            def integer(value: i32) -> i32:
+                return value
+
+            operation = Poly(integer)
+
+            @compile
+            def main() -> i32:
+                return operation(Input(Input.Integer, 7))
+
+            flush_all_pending_outputs()
+
+    def test_rejects_poly_linear_use_after_dispatch(self):
+        with CompileSession(), self.assertRaisesRegex(
+                RuntimeError, 'already consumed'):
+            @compile
+            class Owner:
+                value: i32
+                token: linear
+
+            @enum(i32)
+            class Input:
+                Owned: Owner
+                Copy: i32
+
+            @compile
+            def owned(item: Owner) -> i32:
+                consume(item.token)
+                return item.value
+
+            @compile
+            def copy(item: i32) -> i32:
+                return item
+
+            operation = Poly(owned, copy)
+
+            @compile
+            def main() -> i32:
+                owner: Owner = (7, linear())
+                value = Input(Input.Owned, owner)
+                a = operation(value)
+                return a + operation(value)
+
+            flush_all_pending_outputs()
 
     def test_cross_module_same_named_handlers_survive_a_warm_process(self):
         with tempfile.TemporaryDirectory(prefix='pythoc-poly-warm-') as temp:

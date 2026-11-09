@@ -3,8 +3,54 @@ cannot reach on the local platform (Windows-specific branches)."""
 
 import os
 import sys
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from pythoc.cimport_clang import (
+    ClangCImportError, is_clang_backend_available,
+)
+
+
+class TestClangBackendAvailability(unittest.TestCase):
+    def test_missing_bindings_are_unavailable(self):
+        with patch('pythoc.cimport_clang._load_cindex',
+                   side_effect=ClangCImportError('bindings missing')):
+            self.assertFalse(is_clang_backend_available())
+
+    def test_missing_native_library_is_unavailable(self):
+        class LibclangError(Exception):
+            pass
+
+        cindex = SimpleNamespace(
+            LibclangError=LibclangError,
+            Index=SimpleNamespace(create=Mock(side_effect=LibclangError('missing'))),
+        )
+        with patch('pythoc.cimport_clang._load_cindex', return_value=cindex):
+            self.assertFalse(is_clang_backend_available())
+
+    def test_unexpected_loading_error_propagates(self):
+        with patch('pythoc.cimport_clang._load_cindex',
+                   side_effect=RuntimeError('unexpected loading error')):
+            with self.assertRaisesRegex(RuntimeError, 'unexpected loading error'):
+                is_clang_backend_available()
+
+    def test_unexpected_index_error_propagates(self):
+        class LibclangError(Exception):
+            pass
+
+        cindex = SimpleNamespace(
+            LibclangError=LibclangError,
+            Index=SimpleNamespace(create=Mock(side_effect=ValueError('bad index'))),
+        )
+        with patch('pythoc.cimport_clang._load_cindex', return_value=cindex):
+            with self.assertRaisesRegex(ValueError, 'bad index'):
+                is_clang_backend_available()
+
+    def test_usable_index_is_available(self):
+        cindex = SimpleNamespace(Index=SimpleNamespace(create=Mock()))
+        with patch('pythoc.cimport_clang._load_cindex', return_value=cindex):
+            self.assertTrue(is_clang_backend_available())
 
 
 class TestNormalizeLibForGeneratedSource(unittest.TestCase):

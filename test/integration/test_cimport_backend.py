@@ -6,13 +6,7 @@ import shutil
 import tempfile
 import unittest
 
-
-def _clang_backend_available() -> bool:
-    try:
-        from pythoc.cimport_clang import is_clang_backend_available
-    except Exception:
-        return False
-    return is_clang_backend_available()
+from pythoc.cimport_clang import is_clang_backend_available
 
 
 class TestCimportBackendSelection(unittest.TestCase):
@@ -59,7 +53,7 @@ class TestCimportBackendSelection(unittest.TestCase):
 
 class TestCimportClangFrontend(unittest.TestCase):
     def setUp(self):
-        if not _clang_backend_available():
+        if not is_clang_backend_available():
             self.skipTest("clang/libclang Python bindings are not available")
         self.temp_dir = tempfile.mkdtemp()
 

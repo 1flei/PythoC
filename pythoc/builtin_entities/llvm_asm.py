@@ -145,11 +145,45 @@ class llvm_asm(BuiltinFunction):
         inline_asm = ir.InlineAsm(
             asm_func_type, asm_str, constraints, side_effect=side_effect
         )
-        result = visitor.builder.call(inline_asm, llvm_input_values)
+        element_types = cls._indirect_types(constraints, input_values, visitor, node)
+        result = visitor.builder.call_inline_asm(
+            inline_asm, llvm_input_values, element_types=element_types)
 
         if isinstance(llvm_ret_type, ir.VoidType):
             return wrap_value(None, kind='python', type_hint=void)
         return wrap_value(result, kind='value', type_hint=ret_type)
+
+    @classmethod
+    def _indirect_types(cls, constraints, operands, visitor, node):
+        from .types import ptr, void
+        from ..type_converter import get_base_type
+
+        element_types = {}
+        index = 0
+        for constraint in filter(None, (item.strip() for item in constraints.split(','))):
+            if constraint.startswith('~'):
+                continue
+            indirect = '*' in constraint
+            if constraint.startswith('=') and not indirect:
+                continue
+            if index >= len(operands):
+                logger.error('llvm_asm() constraints require more operands',
+                             node=node, exc_type=TypeError)
+            if indirect:
+                pointer_type = get_base_type(operands[index].type_hint)
+                if not isinstance(pointer_type, type) or not issubclass(pointer_type, ptr):
+                    logger.error('llvm_asm() indirect operands require a typed pointer',
+                                 node=node, exc_type=TypeError)
+                pointee = pointer_type._resolve_pointee(visitor.ctx)
+                if pointee is None or pointee is void or isinstance(pointee, str):
+                    logger.error('llvm_asm() indirect operands require a complete pointee type',
+                                 node=node, exc_type=TypeError)
+                element_types[index] = pointee.get_llvm_type(visitor.module.context)
+            index += 1
+        if index != len(operands):
+            logger.error('llvm_asm() operands exceed constraint operands',
+                         node=node, exc_type=TypeError)
+        return element_types
 
     @classmethod
     def _is_pc_type(cls, value):

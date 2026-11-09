@@ -440,12 +440,8 @@ if _result.returncode != 0:
 # Ensure the shared library directory is on the search path (Windows)
 if sys.platform == 'win32':
     dll_dir = os.path.dirname(os.path.abspath(_case3_so_path))
-    try:
-        if hasattr(os, 'add_dll_directory') and dll_dir:
-            os.add_dll_directory(dll_dir)
-    except Exception:
-        pass
-    if dll_dir and dll_dir not in os.environ.get('PATH', ''):
+    _case3_dll_directory = os.add_dll_directory(dll_dir)
+    if dll_dir not in os.environ.get('PATH', ''):
         os.environ['PATH'] = dll_dir + os.pathsep + os.environ.get('PATH', '')
 
 # Import with shared library path (don't clear registry)

@@ -302,7 +302,7 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
         return None
 
     # Call
-    if op == 'call':
+    if op in ('call', 'call_inline_asm'):
         # If return_type_hint is provided, use its LLVM type (ABI coercion may
         # change the actual return type from the LLVM function signature)
         return_type_hint = kwargs.get('return_type_hint')
@@ -360,6 +360,9 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
 
     # Aggregate ops
     if op == 'extract_value':
+        value_type_hint = kwargs.get('value_type_hint')
+        if value_type_hint is not None:
+            return value_type_hint.get_llvm_type(kwargs.get('_module_context'))
         agg_type = _get_vreg_type(args[0])
         idx = args[1]
         if agg_type and hasattr(agg_type, 'elements'):

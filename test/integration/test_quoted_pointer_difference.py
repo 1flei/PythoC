@@ -1,12 +1,11 @@
 """Quoted pointees use the same subtraction stride as their concrete type."""
 
 import unittest
-import os
-from pathlib import Path
-import subprocess
-import sys
 
 from pythoc import array, compile, i8, i32, i64, ptr, void
+from pythoc.build.output_manager import flush_all_pending_outputs
+from pythoc.session import CompileSession
+from test.utils.test_utils import DeferredTestCase
 from fixtures.quoted_pointer_difference.model import PointerDiffRecord as ImportedRecord
 
 
@@ -38,7 +37,7 @@ def byte_difference() -> i64:
     return end - begin
 
 
-class QuotedPointerDifferenceTest(unittest.TestCase):
+class QuotedPointerDifferenceTest(DeferredTestCase):
     def test_positive_element_difference(self):
         self.assertEqual(record_difference(1), 3)
 
@@ -55,12 +54,16 @@ class QuotedPointerDifferenceTest(unittest.TestCase):
         self.assertEqual(byte_difference(), 3)
 
     def test_incomplete_pointee_is_rejected(self):
-        script = Path(__file__).parent / 'fixtures' / 'quoted_pointer_difference' / 'incomplete.py'
-        env = dict(os.environ, PC_RAISE_ON_ERROR='1')
-        result = subprocess.run([sys.executable, str(script)], env=env,
-                                capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('complete pointee type', result.stderr)
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'complete pointee type'):
+            @compile
+            def invalid_difference() -> i64:
+                Pointer = ptr['UnresolvedPointerDifference']
+                begin: Pointer = Pointer(0)
+                end: Pointer = Pointer(16)
+                return end - begin
+
+            flush_all_pending_outputs()
 
 
 if __name__ == '__main__':
