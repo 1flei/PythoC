@@ -1,7 +1,10 @@
 from __future__ import annotations
 from pythoc import *
-from pythoc.libc.stdlib import malloc, free
-from pythoc.libc.string import memset, memcpy
+from pythoc.libc.string import memset
+from pythoc.std.mem import DefaultMem
+
+
+effect.default(mem=DefaultMem)
 
 
 # Control byte constants (signed i8 representation).
@@ -74,9 +77,9 @@ def FlatHashMap(key_type, value_type, size_type=u64):
 
         def destroy(m: ptr[_FlatHashMap]) -> None:
             if m.capacity > 0:
-                free(m.ctrl)
-                free(m.keys)
-                free(m.values)
+                effect.mem.free(ptr[void](m.ctrl))
+                effect.mem.free(ptr[void](m.keys))
+                effect.mem.free(ptr[void](m.values))
             m.size = 0
             m.capacity = 0
             m.growth_left = 0
@@ -152,10 +155,12 @@ def FlatHashMap(key_type, value_type, size_type=u64):
             old_values: ptr[value_type] = m.values
             old_cap: size_type = m.capacity
 
-            new_ctrl: ptr[i8] = malloc(newcapacity)
+            new_ctrl: ptr[i8] = ptr[i8](effect.mem.malloc(u64(newcapacity)))
             memset(new_ctrl, -128, newcapacity)
-            new_keys: ptr[key_type] = malloc(newcapacity * sizeof(key_type))
-            new_values: ptr[value_type] = malloc(newcapacity * sizeof(value_type))
+            new_keys: ptr[key_type] = ptr[key_type](effect.mem.malloc(
+                u64(newcapacity * sizeof(key_type))))
+            new_values: ptr[value_type] = ptr[value_type](effect.mem.malloc(
+                u64(newcapacity * sizeof(value_type))))
 
             m.ctrl = new_ctrl
             m.keys = new_keys
@@ -171,9 +176,9 @@ def FlatHashMap(key_type, value_type, size_type=u64):
                     if c != _CTRL_EMPTY and c != _CTRL_DELETED:
                         _FlatHashMap._insert_no_grow(m, old_keys[i], old_values[i])
                     i += 1
-                free(old_ctrl)
-                free(old_keys)
-                free(old_values)
+                effect.mem.free(ptr[void](old_ctrl))
+                effect.mem.free(ptr[void](old_keys))
+                effect.mem.free(ptr[void](old_values))
 
         def insert(m: ptr[_FlatHashMap], key: key_type, value: value_type) -> bool:
             if m.growth_left == 0:

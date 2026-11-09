@@ -1,7 +1,10 @@
 from __future__ import annotations
 from pythoc import *
-from pythoc.libc.stdlib import malloc, free, realloc
 from pythoc.libc.string import memset, memcpy
+from pythoc.std.mem import DefaultMem
+
+
+effect.default(mem=DefaultMem)
 
 
 def Vector(element_type, inline_capacity=0, size_type=u64):
@@ -54,7 +57,7 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
 
         def destroy(v: ptr[_Vector]) -> None:
             if v.size_or_cap > inline_capacity:
-                free(v.storage.heap_data.heap_buf)
+                effect.mem.free(ptr[void](v.storage.heap_data.heap_buf))
             v.size_or_cap = 0
 
         def size(v: ptr[_Vector]) -> size_type:
@@ -88,11 +91,13 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
                 # Spilled: grow the heap allocation if it is full.
                 if v.storage.heap_data.size == v.size_or_cap:
                     grown_capacity: size_type = v.size_or_cap * 2
-                    new_mem_i8: ptr[i8] = realloc(
-                        v.storage.heap_data.heap_buf,
-                        grown_capacity * sizeof(element_type),
+                    grown_heap: ptr[element_type] = ptr[element_type](
+                        effect.mem.realloc(
+                            ptr[void](v.storage.heap_data.heap_buf),
+                            u64(grown_capacity * sizeof(element_type)),
+                        )
                     )
-                    v.storage.heap_data.heap_buf = ptr[element_type](new_mem_i8)
+                    v.storage.heap_data.heap_buf = grown_heap
                     v.size_or_cap = grown_capacity
                 v.storage.heap_data.heap_buf[v.storage.heap_data.size] = value
                 v.storage.heap_data.size = v.storage.heap_data.size + 1
@@ -101,8 +106,9 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
                 new_capacity: size_type = 4
                 if inline_capacity > 0:
                     new_capacity = inline_capacity * 2
-                new_heap: ptr[element_type] = malloc(
-                    new_capacity * sizeof(element_type))
+                new_heap: ptr[element_type] = ptr[element_type](
+                    effect.mem.malloc(u64(new_capacity * sizeof(element_type)))
+                )
                 if inline_capacity > 0:
                     memcpy(new_heap, ptr(v.storage.inline_buffer[0]),
                            v.size_or_cap * sizeof(element_type))

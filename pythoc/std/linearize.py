@@ -8,10 +8,14 @@ functions into linear-token enforced APIs for resource safety.
 
 Usage:
     from pythoc.std.linearize import linearize
-    from pythoc.libc.stdlib import malloc, free
+    from pythoc import compile, effect, u64
+    from pythoc.std import mem
 
-    # Generate linear-safe malloc/free pair
-    lmalloc, lfree = linearize(malloc, free)
+    # Use the memory effect's linear allocation interface.
+    @compile
+    def allocate_and_free(size: u64):
+        p, proof = effect.mem.lmalloc(size)
+        effect.mem.lfree(p, proof)
 
     # Use with custom proof struct name
     from pythoc.libc.stdio import fopen, fclose

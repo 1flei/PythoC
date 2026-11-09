@@ -1,7 +1,10 @@
 from __future__ import annotations
 from pythoc import *
-from pythoc.libc.stdlib import malloc, free
-from pythoc.libc.string import memset, memcpy
+from pythoc.libc.string import memset
+from pythoc.std.mem import DefaultMem
+
+
+effect.default(mem=DefaultMem)
 
 
 # Control byte constants (signed i8 representation).
@@ -121,8 +124,8 @@ def FlatHashSet(key_type, size_type=u64):
 
         def destroy(s: ptr[_FlatHashSet]) -> None:
             if s.capacity > 0:
-                free(s.ctrl)
-                free(s.slots)
+                effect.mem.free(ptr[void](s.ctrl))
+                effect.mem.free(ptr[void](s.slots))
             s.size = 0
             s.capacity = 0
             s.growth_left = 0
@@ -194,9 +197,10 @@ def FlatHashSet(key_type, size_type=u64):
             old_slots: ptr[key_type] = s.slots
             old_cap: size_type = s.capacity
 
-            new_ctrl: ptr[i8] = malloc(newcapacity)
+            new_ctrl: ptr[i8] = ptr[i8](effect.mem.malloc(u64(newcapacity)))
             memset(new_ctrl, -128, newcapacity)
-            new_slots: ptr[key_type] = malloc(newcapacity * sizeof(key_type))
+            new_slots: ptr[key_type] = ptr[key_type](effect.mem.malloc(
+                u64(newcapacity * sizeof(key_type))))
 
             s.ctrl = new_ctrl
             s.slots = new_slots
@@ -211,8 +215,8 @@ def FlatHashSet(key_type, size_type=u64):
                     if c != _CTRL_EMPTY and c != _CTRL_DELETED:
                         _FlatHashSet._insert_no_grow(s, old_slots[i])
                     i += 1
-                free(old_ctrl)
-                free(old_slots)
+                effect.mem.free(ptr[void](old_ctrl))
+                effect.mem.free(ptr[void](old_slots))
 
         def insert(s: ptr[_FlatHashSet], key: key_type) -> bool:
             if s.growth_left == 0:

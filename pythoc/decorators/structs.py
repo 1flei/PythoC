@@ -5,6 +5,7 @@ import ast
 from ..registry import register_struct_from_class
 from ..builtin_entities.struct import create_struct_type
 from ..logger import set_source_context, logger
+from .class_methods import _INHERIT_EFFECT_SUFFIX
 
 
 def compile_dynamic_class(
@@ -14,6 +15,7 @@ def compile_dynamic_class(
     captured_symbols=None,
     static_linkage='weak_odr',
     layout_config=None,
+    effect_suffix=_INHERIT_EFFECT_SUFFIX,
 ):
     """Compile a @compile decorated class into a unified struct/union type
     
@@ -32,6 +34,8 @@ def compile_dynamic_class(
         static_linkage: LLVM linkage for class-level static members (default
                       weak_odr: one program-wide entity, like a C++ inline
                       static member; 'internal' gives module-private storage)
+        effect_suffix: Resolved effect binding for class-body methods. When
+                      omitted, methods inherit the active definition context.
     """
     # Default to struct type factory
     if type_factory is None:
@@ -259,6 +263,7 @@ def compile_dynamic_class(
         cls,
         class_compile_suffix=suffix,
         captured_symbols=captured_symbols,
+        effect_suffix=effect_suffix,
     )
 
     return cls

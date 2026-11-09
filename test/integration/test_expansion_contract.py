@@ -263,19 +263,19 @@ def generator_replay() -> i32:
 
 
 @compile
-def perform_once_handler(value: i32) -> i32:
+def chain_once_source(value: i32) -> i32:
     yield value
 
 
 @compile
-def perform_once_producer() -> i32:
-    value = yield effect.perform(perform_once_handler, mark(1, 4))
-    yield value + 1
+def chain_once_producer() -> i32:
+    for value in chain_once_source(mark(1, 4)):
+        yield value + 1
 
 
 @compile
-def perform_once() -> i32:
-    for value in perform_once_producer():
+def chain_once() -> i32:
+    for value in chain_once_producer():
         return value
 
 
@@ -407,8 +407,8 @@ class ExpansionContractTest(DeferredTestCase):
     def test_generator_syntax_keeps_its_explicit_replay_semantics(self):
         self.observe(generator_replay, 8, 11, 2)
 
-    def test_effect_perform_preserves_argument_evaluation(self):
-        self.observe(perform_once, 5, 1, 1)
+    def test_yield_chain_preserves_argument_evaluation(self):
+        self.observe(chain_once, 5, 1, 1)
 
     def test_refinement_transfers_a_linear_owner_once(self):
         self.observe(linear_refine, 4, 0, 0)

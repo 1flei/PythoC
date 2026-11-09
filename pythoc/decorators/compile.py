@@ -893,6 +893,7 @@ def _compile_impl(func_or_class,
             suffix=compile_suffix,
             captured_symbols=captured_symbols,
             static_linkage=static_linkage,
+            effect_suffix=effect_suffix,
         )
 
     func = func_or_class
@@ -1032,8 +1033,7 @@ def _compile_impl(func_or_class,
         wrapper = create_yield_iterator_wrapper(
             func, func_ast, yield_analyzer, transform_globals, source_file, registry
         )
-        # _original_ast is set by the placeholder creation (normalized,
-        # e.g. effect-perform desugar) - do not overwrite with the raw AST.
+        # Keep the placeholder's normalized call signature and AST together.
         return wrapper
 
     from ..type_resolver import TypeResolver

@@ -7,11 +7,15 @@ explicit ``@compile`` overrides, empty bodies).
 """
 import ast
 import unittest
+from unittest.mock import patch
 
 from pythoc.decorators.class_methods import (
     extract_class_method_defs,
     lookup_class_method,
+    attach_class_methods,
 )
+from pythoc.effect import effect, suppress_effect_suffix
+from pythoc.session import CompileSession
 
 
 class TestExtractClassMethodDefs(unittest.TestCase):
@@ -124,6 +128,31 @@ class TestLookupClassMethod(unittest.TestCase):
             pass
 
         self.assertIsNone(lookup_class_method(Empty, "nope"))
+
+
+class TestClassMethodEffectBinding(unittest.TestCase):
+    def attach(self, **kwargs):
+        class Source:
+            def operation():
+                return 1
+
+        with patch('pythoc.decorators.compile._compile_impl') as compiler:
+            attach_class_methods(Source, **kwargs)
+        return compiler.call_args.kwargs['effect_suffix']
+
+    def test_methods_inherit_definition_context(self):
+        with CompileSession(), effect(value=11, suffix='class_binding'):
+            self.assertEqual(self.attach(), 'class_binding')
+
+    def test_explicit_class_binding_takes_precedence(self):
+        with CompileSession(), effect(value=11, suffix='ambient'):
+            self.assertEqual(self.attach(effect_suffix='explicit'), 'explicit')
+            self.assertIsNone(self.attach(effect_suffix=None))
+
+    def test_cold_import_suppression_is_respected(self):
+        with CompileSession(), effect(value=11, suffix='ambient'):
+            with suppress_effect_suffix():
+                self.assertIsNone(self.attach())
 
 
 if __name__ == "__main__":

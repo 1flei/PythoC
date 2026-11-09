@@ -8,12 +8,12 @@ from pythoc import (
     array, static, thread_local,
 )
 from pythoc.builtin_entities import atomic_cas_i64, atomic_store_i64
-from pythoc.libc.stdlib import malloc as libc_malloc, free as libc_free
-from pythoc.libc.string import memset
+from pythoc.libc.string import memset, memcpy
+from pythoc.std.mem import DefaultMem
 
 POOL_HEADER_SIZE = u64(16)
 POOL_CLASS_COUNT = 11
-POOL_MAGIC_LIBC = u64(255)
+POOL_MAGIC_RAW = u64(255)
 
 POOL_LOCAL_CACHE_MAX = u64(8192)
 POOL_GLOBAL_CACHE_MAX = u64(8192)
@@ -37,8 +37,11 @@ class MemPoolLocalState:
 def _pool_state() -> ptr[MemPoolState]:
     state: static[ptr[MemPoolState]] = nullptr
     if state == nullptr:
-        state = ptr[MemPoolState](libc_malloc(i64(sizeof(MemPoolState))))
-        memset(ptr[void](state), 0, i64(sizeof(MemPoolState)))
+        created = ptr[MemPoolState](DefaultMem.malloc(u64(sizeof(MemPoolState))))
+        if created == nullptr:
+            return nullptr
+        memset(ptr[void](created), 0, i64(sizeof(MemPoolState)))
+        state = created
     return state
 
 
@@ -46,23 +49,30 @@ def _pool_state() -> ptr[MemPoolState]:
 def _pool_local_state() -> ptr[MemPoolLocalState]:
     state: thread_local[ptr[MemPoolLocalState]] = nullptr
     if state == nullptr:
-        state = ptr[MemPoolLocalState](libc_malloc(i64(sizeof(MemPoolLocalState))))
-        memset(ptr[void](state), 0, i64(sizeof(MemPoolLocalState)))
+        created = ptr[MemPoolLocalState](DefaultMem.malloc(u64(sizeof(MemPoolLocalState))))
+        if created == nullptr:
+            return nullptr
+        memset(ptr[void](created), 0, i64(sizeof(MemPoolLocalState)))
+        state = created
     return state
 
 
 @compile
 def _pool_raw_alloc(block_size: u64) -> ptr[void]:
-    return libc_malloc(i64(block_size))
+    # A provider's backing allocator is a fixed reference, not effect.mem:
+    # clients can bind effect.mem to PoolMem itself.
+    return DefaultMem.malloc(block_size)
 
 
 @compile
 def _pool_raw_free(block: ptr[void]) -> void:
-    libc_free(block)
+    DefaultMem.free(block)
 
 
 @compile
 def _pool_write_header(block: ptr[void], magic: u64, size: u64) -> ptr[void]:
+    if block == nullptr:
+        return nullptr
     hdr: ptr[u64] = ptr[u64](block)
     hdr[0] = magic
     hdr[1] = size
@@ -197,25 +207,31 @@ def _pool_push_global(state: ptr[MemPoolState], index: i64, block: ptr[void]) ->
 
 
 @compile
-def _pool_malloc_libc(size: u64) -> ptr[void]:
+def _pool_malloc_raw(size: u64) -> ptr[void]:
     block: ptr[void] = _pool_raw_alloc(POOL_HEADER_SIZE + size)
-    return _pool_write_header(block, POOL_MAGIC_LIBC, size)
+    return _pool_write_header(block, POOL_MAGIC_RAW, size)
 
 
 @compile
 def _pool_malloc(size: u64) -> ptr[void]:
     if size == u64(0):
         return nullptr
+    if size > u64(0xFFFFFFFFFFFFFFFF) - POOL_HEADER_SIZE:
+        return nullptr
     index: i64 = _pool_class_index(size)
     if index < i64(0):
-        return _pool_malloc_libc(size)
+        return _pool_malloc_raw(size)
 
     local: ptr[MemPoolLocalState] = _pool_local_state()
+    if local == nullptr:
+        return nullptr
     block: ptr[void] = _pool_pop_local(local, index)
     if block != nullptr:
         return _pool_write_header(block, u64(index) + u64(1), size)
 
     state: ptr[MemPoolState] = _pool_state()
+    if state == nullptr:
+        return nullptr
     _pool_lock(state)
     block = _pool_pop_global(state, index)
     _pool_unlock(state)
@@ -231,7 +247,7 @@ def _pool_free(p: ptr[void]) -> void:
     hdr: ptr[u64] = _pool_header(p)
     magic: u64 = hdr[0]
     block: ptr[void] = ptr[void](hdr)
-    if magic == POOL_MAGIC_LIBC:
+    if magic == POOL_MAGIC_RAW:
         _pool_raw_free(block)
         return
     index: i64 = i64(magic - u64(1))
@@ -240,10 +256,16 @@ def _pool_free(p: ptr[void]) -> void:
         return
 
     local: ptr[MemPoolLocalState] = _pool_local_state()
+    if local == nullptr:
+        _pool_raw_free(block)
+        return
     if _pool_push_local(local, index, block) != i64(0):
         return
 
     state: ptr[MemPoolState] = _pool_state()
+    if state == nullptr:
+        _pool_raw_free(block)
+        return
     _pool_lock(state)
     if _pool_push_global(state, index, block) == i64(0):
         _pool_unlock(state)
@@ -252,7 +274,27 @@ def _pool_free(p: ptr[void]) -> void:
     _pool_unlock(state)
 
 
+@compile
+def _pool_realloc(p: ptr[void], size: u64) -> ptr[void]:
+    """Resize within this provider, retaining the old block on failure."""
+    if p == nullptr:
+        return _pool_malloc(size)
+    if size == u64(0):
+        _pool_free(p)
+        return nullptr
+    new_p: ptr[void] = _pool_malloc(size)
+    if new_p == nullptr:
+        return nullptr
+    copied: u64 = _pool_header(p)[1]
+    if size < copied:
+        copied = size
+    memcpy(new_p, p, copied)
+    _pool_free(p)
+    return new_p
+
+
 PoolMem = SimpleNamespace(
     malloc=_pool_malloc,
+    realloc=_pool_realloc,
     free=_pool_free,
 )

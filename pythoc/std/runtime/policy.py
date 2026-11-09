@@ -2,17 +2,17 @@
 Runtime effect policies.
 
 Registers per-module defaults for runtime compilation units.  Global
-pythoc.std.mem keeps LibcMem; runtime modules bind PoolMem here.
+pythoc.std.mem keeps DefaultMem; runtime modules bind PoolMem here.
 
 Usage (automatic):
     Each runtime submodule calls bind_mem() at import before @compile defs.
 
 Usage (override):
     from pythoc import effect
-    from pythoc.std.mem import LibcMem
+    from pythoc.std.mem import DefaultMem
     from pythoc.std.mem_pool import PoolMem
 
-    with effect(mem=LibcMem, suffix="libc_rt"):
+    with effect(mem=DefaultMem, suffix="libc_rt"):
         from pythoc.std.runtime import runtime_start
 """
 from __future__ import annotations

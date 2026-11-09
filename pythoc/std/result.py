@@ -3,7 +3,9 @@
 Copyable sums support consuming predicates and eager defaults. Linear sums
 use tag projection (value[0]) for inspection and lazy fallbacks for extraction.
 Result bind/do use a copyable error channel; owned errors require an explicit
-match or fallback consumer.
+match or fallback consumer. Result.do installs a frame-local propagation
+channel. Standalone bind requires an explicitly selected error-slot policy;
+importing this module never installs a global error channel.
 """
 
 from ..builtin_entities import i8, static, ptr, array
@@ -15,13 +17,14 @@ from pythoc import compile, inline
 
 
 class ErrnoSlotProvider:
-    """Default errno slot provider using static (global) storage.
+    """Optional error-slot policy using static (global) storage.
 
     Provides per-size errno slots: different err_types with the same
     sizeof share the same global storage -- like C errno but generalized.
 
-    Users can replace this via the effect system to provide thread-local
-    or fiber-local slot implementations.
+    Select it explicitly with effect(errno=provider, suffix=...). It is not
+    installed by importing Result. These are PythoC slots, not native C errno.
+    A caller can instead supply thread-local or fiber-local slot storage.
     """
 
     def __init__(self):
@@ -48,12 +51,11 @@ class ErrnoSlotProvider:
 
 
 class _LocalSlotProvider:
-    """errno provider whose slot is a frame local captured by a closure.
+    """Internal result propagation channel captured by a local closure.
 
     Used by result_do: the err channel lives in the composing function's
-    frame (an alloca promoted to a register), replacing the global static
-    slot on the do path. The slot function is a compile-level closure
-    capturing the channel by reference.
+    frame (an alloca promoted to a register). The slot function is a
+    compile-level closure capturing the channel by reference.
     """
 
     def __init__(self, slot_fn):
@@ -61,9 +63,6 @@ class _LocalSlotProvider:
 
     def get_slot(self, err_type):
         return self._slot_fn
-
-
-effect.default(errno=ErrnoSlotProvider())
 
 
 def option_wrap(value_type, tag_type=i8, name=None):
@@ -184,9 +183,9 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
             case (result_type.Ok, value):
                 yield value
             case (result_type.Err, err_value):
-                # Resolve the err channel at compile time, per use site -
-                # block-scoped effect bindings (e.g. result_do's frame-local
-                # slot) win over the module default provider.
+                # Result.do supplies a local propagation slot. Outside do,
+                # the caller must explicitly bind a slot policy; an unbound
+                # channel is a compile-time error, never a dropped error.
                 ptr[err_type](effect.errno.get_slot(err_type)())[0] = err_value
                 pass
 
@@ -222,8 +221,8 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
         err = result_err
         unwrap_or_else = result_unwrap_or_else
 
-    # The implicit errno channel contains copyable errors. Owned errors stay
-    # in the sum until an explicit match or fallback consumes them.
+    # The local or explicitly selected channel contains copyable errors.
+    # Owned errors stay in the sum until a match or fallback consumes them.
     if not is_linear_schema_type(err_type):
         result_api.bind = result_bind
         result_api.do = result_do

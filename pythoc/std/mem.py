@@ -6,6 +6,7 @@ Provides effect-based memory allocation with default libc implementation.
 
 Effect API (via effect.mem):
 - effect.mem.malloc(size: u64) -> ptr[void]                        : Allocate heap memory
+- effect.mem.realloc(p: ptr[void], size: u64) -> ptr[void]         : Resize, preserving contents
 - effect.mem.free(p: ptr[void]) -> void                            : Free heap memory
 - effect.mem.lmalloc(size: u64) -> struct[ptr[void], MemProof]     : Allocate with linear token
 - effect.mem.lfree(p: ptr[void], t: MemProof) -> void              : Free and consume linear token
@@ -14,6 +15,11 @@ Types:
 - MemProof: refined[linear, "MemProof"] - linear token for memory tracking
 
 Design:
+    malloc/realloc/free form one provider family: never pass an allocation to
+    a different provider's realloc or free. realloc(nullptr, n) allocates;
+    realloc(p, 0) frees and returns null. A successful resize preserves the
+    first min(old_size, new_size) bytes. On failure, the old block stays valid.
+
     lmalloc/lfree use MemProof (a refined linear type) for compile-time resource tracking.
     Using a refined type instead of raw linear allows distinguishing memory tokens
     from other linear resources (e.g., file handles).
@@ -40,8 +46,13 @@ Usage:
 
 from types import SimpleNamespace
 
-from pythoc import compile, effect, u64, ptr, void, linear, struct, consume, refined, assume
-from pythoc.libc.stdlib import malloc as libc_malloc, free as libc_free
+from pythoc import (
+    compile, effect, u64, ptr, void, linear, struct, consume, refined, assume,
+    nullptr,
+)
+from pythoc.libc.stdlib import (
+    malloc as libc_malloc, realloc as libc_realloc, free as libc_free,
+)
 
 
 # ============================================================
@@ -59,6 +70,15 @@ MemProof = refined[linear, "MemProof"]
 def _mem_malloc(size: u64) -> ptr[void]:
     """Default heap allocator using libc malloc"""
     return libc_malloc(size)
+
+
+@compile
+def _mem_realloc(p: ptr[void], size: u64) -> ptr[void]:
+    """Resize; zero frees, and allocation failure leaves p valid."""
+    if size == u64(0):
+        libc_free(p)
+        return nullptr
+    return libc_realloc(p, size)
 
 
 @compile
@@ -83,6 +103,7 @@ def _mem_lfree(p: ptr[void], t: MemProof) -> void:
 # Bundle as effect implementation
 DefaultMem = SimpleNamespace(
     malloc=_mem_malloc,
+    realloc=_mem_realloc,
     free=_mem_free,
     lmalloc=_mem_lmalloc,
     lfree=_mem_lfree,

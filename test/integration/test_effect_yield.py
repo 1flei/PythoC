@@ -2,7 +2,7 @@
 """
 Integration tests for effect-yield unification:
 for loops over compile-level yield handlers and effect-resolved yield
-functions, plus `yield effect.perform(...)` inside producers.
+functions, including nested continuation composition inside producers.
 
 Model: handlers are continuation transformers (compile-level yield
 functions). 'for x in P(args):' is the default loop-effect handler form -
@@ -181,18 +181,18 @@ def test_with_non_yield_error():
 
 
 # ============================================================================
-# Step 2: yield effect.perform(...) inside producers
+# Step 2: nested continuation loops inside producers
 # ============================================================================
 
 @compile
 def _add_chain(a: i32, b: i32) -> i32:
-    v1 = yield effect.perform(_maybe, a)
-    v2 = yield effect.perform(_maybe, b)
-    yield v1 + v2
+    for v1 in _maybe(a):
+        for v2 in _maybe(b):
+            yield v1 + v2
 
 
-@compile(suffix="perform_chain")
-def perform_chain(a: i32, b: i32) -> i32:
+@compile(suffix="yield_chain")
+def yield_chain(a: i32, b: i32) -> i32:
     total: i32 = 0
     for v in _add_chain(a, b):
         total = v
@@ -202,23 +202,24 @@ def perform_chain(a: i32, b: i32) -> i32:
     return total
 
 
-def test_perform_chain():
-    assert perform_chain(3, 4) == 7
-    assert perform_chain(-1, 4) == -1   # first perform short-circuits
-    assert perform_chain(3, -1) == -1   # second perform short-circuits
-    print("OK test_perform_chain passed")
+def test_yield_chain():
+    assert yield_chain(3, 4) == 7
+    assert yield_chain(-1, 4) == -1
+    assert yield_chain(3, -1) == -1
+    print("OK test_yield_chain passed")
 
 
 # ============================================================================
-# Test: statement form relays the performed value onward
+# Test: a producer relays each yielded value onward
 # ============================================================================
 @compile
 def _relay(x: i32) -> i32:
-    yield effect.perform(_maybe, x)
+    for value in _maybe(x):
+        yield value
 
 
-@compile(suffix="perform_stmt_form")
-def perform_stmt_form(n: i32) -> i32:
+@compile(suffix="yield_relay")
+def yield_relay(n: i32) -> i32:
     total: i32 = 0
     for v in _relay(n):
         total = v
@@ -228,24 +229,24 @@ def perform_stmt_form(n: i32) -> i32:
     return total
 
 
-def test_perform_stmt_form():
-    assert perform_stmt_form(5) == 5
-    assert perform_stmt_form(-1) == -1
-    print("OK test_perform_stmt_form passed")
+def test_yield_relay():
+    assert yield_relay(5) == 5
+    assert yield_relay(-1) == -1
+    print("OK test_yield_relay passed")
 
 
 # ============================================================================
-# Test: perform target resolved through an effect namespace
+# Test: a yield source resolved through an effect namespace
 # ============================================================================
 @compile
 def _chain_via_effect(a: i32, b: i32) -> i32:
-    v1 = yield effect.perform(effect.pred.bind, a)
-    v2 = yield effect.perform(effect.pred.bind, b)
-    yield v1 + v2
+    for v1 in effect.pred.bind(a):
+        for v2 in effect.pred.bind(b):
+            yield v1 + v2
 
 
-@compile(suffix="perform_effect_ns")
-def perform_effect_ns(a: i32, b: i32) -> i32:
+@compile(suffix="yield_effect_ns")
+def yield_effect_ns(a: i32, b: i32) -> i32:
     total: i32 = 0
     for v in _chain_via_effect(a, b):
         total = v
@@ -255,14 +256,14 @@ def perform_effect_ns(a: i32, b: i32) -> i32:
     return total
 
 
-def test_perform_effect_ns():
-    assert perform_effect_ns(3, 4) == 7
-    assert perform_effect_ns(3, -1) == -1
-    print("OK test_perform_effect_ns passed")
+def test_yield_effect_ns():
+    assert yield_effect_ns(3, 4) == 7
+    assert yield_effect_ns(3, -1) == -1
+    print("OK test_yield_effect_ns passed")
 
 
 # ============================================================================
-# Test: err side channel across a short-circuiting perform
+# Test: an explicit error side channel across short-circuiting loops
 # ============================================================================
 @compile(suffix="err_slot")
 def _err_slot() -> ptr[i32]:
@@ -280,23 +281,23 @@ def _bind_sc(x: i32) -> i32:
 
 @compile
 def _chain_sc(a: i32, b: i32) -> i32:
-    v1 = yield effect.perform(_bind_sc, a)
-    v2 = yield effect.perform(_bind_sc, b)
-    yield v1 + v2
+    for v1 in _bind_sc(a):
+        for v2 in _bind_sc(b):
+            yield v1 + v2
 
 
-@compile(suffix="perform_side_channel")
-def perform_side_channel(a: i32, b: i32) -> i32:
+@compile(suffix="yield_side_channel")
+def yield_side_channel(a: i32, b: i32) -> i32:
     for v in _chain_sc(a, b):
         return v
     return _err_slot()[0]
 
 
-def test_perform_side_channel():
-    assert perform_side_channel(3, 4) == 7
-    assert perform_side_channel(-7, 4) == -7
-    assert perform_side_channel(3, -9) == -9
-    print("OK test_perform_side_channel passed")
+def test_yield_side_channel():
+    assert yield_side_channel(3, 4) == 7
+    assert yield_side_channel(-7, 4) == -7
+    assert yield_side_channel(3, -9) == -9
+    print("OK test_yield_side_channel passed")
 
 
 # ============================================================================
@@ -316,16 +317,19 @@ def _nonneg(a: i32) -> R_type:
 
 @compile
 def _sum_oks(a: i32, b: i32) -> i32:
-    v1 = yield effect.perform(R_api.bind, _nonneg(a))
-    v2 = yield effect.perform(R_api.bind, _nonneg(b))
-    yield v1 + v2
+    for v1 in R_api.bind(_nonneg(a)):
+        for v2 in R_api.bind(_nonneg(b)):
+            yield v1 + v2
 
 
 @compile(suffix="result_do_direct")
 def result_do_direct(a: i32, b: i32) -> i32:
-    for v in _sum_oks(a, b):
-        return v
-    return -1
+    result = R_api.do(value for value in _sum_oks(a, b))
+    match result:
+        case (R_type.Ok, value):
+            return value
+        case (R_type.Err, error):
+            return -1
 
 
 def test_result_do_direct():
@@ -397,16 +401,19 @@ with effect(errno=_pybuf_provider, suffix="pybuf"):
 
 @compile
 def _sum_oks2(a: i32, b: i32) -> i32:
-    v1 = yield effect.perform(R2_api.bind, _nonneg2(a))
-    v2 = yield effect.perform(R2_api.bind, _nonneg2(b))
-    yield v1 + v2
+    for v1 in R2_api.bind(_nonneg2(a)):
+        for v2 in R2_api.bind(_nonneg2(b)):
+            yield v1 + v2
 
 
 @compile(suffix="result_do_pybuf")
 def result_do_pybuf(a: i32, b: i32) -> i32:
-    for v in _sum_oks2(a, b):
-        return v
-    return -999
+    result = R2_api.do(value for value in _sum_oks2(a, b))
+    match result:
+        case (R2_type.Ok, value):
+            return value
+        case (R2_type.Err, error):
+            return -999
 
 
 def test_result_do_errno_override():
@@ -557,10 +564,10 @@ def main():
         test_effect_for_bind()
         test_effect_for_override()
         test_with_non_yield_error()
-        test_perform_chain()
-        test_perform_stmt_form()
-        test_perform_effect_ns()
-        test_perform_side_channel()
+        test_yield_chain()
+        test_yield_relay()
+        test_yield_effect_ns()
+        test_yield_side_channel()
         test_result_do_direct()
         test_result_do_errno_override()
         test_yield_closure_basic()

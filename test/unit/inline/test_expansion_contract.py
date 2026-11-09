@@ -13,7 +13,6 @@ from pythoc._inline.constant_loop_adapter import ConstantLoopAdapter
 from pythoc._inline.exit_rules import ReturnExitRule
 from pythoc._inline.kernel import MetaInlineRequest, expand_inline
 from pythoc._inline.names import ExpansionNames
-from pythoc._inline.perform_desugar import desugar_effect_performs
 from pythoc._inline.renaming import ScopedVariableRenamer
 from pythoc._inline.scope_analyzer import ScopeContext
 from pythoc._inline.yield_state_machine import inline_yield_function_iterators
@@ -208,20 +207,6 @@ class SyntacticExpansionContractTest(unittest.TestCase):
         self.assertNotIn('_iter_val_7_0', result.iter_var_names)
         self.assertEqual(len(result.iter_var_names), 1)
         self.assertIsNotNone(visitor.lookup_variable(result.iter_var_names[0]))
-
-    def test_perform_temporary_does_not_capture_a_source_variable(self):
-        source = ast.parse('''
-def producer():
-    _perform_val_7 = 99
-    yield effect.perform(handler, input())
-    yield _perform_val_7
-''').body[0]
-        original = ast.dump(source)
-        with patch('pythoc._inline.perform_desugar.get_next_id', return_value=7):
-            result = desugar_effect_performs(source)
-        loop = result.body[1]
-        self.assertNotEqual(loop.target.id, '_perform_val_7')
-        self.assertEqual(ast.dump(source), original)
 
     def test_offline_expansion_rejects_keywords_instead_of_dropping_them(self):
         source = ast.parse('def source():\n    yield 1').body[0]

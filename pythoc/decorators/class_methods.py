@@ -34,6 +34,9 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..logger import logger
 
 
+_INHERIT_EFFECT_SUFFIX = object()
+
+
 def _is_class_callable(member) -> bool:
     """Accept native functions and compile-level inline continuations."""
     return (getattr(member, "_is_compiled", False)
@@ -78,6 +81,7 @@ def attach_class_methods(
     source_cls=None,
     class_compile_suffix: Optional[str] = None,
     captured_symbols: Optional[Dict[str, Any]] = None,
+    effect_suffix=_INHERIT_EFFECT_SUFFIX,
 ) -> None:
     """Compile each plain-def method of ``source_cls`` and attach to ``target_cls``.
 
@@ -99,6 +103,10 @@ def attach_class_methods(
         locals). Threaded into ``_compile_impl`` so that method annotations
         resolve closure-captured names. The class itself is added under its
         own ``__name__`` so self-referential annotations resolve.
+    effect_suffix:
+        The class decoration's resolved effect suffix. Other class decorators
+        inherit the current definition context when this is omitted. Explicit
+        None keeps a default binding.
     """
     if source_cls is None:
         source_cls = target_cls
@@ -118,6 +126,9 @@ def attach_class_methods(
 
     # Imported lazily to avoid circular import at module load time.
     from .compile import _compile_impl
+    if effect_suffix is _INHERIT_EFFECT_SUFFIX:
+        from ..effect import get_current_effect_suffix
+        effect_suffix = get_current_effect_suffix()
 
     attached: List[str] = []
     class_suffix_parts = [target_cls.__name__]
@@ -146,7 +157,7 @@ def attach_class_methods(
         wrapper = _compile_impl(
             member,
             compile_suffix=implicit_method_suffix,
-            effect_suffix=None,
+            effect_suffix=effect_suffix,
             captured_symbols=method_symbols,
         )
         setattr(target_cls, name, wrapper)
