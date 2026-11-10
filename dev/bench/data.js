@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793722159999,
+  "lastUpdate": 1794321818167,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3592,6 +3592,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.943,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "1b03f196a880e5859d54c0943febb280a5eb886c",
+          "message": "Refactor meta symbol capture and introduce the var args expansion",
+          "timestamp": "2026-11-10T22:35:07+08:00",
+          "tree_id": "4d2fd256c5d0a1061ea2e5324d894eb29c3797aa",
+          "url": "https://github.com/1flei/PythoC/commit/1b03f196a880e5859d54c0943febb280a5eb886c"
+        },
+        "date": 1794321817297,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 0.68,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.06,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.489,
             "unit": "seconds/test"
           }
         ]
