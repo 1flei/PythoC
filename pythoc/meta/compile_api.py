@@ -116,6 +116,9 @@ def compile_ast(
         return_type_hint = void
 
     user_globals = dict(user_globals) if user_globals else {}
+    from .._inline.definition_bindings import materialize_definition_symbols
+    fn_ast, symbol_values = materialize_definition_symbols(fn_ast, user_globals)
+    user_globals.update(symbol_values)
 
     # Content hash of the AST plus bakeable captured constants, so a
     # cache hit cannot reuse IR that folded a different Python value

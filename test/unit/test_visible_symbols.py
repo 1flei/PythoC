@@ -95,6 +95,27 @@ class TestCaptureCallerSymbols(unittest.TestCase):
 
 class TestGetAllAccessibleSymbols(unittest.TestCase):
     """Test get_all_accessible_symbols function."""
+
+    def test_query_subset_preserves_closure_and_explicit_override_priority(self):
+        captured = None
+
+        def function():
+            return captured
+
+        symbols = get_all_accessible_symbols(
+            function, names={'captured', 'unavailable'},
+            captured_symbols={'captured': 7, 'irrelevant': 9})
+        self.assertEqual(dict(symbols), {'captured': 7})
+        self.assertIs(symbols.live_globals, function.__globals__)
+
+    def test_query_subset_retains_a_none_binding(self):
+        captured = None
+
+        def function():
+            return captured
+
+        symbols = get_all_accessible_symbols(function, names={'captured'})
+        self.assertEqual(dict(symbols), {'captured': None})
     
     def test_function_with_closure(self):
         """Test function with closure variables."""

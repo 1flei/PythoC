@@ -10,6 +10,81 @@ from .renaming import ScopedVariableRenamer, _parameters
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
 
 
+_UNBOUND = object()
+
+
+@dataclass(frozen=True, eq=False)
+class DefinitionSymbol:
+    """Identity of a Python symbol selected in its definition environment."""
+
+    name: str
+    value: object = _UNBOUND
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def symbol_expression(name, value):
+    node = ast.Name(id=name, ctx=ast.Load())
+    node._definition_symbol = DefinitionSymbol(name, value)
+    return node
+
+
+def materialize_definition_symbols(syntax, globals_, *, names=None):
+    """Materialize bound names, copying only paths containing replacements."""
+    names = names if names is not None else ExpansionNames()
+    names.reserve_ast(syntax)
+    names.reserve(globals_)
+    aliases = {}
+    values = {}
+
+    class Materializer(ast.NodeTransformer):
+        def generic_visit(self, node):
+            result = node
+            for field, value in ast.iter_fields(node):
+                replacement = value
+                if isinstance(value, list):
+                    for index, item in enumerate(value):
+                        rewritten = (self.visit(item)
+                                     if isinstance(item, ast.AST) else item)
+                        if rewritten is not item:
+                            if replacement is value:
+                                replacement = list(value)
+                            replacement[index] = rewritten
+                elif isinstance(value, ast.AST):
+                    replacement = self.visit(value)
+                if replacement is not value:
+                    if result is node:
+                        result = copy.copy(node)
+                    setattr(result, field, replacement)
+            return result
+
+        def visit_Name(self, node):
+            symbol = getattr(node, '_definition_symbol', None)
+            if symbol is None:
+                return node
+            if symbol not in aliases:
+                alias = names.fresh('_definition_' + symbol.name)
+                aliases[symbol] = alias
+                if symbol.value is not _UNBOUND:
+                    values[alias] = symbol.value
+            result = copy.copy(node)
+            result.id = aliases[symbol]
+            del result._definition_symbol
+            return result
+
+    return Materializer().visit(syntax), values
+
+
+def _attach_symbols(syntax, aliases, values):
+    symbols = {alias: DefinitionSymbol(name, values.get(alias, _UNBOUND))
+               for name, alias in aliases.items()}
+    for node in ast.walk(syntax):
+        if (isinstance(node, ast.Name) and node.id in symbols
+                and not hasattr(node, '_definition_symbol')):
+            node._definition_symbol = symbols[node.id]
+
+
 @dataclass
 class BoundDefinition:
     syntax: ast.FunctionDef
@@ -66,6 +141,7 @@ def bind_definition(syntax, globals_, references=None, *, names=None):
             parameter.annotation = renamer.visit(parameter.annotation)
     if prepared.returns is not None:
         prepared.returns = renamer.visit(prepared.returns)
+    _attach_symbols(prepared, global_names, global_values)
     globals_.update(global_values)
     used = {node.id for node in ast.walk(prepared)
             if isinstance(node, ast.Name)}
@@ -93,4 +169,6 @@ def bind_consumer_globals(visitor, body, target):
     global_names, global_values = _global_aliases(syntax, globals_, scope, names)
     renamer = ScopedVariableRenamer({name: name for name in scope}, global_names)
     prepared = [renamer.visit(copy.deepcopy(statement)) for statement in body]
+    _attach_symbols(ast.Module(body=prepared, type_ignores=[]),
+                    global_names, global_values)
     return prepared, global_values

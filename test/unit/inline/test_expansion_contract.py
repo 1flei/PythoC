@@ -13,6 +13,8 @@ from pythoc._inline.constant_loop_adapter import ConstantLoopAdapter
 from pythoc._inline.exit_rules import ReturnExitRule
 from pythoc._inline.kernel import MetaInlineRequest, expand_inline
 from pythoc._inline.names import ExpansionNames
+from pythoc._inline.definition_bindings import materialize_definition_symbols
+from pythoc._inline._intrinsics import _PC_INTRINSICS
 from pythoc._inline.renaming import ScopedVariableRenamer
 from pythoc._inline.scope_analyzer import ScopeContext
 from pythoc._inline.yield_state_machine import inline_yield_function_iterators
@@ -152,6 +154,10 @@ class ExpansionKernelContractTest(unittest.TestCase):
             'value_inline_7': 99,
         }
         program = ast.fix_missing_locations(ast.Module(body=result.stmts, type_ignores=[]))
+        program, symbols = materialize_definition_symbols(program, namespace)
+        for name, value in symbols.items():
+            self.assertIs(value, _PC_INTRINSICS)
+            namespace[name] = namespace['__pc_intrinsics']
         exec(compile(program, '<expanded>', 'exec'), namespace)
         self.assertEqual(namespace['answer'], 5)
         self.assertEqual(namespace['value_inline_7'], 99)

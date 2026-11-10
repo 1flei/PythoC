@@ -31,7 +31,14 @@ class ExpressionsMixin:
     def visit_Name(self, node: ast.Name):
         """Handle variable references, returning ValueRef"""
 
-        var_info = self.lookup_variable(node.id)
+        symbol = getattr(node, '_definition_symbol', None)
+        if symbol is None:
+            var_info = self.lookup_variable(node.id)
+        else:
+            from .._inline.definition_bindings import _UNBOUND
+            var_info = (None if symbol.value is _UNBOUND else
+                        self._wrap_python_name_binding(
+                            symbol.name, symbol.value, source='definition_symbol'))
         if var_info:
             from ..builtin_entities.python_type import PythonType
 

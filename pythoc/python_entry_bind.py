@@ -252,7 +252,7 @@ def _kind_flags(form):
 
 # The vectorcall entry. bind_names and tail are the only statement holes.
 @meta.quote
-def _entry(slots_n, count, bind_names, tail):
+def _entry(slots_n, count, bind_names, tail, *, args, kwnames, nargsf):
     slots: array[ptr[void], slots_n]
     names: array[ptr[i8], slots_n]
     bind_names
@@ -269,7 +269,7 @@ def _entry(slots_n, count, bind_names, tail):
 
 
 @meta.quote
-def _name_at(index, text):
+def _name_at(index, text, *, names):
     names[index] = text
 
 
@@ -309,7 +309,7 @@ def _decl(dst, ty):
 
 
 @meta.quote
-def _load_required(index, src, loaded):
+def _load_required(index, src, loaded, *, slots):
     if i64(slots[index]) == i64(0):
         type_error("missing required argument")
         return ptr[void](0)
@@ -318,7 +318,7 @@ def _load_required(index, src, loaded):
 
 
 @meta.quote
-def _load_optional(dst, ty, index, size, src, parts):
+def _load_optional(dst, ty, index, size, src, parts, *, slots):
     dst: ty
     zero_bytes(ptr[i8](ptr(dst)), i64(size))
     if i64(slots[index]) != i64(0):
@@ -359,6 +359,7 @@ def _from_python_default(
     dst, ty, index,
     as_int, as_u64, as_float, as_bool, as_ptr,
     lo, hi, default,
+    *, slots,
 ):
     dst: ty
     if i64(slots[index]) == i64(0):
@@ -486,6 +487,7 @@ def _box_result(
     type_name,
     as_int, as_u64, as_float, as_bool, as_ptr, as_wide, as_blob,
     signed_flag, size,
+    *, result,
 ):
     if as_int:
         return box_i64(i64(result), type_name)
@@ -507,7 +509,7 @@ def _box_result(
 
 
 @meta.quote
-def _box_enum(tag, tag_ty, type_name):
+def _box_enum(tag, tag_ty, type_name, *, result):
     tag: tag_ty = result[0]
     return box_i64(i64(tag), type_name)
 
@@ -516,7 +518,7 @@ def _box_enum(tag, tag_ty, type_name):
 # the payload. The Python object is a pc_literal whose value is
 # (tag, payload bytes), so a Python sequence match does not unpack it.
 @meta.quote
-def _box_linear_enum(tag, tag_ty, type_name, payload_off, payload_size):
+def _box_linear_enum(tag, tag_ty, type_name, payload_off, payload_size, *, result):
     tag: tag_ty = result[0]
     packed: ptr[void] = PyTuple_New(i64(2))
     PyTuple_SetItem(packed, i64(0), PyLong_FromLongLong(i64(tag)))
@@ -620,7 +622,7 @@ def _return_boxed(type_name, value, fields, names):
 
 
 @meta.quote
-def _adapter_address(hits):
+def _adapter_address(hits, *, arg):
     if i64(arg) == i64(0):
         type_error("adapter_address expected a string")
         return ptr[void](0)
@@ -630,13 +632,13 @@ def _adapter_address(hits):
 
 
 @meta.quote
-def _address_hit(export_id, fn):
+def _address_hit(export_id, fn, *, arg):
     if PyUnicode_CompareWithASCIIString(arg, export_id) == i32(0):
         return PyLong_FromUnsignedLongLong(u64(fn))
 
 
 @meta.quote
-def _install_entry():
+def _install_entry(*, arg):
     if i64(arg) == i64(0):
         type_error("install_runtime expected a tuple")
         return ptr[void](0)
@@ -648,7 +650,7 @@ def _install_entry():
 
 
 @meta.quote
-def _init(module_name):
+def _init(module_name, *, pythoc_adapter_address, pythoc_install_entry):
     return pythoc_make_module(
         module_name,
         ptr[void](pythoc_adapter_address),
@@ -661,7 +663,6 @@ class _Bind:
         self.count = 0
         self.aliases = {}
         self.globals = {}
-        self.captured = {}
 
     def fresh(self, prefix):
         name = '{}{}'.format(prefix, self.count)
@@ -676,20 +677,15 @@ class _Bind:
             self.globals[name] = pc_type
         return self.aliases[key]
 
-    def take(self, frag):
-        self.captured.update(getattr(frag, '_user_globals', {}))
-        return frag
-
-
 def _fill(bind, dst, src, form):
     kind = form['kind']
     if kind in _SCALAR:
-        return bind.take(_from_python(
+        return _from_python(
             dst, bind.alias(form['type']), src, **_kind_flags(form),
-        ))
-    return bind.take(_aggregate(
+        )
+    return _aggregate(
         dst, bind.alias(form['type']), form['size'], _parts(bind, dst, src, form),
-    ))
+    )
 
 
 def _parts(bind, dst, src, form):
@@ -709,13 +705,13 @@ def _parts(bind, dst, src, form):
     if kind == 'enum':
         parts = [_field_part(bind, dst, src, _tag_field(form))]
         if form['payload_size']:
-            parts.append(bind.take(_payload(
+            parts.append(_payload(
                 bind.fresh('p'),
                 dst,
                 src,
                 form['payload_offset'],
                 form['payload_size'],
-            )))
+            ))
         return parts
     raise RuntimeError('cannot unbox {}'.format(kind))
 
@@ -732,20 +728,20 @@ def _field_part(bind, dst, src, field):
     item = bind.fresh('p')
     native = bind.fresh('a')
     label = field['field'] or 'f{}'.format(field['index'])
-    return bind.take(_one_field(
+    return _one_field(
         item,
         src,
         field['index'],
         meta.const(label),
         _fill(bind, native, item, field),
         _store_field(bind, dst, field, native),
-    ))
+    )
 
 
 def _store_field(bind, dst, field, src):
     if field['kind'] == 'array':
-        return bind.take(_copy_into(dst, field['offset'], src, field['size']))
-    return bind.take(_assign_index(dst, field['index'], src))
+        return _copy_into(dst, field['offset'], src, field['size'])
+    return _assign_index(dst, field['index'], src)
 
 
 def _array_slots(form):
@@ -760,27 +756,27 @@ def _elem_part(bind, dst, src, form, indices, offset):
     owned = []
     for depth, index in enumerate(indices):
         nxt = bind.fresh('p')
-        walk.append(bind.take(_step(nxt, current, index)))
+        walk.append(_step(nxt, current, index))
         if depth:
             owned.append(current)
         current = nxt
     native = bind.fresh('a')
     cleanup = [
-        bind.take(_release_one(name))
+        _release_one(name)
         for name in owned + [current]
     ]
-    return bind.take(_one_elem(
+    return _one_elem(
         walk,
         _fill(bind, native, current, form['elem']),
-        bind.take(_copy_into(dst, offset, native, _nbytes(form['elem']))),
+        _copy_into(dst, offset, native, _nbytes(form['elem'])),
         cleanup,
-    ))
+    )
 
 
 def _load_param(bind, dst, index, form, default):
     if default is None:
         src = bind.fresh('p')
-        return _load_required(index, src, _fill(bind, dst, src, form))
+        return _load_required(index, src, _fill(bind, dst, src, form), slots='slots')
     kind = form['kind']
     if default[0] == 'none' and kind in ('int', 'u64', 'f32', 'f64', 'bool', 'ptr'):
         return _scalar_default(bind, dst, index, form, _default_number(default, kind))
@@ -789,6 +785,7 @@ def _load_param(bind, dst, index, form, default):
         return _load_optional(
             dst, bind.alias(form['type']), index, form.get('size', 0),
             src, _parts(bind, dst, src, form),
+            slots='slots',
         )
     if kind in ('int', 'u64', 'f32', 'f64', 'bool', 'ptr'):
         return _scalar_default(bind, dst, index, form, _default_number(default, kind))
@@ -818,33 +815,34 @@ def _scalar_default(bind, dst, index, form, default):
         flags['lo'],
         flags['hi'],
         default,
+        slots='slots',
     )
 
 
 def _read_native(bind, dst, field, src):
     if field['kind'] == 'array':
-        return bind.take(_read_bytes(
+        return _read_bytes(
             dst, bind.alias(field['type']), src, field['offset'], field['size'],
-        ))
-    return bind.take(_read_field(
+        )
+    return _read_field(
         dst, bind.alias(field['type']), src, field['index'],
-    ))
+    )
 
 
 def _plain(bind, src, form):
     kind = form['kind']
     if kind in _SCALAR:
         dst = bind.fresh('o')
-        return dst, [bind.take(_plain_scalar(dst, src, **_plain_flags(form)))]
+        return dst, [_plain_scalar(dst, src, **_plain_flags(form))]
     if kind == 'struct':
         return _plain_struct(bind, src, form)
     if kind == 'array':
         return _plain_array(bind, src, form)
     if kind == 'enum':
         native = bind.fresh('a')
-        head = bind.take(_read_field(
+        head = _read_field(
             native, bind.alias(form['tag']['type']), src, 0,
-        ))
+        )
         obj, more = _plain(bind, native, form['tag'])
         return obj, [head] + more
     raise RuntimeError('cannot box {}'.format(kind))
@@ -868,13 +866,13 @@ def _plain_flags(form):
 def _plain_struct(bind, src, form):
     visible = [field for field in form['fields'] if field['kind'] != 'skip']
     tup = bind.fresh('t')
-    parts = [bind.take(_new_tuple(tup, len(visible)))]
+    parts = [_new_tuple(tup, len(visible))]
     for slot, field in enumerate(visible):
         native = bind.fresh('a')
         parts.append(_read_native(bind, native, field, src))
         obj, more = _plain(bind, native, field)
         parts.extend(more)
-        parts.append(bind.take(_put(tup, slot, obj)))
+        parts.append(_put(tup, slot, obj))
     return tup, parts
 
 
@@ -884,23 +882,23 @@ def _plain_array(bind, src, form):
 
 def _plain_dims(bind, src, form, dims, prefix):
     tup = bind.fresh('t')
-    parts = [bind.take(_new_tuple(tup, dims[0]))]
+    parts = [_new_tuple(tup, dims[0])]
     if len(dims) == 1:
         elem_size = _nbytes(form['elem'])
         for index in range(dims[0]):
             native = bind.fresh('a')
             offset = _flat_offset(prefix + (index,), form['dims'], elem_size)
-            parts.append(bind.take(_read_bytes(
+            parts.append(_read_bytes(
                 native, bind.alias(form['elem']['type']), src, offset, elem_size,
-            )))
+            ))
             obj, more = _plain(bind, native, form['elem'])
             parts.extend(more)
-            parts.append(bind.take(_put(tup, index, obj)))
+            parts.append(_put(tup, index, obj))
         return tup, parts
     for index in range(dims[0]):
         sub, more = _plain_dims(bind, src, form, dims[1:], prefix + (index,))
         parts.extend(more)
-        parts.append(bind.take(_put(tup, index, sub)))
+        parts.append(_put(tup, index, sub))
     return tup, parts
 
 
@@ -911,25 +909,28 @@ def _box_return(bind, form):
     kind = form['kind']
     if kind in _SCALAR:
         flags = _kind_flags(form)
-        return bind.take(_box_result(
+        return _box_result(
             type_name,
             flags['as_int'], flags['as_u64'], flags['as_float'],
             flags['as_bool'], flags['as_ptr'], flags['as_wide'],
             flags['as_blob'], flags['signed_flag'], flags['size'],
-        ))
+            result='result',
+        )
     if kind == 'enum':
         tag = bind.fresh('a')
         if form.get('holds_linear'):
-            return bind.take(_box_linear_enum(
+            return _box_linear_enum(
                 tag,
                 bind.alias(form['tag']['type']),
                 type_name,
                 int(form['payload_offset']),
                 int(form['payload_size']),
-            ))
-        return bind.take(_box_enum(
+                result='result',
+            )
+        return _box_enum(
             tag, bind.alias(form['tag']['type']), type_name,
-        ))
+            result='result',
+        )
     if kind == 'struct':
         return _box_struct(bind, form, type_name)
     if kind == 'array':
@@ -943,27 +944,27 @@ def _box_struct(bind, form, type_name):
     tup = bind.fresh('t')
     fields = bind.fresh('d')
     name_tup = bind.fresh('n')
-    parts = [bind.take(_new_tuple(tup, len(visible)))]
+    parts = [_new_tuple(tup, len(visible))]
     if named:
-        parts.append(bind.take(_new_dict(fields)))
-        parts.append(bind.take(_new_tuple(name_tup, len(named))))
+        parts.append(_new_dict(fields))
+        parts.append(_new_tuple(name_tup, len(named)))
     else:
-        parts.append(bind.take(_null_ptr(fields)))
-        parts.append(bind.take(_null_ptr(name_tup)))
+        parts.append(_null_ptr(fields))
+        parts.append(_null_ptr(name_tup))
     for slot, field in enumerate(visible):
         native = bind.fresh('a')
         parts.append(_read_native(bind, native, field, 'result'))
         obj, more = _plain(bind, native, field)
         parts.extend(more)
         label = field['field'] or 'f'
-        parts.append(bind.take(_export(
+        parts.append(_export(
             tup, slot, fields, meta.const(label), obj,
-        )))
+        ))
         if named:
-            parts.append(bind.take(_name_item(
+            parts.append(_name_item(
                 name_tup, slot, meta.const(label),
-            )))
-    parts.append(bind.take(_return_boxed(type_name, tup, fields, name_tup)))
+            ))
+    parts.append(_return_boxed(type_name, tup, fields, name_tup))
     return parts
 
 
@@ -971,9 +972,9 @@ def _box_array(bind, form, type_name):
     tup, parts = _plain_array(bind, 'result', form)
     fields = bind.fresh('d')
     names = bind.fresh('n')
-    parts.append(bind.take(_null_ptr(fields)))
-    parts.append(bind.take(_null_ptr(names)))
-    parts.append(bind.take(_return_boxed(type_name, tup, fields, names)))
+    parts.append(_null_ptr(fields))
+    parts.append(_null_ptr(names))
+    parts.append(_return_boxed(type_name, tup, fields, names))
     return parts
 
 
@@ -1007,7 +1008,7 @@ def _as_stmts(items):
 def _store_named(bind, obj, field, src):
     label = field.get('field')
     if not label:
-        return bind.take(_assign_index(obj, field['index'], src))
+        return _assign_index(obj, field['index'], src)
     stmt = ast.Assign(
         targets=[ast.Attribute(
             value=ast.Name(id=obj, ctx=ast.Load()),
@@ -1016,7 +1017,7 @@ def _store_named(bind, obj, field, src):
         )],
         value=ast.Name(id=src, ctx=ast.Load()),
     )
-    return bind.take(_stmt(stmt))
+    return _stmt(stmt)
 
 
 def _linear_call(bind):
@@ -1029,7 +1030,7 @@ def _linear_call(bind):
 
 
 def _fill_struct_payload(bind, name, buf, form):
-    stmts = [bind.take(_decl(name, bind.alias(form['type'])))]
+    stmts = [_decl(name, bind.alias(form['type']))]
     for field in form['fields']:
         if field['kind'] == 'skip' and field.get('linear'):
             label = field.get('field')
@@ -1043,7 +1044,7 @@ def _fill_struct_payload(bind, name, buf, form):
                 )],
                 value=_linear_call(bind),
             )
-            stmts.append(bind.take(_stmt(stmt)))
+            stmts.append(_stmt(stmt))
             continue
         if field['kind'] == 'skip':
             continue
@@ -1054,13 +1055,13 @@ def _fill_struct_payload(bind, name, buf, form):
                 )
             )
         native = bind.fresh('a')
-        stmts.append(bind.take(_from_bytes(
+        stmts.append(_from_bytes(
             native,
             bind.alias(field['type']),
             buf,
             int(field['offset']),
             _nbytes(field),
-        )))
+        ))
         stmts.append(_store_named(bind, name, field, native))
     return stmts
 
@@ -1082,9 +1083,9 @@ def _payload_expr(bind, buf, payload_type):
                 form['name'],
             )
         )
-    return name, [bind.take(_from_bytes(
+    return name, [_from_bytes(
         name, bind.alias(form['type']), buf, 0, _nbytes(form),
-    ))]
+    )]
 
 
 def _enum_call(bind, enum_type, tag_type, tag_value, payload):
@@ -1109,19 +1110,19 @@ def _variant_arm(bind, dst, buf, form, payload_type, tag_value):
     call = _enum_call(
         bind, form['peeled'], form['tag']['type'], tag_value, payload,
     )
-    stmts.append(bind.take(_set_call(dst, call)))
+    stmts.append(_set_call(dst, call))
     return _as_stmts(stmts)
 
 
 def _enum_arms(bind, dst, tag, buf, form):
     if form['tag']['kind'] != 'int':
         raise RuntimeError('linear enum tag must be a machine integer')
-    node = bind.take(_bad_tag(buf))
+    node = _bad_tag(buf)
     for _variant_name, tag_value, payload_type in reversed(
         _enum_variants(form['peeled'])
     ):
         arm = _variant_arm(bind, dst, buf, form, payload_type, tag_value)
-        node = bind.take(_if_i64(tag, int(tag_value), arm, node))
+        node = _if_i64(tag, int(tag_value), arm, node)
     return node
 
 
@@ -1158,8 +1159,8 @@ def build_entry(spec):
             src = bind.fresh('p')
             tag = bind.fresh('a')
             buf = bind.fresh('p')
-            loads.append(bind.take(_load_required(index, src, [])))
-            rebuilds.append(bind.take(_rebuild_enum(
+            loads.append(_load_required(index, src, [], slots='slots'))
+            rebuilds.append(_rebuild_enum(
                 name,
                 bind.alias(form['type']),
                 tag,
@@ -1168,32 +1169,35 @@ def build_entry(spec):
                 int(form['tag']['hi']),
                 buf,
                 _enum_arms(bind, name, tag, buf, form),
-            )))
+            ))
             continue
         if form['kind'] == 'skip' and form.get('linear'):
-            mints.append(bind.take(_linear(name, bind.alias(form['type']))))
+            mints.append(_linear(name, bind.alias(form['type'])))
             continue
         if form['kind'] == 'skip':
-            loads.append(bind.take(_decl(name, bind.alias(form['type']))))
+            loads.append(_decl(name, bind.alias(form['type'])))
             continue
-        loads.append(bind.take(_load_param(bind, name, index, form, default)))
+        loads.append(_load_param(bind, name, index, form, default))
     linears = rebuilds + mints
     call = _kernel_call(arg_names)
     if returns['kind'] == 'void':
-        returned = bind.take(_void_returned(call))
+        returned = _void_returned(call)
     else:
-        returned = bind.take(_returned(
+        returned = _returned(
             bind.alias(returns['type']),
             call,
             _box_return(bind, returns),
-        ))
+        )
     count = len(spec['names'])
     bind_names = [
-        bind.take(_name_at(index, meta.const(text)))
+        _name_at(index, meta.const(text), names='names')
         for index, text in enumerate(spec['names'])
     ]
-    tail = bind.take(_tail(loads, linears, returned))
-    body = bind.take(_entry(count or 1, count, bind_names, tail))
+    tail = _tail(loads, linears, returned)
+    body = _entry(
+        count or 1, count, bind_names, tail,
+        args='args', kwnames='kwnames', nargsf='nargsf',
+    )
     return body.stmts, bind
 
 
@@ -1258,8 +1262,7 @@ def _object_args():
 
 def _development_entry(spec, source_file):
     body, bind = build_entry(spec)
-    user_globals = dict(bind.captured)
-    user_globals.update(bind.globals)
+    user_globals = dict(bind.globals)
     user_globals['kern'] = spec['callee']
     user_globals['__name__'] = 'pythoc.python_entry_bind'
     generated = _generated_function(
@@ -1288,14 +1291,11 @@ def compile_adapter_object(specs, group_key, init_symbol, module_name):
 
     if init_symbol:
         hits = []
-        captured = {}
         for spec, wrapper in zip(specs, wrappers):
-            hit = _address_hit(meta.const(spec['export_id']), wrapper)
-            captured.update(getattr(hit, '_user_globals', {}))
+            hit = _address_hit(meta.const(spec['export_id']), wrapper, arg='arg')
             hits.append(hit)
-        address_body = _adapter_address(hits)
-        captured.update(getattr(address_body, '_user_globals', {}))
-        address_globals = dict(captured)
+        address_body = _adapter_address(hits, arg='arg')
+        address_globals = {}
         address_globals['__name__'] = 'pythoc.python_entry_bind'
         address = _compile_one(
             'pythoc_adapter_address',
@@ -1306,8 +1306,8 @@ def compile_adapter_object(specs, group_key, init_symbol, module_name):
             source_file,
             group_key,
         )
-        install = _install_entry()
-        install_globals = dict(getattr(install, '_user_globals', {}))
+        install = _install_entry(arg='arg')
+        install_globals = {}
         install_globals['__name__'] = 'pythoc.python_entry_bind'
         install_wrapper = _compile_one(
             'pythoc_install_entry',
@@ -1318,13 +1318,12 @@ def compile_adapter_object(specs, group_key, init_symbol, module_name):
             source_file,
             group_key,
         )
-        init = _init(meta.const(module_name))
-        init_globals = dict(getattr(init, '_user_globals', {}))
-        init_globals.update({
-            'pythoc_adapter_address': address,
-            'pythoc_install_entry': install_wrapper,
-            '__name__': 'pythoc.python_entry_bind',
-        })
+        init = _init(
+            meta.const(module_name), pythoc_adapter_address=address,
+            pythoc_install_entry=install_wrapper,
+        )
+        init_globals = {}
+        init_globals['__name__'] = 'pythoc.python_entry_bind'
         _compile_one(
             init_symbol,
             [],

@@ -245,7 +245,7 @@ neg_i32 = meta.compile_ast(
     neg_frag.stmts[0],
     param_types={"x": i32},
     return_type=i32,
-    user_globals={**globals(), **getattr(neg_frag, '_user_globals', {})},
+    user_globals=globals(),
 )
 
 

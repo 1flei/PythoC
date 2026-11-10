@@ -170,31 +170,31 @@ class TestMetaArtifact(unittest.TestCase):
 class TestCoercionExprPosition(unittest.TestCase):
 
     def test_str_to_name(self):
-        result = _coerce_to_ast("x", {}, 'expr')
+        result = _coerce_to_ast("x", 'expr')
         self.assertIsInstance(result, ast.Name)
         self.assertEqual(result.id, "x")
         self.assertIsInstance(result.ctx, ast.Load)
 
     def test_const_helper_to_constant(self):
-        result = _coerce_to_ast(const("hello"), {}, 'expr')
+        result = _coerce_to_ast(const("hello"), 'expr')
         self.assertIsInstance(result, ast.Constant)
         self.assertEqual(result.value, "hello")
 
     def test_int_to_constant(self):
-        result = _coerce_to_ast(42, {}, 'expr')
+        result = _coerce_to_ast(42, 'expr')
         self.assertIsInstance(result, ast.Constant)
         self.assertEqual(result.value, 42)
 
     def test_float_to_constant(self):
-        result = _coerce_to_ast(3.14, {}, 'expr')
+        result = _coerce_to_ast(3.14, 'expr')
         self.assertEqual(result.value, 3.14)
 
     def test_bool_to_constant(self):
-        result = _coerce_to_ast(True, {}, 'expr')
+        result = _coerce_to_ast(True, 'expr')
         self.assertIs(result.value, True)
 
     def test_none_to_constant(self):
-        result = _coerce_to_ast(None, {}, 'expr')
+        result = _coerce_to_ast(None, 'expr')
         self.assertIsNone(result.value)
 
     def test_ast_expr_passthrough(self):
@@ -203,74 +203,73 @@ class TestCoercionExprPosition(unittest.TestCase):
             op=ast.Add(),
             right=ast.Constant(value=1),
         )
-        self.assertIs(_coerce_to_ast(node, {}, 'expr'), node)
+        self.assertIs(_coerce_to_ast(node, 'expr'), node)
 
     def test_fragment_in_expr_unwraps_return(self):
         inner = ast.Constant(value=7)
         frag = Fragment(body=[ast.Return(value=inner)])
-        self.assertIs(_coerce_to_ast(frag, {}, 'expr'), inner)
+        self.assertIs(_coerce_to_ast(frag, 'expr'), inner)
 
     def test_fragment_multi_stmt_in_expr_raises(self):
         frag = Fragment(body=[ast.Pass(), ast.Pass()])
         with self.assertRaises(TypeError):
-            _coerce_to_ast(frag, {}, 'expr')
+            _coerce_to_ast(frag, 'expr')
 
     def test_named_callable_registered(self):
-        extra = {}
 
         def my_func():
             pass
 
-        result = _coerce_to_ast(my_func, extra, 'expr')
+        result = _coerce_to_ast(my_func, 'expr')
         self.assertIsInstance(result, ast.Name)
         self.assertEqual(result.id, "my_func")
-        self.assertIn("my_func", extra)
+        self.assertIs(result._definition_symbol.value, my_func)
 
 
 class TestCoercionStorePosition(unittest.TestCase):
 
     def test_str_to_store_name(self):
-        result = _coerce_to_ast("x", {}, 'store')
+        result = _coerce_to_ast("x", 'store')
         self.assertIsInstance(result, ast.Name)
         self.assertEqual(result.id, "x")
         self.assertIsInstance(result.ctx, ast.Store)
 
     def test_ast_name_passthrough(self):
         node = ast.Name(id='x', ctx=ast.Store())
-        self.assertIs(_coerce_to_ast(node, {}, 'store'), node)
+        self.assertIs(_coerce_to_ast(node, 'store'), node)
 
     def test_tuple_passthrough(self):
         node = ast.Tuple(elts=[ast.Name(id='a', ctx=ast.Store())], ctx=ast.Store())
-        self.assertIs(_coerce_to_ast(node, {}, 'store'), node)
+        self.assertIs(_coerce_to_ast(node, 'store'), node)
 
     def test_int_in_store_raises(self):
         with self.assertRaises(TypeError):
-            _coerce_to_ast(42, {}, 'store')
+            _coerce_to_ast(42, 'store')
 
 
 class TestCoercionSplicePosition(unittest.TestCase):
 
     def test_list_of_stmts_to_splice_marker(self):
         stmts = [ast.Pass(), ast.Pass()]
-        result = _coerce_to_ast(stmts, {}, 'splice')
+        result = _coerce_to_ast(stmts, 'splice')
         self.assertIsInstance(result, _SpliceMarker)
         self.assertEqual(result.stmts, stmts)
 
     def test_fragment_to_splice_marker(self):
         body = [ast.Pass()]
         frag = Fragment(body=body)
-        result = _coerce_to_ast(frag, {}, 'splice')
+        result = _coerce_to_ast(frag, 'splice')
         self.assertIsInstance(result, _SpliceMarker)
         self.assertEqual(result.stmts, body)
 
     def test_single_stmt_to_splice_marker(self):
         s = ast.Pass()
-        result = _coerce_to_ast(s, {}, 'splice')
+        result = _coerce_to_ast(s, 'splice')
         self.assertIsInstance(result, _SpliceMarker)
         self.assertEqual(result.stmts, [s])
 
     def test_str_in_splice_wraps_in_expr(self):
-        result = _coerce_to_ast("x", {}, 'splice')
+        result = _coerce_to_ast("x", 'splice')
         self.assertIsInstance(result, _SpliceMarker)
         self.assertEqual(len(result.stmts), 1)
         self.assertIsInstance(result.stmts[0], ast.Expr)
@@ -292,7 +291,7 @@ class TestParamSubstituter(unittest.TestCase):
         tree = ast.BinOp(left=x_node, op=ast.Add(), right=y_node)
         ast.fix_missing_locations(tree)
 
-        substituter = _ParamSubstituter({'x': 'lhs', 'y': 'rhs'}, {})
+        substituter = _ParamSubstituter({'x': 'lhs', 'y': 'rhs'})
         result = substituter.visit(tree)
         self.assertEqual(result.left.id, 'lhs')
         self.assertEqual(result.right.id, 'rhs')
@@ -300,7 +299,7 @@ class TestParamSubstituter(unittest.TestCase):
     def test_unbound_name_unchanged(self):
         z_node = ast.Name(id='z', ctx=ast.Load())
         ast.fix_missing_locations(z_node)
-        substituter = _ParamSubstituter({'x': 1}, {})
+        substituter = _ParamSubstituter({'x': 1})
         result = substituter.visit(z_node)
         self.assertIsInstance(result, ast.Name)
         self.assertEqual(result.id, 'z')

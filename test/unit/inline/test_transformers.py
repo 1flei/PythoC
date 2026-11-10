@@ -8,6 +8,7 @@ import ast
 import unittest
 from pythoc._inline.transformers import InlineBodyTransformer
 from pythoc._inline.exit_rules import ReturnExitRule, YieldExitRule
+from pythoc._inline._intrinsics import _PC_INTRINSICS
 
 
 class TestInlineBodyTransformer(unittest.TestCase):
@@ -25,7 +26,7 @@ class TestInlineBodyTransformer(unittest.TestCase):
                               f"Expected Attribute node for intrinsic '{intrinsic_name}', got {type(func).__name__}")
         self.assertEqual(func.attr, intrinsic_name)
         self.assertIsInstance(func.value, ast.Name)
-        self.assertEqual(func.value.id, '__pc_intrinsics')
+        self.assertIs(func.value._definition_symbol.value, _PC_INTRINSICS)
     
     def test_simple_renaming(self):
         """

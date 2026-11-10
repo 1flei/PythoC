@@ -23,7 +23,9 @@ class ScopedVariableRenamer(ast.NodeTransformer):
             name = self.global_renames.get(node.id)
         if name is None:
             return node
-        return ast.copy_location(ast.Name(id=name, ctx=node.ctx), node)
+        result = copy.copy(node)
+        result.id = name
+        return result
 
     def visit_MatchAs(self, node):
         self.generic_visit(node)

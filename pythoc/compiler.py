@@ -630,6 +630,7 @@ class LLVMCompiler:
         # Visit function body
         # Skip statements after control flow termination (e.g., after infinite loops)
         # Exception: with label() statements are always processed because they create new reachable blocks
+        from .builtin_entities.scoped_label import label
         for stmt in ast_node.body:
             # Check if current block is terminated (unreachable code)
             if visitor.builder.is_terminated():
@@ -639,7 +640,11 @@ class LLVMCompiler:
                     for item in stmt.items:
                         if isinstance(item.context_expr, ast.Call):
                             func = item.context_expr.func
-                            if isinstance(func, ast.Name) and func.id == 'label':
+                            binding = (visitor.lookup_variable(func.id)
+                                       if isinstance(func, ast.Name) else None)
+                            value = binding.value_ref if binding is not None else None
+                            if (value is not None and value.is_python_value()
+                                    and value.get_python_value() is label):
                                 is_label_stmt = True
                                 break
                 

@@ -360,7 +360,7 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
     # Build value-case statements via template
     elem_converter = _type_to_annotation_ast(elem_type)
     case_stmts = [
-        _value_case.instantiate(i=i, converter=elem_converter, v=v).stmts[0]
+        _value_case.instantiate(i=i, converter=elem_converter, v=v, idx='idx').stmts[0]
         for i, v in enumerate(values)
     ]
     vf = _cq(
@@ -531,7 +531,7 @@ def _build_init_into_fn(
         init_arg_name = f"_{capture.name}_in"
         init_args_list.append(ast.arg(arg=init_arg_name, annotation=None))
         init_param_types[init_arg_name] = capture.pc_type
-        assign = _closure_capture_assign(init_arg_name).stmts[0]
+        assign = _closure_capture_assign(init_arg_name, s='s').stmts[0]
         assign.targets[0].attr = capture.name
         init_body.append(assign)
 
@@ -793,7 +793,7 @@ def _compile_closure_fn_pipeline(
         vararg=fa.args.vararg,
         kwarg=fa.args.kwarg,
     )
-    wrapper_ast = _closure_call_template(rewritten_body).stmts[0]
+    wrapper_ast = _closure_call_template(rewritten_body, _Ret=return_type).stmts[0]
     wrapper_ast.args = wrapper_args
     ast.fix_missing_locations(wrapper_ast)
 
@@ -1000,7 +1000,7 @@ def _next_tmpl(N):
 
 
 @quote
-def _value_case(i, converter, v):
+def _value_case(i, converter, v, *, idx):
     if idx == i32(i):
         return converter(v)
 
@@ -1014,7 +1014,7 @@ def _value_tmpl(cases, default_value):
 
 
 @quote
-def _closure_call_template(body):
+def _closure_call_template(body, *, _Ret):
     def _call(s) -> _Ret:
         body
 
@@ -1026,7 +1026,7 @@ def _closure_init_template(body):
 
 
 @quote
-def _closure_capture_assign(arg_name):
+def _closure_capture_assign(arg_name, *, s):
     s._placeholder = move(arg_name)
 
 

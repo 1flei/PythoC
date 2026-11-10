@@ -248,6 +248,7 @@ def lower_yield_state_machine(
         return _yield_state_tmpl.instantiate(
             value_expr=value_expr,
             resume_pc=_i32_const(label_pc[resume_label]),
+            s='s',
         ).stmts
 
     def lower_stmts(stmts: List[ast.stmt], entry_label: str, next_label: str):
@@ -510,7 +511,7 @@ def _label_block_tmpl(label_name, body):
 
 
 @quote
-def _yield_state_tmpl(value_expr, resume_pc):
+def _yield_state_tmpl(value_expr, resume_pc, *, s):
     s._yield_value = value_expr
     s._pc = resume_pc
     return bool(1)

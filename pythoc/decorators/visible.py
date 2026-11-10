@@ -126,7 +126,8 @@ def get_all_accessible_symbols(
     include_builtins: bool = False,
     include_closure: bool = True,
     include_annotations: bool = False,
-    captured_symbols: Optional[Dict[str, Any]] = None
+    captured_symbols: Optional[Dict[str, Any]] = None,
+    names=None,
 ) -> Dict[str, Any]:
     """Get all symbols accessible to a function.
     
@@ -149,11 +150,20 @@ def get_all_accessible_symbols(
         captured_symbols: Pre-captured symbols from decorator call time.
             Should be captured using capture_caller_symbols() immediately
             when the decorator is applied. These take HIGHEST priority.
+        names: Optional subset to query without copying the whole namespace.
         
     Returns:
         Dictionary of all accessible symbols
     """
     symbols = AccessibleSymbols()
+
+    def add_namespace(namespace):
+        if names is None:
+            symbols.update(namespace)
+        else:
+            symbols.update((name, namespace[name]) for name in names
+                           if name in namespace)
+
     from ..type_resolver import TypeResolver
     captured = TypeResolver.capture_type_namespace(definition=func)
     scope = getattr(captured, 'type_scope', None)
@@ -163,19 +173,19 @@ def get_all_accessible_symbols(
 
     # Start with function's globals
     if hasattr(func, '__globals__'):
-        symbols.update(func.__globals__)
+        add_namespace(func.__globals__)
         # Live reference for names defined after decoration (compile is lazy,
         # so by first call the whole module has executed).
         symbols.live_globals = func.__globals__
     
     # Add closure variables
     if include_closure:
-        symbols.update(get_closure_variables(func))
+        add_namespace(get_closure_variables(func))
     
     # Add captured symbols (HIGHEST priority)
     # This captures locals from decoration time that may not be available later
     if captured_symbols:
-        symbols.update(captured_symbols)
+        add_namespace(captured_symbols)
         if scope is not None:
             symbols.type_locals = dict(symbols.type_locals or {})
             symbols.type_locals.update(

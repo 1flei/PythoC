@@ -17,7 +17,7 @@ single explicit binding helper ``meta.const(value)``. The core idea is
 
         * ``str``                 -> ``Name`` (or ``Expr(Name)`` for splice)
         * ``int/float/bool/None`` -> ``Constant``
-        * PythoC type             -> ``Name`` + register global
+        * PythoC type             -> ``Name`` with its definition binding
         * ``ast.expr``            -> as-is
         * ``ast.stmt``            -> only valid in splice position
         * ``list[ast.stmt]``      -> only valid in splice position (auto-spliced)
@@ -32,7 +32,7 @@ import ast
 import copy
 import inspect
 import textwrap
-from typing import Any, Dict, List, Optional, Set
+from typing import List, Set
 
 from .fragment import Fragment
 
@@ -188,7 +188,7 @@ def _get_type_name(obj):
     return str(obj)
 
 
-def _coerce_value_to_expr(value, extra_globals):
+def _coerce_value_to_expr(value):
     """Coerce a bound value to an ``ast.expr``.
 
     Used for ``'expr'`` position and as the inner step for ``'splice'``
@@ -217,33 +217,31 @@ def _coerce_value_to_expr(value, extra_globals):
         return value.expr   # may raise TypeError with a clear message
 
     if _is_pythoc_type(value):
+        from .._inline.definition_bindings import symbol_expression
         type_name = _get_type_name(value)
-        extra_globals[type_name] = value
-        return ast.Name(id=type_name, ctx=ast.Load())
+        return symbol_expression(type_name, value)
 
     # Other named callables / wrappers
     if hasattr(value, '__name__'):
+        from .._inline.definition_bindings import symbol_expression
         name = value.__name__
-        extra_globals[name] = value
-        return ast.Name(id=name, ctx=ast.Load())
+        return symbol_expression(name, value)
 
     if hasattr(value, '_original_name'):
+        from .._inline.definition_bindings import symbol_expression
         name = value._original_name
-        extra_globals[name] = value
-        return ast.Name(id=name, ctx=ast.Load())
+        return symbol_expression(name, value)
 
     raise TypeError(
         "Cannot coerce {} to an expression node.".format(type(value).__name__)
     )
 
 
-def _coerce_to_ast(value, extra_globals, position='expr'):
+def _coerce_to_ast(value, position='expr'):
     """Coerce a bound value to AST according to its template position.
 
     Args:
         value: The argument passed at the template call site.
-        extra_globals: Dict to accumulate any globals that need
-            registering (PythoC types, named callables).
         position: One of ``'expr'``, ``'splice'``, ``'store'``.
             Defaults to ``'expr'`` (most common; lets legacy callers
             that don't know about position still get sensible coercion).
@@ -252,7 +250,7 @@ def _coerce_to_ast(value, extra_globals, position='expr'):
         Either an ``ast.AST`` node or a ``_SpliceMarker``.
     """
     if position == 'expr':
-        return _coerce_value_to_expr(value, extra_globals)
+        return _coerce_value_to_expr(value)
 
     if position == 'store':
         if isinstance(value, str):
@@ -290,7 +288,7 @@ def _coerce_to_ast(value, extra_globals, position='expr'):
             return _SpliceMarker(stmts=[value])
 
         # Single-expression-ish values: wrap as Expr(...)
-        expr = _coerce_value_to_expr(value, extra_globals)
+        expr = _coerce_value_to_expr(value)
         return _SpliceMarker(stmts=[ast.Expr(value=expr)])
 
     raise ValueError("Unknown position: {!r}".format(position))
@@ -366,27 +364,70 @@ class _ParamSubstituter(ast.NodeTransformer):
     inside a template.
     """
 
-    def __init__(self, raw_bindings, extra_globals):
+    def __init__(self, raw_bindings):
         """
         Args:
             raw_bindings: dict mapping param_name -> raw Python value as
                 provided at the call site (no coercion yet).
-            extra_globals: shared dict that ``_coerce_to_ast`` can write
-                registered globals into.
         """
         self.raw_bindings = raw_bindings
-        self.extra_globals = extra_globals
+
+    def _bound_unpack(self, node, container_type):
+        if isinstance(node, ast.Name) and node.id in self.raw_bindings:
+            value = self.raw_bindings[node.id]
+            if isinstance(value, container_type):
+                return value
+        return None
+
+    def visit_Call(self, node):
+        node.func = self.visit(node.func)
+        args = []
+        for arg in node.args:
+            values = (self._bound_unpack(arg.value, (tuple, list))
+                      if isinstance(arg, ast.Starred) else None)
+            if values is None:
+                args.append(self.visit(arg))
+            else:
+                args.extend(copy.deepcopy(_coerce_value_to_expr(
+                    value)) for value in values)
+        node.args = args
+
+        keywords = []
+        names = set()
+        for entry in node.keywords:
+            values = (self._bound_unpack(entry.value, dict)
+                      if entry.arg is None else None)
+            if values is None:
+                expanded = [self.visit(entry)]
+            else:
+                expanded = []
+                for name, value in values.items():
+                    if not isinstance(name, str):
+                        raise TypeError(
+                            f"Invalid quoted keyword argument name: {name!r}")
+                    expanded.append(ast.keyword(
+                        arg=name, value=copy.deepcopy(_coerce_value_to_expr(
+                            value))))
+            for entry in expanded:
+                if entry.arg is not None:
+                    if entry.arg in names:
+                        raise TypeError(
+                            f"Duplicate quoted keyword argument: {entry.arg!r}")
+                    names.add(entry.arg)
+                keywords.append(entry)
+        node.keywords = keywords
+        return node
 
     def visit_Name(self, node):
         if node.id not in self.raw_bindings:
             return node
         raw = self.raw_bindings[node.id]
         position = getattr(node, '_meta_position', 'expr')
-        coerced = _coerce_to_ast(raw, self.extra_globals, position)
+        coerced = _coerce_to_ast(raw, position)
         if isinstance(coerced, _SpliceMarker):
             # Splice context: leave as-is so the wrapping Expr can be
             # picked up by _expand_splices.
-            return coerced
+            return _SpliceMarker(stmts=copy.deepcopy(coerced.stmts))
         result = copy.deepcopy(coerced)
         # Preserve the syntactic context declared by the template site
         # when substituting Name -> Name. The template position dictates
@@ -411,55 +452,62 @@ class MetaTemplate:
             is the *primary* one (used for sanity checks); the actual
             substitution reads each Name node's own ``_meta_position``
             tag, so a parameter may be used in multiple positions.
-        user_globals: Captured globals from the template definition site.
         origin_file / origin_line: Diagnostics.
     """
 
-    def __init__(self, source, template_body, param_names,
-                 param_positions, user_globals,
+    def __init__(self, source, definition, syntax, signature,
+                 param_positions,
                  origin_file=None, origin_line=None,
                  debug_source_enabled=True):
         self.source = source
-        self.template_body = template_body
-        self.param_names = tuple(param_names)
+        self.definition = definition
+        self.syntax = syntax
+        self.symbol_names = frozenset(node.id for node in ast.walk(syntax)
+                                      if isinstance(node, ast.Name))
+        self.signature = signature
+        self.param_names = tuple(signature.parameters)
         self.param_positions = dict(param_positions)
-        self.user_globals = dict(user_globals) if user_globals else {}
         self.origin_file = origin_file
         self.origin_line = origin_line
         self.debug_source_enabled = debug_source_enabled
 
-    def instantiate(self, *args, **kwargs) -> Fragment:
+    @property
+    def template_body(self):
+        return self.syntax.body
+
+    def instantiate(self, /, *args, **kwargs) -> Fragment:
         """Instantiate the template and return a :class:`Fragment`."""
-        # 1. Bind args -> param names
-        if len(args) > len(self.param_names):
-            raise TypeError(
-                "Too many positional arguments: template has {} params, "
-                "got {} args".format(len(self.param_names), len(args))
-            )
-        provided: Dict[str, Any] = {}
-        for i, val in enumerate(args):
-            provided[self.param_names[i]] = val
-        for name, val in kwargs.items():
-            if name in provided:
-                raise TypeError(
-                    "Duplicate binding for parameter {!r}".format(name)
-                )
-            if name not in self.param_names:
-                raise TypeError(
-                    "Unknown template parameter {!r}. "
-                    "Available: {}".format(name, list(self.param_names))
-                )
-            provided[name] = val
+        bound = self.signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        provided = bound.arguments
 
         # 2. Substitute into a deep copy of the template body. The
         #    substituter coerces each Name occurrence per its tagged
         #    position, so a single parameter used in multiple positions
         #    coerces correctly per-site.
-        extra_globals: Dict[str, Any] = {}
-        substituter = _ParamSubstituter(provided, extra_globals)
+        from ..decorators.visible import get_all_accessible_symbols
+        from .._inline.definition_bindings import bind_definition
+        from .._inline.names import ExpansionNames
+        from .._inline.renaming import ScopedVariableRenamer, _parameters
+
+        names = ExpansionNames()
+        names.reserve_ast(self.syntax)
+        parameter_aliases = {name: names.fresh('_quote_' + name)
+                             for name in self.param_names}
+        syntax = copy.deepcopy(self.syntax)
+        renamer = ScopedVariableRenamer(parameter_aliases)
+        syntax.body = [renamer.visit(stmt) for stmt in syntax.body]
+        for argument in _parameters(syntax.args):
+            argument.arg = parameter_aliases[argument.arg]
+        definition = bind_definition(
+            syntax, get_all_accessible_symbols(
+                self.definition, names=self.symbol_names), names=names)
+        _PositionAnalyzer(set(parameter_aliases.values())).analyze(
+            definition.syntax.body)
+        substituter = _ParamSubstituter({parameter_aliases[name]: value
+                                        for name, value in provided.items()})
         result_body: List[ast.stmt] = [
-            substituter.visit(copy.deepcopy(stmt))
-            for stmt in self.template_body
+            substituter.visit(stmt) for stmt in definition.syntax.body
         ]
         result_body = _expand_splices(result_body)
         result_body = _fold_const_if(result_body)
@@ -468,11 +516,7 @@ class MetaTemplate:
         for node in result_body:
             ast.fix_missing_locations(node)
 
-        # 4. Merge globals
-        merged_globals = dict(self.user_globals)
-        merged_globals.update(extra_globals)
-
-        # 5. Optional debug source
+        # 4. Optional debug source
         debug_source = None
         if self.debug_source_enabled:
             try:
@@ -486,13 +530,9 @@ class MetaTemplate:
             origin_line=self.origin_line,
             debug_source=debug_source,
         )
-        # Attach merged globals as an out-of-band attribute, mirroring
-        # the previous MetaFragment._user_globals contract relied upon
-        # by compile_ast.
-        object.__setattr__(fragment, '_user_globals', merged_globals)
         return fragment
 
-    def __call__(self, *args, **kwargs) -> Fragment:
+    def __call__(self, /, *args, **kwargs) -> Fragment:
         return self.instantiate(*args, **kwargs)
 
     def __repr__(self):
@@ -504,26 +544,6 @@ class MetaTemplate:
 # ---------------------------------------------------------------------------
 # Quote decorator
 # ---------------------------------------------------------------------------
-
-def _capture_caller_globals(depth=2):
-    """Capture globals+locals from the caller's frame.
-
-    Default depth=2: caller -> quote -> _make_template -> here.
-    """
-    frame = inspect.currentframe()
-    try:
-        for _ in range(depth + 1):
-            if frame is None:
-                return {}
-            frame = frame.f_back
-        if frame is None:
-            return {}
-        symbols = dict(frame.f_globals)
-        symbols.update(frame.f_locals)
-        return symbols
-    finally:
-        del frame
-
 
 def _primary_position_for(param_name: str, body: List[ast.stmt]) -> str:
     """Return one canonical position for a parameter.
@@ -572,7 +592,8 @@ def _make_template(func, debug_source=True) -> MetaTemplate:
             )
         )
 
-    param_names = [a.arg for a in func_def.args.args]
+    signature = inspect.signature(func)
+    param_names = tuple(signature.parameters)
     template_body = func_def.body
 
     # Static position analysis
@@ -590,14 +611,12 @@ def _make_template(func, debug_source=True) -> MetaTemplate:
     except (OSError, TypeError):
         pass
 
-    user_globals = _capture_caller_globals(depth=2)
-
     return MetaTemplate(
         source=source,
-        template_body=template_body,
-        param_names=param_names,
+        definition=func,
+        syntax=func_def,
+        signature=signature,
         param_positions=param_positions,
-        user_globals=user_globals,
         origin_file=origin_file,
         origin_line=origin_line,
         debug_source_enabled=debug_source,
@@ -610,6 +629,9 @@ def quote(func=None, *, debug_source=True):
     The decorated function's parameters define the template holes; its
     body is captured (always as ``list[ast.stmt]``) and substituted at
     instantiation. Calling the template returns a :class:`Fragment`.
+
+    Template symbols bind in the definition environment. References supplied
+    through template parameters retain their own compilation context.
 
     Example::
 

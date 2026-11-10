@@ -349,6 +349,14 @@ def inline_globals_scope(visitor, inline_result):
             for stmt in inline_result.stmts:
                 visitor.visit(stmt)
     """
+    from .definition_bindings import materialize_definition_symbols
+    from .names import visitor_expansion_names
+    syntax = ast.Module(body=inline_result.stmts, type_ignores=[])
+    syntax, symbols = materialize_definition_symbols(
+        syntax, inline_result.required_globals,
+        names=visitor_expansion_names(visitor))
+    inline_result.stmts = syntax.body
+    inline_result.required_globals.update(symbols)
     for stmt in inline_result.stmts:
         ast.fix_missing_locations(stmt)
 

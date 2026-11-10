@@ -6,7 +6,9 @@ from types import SimpleNamespace
 
 from pythoc import i32
 from pythoc._inline.closure_capture import snapshot_closure_captures
-from pythoc._inline.definition_bindings import bind_definition
+from pythoc._inline.definition_bindings import (
+    bind_definition, materialize_definition_symbols, symbol_expression,
+)
 from pythoc._inline.exit_rules import ReturnExitRule
 from pythoc._inline.kernel import MetaInlineRequest, expand_inline
 from pythoc._inline.names import visitor_expansion_names
@@ -18,6 +20,27 @@ from pythoc.valueref import wrap_python_constant
 
 
 class DefinitionBindingsTest(unittest.TestCase):
+    def test_materialization_reuses_a_tree_without_bound_symbols(self):
+        syntax = ast.parse('value = 41\nresult = value + 1')
+        prepared, globals_ = materialize_definition_symbols(syntax, {})
+        self.assertIs(prepared, syntax)
+        self.assertIs(prepared.body, syntax.body)
+        self.assertEqual(globals_, {})
+
+    def test_materialization_copies_only_replaced_paths(self):
+        syntax = ast.parse('value = 41\nresult = helper(value)')
+        helper = lambda value: value + 1
+        bound = symbol_expression('helper', helper)
+        syntax.body[1].value.func = bound
+        prepared, globals_ = materialize_definition_symbols(syntax, {})
+        self.assertIsNot(prepared, syntax)
+        self.assertIsNot(prepared.body, syntax.body)
+        self.assertIs(prepared.body[0], syntax.body[0])
+        self.assertIsNot(prepared.body[1], syntax.body[1])
+        self.assertIs(prepared.body[1].value.args, syntax.body[1].value.args)
+        self.assertIs(syntax.body[1].value.func, bound)
+        self.assertIs(globals_[prepared.body[1].value.func.id], helper)
+
     def test_binding_stays_live_until_instantiation_snapshots_it(self):
         original = VariableInfo('value', value_ref=wrap_python_constant(3))
         syntax = ast.parse('def read():\n    return value').body[0]
