@@ -19,8 +19,6 @@ class CallValueBoundaryTest(unittest.TestCase):
     def test_handlers_do_not_read_call_structure(self):
         violations = []
         for path in ROOT.rglob('*.py'):
-            if 'std/runtime' in path.relative_to(ROOT).as_posix():
-                continue
             tree = ast.parse(path.read_text())
             for function in ast.walk(tree):
                 if not isinstance(function, ast.FunctionDef):
@@ -42,8 +40,6 @@ class CallValueBoundaryTest(unittest.TestCase):
     def test_std_does_not_implement_compiler_handlers(self):
         violations = []
         for path in (ROOT / 'std').rglob('*.py'):
-            if 'runtime' in path.relative_to(ROOT / 'std').parts:
-                continue
             for node in ast.walk(ast.parse(path.read_text())):
                 if (isinstance(node, ast.FunctionDef)
                         and node.name.startswith('handle_')):

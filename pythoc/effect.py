@@ -90,8 +90,7 @@ def record_effect_usage(effect_name: str, compile_frame: Optional[Any] = None):
 # being compiled on this thread.
 #
 # This dynamic scope is kept deliberately: the readers (effect
-# specialization materialization in decorators/compile.py and the Future
-# executor binding in std/runtime/future.py) run on planning-time paths
+# specialization materialization in decorators/compile.py) run on planning-time paths
 # that cannot reach the active visitor/binding without changing public
 # wrapper APIs (get_effect_specialized, materialize_specialization).
 # Code inside the visitor chain must read visitor.binding_state instead.
@@ -417,7 +416,7 @@ def _block_bound_impl(effect_name: str, visitor) -> Any:
 
 
 def _module_default_impl(effect_name: str, caller_module: Optional[str]) -> Any:
-    """Lookup per-module effect default registered via effect.default/bind_mem."""
+    """Lookup per-module effect default registered via effect.default."""
     if not caller_module:
         return None
     eff = _current_effect()

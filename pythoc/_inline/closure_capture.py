@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,6 @@ class RuntimeCapture:
 class ClosureCapturePlan:
     bindings: Dict[str, Any]
     runtime: List[RuntimeCapture]
-    references: Dict[str, Any] = field(default_factory=dict)
 
 
 def extract_value_from_vref(vref) -> Any:
@@ -28,35 +27,30 @@ def extract_value_from_vref(vref) -> Any:
     return vref.get_python_value()
 
 
-def build_closure_capture_plan(
-    captured_vars: Iterable[str],
-    visible: Mapping[str, Any],
+def snapshot_closure_captures(
+    references: Mapping[str, Any],
+    reference_names: Mapping[str, str],
 ) -> ClosureCapturePlan:
+    """Snapshot resolved bindings for materialization into independent state."""
     bindings: Dict[str, Any] = {}
     runtime: List[RuntimeCapture] = []
-    references: Dict[str, Any] = {}
-
-    for var_name in captured_vars:
-        vinfo = visible.get(var_name)
-        if vinfo is None or vinfo.value_ref is None:
-            continue
-
-        references[var_name] = vinfo
-
+    for alias, vinfo in references.items():
         vref = vinfo.value_ref
         if vref.is_python_value():
-            try:
-                bindings[var_name] = extract_value_from_vref(vref)
-            except TypeError:
-                pass
+            bindings[alias] = extract_value_from_vref(vref)
             continue
 
         if vref.is_pcvalue():
             pc_type = vref.get_pc_type()
             if pc_type is not None:
-                runtime.append(RuntimeCapture(var_name, pc_type, vref))
+                captured = vref.clone(
+                    var_name=vinfo.name, linear_path=(),
+                    linear_owner_id=vinfo.var_id,
+                )
+                runtime.append(RuntimeCapture(
+                    reference_names[alias], pc_type, captured))
 
-    return ClosureCapturePlan(bindings, runtime, references)
+    return ClosureCapturePlan(bindings, runtime)
 
 
 def normalize_runtime_captures(captures) -> List[RuntimeCapture]:

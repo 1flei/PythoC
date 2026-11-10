@@ -2,6 +2,9 @@
 
 PythoC is a Python DSL compiler that compiles statically-typed Python to LLVM IR, providing C-equivalent runtime capabilities with Python syntax and compile-time metaprogramming.
 
+The experimental concurrency library is maintained separately in
+[pc_runtime](https://github.com/1flei/pc_runtime). PythoC does not require it.
+
 ## Design Philosophy
 
 **Core principle**: C-level runtime + Python-powered compile-time

@@ -5,10 +5,11 @@ import unittest
 from types import SimpleNamespace
 
 from pythoc import i32
-from pythoc._inline.closure_capture import build_closure_capture_plan
+from pythoc._inline.closure_capture import snapshot_closure_captures
 from pythoc._inline.definition_bindings import bind_definition
 from pythoc._inline.exit_rules import ReturnExitRule
 from pythoc._inline.kernel import MetaInlineRequest, expand_inline
+from pythoc._inline.names import visitor_expansion_names
 from pythoc._inline.scope_analyzer import ScopeContext
 from pythoc.ast_visitor.base import LLVMIRVisitor
 from pythoc.context import VariableInfo
@@ -17,13 +18,15 @@ from pythoc.valueref import wrap_python_constant
 
 
 class DefinitionBindingsTest(unittest.TestCase):
-    def test_capture_plan_keeps_the_actual_variable_binding(self):
+    def test_binding_stays_live_until_instantiation_snapshots_it(self):
         original = VariableInfo('value', value_ref=wrap_python_constant(3))
-        plan = build_closure_capture_plan({'value'}, {'value': original})
+        syntax = ast.parse('def read():\n    return value').body[0]
+        bound = bind_definition(syntax, {}, {'value': original})
+        alias = bound.syntax.body[0].value.id
         original.value_ref = wrap_python_constant(7)
-        self.assertIs(plan.references['value'], original)
-        self.assertEqual(plan.references['value'].value_ref.get_python_value(), 7)
-        self.assertEqual(plan.bindings['value'], 3)
+        self.assertIs(bound.references[alias], original)
+        plan = snapshot_closure_captures(bound.references, bound.reference_names)
+        self.assertEqual(plan.bindings[alias], 7)
 
     def test_reference_alias_has_no_new_owner_or_variable_lifetime(self):
         manager = ScopeManager()
@@ -71,14 +74,14 @@ class DefinitionBindingsTest(unittest.TestCase):
         visitor.scope_manager.declare_variable(shadow)
         source = ast.parse('def read() -> i32:\n    return value').body[0]
         before = ast.dump(source)
-        bound = bind_definition(visitor, source, {'i32': i32}, {'value': original})
+        bound = bind_definition(source, {'i32': i32}, {'value': original},
+                                names=visitor_expansion_names(visitor))
         name = bound.syntax.body[0].value.id
         self.assertNotEqual(name, 'value')
         self.assertIs(bound.references[name], original)
         self.assertEqual(ast.dump(source), before)
 
     def test_nested_local_masks_a_definition_global(self):
-        visitor = LLVMIRVisitor()
         source = ast.parse('''
 def read():
     def inner():
@@ -86,7 +89,7 @@ def read():
         return value
     return inner() + value
 ''').body[0]
-        bound = bind_definition(visitor, source, {'value': 7})
+        bound = bind_definition(source, {'value': 7})
         inner = bound.syntax.body[0]
         self.assertEqual(inner.body[0].targets[0].id, 'value')
         self.assertEqual(inner.body[1].value.id, 'value')
@@ -95,20 +98,18 @@ def read():
         self.assertEqual(bound.globals[name], 7)
 
     def test_unresolved_definition_name_cannot_reuse_a_consumer_binding(self):
-        visitor = LLVMIRVisitor()
         source = ast.parse('def read():\n    return missing').body[0]
-        bound = bind_definition(visitor, source, {})
+        bound = bind_definition(source, {})
         name = bound.syntax.body[0].value.id
         self.assertNotEqual(name, 'missing')
         self.assertNotIn(name, bound.globals)
 
     def test_comprehension_targets_mask_globals_after_their_iterable(self):
-        visitor = LLVMIRVisitor()
         source = ast.parse('''
 def read():
     return (item + other for item in item for other in (item,))
 ''').body[0]
-        bound = bind_definition(visitor, source, {'item': (1, 2), 'other': 7})
+        bound = bind_definition(source, {'item': (1, 2), 'other': 7})
         expression = bound.syntax.body[0].value
         iterable = expression.generators[0].iter.id
         self.assertNotEqual(iterable, 'item')
@@ -117,6 +118,41 @@ def read():
         self.assertEqual(expression.generators[1].iter.elts[0].id, 'item')
         self.assertEqual(expression.elt.left.id, 'item')
         self.assertEqual(expression.elt.right.id, 'other')
+
+    def test_only_lexically_free_names_become_capture_bindings(self):
+        sources = (
+            'def read(value):\n    return value',
+            'def read():\n    value: i32 = 41\n    return value',
+            'def read():\n    def inner(value):\n        return value\n'
+            '    return inner(41)',
+            'def read():\n    def inner():\n        value: i32 = 41\n'
+            '        return value\n    return inner()',
+            'def read():\n    return lambda value: value',
+            'def read():\n    return (value for value in (1, 2))',
+        )
+        original = VariableInfo('value', value_ref=wrap_python_constant(7))
+        for source in sources:
+            with self.subTest(source=source):
+                bound = bind_definition(ast.parse(source).body[0], {'i32': i32},
+                                        {'value': original})
+                self.assertEqual(bound.references, {})
+                self.assertEqual(bound.reference_names, {})
+
+    def test_nested_free_reads_and_writes_keep_the_original_binding(self):
+        original = VariableInfo('value', value_ref=wrap_python_constant(7))
+        source = ast.parse('''
+def read():
+    def inner():
+        value += 1
+        return value
+    return inner()
+''').body[0]
+        bound = bind_definition(source, {}, {'value': original})
+        inner = bound.syntax.body[0]
+        alias = inner.body[0].target.id
+        self.assertEqual(inner.body[1].value.id, alias)
+        self.assertEqual(bound.reference_names, {alias: 'value'})
+        self.assertEqual(bound.references, {alias: original})
 
     def test_kernel_never_infers_captures_from_consumer_names(self):
         source = ast.parse('def read():\n    value = 7\n    return value').body[0]

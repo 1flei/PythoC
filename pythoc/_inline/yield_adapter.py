@@ -123,7 +123,7 @@ class YieldInlineAdapter:
 
         from .definition_bindings import bind_definition
         definition = bind_definition(
-            self.visitor, func_ast, callee_globals, capture_references)
+            func_ast, callee_globals, capture_references, names=names)
         exit_rule.return_type_annotation = definition.syntax.returns
 
         from .kernel import try_expand_inline

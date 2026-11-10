@@ -47,8 +47,8 @@ class _ClosureWrapper:
     # ordinary closures and yield producers.
     defer_linear_transfer = True
 
-    def __init__(self, func_ast, visitor, func_globals, capture_bindings,
-                 capture_runtime, defaults, capture_references):
+    def __init__(self, func_ast, visitor, func_globals, defaults,
+                 capture_references):
         from ..call_normalization import lower_inline_signature
 
         self.func_ast, self._pc_call_signature = lower_inline_signature(
@@ -56,8 +56,6 @@ class _ClosureWrapper:
         self.name = func_ast.name
         self.visitor = visitor
         self.func_globals = func_globals
-        self._capture_bindings = capture_bindings
-        self._capture_runtime = capture_runtime
         self._capture_references = capture_references
         self._has_yield = _contains_yield(func_ast)
 
@@ -246,38 +244,14 @@ class FunctionsMixin:
 
     def _make_closure_wrapper(self, node: ast.FunctionDef, defaults):
         """Build the callable wrapper for a closure/lambda AST."""
-        from .._inline.scope_analyzer import analyze_function_scope, build_caller_context
-        from .._inline.closure_capture import build_closure_capture_plan
-
         # Capture the current user_globals at closure definition time
         # This is the caller's globals context
         closure_globals = dict(self.ctx.user_globals)
-
-        # Analyze captured variables for this closure
-        caller_context = build_caller_context(
-            self.scope_manager, visibility="all_visible"
-        )
-        captured_vars, _, _ = analyze_function_scope(
-            node, caller_context=caller_context
-        )
-
-        visible = self.scope_manager.get_all_visible()
-        nested_refs = {
-            name_node.id
-            for name_node in ast.walk(node)
-            if isinstance(name_node, ast.Name) and isinstance(name_node.ctx, ast.Load)
-        }
-        capture_plan = build_closure_capture_plan(
-            captured_vars | nested_refs,
-            visible,
-        )
 
         return _ClosureWrapper(
             node,
             self,
             closure_globals,
-            capture_plan.bindings,
-            capture_plan.runtime,
             defaults,
-            capture_plan.references,
+            self.scope_manager.get_all_visible(),
         )

@@ -67,6 +67,7 @@ from .artifact import (
     plan_artifact_tasks,
 )
 from .cimport import cimport, cimport_header, cimport_source
+from .builtin_entities.instantiate import instantiate
 from .utils.link_utils import linklibrary
 from .config import config
 from .forward_ref import mark_type_defined, register_forward_ref_callback
@@ -161,6 +162,7 @@ __all__ = [
 
     # Meta module
     'meta',
+    'instantiate',
     
     # Core compiler
     'LLVMCompiler',

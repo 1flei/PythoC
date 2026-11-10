@@ -5,7 +5,7 @@ import builtins
 import copy
 from dataclasses import dataclass
 
-from .names import visitor_expansion_names
+from .names import ExpansionNames, visitor_expansion_names
 from .renaming import ScopedVariableRenamer, _parameters
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
 
@@ -15,6 +15,7 @@ class BoundDefinition:
     syntax: ast.FunctionDef
     globals: dict
     references: dict
+    reference_names: dict
 
 
 def _global_aliases(syntax, globals_, protected, names):
@@ -42,11 +43,11 @@ def _global_aliases(syntax, globals_, protected, names):
     return aliases, values
 
 
-def bind_definition(visitor, syntax, globals_, references=None):
+def bind_definition(syntax, globals_, references=None, *, names=None):
     """Rename accesses to original bindings; never snapshot their values."""
     references = references or {}
     globals_ = dict(globals_ or {})
-    names = visitor_expansion_names(visitor)
+    names = names if names is not None else ExpansionNames()
     names.reserve_ast(syntax)
     names.reserve(globals_)
     _, local, parameters = ScopeAnalyzer(ScopeContext(set(references))).analyze(
@@ -66,9 +67,18 @@ def bind_definition(visitor, syntax, globals_, references=None):
     if prepared.returns is not None:
         prepared.returns = renamer.visit(prepared.returns)
     globals_.update(global_values)
+    used = {node.id for node in ast.walk(prepared)
+            if isinstance(node, ast.Name)}
+    used.update(node.name for node in ast.walk(prepared)
+                if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name)
+    used.update(node.rest for node in ast.walk(prepared)
+                if isinstance(node, ast.MatchMapping) and node.rest)
+    capture_names = {alias: name for name, alias in captures.items()
+                     if alias in used}
     return BoundDefinition(
-        prepared, globals_, {alias: references[name]
-                             for name, alias in captures.items()})
+        prepared, globals_,
+        {alias: references[name] for alias, name in capture_names.items()},
+        capture_names)
 
 
 def bind_consumer_globals(visitor, body, target):

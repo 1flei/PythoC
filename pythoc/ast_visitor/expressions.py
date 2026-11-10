@@ -357,7 +357,6 @@ class ExpressionsMixin:
         placeholder._pc_generator_expr = copy.deepcopy(node)
         placeholder._pc_is_generator_expr = True
 
-        from .._inline.closure_capture import build_closure_capture_plan
         bound = set()
         free = set()
         for generator in node.generators:
@@ -373,8 +372,8 @@ class ExpressionsMixin:
         free.update(name.id for name in ast.walk(node.elt)
                     if isinstance(name, ast.Name)
                     and isinstance(name.ctx, ast.Load) and name.id not in bound)
-        captures = build_closure_capture_plan(
-            free, self.scope_manager.get_all_visible())
+        visible = self.scope_manager.get_all_visible()
+        references = {name: visible[name] for name in free if name in visible}
 
         result = wrap_value(
             placeholder,
@@ -385,7 +384,7 @@ class ExpressionsMixin:
             "ast": copy.deepcopy(node),
             "kind": "generator_expression",
             "globals": dict(self.ctx.user_globals),
-            "capture_references": captures.references,
+            "capture_references": references,
         }
         return result
     

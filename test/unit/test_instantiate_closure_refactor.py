@@ -1,54 +1,103 @@
 import ast
 import unittest
 
+from llvmlite import ir
+
 from pythoc import i32
-from pythoc._inline.closure_capture import build_closure_capture_plan
+from pythoc._inline.closure_capture import snapshot_closure_captures
 from pythoc._inline.state_field_rewriter import (
     StateFieldRewriter,
     StateFieldRewritePolicy,
 )
-from pythoc.meta.instantiate import _compile_closure_fn_pipeline
-
-
-class _FakeValueRef:
-    def __init__(self, *, python_value=None, pc_type=None):
-        self._python_value = python_value
-        self._pc_type = pc_type
-
-    def is_python_value(self):
-        return self._pc_type is None
-
-    def is_pcvalue(self):
-        return self._pc_type is not None
-
-    def get_python_value(self):
-        return self._python_value
-
-    def get_pc_type(self):
-        return self._pc_type
-
-
-class _FakeVarInfo:
-    def __init__(self, value_ref):
-        self.value_ref = value_ref
+from pythoc.meta.instantiate import (
+    _build_callee_globals, _compile_closure_fn_pipeline, _splice_capture_bindings,
+)
+from pythoc.context import VariableInfo
+from pythoc.valueref import ValueRef, wrap_python_constant
 
 
 class TestClosureCapturePlan(unittest.TestCase):
     def test_splits_compiletime_and_runtime_captures(self):
-        visible = {
-            "scale": _FakeVarInfo(_FakeValueRef(python_value=3)),
-            "offset": _FakeVarInfo(_FakeValueRef(pc_type=i32)),
+        references = {
+            "scale_alias": VariableInfo('scale', value_ref=wrap_python_constant(3)),
+            "offset_alias": VariableInfo('offset', value_ref=ValueRef(
+                'value', ir.Constant(ir.IntType(32), 7), i32)),
         }
 
-        plan = build_closure_capture_plan({"scale", "offset"}, visible)
+        plan = snapshot_closure_captures(
+            references, {'scale_alias': 'scale', 'offset_alias': 'offset'})
 
-        self.assertEqual(plan.bindings, {"scale": 3})
+        self.assertEqual(plan.bindings, {"scale_alias": 3})
         self.assertEqual(len(plan.runtime), 1)
         self.assertEqual(plan.runtime[0].name, "offset")
         self.assertIs(plan.runtime[0].pc_type, i32)
+        self.assertEqual(plan.runtime[0].value_ref.var_name, 'offset')
+        self.assertEqual(plan.runtime[0].value_ref.linear_owner_id,
+                         references['offset_alias'].var_id)
+
+
+class TestCaptureBindings(unittest.TestCase):
+    def test_unused_parameter_cannot_shadow_capture_alias(self):
+        tree = ast.parse('''
+def work(__pc_capture_captured):
+    return captured
+''')
+        namespace = {}
+        _splice_capture_bindings(tree.body[0], {'captured': 10}, namespace)
+        exec(compile(ast.fix_missing_locations(tree), '<capture>', 'exec'),
+             namespace)
+        self.assertEqual(namespace['work'](99), 10)
+
+    def test_none_capture_survives_global_resolution(self):
+        tree = ast.parse('def work():\n    return captured')
+        namespace = {}
+        _splice_capture_bindings(tree.body[0], {'captured': None}, namespace)
+        namespace = _build_callee_globals(
+            namespace, {'captured'}, set(), tree.body[0],
+            include_intrinsics=False,
+        )
+        exec(compile(ast.fix_missing_locations(tree), '<capture>', 'exec'),
+             namespace)
+        self.assertIsNone(namespace['work']())
+
+    def test_type_capture_preserves_identity_and_avoids_name_collisions(self):
+        tree = ast.parse('''
+def work():
+    __pc_capture_T = 'local'
+    return T, __pc_capture_T
+''')
+        namespace = {'T': str, '__pc_capture_T': 'global'}
+        _splice_capture_bindings(tree.body[0], {'T': int}, namespace)
+        exec(compile(ast.fix_missing_locations(tree), '<capture>', 'exec'),
+             namespace)
+        self.assertEqual(namespace['work'](), (int, 'local'))
+        self.assertEqual(namespace['__pc_capture_T'], 'global')
+
+    def test_callable_capture_remains_callable(self):
+        tree = ast.parse('def work():\n    return callback(41)')
+        namespace = {}
+        _splice_capture_bindings(
+            tree.body[0], {'callback': lambda value: value + 1}, namespace,
+        )
+        exec(compile(ast.fix_missing_locations(tree), '<capture>', 'exec'),
+             namespace)
+        self.assertEqual(namespace['work'](), 42)
 
 
 class TestStateFieldRewriter(unittest.TestCase):
+    def test_capture_alias_maps_to_the_public_state_field(self):
+        fn = ast.parse('''
+def work():
+    _capture_offset += 1
+    return _capture_offset
+''').body[0]
+        rewriter = StateFieldRewriter(StateFieldRewritePolicy(
+            fields={'_capture_offset': 'offset'}, protect_names={'s'}))
+        body = [rewriter.visit(stmt) for stmt in fn.body]
+        self.assertEqual(body[0].target.attr, 'offset')
+        self.assertEqual(body[1].value.attr, 'offset')
+        self.assertEqual(body[1].value.value.id, 's')
+
     def test_preserves_nested_function_and_rewrites_state_capture(self):
         fn = ast.parse(
             """
@@ -61,7 +110,7 @@ def outer(x: i32) -> i32:
         ).body[0]
 
         rewriter = StateFieldRewriter(StateFieldRewritePolicy(
-            field_names={"offset"},
+            fields={"offset": "offset"},
             protect_names={"s"},
             preserve_nested_functions=True,
         ))
@@ -85,7 +134,6 @@ def bad() -> i32:
         with self.assertRaises((TypeError, SystemExit)):
             _compile_closure_fn_pipeline(
                 fn,
-                capture_bindings=None,
                 source_object_id=1,
                 func_name_hint="bad",
                 callee_globals={"i32": i32},

@@ -7,10 +7,50 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import compile, i32, ptr, void, nullptr, array, thread_local
+from pythoc import compile, extern, i32, u32, u64, ptr, void, nullptr, array, thread_local
 from pythoc.build.output_manager import flush_all_pending_outputs
-from pythoc.std.runtime.platform import ThreadHandle, thread_create, thread_join
 from test.utils.test_utils import DeferredTestCase
+
+
+if sys.platform == 'win32':
+    ThreadHandle = u64
+
+    @extern(lib='kernel32')
+    def CreateThread(attrs: ptr[void], stack_size: u64, start: ptr[void],
+                     arg: ptr[void], flags: u32, thread_id: ptr[u32]) -> u64:
+        pass
+
+    @extern(lib='kernel32')
+    def WaitForSingleObject(handle: u64, milliseconds: u32) -> u32:
+        pass
+
+    @extern(lib='kernel32')
+    def CloseHandle(handle: u64) -> i32:
+        pass
+
+    @compile
+    def thread_create(start: ptr[void], arg: ptr[void]) -> ThreadHandle:
+        return CreateThread(nullptr, u64(0), start, arg, u32(0), nullptr)
+
+    @compile
+    def thread_join(handle: ThreadHandle) -> void:
+        WaitForSingleObject(handle, u32(0xffffffff))
+        CloseHandle(handle)
+else:
+    from pythoc import func
+    from pythoc.libc.pthread import pthread_t, pthread_create, pthread_join
+
+    ThreadHandle = pthread_t
+
+    @compile
+    def thread_create(start: ptr[void], arg: ptr[void]) -> ThreadHandle:
+        handle: pthread_t
+        pthread_create(ptr(handle), nullptr, func[ptr[void], ptr[void]](start), arg)
+        return handle
+
+    @compile
+    def thread_join(handle: ThreadHandle) -> void:
+        pthread_join(handle, nullptr)
 
 
 @compile

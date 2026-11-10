@@ -235,6 +235,106 @@ def compiletime_reference() -> i32:
     return read() * 100 + api.call(ptr(state))
 
 
+@compile
+def parameter_shadows_capture() -> i32:
+    value: i32 = 7
+
+    def work(value: i32) -> i32:
+        return value + 1
+
+    api = instantiate(work)
+    state = api.init()
+    return work(41) * 100 + api.call(ptr(state), 41)
+
+
+@compile
+def local_shadows_capture() -> i32:
+    value: i32 = 7
+
+    def work() -> i32:
+        value: i32 = 41
+        return value + 1
+
+    api = instantiate(work)
+    state = api.init()
+    return work() * 100 + api.call(ptr(state))
+
+
+@compile
+def nested_parameter_and_transitive_capture() -> i32:
+    value: i32 = 7
+    offset: i32 = 1
+
+    def work() -> i32:
+        def inner(value: i32) -> i32:
+            def add() -> i32:
+                return value + offset
+            return add()
+        return inner(41)
+
+    api = instantiate(work)
+    state = api.init()
+    return work() * 100 + api.call(ptr(state))
+
+
+@compile
+def instantiate_after_binding_update() -> i32:
+    value = 7
+
+    def work() -> i32:
+        return i32(value) + 1
+
+    value = 41
+    api = instantiate(work)
+    state = api.init()
+    return work() * 100 + api.call(ptr(state))
+
+
+@compile
+def instantiate_through_caller_shadow() -> i32:
+    value: i32 = 7
+
+    def work() -> i32:
+        return value
+
+    if value > 0:
+        value: i32 = 99
+        api = instantiate(work)
+        state = api.init()
+        return work() * 100 + api.call(ptr(state))
+    return 0
+
+
+@compile
+def instantiate_default_and_reference() -> i32:
+    value: i32 = 1
+
+    def work(saved: i32 = value) -> i32:
+        return saved * 100 + value
+
+    value = 10
+    api = instantiate(work)
+    state = api.init()
+    return work() * 1000 + api.call(ptr(state))
+
+
+@compile
+def instantiate_state_parameter_names() -> i32:
+    offset: i32 = 1
+
+    def typed(s: i32) -> i32:
+        return s + offset
+
+    def inferred(s) -> i32:
+        return s + offset
+
+    first = instantiate(typed)
+    second = instantiate(inferred)
+    a = first.init()
+    b = second.init()
+    return first.call(ptr(a), 41) * 100 + second.call(ptr(b), i32(41))
+
+
 class DefinitionCaptureTest(DeferredTestCase):
     @classmethod
     def setUpClass(cls):
@@ -288,6 +388,47 @@ class DefinitionCaptureTest(DeferredTestCase):
 
     def test_compiletime_binding_updates_remain_visible_to_direct_calls(self):
         self.assertEqual(compiletime_reference(), 701)
+
+    def test_parameter_shadows_outer_binding_in_both_call_paths(self):
+        self.assertEqual(parameter_shadows_capture(), 4242)
+
+    def test_annotated_local_shadows_outer_binding_in_both_call_paths(self):
+        self.assertEqual(local_shadows_capture(), 4242)
+
+    def test_nested_parameters_hide_captures_without_losing_free_variables(self):
+        self.assertEqual(nested_parameter_and_transitive_capture(), 4242)
+
+    def test_instantiation_snapshots_the_current_definition_binding(self):
+        self.assertEqual(instantiate_after_binding_update(), 4242)
+
+    def test_instantiation_ignores_a_call_site_shadow(self):
+        self.assertEqual(instantiate_through_caller_shadow(), 707)
+
+    def test_instantiated_defaults_remain_eager_while_captures_stay_live(self):
+        self.assertEqual(instantiate_default_and_reference(), 110110)
+
+    def test_state_parameter_avoids_typed_and_inferred_parameter_names(self):
+        self.assertEqual(instantiate_state_parameter_names(), 4242)
+
+    def test_nested_parameter_does_not_capture_or_consume_an_outer_token(self):
+        with CompileSession():
+            @compile(suffix='uncaptured_nested_parameter')
+            def use_original() -> i32:
+                token: linear = linear()
+
+                def work() -> i32:
+                    def inner(token: i32) -> i32:
+                        return token + 1
+                    return inner(41)
+
+                api = instantiate(work)
+                state = api.init()
+                result = work() + api.call(ptr(state))
+                consume(token)
+                return result
+
+            flush_all_pending_outputs()
+            self.assertEqual(use_original(), 84)
 
     def test_unresolved_global_cannot_capture_a_new_caller_local(self):
         with CompileSession(), self.assertRaisesRegex(NameError, 'undefined_at_definition'):

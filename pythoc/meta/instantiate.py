@@ -36,10 +36,13 @@ from ..builtin_entities import ptr as pc_ptr
 from .._inline.scope_analyzer import ScopeAnalyzer, ScopeContext, analyze_function_scope
 from .._inline._intrinsics import _PC_INTRINSICS
 from .._inline.genexpr_builder import build_genexpr_yield_function_ast
+from .._inline.names import ExpansionNames
+from .._inline.definition_bindings import bind_definition
 from .._inline.closure_capture import (
     RuntimeCapture,
     extract_value_from_vref,
     normalize_runtime_captures,
+    snapshot_closure_captures,
 )
 from .._inline.state_field_rewriter import (
     StateFieldRewriter,
@@ -69,15 +72,13 @@ _RETURN_SENTINEL_PC = -1
 @dataclass
 class _InstantiateSource:
     """Normalized source descriptor for all instantiate() cases."""
-    source_kind: str  # "yield_call", "generator_expression", "closure", "const_iterable"
+    source_kind: str  # "yield_call", "generator_expression"
     func_ast: Optional[ast.FunctionDef]
     capture_bindings: Optional[Dict[str, Any]]
     source_object_id: int
     func_name_hint: str
     callee_globals: Optional[Dict[str, Any]] = None
     call_args: Tuple[Any, ...] = ()
-    capture_mode: Optional[str] = None
-    capture_runtime: Optional[List[Tuple[str, type]]] = None
 
 
 class _InitDispatcher:
@@ -111,10 +112,12 @@ class _InitDispatcher:
                     node=node,
                     exc_type=TypeError,
                 )
-            bound_args = [
-                _capture_value_as_rvalue(visitor, arg)
-                for arg in self._bound_args
-            ]
+            bound_args = []
+            for arg in self._bound_args:
+                visitor._transfer_linear_ownership(
+                    arg, reason="instantiate capture", node=node,
+                )
+                bound_args.append(_capture_value_as_rvalue(visitor, arg))
             return _materialize_state_value(
                 visitor,
                 self._state_type,
@@ -143,11 +146,12 @@ class _CallDispatcher:
     """
 
     def __init__(self, *, wrapper_ast, param_names, declared_param_types,
-                 state_ptr_type, return_type, suffix, gv):
+                 state_ptr_type, state_param, return_type, suffix, gv):
         self._wrapper_ast = wrapper_ast
         self._param_names = list(param_names)
         self._declared_param_types = dict(declared_param_types)
         self._state_ptr_type = state_ptr_type
+        self._state_param = state_param
         self._return_type = return_type
         self._suffix = suffix
         self._gv = gv
@@ -171,7 +175,7 @@ class _CallDispatcher:
                 node=node, exc_type=TypeError,
             )
 
-        param_types = {"s": self._state_ptr_type}
+        param_types = {self._state_param: self._state_ptr_type}
         inferred = []
         for name, arg in zip(self._param_names, call_args):
             declared = self._declared_param_types.get(name)
@@ -207,16 +211,6 @@ def _compile_normalized_source(source: _InstantiateSource) -> Any:
     """Dispatch a normalized instantiate source to the right lowerer."""
     if source.func_ast is None:
         raise TypeError("instantiate: normalized source has no function AST")
-
-    if source.source_kind == "closure":
-        return _compile_closure_fn_pipeline(
-            source.func_ast,
-            capture_bindings=source.capture_bindings,
-            source_object_id=source.source_object_id,
-            func_name_hint=source.func_name_hint,
-            callee_globals=source.callee_globals,
-            capture_runtime=source.capture_runtime,
-        )
 
     return _compile_yield_fn_pipeline(
         source.func_ast,
@@ -295,60 +289,15 @@ def _instantiate_genexpr(source) -> Any:
 
 
 def _instantiate_closure(source) -> Any:
-    """Reserve the architecture slot for closure-backed instantiate."""
-    func_ast = getattr(source, "func_ast", None)
-    capture_bindings = getattr(source, "_capture_bindings", None)
-    capture_runtime = getattr(source, "_capture_runtime", None)
-
-    # Default arguments of a closure are eager captures: move them out of
-    # the call signature and into the capture channels (constant bindings
-    # for Python values, runtime captures moved into the state at init).
-    signature = getattr(source, '_pc_call_signature', {})
-    defaults = signature.get('defaults', {})
-    if defaults:
-        func_ast = copy.deepcopy(func_ast)
-        func_ast.args.args = [arg for arg in func_ast.args.args
-                              if arg.arg not in defaults]
-        capture_bindings = dict(capture_bindings or {})
-        capture_runtime = list(capture_runtime or [])
-        for name, vref in defaults.items():
-            if vref.is_python_value():
-                capture_bindings[name] = extract_value_from_vref(vref)
-            else:
-                pc_type = vref.get_pc_type() if hasattr(vref, "get_pc_type") else None
-                if pc_type is None:
-                    raise TypeError(
-                        f"instantiate: default argument '{name}' has no "
-                        f"determinable PC type"
-                    )
-                capture_runtime.append(RuntimeCapture(name, pc_type, vref))
-
-    callee_globals = dict(getattr(source, "func_globals", None) or {})
-    # Ensure builtin PC types are available for type annotation resolution
-    # ( FakeClosure tests or closures defined with empty globals need this )
-    from ..builtin_entities import (
-        i8, i16, i32, i64, u8, u16, u32, u64, f32, f64,
-        bool as pc_bool_b, ptr as pc_ptr_b, array, struct, union, enum,
-    )
-    _builtins = {
-        "i8": i8, "i16": i16, "i32": i32, "i64": i64,
-        "u8": u8, "u16": u16, "u32": u32, "u64": u64,
-        "f32": f32, "f64": f64, "bool": pc_bool_b, "ptr": pc_ptr_b,
-        "array": array, "struct": struct, "union": union, "enum": enum,
-    }
-    for _name, _val in _builtins.items():
-        if _name not in callee_globals:
-            callee_globals[_name] = _val
-    return _compile_normalized_source(_InstantiateSource(
-        source_kind="closure",
-        func_ast=func_ast,
-        capture_bindings=capture_bindings,
+    """Materialize the same definition bindings used by ordinary inline calls."""
+    return _compile_closure_fn_pipeline(
+        source.func_ast,
+        capture_references=source._capture_references,
+        defaults=source._pc_call_signature['defaults'],
         source_object_id=id(source),
-        func_name_hint=getattr(func_ast, "name", "closure"),
-        callee_globals=callee_globals,
-        capture_mode="closure",
-        capture_runtime=capture_runtime,
-    ))
+        func_name_hint=source.func_ast.name,
+        callee_globals=source.func_globals,
+    )
 
 
 class _ExternalNameCollector(ast.NodeVisitor):
@@ -441,16 +390,22 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
 def _splice_capture_bindings(
     fa: ast.FunctionDef,
     capture_bindings: Optional[Dict[str, Any]],
+    callee_globals: Dict[str, Any],
 ) -> None:
-    """Splice compile-time capture initialisers at the top of ``fa.body``."""
+    """Bind captured Python objects through collision-free global aliases."""
     if not capture_bindings:
         return
-    pre = [
-        ast.Assign(
+    names = ExpansionNames()
+    names.reserve(callee_globals)
+    names.reserve_ast(fa)
+    pre = []
+    for name, value in capture_bindings.items():
+        alias = names.fresh(f'__pc_capture_{name}')
+        callee_globals[alias] = value
+        pre.append(ast.Assign(
             targets=[ast.Name(id=name, ctx=ast.Store())],
-            value=_python_value_to_ast(val))
-        for name, val in capture_bindings.items()
-    ]
+            value=ast.Name(id=alias, ctx=ast.Load()),
+        ))
     fa.body = pre + fa.body
 
 
@@ -495,6 +450,7 @@ def _build_callee_globals(
     and forwards the callee's own globals so annotations and builtin names are
     available to the compiled functions.
     """
+    callee_globals = callee_globals or {}
     gv = {
         "i32": i32,
         "bool": pc_bool,
@@ -506,15 +462,13 @@ def _build_callee_globals(
         gv.update(extra_globals)
 
     for ext_name in _find_external_names(fa, locals_set, protect_set):
-        val = callee_globals.get(ext_name) if callee_globals else None
-        if val is not None:
+        if ext_name in callee_globals:
             protect_set.add(ext_name)
-            gv[ext_name] = val
+            gv[ext_name] = callee_globals[ext_name]
 
-    if callee_globals:
-        for cg_name, cg_val in callee_globals.items():
-            if cg_name not in gv and not cg_name.startswith("_"):
-                gv[cg_name] = cg_val
+    for cg_name, cg_val in callee_globals.items():
+        if cg_name not in gv and not cg_name.startswith("_"):
+            gv[cg_name] = cg_val
 
     return gv
 
@@ -656,7 +610,9 @@ def _compile_yield_fn_pipeline(
     fa = copy.deepcopy(func_ast)
     runtime_captures = normalize_runtime_captures(capture_runtime)
 
-    _splice_capture_bindings(fa, capture_bindings)
+    callee_globals = dict(callee_globals or {})
+    callee_globals.update(capture_bindings or {})
+    _splice_capture_bindings(fa, capture_bindings, callee_globals)
 
     captured_vars, local_vars, param_vars = analyze_function_scope(fa)
     # Parameters need to be stored in the state struct too, because label/goto
@@ -750,16 +706,16 @@ def _compile_yield_fn_pipeline(
 def _compile_closure_fn_pipeline(
     func_ast: ast.FunctionDef,
     *,
-    capture_bindings: Optional[Dict[str, Any]],
     source_object_id: int,
     func_name_hint: str,
     callee_globals: Optional[Dict[str, Any]] = None,
-    capture_runtime: Optional[List[Tuple[str, type]]] = None,
+    capture_references: Optional[Dict[str, Any]] = None,
+    defaults: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Compile a closure into a callable first-class object.
 
-    Supports both compile-time constant capture (via capture_bindings)
-    and runtime capture (via capture_runtime + api.init()).
+    Resolve lexical bindings through the inline binder, then snapshot Python
+    values and materialize runtime captures through api.init().
 
     The compiled API exposes::
 
@@ -767,9 +723,7 @@ def _compile_closure_fn_pipeline(
         api.init  – init function ``init() -> State``
         api.call  – compiled wrapper function ``call(s, *args) -> ret``
     """
-    fa = copy.deepcopy(func_ast)
-    runtime_captures = normalize_runtime_captures(capture_runtime)
-    if _contains_yield(fa):
+    if _contains_yield(func_ast):
         from ..logger import logger
         logger.error(
             "instantiate: closure sources containing yield are not supported",
@@ -777,27 +731,41 @@ def _compile_closure_fn_pipeline(
             exc_type=TypeError,
         )
 
-    _splice_capture_bindings(fa, capture_bindings)
+    names = ExpansionNames()
+    definition = bind_definition(
+        func_ast, callee_globals, capture_references, names=names)
+    fa = definition.syntax
+    plan = snapshot_closure_captures(
+        definition.references, definition.reference_names)
+    capture_bindings = plan.bindings
+    runtime_captures = plan.runtime
+    runtime_names = {capture.name for capture in runtime_captures}
+    field_aliases = {alias: name
+                     for alias, name in definition.reference_names.items()
+                     if name in runtime_names}
 
-    captured_vars, local_vars, param_vars = analyze_function_scope(fa)
-    # For closures:
-    #   - captured_vars -> state struct fields (persist across calls)
-    #   - local_vars    -> ordinary stack locals (reset each call)
-    #   - param_vars    -> real function parameters (passed each call)
-    # Only captured variables need to be rewritten to s.xxx.
-    state_vars: Set[str] = set(captured_vars)
-    protect_set: Set[str] = set(_INTRINSICS) | {"s"}
+    # Defaults are already evaluated values, not lexical references.
+    defaults = defaults or {}
+    fa.args.args = [arg for arg in fa.args.args if arg.arg not in defaults]
+    for name, vref in defaults.items():
+        if vref.is_python_value():
+            capture_bindings[name] = extract_value_from_vref(vref)
+        else:
+            runtime_captures.append(RuntimeCapture(name, vref.get_pc_type(), vref))
+            field_aliases[name] = name
+
+    callee_globals = definition.globals
+    callee_globals.update(capture_bindings)
+    _splice_capture_bindings(fa, capture_bindings, callee_globals)
+    state_arg = names.fresh('s')
     type_resolver = _build_type_resolver(callee_globals)
-
-    for capture in runtime_captures:
-        state_vars.add(capture.name)
 
     return_type = _infer_return_type(fa, type_resolver)
 
     rewriter = StateFieldRewriter(StateFieldRewritePolicy(
-        field_names=state_vars,
-        protect_names=protect_set,
-        state_arg="s",
+        fields=field_aliases,
+        protect_names={state_arg},
+        state_arg=state_arg,
         strip_yield_expr=False,
         preserve_nested_functions=True,
     ))
@@ -818,7 +786,7 @@ def _compile_closure_fn_pipeline(
 
     wrapper_args = ast.arguments(
         posonlyargs=[],
-        args=[ast.arg(arg="s", annotation=None)] + list(fa.args.args),
+        args=[ast.arg(arg=state_arg, annotation=None)] + list(fa.args.args),
         kwonlyargs=[],
         kw_defaults=[],
         defaults=list(fa.args.defaults),
@@ -843,17 +811,11 @@ def _compile_closure_fn_pipeline(
     )
     sfx = "_".join(str(p) for p in suffix)
 
-    fields: Dict[str, type] = {}
-    for name in captured_vars:
-        lt = _local_type_hint(name, fa, type_resolver)
-        fields[name] = lt if lt is not None else i32
-    for capture in runtime_captures:
-        fields[capture.name] = capture.pc_type
-
+    fields = {capture.name: capture.pc_type for capture in runtime_captures}
     _State = _build_state_struct(fields, suffix)
     ip = pc_ptr[_State]
 
-    param_types: Dict[str, type] = {"s": ip}
+    param_types: Dict[str, type] = {state_arg: ip}
     for arg in fa.args.args:
         at = (
             _annotation_ast_to_type(arg.annotation, type_resolver)
@@ -864,14 +826,8 @@ def _compile_closure_fn_pipeline(
             param_types[arg.arg] = at
 
     from pythoc import move
-    gv = _build_callee_globals(
-        callee_globals,
-        state_vars | param_vars,
-        protect_set,
-        wrapper_ast,
-        extra_globals={"_State": _State, "_Ret": return_type, "move": move},
-        include_intrinsics=False,
-    )
+    gv = dict(callee_globals)
+    gv.update({"_State": _State, "_Ret": return_type, "move": move})
 
     untyped_params = [arg.arg for arg in fa.args.args if arg.annotation is None]
     if untyped_params:
@@ -880,8 +836,10 @@ def _compile_closure_fn_pipeline(
         cf = _CallDispatcher(
             wrapper_ast=wrapper_ast,
             param_names=[arg.arg for arg in fa.args.args],
-            declared_param_types={k: v for k, v in param_types.items() if k != "s"},
+            declared_param_types={k: v for k, v in param_types.items()
+                                  if k != state_arg},
             state_ptr_type=ip,
+            state_param=state_arg,
             return_type=return_type,
             suffix=sfx,
             gv=gv,

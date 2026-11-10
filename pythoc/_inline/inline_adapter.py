@@ -97,7 +97,7 @@ class InlineAdapter:
         names.reserve_ast(func_ast)
         from .definition_bindings import bind_definition
         definition = bind_definition(
-            self.visitor, func_ast, self.func_globals, self.capture_references)
+            func_ast, self.func_globals, self.capture_references, names=names)
         result_var = names.fresh(f"_{self.kind}_result_{unique_id}")
 
         # Exit rule (goto-based approach, no flag_var needed).

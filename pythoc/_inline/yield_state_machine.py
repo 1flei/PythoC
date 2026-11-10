@@ -231,7 +231,7 @@ def lower_yield_state_machine(
         states[name] = list(stmts) if stmts else [ast.Pass()]
 
     rewriter = StateFieldRewriter(StateFieldRewritePolicy(
-        field_names=locals_set,
+        fields={name: name for name in locals_set},
         protect_names=protect_set,
         state_arg=state_arg,
         strip_yield_expr=True,

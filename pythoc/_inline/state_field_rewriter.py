@@ -3,14 +3,14 @@ from __future__ import annotations
 import ast
 import copy
 from dataclasses import dataclass
-from typing import Optional, Set
+from typing import Mapping, Optional, Set
 
 from .scope_analyzer import AssignmentCollector
 
 
 @dataclass(frozen=True)
 class StateFieldRewritePolicy:
-    field_names: Set[str]
+    fields: Mapping[str, str]
     protect_names: Set[str]
     state_arg: str = "s"
     strip_yield_expr: bool = False
@@ -20,16 +20,16 @@ class StateFieldRewritePolicy:
 class StateFieldRewriter(ast.NodeTransformer):
     def __init__(self, policy: StateFieldRewritePolicy):
         self.policy = policy
-        self.field_names = set(policy.field_names)
+        self.fields = policy.fields
         self.protect_names = set(policy.protect_names) | {policy.state_arg}
         self.state_arg = policy.state_arg
 
     def visit_Name(self, node: ast.Name) -> ast.AST:
-        if node.id in self.protect_names or node.id not in self.field_names:
+        if not self._should_rewrite(node.id):
             return node
         return ast.Attribute(
             value=ast.Name(id=self.state_arg, ctx=ast.Load()),
-            attr=node.id,
+            attr=self.fields[node.id],
             ctx=node.ctx,
         )
 
@@ -81,7 +81,7 @@ class StateFieldRewriter(ast.NodeTransformer):
         nested_protect.update(collector.annotated_assigned)
 
         nested_rewriter = StateFieldRewriter(StateFieldRewritePolicy(
-            field_names=self.field_names,
+            fields=self.fields,
             protect_names=nested_protect,
             state_arg=self.state_arg,
             strip_yield_expr=self.policy.strip_yield_expr,
@@ -98,13 +98,13 @@ class StateFieldRewriter(ast.NodeTransformer):
         if isinstance(target, ast.Name) and self._should_rewrite(target.id):
             return ast.Attribute(
                 value=ast.Name(id=self.state_arg, ctx=ast.Load()),
-                attr=target.id,
+                attr=self.fields[target.id],
                 ctx=ast.Store(),
             )
         return target
 
     def _should_rewrite(self, name: str) -> bool:
-        return name in self.field_names and name not in self.protect_names
+        return name in self.fields and name not in self.protect_names
 
 
 def _as_stmt_list(node):
