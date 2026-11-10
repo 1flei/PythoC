@@ -40,7 +40,8 @@ class ForwardRefNamespace:
         with self._lock:
             return self._revision
 
-    def register_callback(self, type_name: str, callback: Callable[[Any], None]):
+    def register_callback(self, type_name: str, callback: Callable[[Any], None],
+                          *, include_existing=True):
         """Register a callback to be called when type_name is defined
 
         Args:
@@ -48,7 +49,7 @@ class ForwardRefNamespace:
             callback: Function to call when type is defined, receives the type object
         """
         with self._lock:
-            if type_name in self._defined_types:
+            if include_existing and type_name in self._defined_types:
                 # Type already defined, call immediately
                 type_obj = self._defined_types[type_name]
             else:
@@ -133,6 +134,8 @@ def mark_type_defined(type_name: str, type_obj: Any):
         type_name: Name of the type being defined
         type_obj: The type object (usually a Python class)
     """
+    from .type_resolver import TypeResolver
+    TypeResolver.publish_type_definition(type_name, type_obj)
     _current_namespace().mark_type_defined(type_name, type_obj)
 
 

@@ -14,7 +14,7 @@ class TypeQualifierMeta(BuiltinEntityMeta):
         '_normalize_qualifiers', '__init__', '__new__', '__init_subclass__',
         '__mro__', '__bases__', '__dict__', '__module__', '__qualname__',
         'get_llvm_type', 'get_size_bytes', 'get_type_id',
-        'get_layout', 'get_alignment',
+        'get_layout', 'get_alignment', 'map_type_components',
     })
     
     def __getattribute__(cls, name):
@@ -33,11 +33,8 @@ class TypeQualifierMeta(BuiltinEntityMeta):
         # the lazy resolution in _resolve_qualified_type.
         try:
             qualified_type = super().__getattribute__('qualified_type')
-            if isinstance(qualified_type, str):
-                from ..forward_ref import get_defined_type
-                resolved = get_defined_type(qualified_type)
-                if resolved is not None:
-                    qualified_type = resolved
+            from ..type_resolver import TypeResolver
+            qualified_type = TypeResolver.resolve_type(qualified_type, required=False)
             if qualified_type is not None and hasattr(qualified_type, name):
                 return getattr(qualified_type, name)
         except AttributeError:
@@ -57,6 +54,13 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
     qualified_type = None
     _qualifier_flags = {}  # Override in subclasses: {'const': True, 'static': False, 'volatile': False}
     
+    @classmethod
+    def map_type_components(cls, mapper):
+        qualified = mapper(cls.qualified_type)
+        if qualified is cls.qualified_type:
+            return cls
+        return cls.handle_type_subscript(((None, qualified),))
+
     @classmethod
     def get_qualifier_name(cls) -> str:
         """Override in subclasses to return qualifier name"""
@@ -106,18 +110,8 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         it inside ``get_llvm_type``), the qualifier resolves the string
         through the forward-ref registry at use time.
         """
-        base_type = cls.qualified_type
-        if isinstance(base_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(base_type)
-            if resolved is None:
-                logger.error(
-                    f"{cls.get_qualifier_name()}: unresolved forward "
-                    f"reference '{base_type}'",
-                    node=None, exc_type=NameError,
-                )
-            base_type = resolved
-        return base_type
+        from ..type_resolver import TypeResolver
+        return TypeResolver.resolve_type(cls.qualified_type)
 
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
@@ -130,7 +124,8 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         unspecialized qualifier (no inner type) falls back to the base
         implementation, as the forwarding did before.
         """
-        base_type = cls._resolve_qualified_type()
+        from ..type_resolver import TypeResolver
+        base_type = TypeResolver.resolve_type(cls.qualified_type, freeze=True)
         if base_type is None:
             return super().get_llvm_type(module_context)
         return base_type.get_llvm_type(module_context)

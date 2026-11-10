@@ -60,6 +60,8 @@ class func(BuiltinType):
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get C ABI lowered LLVM function pointer type."""
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         return ir.PointerType(cls.get_function_type(module_context))
 
     @classmethod
@@ -69,15 +71,8 @@ class func(BuiltinType):
         # mirroring ptr's string pointee.  A value component of a func type
         # must be complete (C agrees: no by-value incomplete types in a
         # signature), so an unresolvable name is a hard error here.
-        if isinstance(pc_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(pc_type)
-            if resolved is None:
-                logger.error(
-                    f"func: unresolved forward reference '{pc_type}'",
-                    node=None, exc_type=NameError,
-                )
-            pc_type = resolved
+        from ..type_resolver import TypeResolver
+        pc_type = TypeResolver.resolve_type(pc_type, freeze=True)
         if hasattr(pc_type, 'get_llvm_type'):
             return pc_type.get_llvm_type(module_context)
         if isinstance(pc_type, ir.Type):
@@ -327,6 +322,17 @@ class func(BuiltinType):
         )
 
     @classmethod
+    def map_type_components(cls, mapper):
+        if cls.param_types is None:
+            return cls
+        original = (*cls.param_types, cls.return_type)
+        resolved = tuple(mapper(value) for value in original)
+        if all(a is b for a, b in zip(original, resolved)):
+            return cls
+        names = (*cls._get_parameter_names(), None)
+        return cls.handle_type_subscript(tuple(zip(names, resolved)))
+
+    @classmethod
     def handle_type_subscript(cls, items):
         """Handle type subscript with normalized items for func
 
@@ -404,9 +410,6 @@ class func(BuiltinType):
 
     def __class_getitem__(cls, item):
         """Python runtime entry point using normalization -> handle_type_subscript"""
-        from .base import _resolve_caller_type_names
+        from ..type_resolver import TypeResolver
         normalized = cls.normalize_subscript_items(item)
-        # Bind quoted names visible at the call site (typedef-style aliases),
-        # same as the base-class entry point.
-        normalized = _resolve_caller_type_names(normalized)
-        return cls.handle_type_subscript(normalized)
+        return TypeResolver.bind_type_references(cls.handle_type_subscript(normalized))

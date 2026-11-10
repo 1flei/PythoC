@@ -348,9 +348,8 @@ class AbstractBuilder(ABC):
     # ========== Aggregate Operations ==========
     
     @abstractmethod
-    def extract_value(self, agg: Any, idx: Any, name: str = "",
-                      value_type_hint: Any = None) -> Any:
-        """Extract an aggregate member with its optional semantic type."""
+    def extract_value(self, agg: Any, idx: Any, name: str = "") -> Any:
+        """Extract a member with the type declared by its aggregate."""
         pass
     
     @abstractmethod

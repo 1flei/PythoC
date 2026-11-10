@@ -30,7 +30,8 @@ def _issubclass_refined(cls) -> bool:
 
 
 def resolve_schema_type(type_hint: Any) -> Any:
-    resolved = unwrap_python_object(type_hint)
+    from .type_resolver import TypeResolver
+    resolved = TypeResolver.resolve_type(unwrap_python_object(type_hint), required=False)
     if isinstance(resolved, type) and _issubclass_refined(resolved):
         base_type = getattr(resolved, '_base_type', None)
         if base_type is not None:

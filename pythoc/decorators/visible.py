@@ -115,6 +115,10 @@ class AccessibleSymbols(dict):
     def __init__(self, *args, live_globals: Optional[Dict[str, Any]] = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.live_globals = live_globals
+        self.type_scope = getattr(args[0], 'type_scope', None) if args else None
+        self.type_owner_name = getattr(args[0], 'type_owner_name', None) if args else None
+        self.type_owner_namespace = getattr(args[0], 'type_owner_namespace', None) if args else None
+        self.type_locals = getattr(args[0], 'type_locals', None) if args else None
 
 
 def get_all_accessible_symbols(
@@ -150,6 +154,12 @@ def get_all_accessible_symbols(
         Dictionary of all accessible symbols
     """
     symbols = AccessibleSymbols()
+    from ..type_resolver import TypeResolver
+    captured = TypeResolver.capture_type_namespace(definition=func)
+    scope = getattr(captured, 'type_scope', None)
+    if scope is not None and scope.contains(func.__code__):
+        symbols.type_scope = scope
+        symbols.type_locals = captured.type_locals
 
     # Start with function's globals
     if hasattr(func, '__globals__'):
@@ -166,6 +176,11 @@ def get_all_accessible_symbols(
     # This captures locals from decoration time that may not be available later
     if captured_symbols:
         symbols.update(captured_symbols)
+        if scope is not None:
+            symbols.type_locals = dict(symbols.type_locals or {})
+            symbols.type_locals.update(
+                (name, value) for name, value in captured_symbols.items()
+                if name in scope.local_names)
     
     # Add annotations if requested
     if include_annotations and hasattr(func, '__annotations__'):

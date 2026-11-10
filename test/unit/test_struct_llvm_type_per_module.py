@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from llvmlite import ir
 
-from pythoc.builtin_entities import i32, i64, u32, f64, ptr
+from pythoc.builtin_entities import array, i32, i64, u32, f64, ptr
 from pythoc.builtin_entities.struct import create_struct_type
 from pythoc.type_id import get_type_id
 from pythoc.forward_ref import mark_type_defined
@@ -22,6 +22,7 @@ from pythoc.builder.llvm_c_builder import LLVMCBuilder
 from pythoc.type_graph import canonical_record_type
 from pythoc.builder.llvm_simple_builder import LLVMBuilder
 from pythoc.literal_protocol import assemble_aggregate_value
+from pythoc.compiler import LLVMCompiler
 
 
 class Point:
@@ -38,6 +39,24 @@ def _make_module(name):
 
 
 class TestStructTypePerModule(unittest.TestCase):
+
+    def test_early_opaque_query_does_not_define_compiler_module_fields(self):
+        with CompileSession():
+            holder = create_struct_type(
+                [ptr['FreshModuleTarget']], ['value'],
+                python_class=type('FreshModuleHolder', (), {}))
+            early = holder.get_llvm_type(ir.global_context)
+            mark_type_defined('FreshModuleTarget', i32)
+
+            compiler = LLVMCompiler()
+            previous_context = compiler.module.context
+            actual = holder.get_llvm_type(previous_context)
+            compiler.create_module('second')
+
+            self.assertIsNot(previous_context, ir.global_context)
+            self.assertIsNot(compiler.module.context, previous_context)
+            self.assertEqual(early.elements[0], ir.PointerType(ir.IntType(8)))
+            self.assertEqual(actual.elements[0], ir.PointerType(ir.IntType(32)))
 
     def test_identified_type_is_per_module(self):
         point_type = _make_point_type()
@@ -79,9 +98,8 @@ class TestStructTypePerModule(unittest.TestCase):
         # Body must be set in both modules (no cross-module flag leaks).
         self.assertIsNotNone(t1.elements)
         self.assertIsNotNone(t2.elements)
-        # Pointer storage does not encode a semantic pointee or recurse.
-        self.assertEqual(t1.elements[0], ir.PointerType(ir.IntType(8)))
-        self.assertEqual(t2.elements[0], ir.PointerType(ir.IntType(8)))
+        self.assertIs(t1.elements[0].pointee, t1)
+        self.assertIs(t2.elements[0].pointee, t2)
         self.assertIs(ptr[node_type].get_llvm_type(mod1.context).pointee, t1)
         self.assertIs(ptr[node_type].get_llvm_type(mod2.context).pointee, t2)
 
@@ -109,7 +127,7 @@ class TestStructTypePerModule(unittest.TestCase):
             module = _make_module(name)
             llvm_type = first.get_llvm_type(module.context)
             self.assertIs(second.get_llvm_type(module.context), llvm_type)
-            self.assertEqual(llvm_type.elements[0], ir.PointerType(ir.IntType(8)))
+            self.assertIs(llvm_type.elements[0].pointee, llvm_type)
             self.assertEqual(str(llvm_type.elements[1]), 'i32')
 
     def test_conflicting_recursive_views_fail_before_materialization(self):
@@ -186,15 +204,27 @@ class TestStructTypePerModule(unittest.TestCase):
             SimpleNamespace(module=module), holder, [global_value])
         self.assertEqual(constant.constant[0].type, constant.type.elements[0])
         self.assertEqual(constant.constant[0].type,
-                         ir.PointerType(ir.IntType(8)))
+                         ir.PointerType(ir.IntType(32)))
 
-    def test_storage_adaptation_cannot_truncate_an_array(self):
+    def test_constant_assembly_rejects_mismatched_pointer_fields(self):
+        module = _make_module('invalid_pointer_fields')
+        wrong_pointer = ir.Constant(ir.PointerType(ir.IntType(8)), None)
+        wrong_array = ir.Constant(ir.ArrayType(wrong_pointer.type, 2),
+                                  [wrong_pointer, wrong_pointer])
+        for field, value in ((ptr[i32], wrong_pointer),
+                             (array[ptr[i32], 2], wrong_array)):
+            with self.subTest(field=field):
+                holder = create_struct_type([field], ['value'])
+                with self.assertRaisesRegex(TypeError, 'field 0 type mismatch'):
+                    assemble_aggregate_value(SimpleNamespace(module=module), holder, [value])
+
+    def test_aggregate_insertion_cannot_truncate_an_array(self):
         module = _make_module('invalid_storage')
         function = ir.Function(module, ir.FunctionType(ir.VoidType(), []), 'f')
         builder = LLVMBuilder(ir.IRBuilder(function.append_basic_block('entry')))
         target = ir.LiteralStructType([ir.ArrayType(ir.IntType(32), 2)])
         source = ir.Constant(ir.ArrayType(ir.IntType(32), 3), [1, 2, 3])
-        with self.assertRaisesRegex(TypeError, 'array length'):
+        with self.assertRaises(TypeError):
             builder.insert_value(ir.Constant(target, ir.Undefined), source, 0)
 
     def test_late_equivalent_views_keep_compatible_existing_signatures(self):
@@ -213,6 +243,9 @@ class TestStructTypePerModule(unittest.TestCase):
             mark_type_defined('Pending', pending)
             self.assertIs(canonical_record_type(first),
                           canonical_record_type(second))
+            # Use the completed semantic view for a new declaration. The
+            # previously returned LLVM object is a snapshot of its old view.
+            b = second.get_llvm_type(module.context)
             builder = LLVMCBuilder()
             declared = builder.declare_function(
                 module, 'consume', [a.as_pointer()], ir.IntType(32))
@@ -253,7 +286,7 @@ class TestStructTypePerModule(unittest.TestCase):
             thread.join()
         self.assertEqual(errors, [])
         self.assertIs(results[0], results[1])
-        self.assertEqual(results[0].elements[0], ir.PointerType(ir.IntType(8)))
+        self.assertIs(results[0].elements[0].pointee, results[0])
 
     def test_default_modules_share_llvmlite_global_context(self):
         # Status quo: ir.Module() without an explicit context uses llvmlite's

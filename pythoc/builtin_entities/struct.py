@@ -96,6 +96,16 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     _llvm_field_map: Optional[Dict[int, int]] = None  # PC field idx -> LLVM field idx
     
     @classmethod
+    def map_type_components(cls, mapper):
+        if cls._python_class is not None or cls._force_identified or cls._field_types is None:
+            return cls
+        fields = [mapper(field) for field in cls._field_types]
+        if all(a is b for a, b in zip(fields, cls._field_types)):
+            return cls
+        return create_struct_type(fields, cls._field_names, elements=cls._elements,
+                                  layout_config=cls._layout_config)
+
+    @classmethod
     def get_name(cls) -> str:
         """Return struct name"""
         if cls._canonical_name:
@@ -115,12 +125,15 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         Uses caching to avoid recreating the same struct type.
         """
         import ctypes
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         from ..type_graph import validate_type_graph
         validate_type_graph(cls)
         
-        # Check cache first
-        if hasattr(cls, '_ctypes_struct_cache') and cls._ctypes_struct_cache is not None:
-            return cls._ctypes_struct_cache
+        from ..session import CompileSession
+        cache = CompileSession.current().type_graph.ctypes_types
+        if cls in cache:
+            return cache[cls]
         
         cls._ensure_field_types_resolved()
 
@@ -132,7 +145,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                 cls.get_layout(),
                 f"CStruct_{cls.get_name()}",
             )
-            cls._ctypes_struct_cache = storage
+            cache[cls] = storage
             return storage
         
         # Build fields list
@@ -169,7 +182,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         from ..target_layout import validate_ctypes_layout
         validate_ctypes_layout(cls, struct_class, field_indices)
         
-        cls._ctypes_struct_cache = struct_class
+        cache[cls] = struct_class
         return struct_class
     
     @classmethod
@@ -263,6 +276,9 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         """
         if cls._field_types is None:
             logger.error("struct type requires field types", node=node, exc_type=TypeError)
+
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         
         from ..type_graph import validate_type_graph
         validate_type_graph(cls)
@@ -325,6 +341,9 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     
     @classmethod
     def get_layout(cls):
+        if cls._field_types is not None:
+            from ..type_graph import prepare_type
+            prepare_type(cls)
         from ..type_graph import validate_type_graph
         validate_type_graph(cls)
         if cls._field_types is None:
@@ -479,7 +498,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             if base.is_struct_value():
                 struct_value = ensure_ir(base)
                 field_value = visitor.builder.extract_value(
-                    struct_value, llvm_field_index, value_type_hint=field_type)
+                    struct_value, llvm_field_index)
                 # For struct values without address, we can't provide lvalue
                 return wrap_value(
                     field_value, kind="value", type_hint=field_type,
@@ -590,7 +609,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             # Use extract_value - this cannot be used as lvalue
             struct_value = ensure_ir(base)
             field_value = visitor.builder.extract_value(
-                struct_value, llvm_index_val, value_type_hint=field_type)
+                struct_value, llvm_index_val)
             return wrap_value(field_value, kind="value", type_hint=field_type,
                               var_name=result_var_name, linear_path=result_linear_path,
                               linear_owner_id=base.linear_owner_id)

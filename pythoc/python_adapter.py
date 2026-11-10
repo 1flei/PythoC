@@ -323,6 +323,8 @@ def function_spec(wrapper) -> Optional[dict]:
         return None
     if info.linkage in ('internal', 'linkonce_odr'):
         return None
+    from .type_resolver import TypeResolver
+    TypeResolver.resolve_signature_types(info)
     if _python_boundary_failure(info) is not None:
         return None
     abi = _Abi()
@@ -637,10 +639,8 @@ def _peel_type(pc_type):
 
 
 def _resolve_named_type(pc_type):
-    if not isinstance(pc_type, str):
-        return pc_type
-    from .forward_ref import get_defined_type
-    return get_defined_type(pc_type)
+    from .type_resolver import TypeResolver
+    return TypeResolver.resolve_type(pc_type, required=False)
 
 
 def _size_of(pc_type):

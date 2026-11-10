@@ -51,6 +51,8 @@ class offsetof(BuiltinFunction):
     @classmethod
     def _get_member_layout(cls, pc_type, field_name: str):
         """Resolve a member's local byte offset and type together."""
+        from ..type_resolver import TypeResolver
+        pc_type = TypeResolver.resolve_type(pc_type, freeze=True)
         pc_type = getattr(pc_type, '_union_type', pc_type)
         field_names, field_types = cls._get_struct_fields(pc_type)
 

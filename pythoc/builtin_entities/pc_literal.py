@@ -183,6 +183,7 @@ class pc_literal:
         inst = cls.__new__(cls)
         inst._pc_type = unified_type
         inst._ctypes_owner = None
+        unified_type._ensure_field_types_resolved()
         field_names = getattr(unified_type, '_field_names', None) or []
         inst._field_names = list(field_names)
 

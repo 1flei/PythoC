@@ -3,12 +3,12 @@
 Unified annotation resolver for handling string annotations from __future__ import annotations
 """
 
-import inspect
 from typing import Any, Dict, Optional
 
 
 def build_annotation_namespace(user_globals: dict, is_dynamic: bool = False, 
-                               additional_types: Optional[Dict[str, Any]] = None) -> dict:
+                               additional_types: Optional[Dict[str, Any]] = None,
+                               definition=None) -> dict:
     """
     Build a namespace for evaluating string type annotations.
     
@@ -24,96 +24,38 @@ def build_annotation_namespace(user_globals: dict, is_dynamic: bool = False,
     Returns:
         A dictionary that can be used as the namespace for eval() or TypeResolver
     """
-    eval_namespace = dict(user_globals)
+    from .visible import AccessibleSymbols
+    live = getattr(user_globals, 'live_globals', None)
+    eval_namespace = AccessibleSymbols(
+        user_globals, live_globals=live if live is not None else user_globals)
     
     # Add any additional type mappings
     if additional_types:
         eval_namespace.update(additional_types)
     
-    # For dynamic functions/classes, try to capture enclosing scope variables
-    if is_dynamic:
-        try:
-            # Walk up the call stack to find frames with local variables
-            frame = inspect.currentframe()
-            # Walk up several frames to get past our decorator stack
-            for _ in range(10):
-                if frame is None:
-                    break
-                frame = frame.f_back
-                if frame and frame.f_locals:
-                    # Merge frame locals into eval namespace
-                    # Filter to avoid polluting namespace with internal variables
-                    for key, value in frame.f_locals.items():
-                        # Skip specific internal names but allow _ClassName for nested structs
-                        if key in ['self', 'cls', 'func', 'wrapper']:
-                            continue
-                        
-                        # Include type-like objects (for type annotations)
-                        # AND integer constants (for array dimensions, etc.)
-                        # AND struct classes (even those starting with _)
-                        if (hasattr(value, '__name__') or 
-                            hasattr(value, 'can_be_type') or 
-                            isinstance(value, int) or
-                            (isinstance(value, type) and hasattr(value, '_is_struct'))):
-                            eval_namespace[key] = value
-        except:
-            pass  # If we can't get the frame, just use globals
-    
+    if is_dynamic and not isinstance(user_globals, AccessibleSymbols):
+        from ..type_resolver import TypeResolver
+        captured = TypeResolver.capture_type_namespace(definition=definition)
+        eval_namespace.update(captured)
+        eval_namespace.type_scope = captured.type_scope
+        eval_namespace.type_locals = captured.type_locals
+
     return eval_namespace
 
 
-def resolve_string_annotation(annotation_str: str, eval_namespace: dict, 
-                              type_resolver) -> Any:
-    """
-    Resolve a string type annotation to an actual type.
-    
-    Tries multiple strategies:
-    1. TypeResolver parsing (handles complex types like ptr[T] properly)
-    2. Direct eval in the provided namespace (for simple names)
-    
-    Args:
-        annotation_str: The string annotation to resolve
-        eval_namespace: The namespace to use for eval
-        type_resolver: Optional TypeResolver instance for parsing
-    
-    Returns:
-        The resolved type, or the original string if resolution fails
-    """
-    from ..builtin_entities import BuiltinEntity
-    return type_resolver.parse_annotation(annotation_str)
-
-
-def resolve_annotations_dict(annotations: dict, eval_namespace: dict,
-                             type_resolver) -> dict:
+def resolve_annotations_dict(annotations: dict, type_resolver) -> dict:
     """
     Resolve all annotations in a __annotations__ dictionary.
 
     Args:
         annotations: The __annotations__ dictionary from a function or class
-        eval_namespace: The namespace prepared for TypeResolver callers
         type_resolver: TypeResolver instance used for string annotation resolution
     
     Returns:
         Dictionary mapping annotation names to resolved types
     """
-    from ..builtin_entities import BuiltinEntity
-    
-    resolved = {}
-    
-    for name, annotation_value in annotations.items():
-        # Handle direct BuiltinEntity types (already evaluated)
-        if isinstance(annotation_value, type) and issubclass(annotation_value, BuiltinEntity):
-            if annotation_value.can_be_type():
-                resolved[name] = annotation_value
-                continue
-        
-        # Handle string annotations (from __future__ import annotations)
-        if isinstance(annotation_value, str):
-            resolved[name] = resolve_string_annotation(
-                annotation_value, eval_namespace, type_resolver
-            )
-        else:
-            # Keep non-string, non-BuiltinEntity values as-is
-            resolved[name] = annotation_value
-    
-    return resolved
+    return {
+        name: (type_resolver.parse_annotation(value, defer_unresolved=True)
+               if isinstance(value, str) else value)
+        for name, value in annotations.items()
+    }

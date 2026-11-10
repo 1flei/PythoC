@@ -5,7 +5,7 @@ import unittest
 from llvmlite import ir
 
 from pythoc import array, compile, i32, ptr, u16
-from pythoc.builder.record_types import storage_type
+from pythoc.builtin_entities.struct import create_struct_type
 from pythoc.forward_ref import mark_type_defined
 
 
@@ -18,17 +18,26 @@ class RecordArrayStorageElement:
 class RecordArrayStorageTest(unittest.TestCase):
     def test_forward_record_elements_preserve_all_dimensions(self):
         context = ir.Context()
-        actual = storage_type(array['RecordArrayStorageElement', 2, 3], context)
+        holder = create_struct_type(
+            [array['RecordArrayStorageElement', 2, 3]], ['values'],
+            python_class=type('ArrayHolder', (), {}))
+        actual = holder.get_llvm_type(context).elements[0]
         expected = array[RecordArrayStorageElement, 2, 3].get_llvm_type(context)
         self.assertEqual(actual, expected)
 
     def test_forward_array_aliases_are_resolved_recursively(self):
         mark_type_defined('RecordStorageRow', array[u16, 3])
-        actual = storage_type(array['RecordStorageRow', 2], ir.Context())
+        holder = create_struct_type(
+            [array['RecordStorageRow', 2]], ['values'],
+            python_class=type('ArrayAliasHolder', (), {}))
+        actual = holder.get_llvm_type(ir.Context()).elements[0]
         self.assertEqual(actual, ir.ArrayType(ir.ArrayType(ir.IntType(16), 3), 2))
 
     def test_pointer_elements_do_not_require_complete_pointees(self):
-        actual = storage_type(array[ptr['RecordStorageIncomplete'], 2], ir.Context())
+        holder = create_struct_type(
+            [array[ptr['RecordStorageIncomplete'], 2]], ['values'],
+            python_class=type('IncompleteArrayHolder', (), {}))
+        actual = holder.get_llvm_type(ir.Context()).elements[0]
         self.assertEqual(actual, ir.ArrayType(ir.PointerType(ir.IntType(8)), 2))
 
 

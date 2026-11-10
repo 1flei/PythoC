@@ -1043,17 +1043,12 @@ def _compile_impl(func_or_class,
     return_type_hint = None
     param_type_hints = {}
 
-    is_dynamic = '.<locals>.' in func.__qualname__
-
     if hasattr(func, '__annotations__') and func.__annotations__:
         from ..builtin_entities import BuiltinEntity
-        from .annotation_resolver import build_annotation_namespace, resolve_annotations_dict
-        
-        eval_namespace = build_annotation_namespace(user_globals, is_dynamic=is_dynamic)
+        from .annotation_resolver import resolve_annotations_dict
+
         resolved_annotations = resolve_annotations_dict(
-            func.__annotations__, 
-            eval_namespace, 
-            type_resolver
+            func.__annotations__, type_resolver
         )
         
         for param_name, resolved_type in resolved_annotations.items():

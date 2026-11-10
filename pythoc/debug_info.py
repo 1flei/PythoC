@@ -36,12 +36,9 @@ def _strip_qualifiers(pc_type: Any) -> Any:
 
 def _resolve_type(pc_type: Any) -> Any:
     """Resolve a forward-reference string to a real type, if applicable."""
-    if isinstance(pc_type, str):
-        from .forward_ref import get_defined_type
-        resolved = get_defined_type(pc_type)
-        if resolved is not None:
-            return resolved
-    return pc_type
+    from .type_resolver import TypeResolver
+    resolved = TypeResolver.resolve_type(pc_type, required=False)
+    return pc_type if resolved is None else resolved
 
 
 class DebugInfoBuilder:
@@ -383,9 +380,8 @@ class DebugInfoBuilder:
     def _build_pointer_debug_type(self, pc_type: Any) -> Optional[ir.DIValue]:
         """Build a DWARF pointer type around an optional pointee debug type."""
         pointee = getattr(pc_type, 'pointee_type', None)
-        if isinstance(pointee, str):
-            from .forward_ref import get_defined_type
-            pointee = get_defined_type(pointee)
+        from .type_resolver import TypeResolver
+        pointee = TypeResolver.resolve_type(pointee, required=False)
 
         pointee_di = self.get_debug_type(pointee) if pointee is not None else None
         if pointee_di is None:

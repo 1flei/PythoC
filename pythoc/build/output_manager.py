@@ -44,33 +44,9 @@ class _CompileResult:
 
 
 def _rebind_func_info_signature(func_info):
-    """Rebind quoted (string) pointees in a function's stored signature types.
-
-    Runs at group-compile time, when the whole defining module has executed:
-    names that were not visible at decoration time (module-level aliases
-    defined later) now resolve through the live globals carried by the
-    compilation snapshot, then the session registry.  Unresolvable names
-    stay lazy strings and keep their forward-ref / opaque-type semantics.
-    """
-    from ..builtin_entities.base import (
-        lookup_type_name_in_globals, rebind_lazy_type_names,
-    )
-    from ..forward_ref import get_defined_type
-    globals_dict = getattr(func_info, 'compilation_globals', None)
-
-    def lookup(name):
-        resolved = lookup_type_name_in_globals(globals_dict, name)
-        if resolved is not None:
-            return resolved
-        return get_defined_type(name)
-
-    hints = getattr(func_info, 'param_type_hints', None)
-    if hints:
-        for key, pc_type in list(hints.items()):
-            hints[key] = rebind_lazy_type_names(pc_type, lookup)
-    if getattr(func_info, 'return_type_hint', None) is not None:
-        func_info.return_type_hint = rebind_lazy_type_names(
-            func_info.return_type_hint, lookup)
+    """Complete the callee's scoped types at the shared compilation boundary."""
+    from ..type_resolver import TypeResolver
+    TypeResolver.resolve_signature_types(func_info)
 
 
 @dataclass

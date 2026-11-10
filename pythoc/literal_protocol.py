@@ -347,7 +347,7 @@ def materialize_sequence_value(visitor, carrier, target_pc_type):
 
 
 def assemble_aggregate_value(visitor, target_pc_type, values):
-    """Assemble semantic fields using the target's storage representation."""
+    """Assemble fields already lowered to the aggregate's declared types."""
     from llvmlite import ir
     from .ir_helpers import is_link_time_constant
     from .target_layout import NATURAL_LAYOUT
@@ -359,14 +359,15 @@ def assemble_aggregate_value(visitor, target_pc_type, values):
     if not layout_config.is_natural:
         from .builtin_entities.bitfield_access import assemble_bit_fields
         return assemble_bit_fields(visitor, target_pc_type, values)
+    fields = agg_llvm.elements
+    if len(values) != len(fields):
+        raise TypeError('Aggregate initializer field count mismatch')
+    for index, (value, field) in enumerate(zip(values, fields)):
+        if value.type != field:
+            raise TypeError(
+                f'Aggregate initializer field {index} type mismatch: '
+                f'expected {field}, got {value.type}')
     if all(is_link_time_constant(v) for v in values):
-        from .builder.record_types import storage_value
-        fields = (agg_llvm.elements if isinstance(agg_llvm, ir.BaseStructType)
-                  else (agg_llvm.element,) * agg_llvm.count)
-        if len(values) != len(fields):
-            raise TypeError('Aggregate initializer field count mismatch')
-        values = [storage_value(None, value, field)
-                  for value, field in zip(values, fields)]
         return ir.Constant(agg_llvm, values)
     agg = ir.Constant(agg_llvm, ir.Undefined)
     for i, v in enumerate(values):

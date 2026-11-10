@@ -172,7 +172,7 @@ class LLVMCompiler:
     
     def create_module(self, name: str = "main"):
         """Create a new LLVM module"""
-        self.module = ir.Module(name=name)
+        self.module = ir.Module(name=name, context=ir.Context())
         triple = default_target_triple()
         self.module.triple = triple
         # Set data layout for correct struct size calculation

@@ -233,6 +233,39 @@ class RecordTypeSemanticsTest(unittest.TestCase):
                       canonical_record_type(concrete))
         self.assertEqual(get_type_id(quoted), get_type_id(concrete))
 
+    def test_completion_canonicalizes_before_either_query_order(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse), CompileSession():
+                target = create_struct_type([i32], ['value'],
+                         python_class=type('PendingTarget', (), {}))
+                first = create_struct_type([ptr['PendingTarget']], ['next'],
+                        python_class=type('CompletedView', (), {}))
+                second = create_struct_type([ptr[target]], ['next'],
+                         python_class=type('CompletedView', (), {}))
+                canonical_record_type(first)
+                canonical_record_type(second)
+                mark_type_defined('PendingTarget', target)
+                left, right = (second, first) if reverse else (first, second)
+                self.assertIs(canonical_record_type(left), canonical_record_type(right))
+
+    def test_prepared_expression_refreshes_its_index_dependents(self):
+        from pythoc.type_resolver import TypeReference, TypeResolver
+
+        class Constructor:
+            def __class_getitem__(cls, value):
+                return i64
+
+        reference = TypeReference('Constructor[i32]', {
+            'Constructor': Constructor, 'i32': i32})
+        first = create_struct_type([ptr[reference]], ['next'],
+                python_class=type('ExpressionView', (), {}))
+        second = create_struct_type([ptr[i64]], ['next'],
+                 python_class=type('ExpressionView', (), {}))
+        canonical_record_type(first)
+        canonical_record_type(second)
+        TypeResolver.resolve_type(reference, freeze=True)
+        self.assertIs(canonical_record_type(second), canonical_record_type(first))
+
     def test_union_decorator_and_its_type_are_the_same_field_type(self):
         wrapped = union(type('Payload', (), {
             '__annotations__': {'x': i32}, '__module__': __name__}))

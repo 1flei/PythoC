@@ -175,7 +175,8 @@ class llvm_asm(BuiltinFunction):
                     logger.error('llvm_asm() indirect operands require a typed pointer',
                                  node=node, exc_type=TypeError)
                 pointee = pointer_type._resolve_pointee(visitor.ctx)
-                if pointee is None or pointee is void or isinstance(pointee, str):
+                from ..type_resolver import TypeReference
+                if pointee is None or pointee is void or isinstance(pointee, (str, TypeReference)):
                     logger.error('llvm_asm() indirect operands require a complete pointee type',
                                  node=node, exc_type=TypeError)
                 element_types[index] = pointee.get_llvm_type(visitor.module.context)

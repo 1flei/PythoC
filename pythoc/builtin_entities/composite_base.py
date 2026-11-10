@@ -10,7 +10,6 @@ with shared functionality for:
 """
 
 import ast
-import threading
 from typing import Any, Dict, List, Optional, Tuple
 from llvmlite import ir
 
@@ -18,11 +17,6 @@ from .base import BuiltinType
 from ..logger import logger
 from ..valueref import ValueRef
 from ..target_layout import NATURAL_LAYOUT
-
-
-# Serializes lazy field-type resolution (forward references) so concurrent
-# compilations materialize the resolved fields exactly once per class.
-_field_resolution_lock = threading.RLock()
 
 
 class CompositeType(BuiltinType):
@@ -183,6 +177,8 @@ class CompositeType(BuiltinType):
     
     @classmethod
     def get_layout(cls):
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         cls._ensure_field_types_resolved()
         if cls._field_types is None:
             from ..target_layout import TypeLayout
@@ -198,25 +194,12 @@ class CompositeType(BuiltinType):
     
     @classmethod
     def _ensure_field_types_resolved(cls):
-        """Resolve field types lazily if needed (for forward references)
-        
-        This method handles forward references by resolving string type names
-        to actual type objects. It's called automatically before field access.
-        
-        Forward references can occur when:
-        - Struct A contains field of type B, and B is defined later
-        - Recursive types (struct containing pointer to itself)
-        
-        Resolution strategy:
-        1. Use saved type namespace if available
-        2. Add all registered structs/types to namespace
-        3. Add all defined types from forward_ref system
-        4. Resolve string field types using TypeResolver
-        """
+        """Resolve scoped field references and refresh the storage projection."""
         if cls._field_types_resolved or not cls._needs_type_resolution:
             return
 
-        with _field_resolution_lock:
+        from ..session import CompileSession
+        with CompileSession.current().type_graph._lock:
             # Double-checked: another thread may have resolved while we waited.
             if cls._field_types_resolved or not cls._needs_type_resolution:
                 return
@@ -226,46 +209,27 @@ class CompositeType(BuiltinType):
     def _resolve_field_types_locked(cls):
         """Resolve string field types to actual type objects.
 
-        Caller must hold _field_resolution_lock and have checked
+        Caller must hold the session type graph lock and have checked
         _needs_type_resolution / _field_types_resolved.
         """
         from ..type_resolver import TypeResolver
-        from ..registry import get_unified_registry
-        
-        # Build namespace for type resolution
-        type_namespace = cls._type_namespace or {}
-        
-        # Add all registered structs to namespace
-        registry = get_unified_registry()
-        for struct_name in registry.list_structs():
-            struct_info = registry.get_struct(struct_name)
-            if struct_info and struct_info.python_class:
-                type_namespace[struct_info.name] = struct_info.python_class
-        
-        # Add all defined types from forward_ref system
-        from ..session import CompileSession
-        type_namespace.update(
-            CompileSession.current().forward_refs.defined_types_snapshot())
-        
-        type_resolver = TypeResolver(user_globals=type_namespace)
-        
-        # Resolve string field types
-        resolved_types = []
-        for ftype in cls._field_types:
-            if isinstance(ftype, str):
-                try:
-                    resolved = type_resolver.parse_annotation(ftype)
-                    if resolved is None:
-                        logger.error(f"Cannot resolve field type: {ftype}", node=None, exc_type=TypeError)
-                    resolved_types.append(resolved)
-                except Exception as e:
-                    logger.error(f"Failed to resolve field type '{ftype}': {e}", node=None, exc_type=TypeError)
-            else:
-                resolved_types.append(ftype)
-        
-        cls._field_types = resolved_types
-        cls._field_types_resolved = True
-    
+
+        owner = getattr(cls, '_python_class', None)
+        if owner is not None:
+            from ..decorators.class_statics import split_static_members
+            for _, _, field, _ in owner._type_declaration:
+                TypeResolver.resolve_type(field, cls._type_namespace, required=False)
+            fields = split_static_members(owner, cls._field_types)
+            names = [name for name, _ in owner._struct_fields]
+            if (names != cls._field_names or len(fields) != len(cls._field_types)
+                    or any(a is not b for a, b in zip(fields, cls._field_types))):
+                cls._field_types[:] = fields
+                cls._field_names[:] = names
+                cls._llvm_field_map = None
+        else:
+            for field in cls._field_types:
+                TypeResolver.resolve_type(field, cls._type_namespace, required=False)
+
     @classmethod
     def get_field_index(cls, name: str) -> int:
         """Get field index by name
@@ -312,7 +276,8 @@ class CompositeType(BuiltinType):
         """
         if cls._field_types is None or index >= len(cls._field_types):
             logger.error(f"{cls.get_name()} field index {index} out of range", node=None, exc_type=IndexError)
-        return cls._field_types[index]
+        from ..type_resolver import TypeResolver
+        return TypeResolver.resolve_type(cls._field_types[index], cls._type_namespace, freeze=True)
     
     @classmethod
     def can_be_called(cls) -> bool:
@@ -340,7 +305,7 @@ class CompositeType(BuiltinType):
                 - needs_type_resolution: bool, True if forward refs exist
         """
         from ..type_resolver import TypeResolver
-        from ..decorators.annotation_resolver import build_annotation_namespace, resolve_string_annotation
+        from ..decorators.annotation_resolver import build_annotation_namespace
         from ..utils import normalize_suffix
         import sys
         
@@ -364,11 +329,13 @@ class CompositeType(BuiltinType):
         # Build comprehensive namespace for type resolution
         type_namespace = build_annotation_namespace(
             user_globals,
-            is_dynamic=is_dynamic
+            is_dynamic=is_dynamic, definition=target_cls
         )
         
         # Add the class itself to namespace for self-referential types
         type_namespace[target_cls.__name__] = target_cls
+        type_namespace.type_owner_name = target_cls.__name__
+        type_namespace.type_owner_namespace = target_cls.__dict__
         
         type_resolver = TypeResolver(user_globals=type_namespace)
         
@@ -376,20 +343,14 @@ class CompositeType(BuiltinType):
         parsed_field_types = []
         for fname, ftype in target_cls._struct_fields:
             if isinstance(ftype, str):
-                # A NameError here means the annotation names a type that is
-                # not visible yet (defined later, or registered by another
-                # module via mark_type_defined).  Keep the annotation as a
-                # string so needs_type_resolution stays True and the lazy
-                # resolution path (forward-ref callbacks plus the session
-                # registry snapshot in _resolve_field_types_locked) can
-                # resolve it once the type is actually defined.
-                try:
-                    resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
-                except NameError:
-                    resolved_type = ftype
-                parsed_field_types.append(resolved_type)
+                # Delay the whole expression until its dependencies exist.
+                resolved_type = type_resolver.parse_annotation(ftype, defer_unresolved=True)
             else:
-                parsed_field_types.append(ftype)
+                resolved_type = ftype
+            from ..type_resolver import TypeResolver
+            parsed_field_types.append(TypeResolver.bind_type_references(
+                resolved_type, type_namespace,
+                self_types={target_cls.__name__: target_cls}))
 
         # Class-level static members (``name: static[T] = ...``) are not
         # instance fields; split them out before the unified type is built.
@@ -397,7 +358,7 @@ class CompositeType(BuiltinType):
         parsed_field_types = split_static_members(target_cls, parsed_field_types)
 
         field_names = [fname for fname, ftype in target_cls._struct_fields]
-        needs_type_resolution = any(isinstance(ft, str) for ft in parsed_field_types)
+        needs_type_resolution = True
         
         return {
             'field_types': parsed_field_types,
@@ -405,42 +366,6 @@ class CompositeType(BuiltinType):
             'type_namespace': type_namespace,
             'needs_type_resolution': needs_type_resolution,
         }
-    
-    @classmethod
-    def _setup_forward_ref_callbacks(cls, unified_type, target_cls, parsed_field_types, type_namespace):
-        """Setup forward reference callbacks for unresolved types
-        
-        Args:
-            unified_type: The created type (StructType/UnionType subclass)
-            target_cls: Original decorated class
-            parsed_field_types: List of parsed field types (may contain strings)
-            type_namespace: Type resolution namespace
-        """
-        from ..forward_ref import register_forward_ref_callback, extract_type_names_from_annotation
-        from ..type_resolver import TypeResolver
-        
-        for field_index, (fname, ftype) in enumerate(target_cls._struct_fields):
-            if isinstance(parsed_field_types[field_index], str):
-                type_str = parsed_field_types[field_index]
-                referenced_types = extract_type_names_from_annotation(type_str)
-                
-                for ref_type_name in referenced_types:
-                    def make_callback(idx, type_str_copy, namespace_copy, ref_type_name_copy):
-                        def callback(resolved_type_obj):
-                            namespace_copy[ref_type_name_copy] = resolved_type_obj
-                            type_resolver_cb = TypeResolver(user_globals=namespace_copy)
-                            try:
-                                new_parsed = type_resolver_cb.parse_annotation(type_str_copy)
-                                if new_parsed is not None:
-                                    unified_type._field_types[idx] = new_parsed
-                            except Exception:
-                                pass
-                        return callback
-                    
-                    register_forward_ref_callback(
-                        ref_type_name,
-                        make_callback(field_index, type_str, type_namespace.copy(), ref_type_name)
-                    )
     
     @classmethod
     def _link_class_to_type(cls, target_cls, unified_type, suffix=None):

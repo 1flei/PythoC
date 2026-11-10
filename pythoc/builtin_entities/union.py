@@ -13,6 +13,16 @@ class UnionType(CompositeType):
     _is_union = True
     
     @classmethod
+    def map_type_components(cls, mapper):
+        if getattr(cls, '_python_class', None) is not None or cls._field_types is None:
+            return cls
+        fields = [mapper(field) for field in cls._field_types]
+        if all(a is b for a, b in zip(fields, cls._field_types)):
+            return cls
+        return create_union_type(fields, cls._field_names,
+                                 layout_config=cls._layout_config)
+
+    @classmethod
     def get_name(cls) -> str:
         return 'union'
     
@@ -24,6 +34,8 @@ class UnionType(CompositeType):
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get backing storage matching the semantic union layout."""
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         if cls._field_types is None:
             logger.error("union type requires field types", node=None, exc_type=TypeError)
 
@@ -43,16 +55,19 @@ class UnionType(CompositeType):
     def get_ctypes_type(cls):
         """Get a ctypes union with the same member-driven alignment."""
         import ctypes
+        from ..type_graph import prepare_type
+        prepare_type(cls)
 
-        cached = getattr(cls, '_ctypes_union_cache', None)
-        if cached is not None:
-            return cached
+        from ..session import CompileSession
+        cache = CompileSession.current().type_graph.ctypes_types
+        if cls in cache:
+            return cache[cls]
 
         from ..target_layout import NATURAL_LAYOUT
         if not getattr(cls, '_layout_config', NATURAL_LAYOUT).is_natural:
             from .bitfield_access import get_bit_storage_ctypes
             storage = get_bit_storage_ctypes(cls.get_layout(), 'CBitUnion')
-            cls._ctypes_union_cache = storage
+            cache[cls] = storage
             return storage
 
         cls._ensure_field_types_resolved()
@@ -79,7 +94,7 @@ class UnionType(CompositeType):
         )
         from ..target_layout import validate_ctypes_layout
         validate_ctypes_layout(cls, union_class)
-        cls._ctypes_union_cache = union_class
+        cache[cls] = union_class
         return union_class
     
     @classmethod
@@ -88,6 +103,8 @@ class UnionType(CompositeType):
             from ..target_layout import TypeLayout
             return TypeLayout.empty()
 
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         cls._ensure_field_types_resolved()
         from ..target_layout import get_target_layout, get_type_layout
         from ..target_layout import NATURAL_LAYOUT, bit_aggregate_layout
@@ -379,11 +396,6 @@ class union(UnionType):
         # Setup forward reference handling if needed
         if parsed['needs_type_resolution']:
             unified_type._needs_type_resolution = True
-            unified_type._type_namespace = parsed['type_namespace']
-            cls._setup_forward_ref_callbacks(
-                unified_type, target_cls,
-                parsed['field_types'], parsed['type_namespace']
-            )
         
         # Link class to type and register
         cls._link_class_to_type(target_cls, unified_type, suffix)

@@ -3,9 +3,11 @@ Unit tests for forward reference handling.
 """
 
 import unittest
-from unittest.mock import patch
 
-from pythoc.builtin_entities.composite_base import CompositeType
+from llvmlite import ir
+
+from pythoc import i32, i64, struct
+from pythoc.decorators.structs import compile_dynamic_class
 from pythoc.decorators import clear_registry
 from pythoc.forward_ref import clear_forward_ref_state, is_type_defined, mark_type_defined
 
@@ -28,49 +30,18 @@ class TestForwardRefState(unittest.TestCase):
 
         self.assertFalse(is_type_defined("Node"))
 
-    def test_forward_ref_callbacks_bind_each_referenced_type(self):
-        """Each callback should update the matching unresolved name."""
-        callbacks = {}
-        seen_namespaces = []
+    def test_field_expression_waits_for_all_referenced_types(self):
+        class PairHolder:
+            pair: 'struct[LaterA, LaterB]'
 
-        class DummyUnifiedType:
-            _field_types = [None]
-
-        class DummyTarget:
-            _struct_fields = [("field", "tuple[A, B]")]
-
-        class FakeResolver:
-            def __init__(self, user_globals):
-                self.user_globals = user_globals
-
-            def parse_annotation(self, _annotation):
-                seen_namespaces.append(dict(self.user_globals))
-                return ("parsed", dict(self.user_globals))
-
-        def capture_callback(type_name, callback):
-            callbacks[type_name] = callback
-
-        with patch(
-            "pythoc.forward_ref.register_forward_ref_callback",
-            side_effect=capture_callback,
-        ), patch("pythoc.type_resolver.TypeResolver", FakeResolver):
-            CompositeType._setup_forward_ref_callbacks(
-                DummyUnifiedType,
-                DummyTarget,
-                ["tuple[A, B]"],
-                {},
-            )
-
-        self.assertIn("A", callbacks)
-        self.assertIn("B", callbacks)
-
-        callbacks["A"]("resolved_a")
-        self.assertEqual(seen_namespaces[-1]["A"], "resolved_a")
-        self.assertNotIn("B", seen_namespaces[-1])
-
-        callbacks["B"]("resolved_b")
-        self.assertEqual(seen_namespaces[-1]["B"], "resolved_b")
-        self.assertNotIn("A", seen_namespaces[-1])
+        holder = compile_dynamic_class(PairHolder)
+        mark_type_defined('LaterA', i32)
+        with self.assertRaisesRegex(NameError, 'LaterB'):
+            holder.get_llvm_type(ir.Context())
+        mark_type_defined('LaterB', i64)
+        lowered = holder.get_llvm_type(ir.Context())
+        self.assertEqual(lowered.elements[0].elements,
+                         (ir.IntType(32), ir.IntType(64)))
 
 
 if __name__ == "__main__":

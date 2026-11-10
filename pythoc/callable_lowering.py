@@ -177,18 +177,8 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
     # Rebind quoted (string) pointees against the callee's own visible
     # namespaces and the session registry, so the declaration here matches
     # the definition in the callee's module.
-    from .builtin_entities.base import (
-        lookup_type_name_in_globals, rebind_lazy_type_names,
-    )
-    from .forward_ref import get_defined_type
-    binding = getattr(func_info, 'binding_state', None)
-    callee_globals = getattr(binding, 'compilation_globals', None)
-
-    def _lookup(name):
-        resolved = lookup_type_name_in_globals(callee_globals, name)
-        if resolved is not None:
-            return resolved
-        return get_defined_type(name)
+    from .type_resolver import TypeResolver
+    TypeResolver.resolve_signature_types(func_info)
 
     # Build LLVM parameter types from PC type hints
     param_llvm_types = []
@@ -200,7 +190,6 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
                 f"has no valid PC type (got {param_type!r})",
                 node=node, exc_type=TypeError,
             )
-        param_type = rebind_lazy_type_names(param_type, _lookup)
         param_llvm_types.append(param_type.get_llvm_type(module_context))
 
     return_type = func_info.return_type_hint
@@ -210,7 +199,7 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
             f"has no valid PC type (got {return_type!r})",
             node=node, exc_type=TypeError,
         )
-    return_llvm_type = rebind_lazy_type_names(return_type, _lookup).get_llvm_type(module_context)
+    return_llvm_type = return_type.get_llvm_type(module_context)
 
     # Declare with C ABI via LLVMBuilder
     from .builder import LLVMBuilder

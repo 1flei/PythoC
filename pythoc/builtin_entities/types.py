@@ -133,17 +133,12 @@ class ptr(BuiltinType):
 
     @classmethod
     def _resolve_pointee(cls, ctx=None):
-        """Resolve a pointee using visible bindings, then the session namespace."""
+        """Resolve through the common definition-scoped type resolver."""
+        from ..type_resolver import TypeResolver
         pointee = cls.pointee_type
-        if isinstance(pointee, str):
-            from .base import lookup_ctx_type_name
-            from ..forward_ref import get_defined_type
-            resolved = lookup_ctx_type_name(ctx, pointee)
-            if resolved is None:
-                resolved = get_defined_type(pointee)
-            if resolved is not None:
-                return resolved
-        return pointee
+        resolved = TypeResolver.resolve_type(
+            pointee, getattr(ctx, 'user_globals', None), required=False)
+        return pointee if resolved is None else resolved
 
     @classmethod
     def get_name(cls) -> str:
@@ -161,12 +156,17 @@ class ptr(BuiltinType):
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM pointer type"""
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         if cls.pointee_type is not None:
             pointee = cls._resolve_pointee()
+            from ..type_resolver import TypeResolver
+            TypeResolver.resolve_type(cls.pointee_type, required=False, freeze=True)
 
             # An unresolved pointee has no layout. Its pointer representation
             # is an address; the PythoC name remains in the semantic type.
-            if isinstance(pointee, str):
+            from ..type_resolver import TypeReference
+            if isinstance(pointee, (str, TypeReference)):
                 return ir.PointerType(ir.IntType(8))
 
             # ptr[void] -> i8* (same as unspecialized ptr)
@@ -275,7 +275,8 @@ class ptr(BuiltinType):
         from ..type_converter import get_base_type
         pointer_type = get_base_type(left.type_hint)
         pointee = pointer_type._resolve_pointee(getattr(visitor, 'ctx', None))
-        if isinstance(pointee, str):
+        from ..type_resolver import TypeReference
+        if isinstance(pointee, (str, TypeReference)):
             logger.error(
                 f"Pointer arithmetic requires a complete pointee type: {pointee}",
                 node=node, exc_type=TypeError)
@@ -321,7 +322,8 @@ class ptr(BuiltinType):
             
             # Get element size
             pointee_type = cls._resolve_pointee(getattr(visitor, 'ctx', None))
-            if isinstance(pointee_type, str):
+            from ..type_resolver import TypeReference
+            if isinstance(pointee_type, (str, TypeReference)):
                 logger.error(
                     f"Pointer subtraction requires a complete pointee type: {pointee_type}",
                     node=node, exc_type=TypeError)
@@ -363,7 +365,8 @@ class ptr(BuiltinType):
         if pointee_type_hint is None:
             logger.error(f"Cannot infer pointee type for pointer subscript {base}", node=node, exc_type=TypeError)
 
-        if isinstance(pointee_type_hint, str):
+        from ..type_resolver import TypeReference
+        if isinstance(pointee_type_hint, (str, TypeReference)):
             logger.error(
                 f"Cannot dereference pointer to incomplete type '{pointee_type_hint}' "
                 f"(no visible binding or registered type by that name)",
@@ -418,6 +421,13 @@ class ptr(BuiltinType):
         base = cls.handle_add(visitor, base, index, node)
         return cls.handle_deref(visitor, base, node)
     
+    @classmethod
+    def map_type_components(cls, mapper):
+        pointee = mapper(cls.pointee_type)
+        if pointee is cls.pointee_type:
+            return cls
+        return cls.handle_type_subscript(((None, pointee),))
+
     @classmethod
     def handle_type_subscript(cls, items):
         """Handle type subscript: ptr[T] or ptr[T, dims...]
@@ -561,7 +571,8 @@ class ptr(BuiltinType):
         from ..type_converter import get_base_type
         pointer_type = get_base_type(current_type_hint)
         struct_type = pointer_type._resolve_pointee(getattr(visitor, 'ctx', None))
-        if isinstance(struct_type, str):
+        from ..type_resolver import TypeReference
+        if isinstance(struct_type, (str, TypeReference)):
             logger.error(
                 f"ptr attribute access: unresolved forward reference '{struct_type}'",
                 node=node, exc_type=TypeError)

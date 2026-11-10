@@ -130,6 +130,8 @@ class ValueRefDispatcher:
                 exc_type=TypeError,
             )
 
+        from .type_graph import prepare_type
+        prepare_type(type_obj)
         return handle_type_call(self.visitor, func_ref, args, node)
 
     def explicit_cast(self, target_type, value: ValueRef, node: Optional[ast.AST] = None):

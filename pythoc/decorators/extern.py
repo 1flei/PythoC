@@ -103,6 +103,12 @@ class ExternFunctionWrapper:
         self._raw_annotations = dict(getattr(func, '__annotations__', None) or {})
         self._signature = inspect.signature(func)
         self._resolved_types = None
+        from ..type_resolver import TypeResolver
+        names = set()
+        for annotation in self._raw_annotations.values():
+            if isinstance(annotation, str):
+                names.update(TypeResolver.expression_names(annotation))
+        self._annotation_namespace = TypeResolver.capture_type_namespace(names, definition=func)
 
     def _resolve_annotation(self, annotation, owner, func, func_name):
         """Resolve one string annotation to a type object.
@@ -111,23 +117,16 @@ class ExternFunctionWrapper:
         to the session forward-ref registry (fail-loud with context when
         the registry cannot help either).
         """
-        from ..type_resolver import TypeResolver
         from .annotation_resolver import build_annotation_namespace
 
         is_dynamic = '.<locals>.' in func.__qualname__
-        type_resolver = TypeResolver(user_globals=func.__globals__)
         eval_namespace = build_annotation_namespace(
-            func.__globals__, is_dynamic=is_dynamic,
+            self._annotation_namespace, is_dynamic=is_dynamic,
         )
         try:
-            return type_resolver.parse_annotation(annotation)
+            from ..type_resolver import TypeResolver
+            return TypeResolver.resolve_type(annotation, eval_namespace, freeze=True)
         except NameError as e:
-            import re as _re
-            if _re.fullmatch(r'[A-Za-z_]\w*', annotation.strip()):
-                from ..forward_ref import get_defined_type
-                defined = get_defined_type(annotation.strip())
-                if defined is not None:
-                    return defined
             raise NameError(
                 f"@extern '{func_name}': {owner} annotation {annotation!r} "
                 f"is not defined in module {func.__module__!r} nor in the "

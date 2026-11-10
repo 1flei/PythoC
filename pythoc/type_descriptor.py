@@ -6,6 +6,7 @@ A digest of that wire form is only an index, never proof of equality.
 """
 
 import base64
+from collections import defaultdict, deque
 import json
 import math
 import uuid
@@ -129,39 +130,103 @@ def leaf_key(pc_type):
     raise TypeError(f'Unsupported PythoC type leaf: {pc_type!r}')
 
 
-def type_key(pc_type, resolver=None):
-    """Project a type graph to a canonical finite bisimulation quotient.
+def _bisimulation_classes(heads, edges):
+    """Refine ordered type edges using smaller-half partition splitting."""
+    groups = defaultdict(set)
+    for node, (head, children) in enumerate(zip(heads, edges)):
+        groups[(head, len(children))].add(node)
+    blocks = [groups[key] for key in sorted(groups)]
+    classes = [0] * len(heads)
+    for number, block in enumerate(blocks):
+        for node in block:
+            classes[node] = number
+    predecessors = [[] for _ in heads]
+    for source, children in enumerate(edges):
+        for position, target in enumerate(children):
+            predecessors[target].append((source, position))
+    pending = deque(range(len(blocks)))
+    queued = set(pending)
+    while pending:
+        splitter = pending.popleft()
+        queued.remove(splitter)
+        incoming = defaultdict(set)
+        for target in blocks[splitter]:
+            for source, position in predecessors[target]:
+                incoming[position].add(source)
+        for position in sorted(incoming):
+            sources = incoming[position]
+            affected = defaultdict(set)
+            for source in sources:
+                affected[classes[source]].add(source)
+            for number in sorted(affected):
+                selected = affected[number]
+                block = blocks[number]
+                if len(selected) == len(block):
+                    continue
+                if len(selected) > len(block) // 2:
+                    selected = block - selected
+                block.difference_update(selected)
+                other = len(blocks)
+                blocks.append(selected)
+                for node in selected:
+                    classes[node] = other
+                queued.add(other)
+                pending.append(other)
+    return classes
+
+
+def _type_projection(pc_type, resolver=None, *, _validate=True, on_unresolved=None):
+    """Read each reachable type into an ordered finite graph.
 
     This treats a forward-declared pointer and a completed pointer as the
     same type once the name resolves, even if they unfold a recursive record
     through different numbers of intermediate Python specialization objects.
     """
     from .type_graph import (
-        _owner, _resolve, _shape, canonical_record_type, named_record,
-        record_name,
+        _owner, _resolve, _shape, named_record, record_name,
+        validate_type_graph,
     )
     heads = []
     edges = []
     indices = {}
+    objects = []
+
+    validated = False
 
     def normalize(current, allow_incomplete):
-        if isinstance(current, str):
+        nonlocal validated
+        from .type_resolver import TypeReference, TypeResolver
+        if isinstance(current, (str, TypeReference)):
             resolved = resolver(current) if resolver is not None else None
             if resolved is None:
                 resolved = _resolve(current)
             if resolved is None:
+                if on_unresolved is not None:
+                    expression = (current.expression
+                                  if isinstance(current, TypeReference) else current)
+                    namespace = current.namespace if isinstance(current, TypeReference) else None
+                    on_unresolved(current, TypeResolver._missing_expression_names(
+                        expression, namespace))
                 from .type_id import note_unresolved_name_token
                 note_unresolved_name_token()
                 from .session import CompileSession
-                return ('forward', _opaque(CompileSession.current()), current)
+                return ('forward', _opaque(CompileSession.current()),
+                        TypeResolver.reference_key(current))
             current = resolved
         current = _resolve(current)
         if current is None:
             return ('void',)
+        if named_record(current) is not None and any(
+                field is None for field in current._field_types or ()):
+            return ('incomplete-record', _opaque(_owner(current)), record_name(current))
         try:
-            return canonical_record_type(current)
-        except TypeError as error:
-            if not allow_incomplete or 'Incomplete PythoC' not in str(error):
+            if _validate and not validated and named_record(current) is not None:
+                validate_type_graph(current)
+                validated = True
+            return current
+        except (TypeError, NameError) as error:
+            if not allow_incomplete or (
+                    isinstance(error, TypeError) and 'Incomplete PythoC' not in str(error)):
                 raise
             view = named_record(current)
             if view is None:
@@ -178,38 +243,30 @@ def type_key(pc_type, resolver=None):
             return indices[key]
         index = len(heads)
         indices[key] = index
+        objects.append(current)
         heads.append(None)
         edges.append(None)
-        if isinstance(current, tuple):
-            head, children = current, ()
-        else:
-            head, children = _shape(current)
-        heads[index] = _wire(head).decode('utf-8')
-        edges[index] = tuple(add(child, allow_incomplete or not stored)
-                             for child, stored in children)
+        pending.append((index, current, allow_incomplete))
         return index
 
     # A type key can be requested before a declaration is complete (for a
     # specialization name). Value-use validation remains TypeGraph's job.
+    pending = []
     root = add(pc_type, allow_incomplete=True)
+    for index, current, allow_incomplete in pending:
+        head, children = (current, ()) if isinstance(current, tuple) else _shape(current)
+        heads[index] = _wire(head).decode('utf-8')
+        edges[index] = tuple(add(child, allow_incomplete or not stored)
+                             for child, stored in children)
+    return root, objects, heads, edges
+
+
+def type_key(pc_type, resolver=None, *, _validate=True):
+    """Project a type to a lossless, rooted finite bisimulation quotient."""
+    root, _, heads, edges = _type_projection(pc_type, resolver, _validate=_validate)
     # Class refinement computes the greatest structural equivalence of this
     # finite graph. Sharing and cycle-unrolling do not affect the result.
-    def classify(signatures):
-        ordered = sorted(set(signatures))
-        numbers = {signature: number for number, signature in enumerate(ordered)}
-        return tuple(numbers[signature] for signature in signatures)
-
-    classes = classify(tuple((head, len(children)) for head, children in zip(heads, edges)))
-    while True:
-        signatures = tuple((classes[index], head,
-                            tuple(classes[child] for child in children))
-                           for index, (head, children) in enumerate(zip(heads, edges)))
-        updated = classify(signatures)
-        # Including the previous class makes each pass a strict refinement.
-        # Once the class count stops growing, only numeric labels could move.
-        if len(set(updated)) == len(set(classes)):
-            break
-        classes = updated
+    classes = _bisimulation_classes(heads, edges)
     representatives = {}
     for index, number in enumerate(classes):
         representatives.setdefault(number, index)
@@ -227,6 +284,97 @@ def type_key(pc_type, resolver=None):
             children.append(positions[child_class])
         output.append((heads[index], tuple(children)))
     return ('graph', tuple(output))
+
+
+class StructuralTypeIndex:
+    """Intern finite type graphs without serializing every rooted subgraph.
+
+    Acyclic edges use interned child identities. Cyclic components use a
+    canonical quotient shared by all of their members. Dictionary equality
+    checks the full component, so a hash collision cannot merge types.
+    """
+
+    def __init__(self):
+        self.components = {}
+        self.next_identity = 0
+
+    def intern(self, pc_type, *, on_unresolved=None):
+        _, objects, heads, edges = _type_projection(
+            pc_type, _validate=False, on_unresolved=on_unresolved)
+        classes = _bisimulation_classes(heads, edges)
+        representatives = {}
+        for node, number in enumerate(classes):
+            representatives.setdefault(number, node)
+        numbers = list(representatives)
+        positions = {number: pos for pos, number in enumerate(numbers)}
+        qheads = [heads[representatives[number]] for number in numbers]
+        qedges = [tuple(positions[classes[child]] for child in
+                        edges[representatives[number]]) for number in numbers]
+        reverse = [[] for _ in numbers]
+        for node, children in enumerate(qedges):
+            for child in children:
+                reverse[child].append(node)
+        visited, finished = set(), []
+        for root in range(len(numbers)):
+            pending = [(root, False)]
+            while pending:
+                node, finish = pending.pop()
+                if finish:
+                    finished.append(node)
+                elif node not in visited:
+                    visited.add(node)
+                    pending.append((node, True))
+                    pending.extend((child, False) for child in qedges[node]
+                                   if child not in visited)
+        components, assigned = [], set()
+        for root in reversed(finished):
+            if root in assigned:
+                continue
+            component, pending = [], [root]
+            assigned.add(root)
+            while pending:
+                node = pending.pop()
+                component.append(node)
+                for parent in reverse[node]:
+                    if parent not in assigned:
+                        assigned.add(parent)
+                        pending.append(parent)
+            components.append(component)
+        identities = {}
+        for component in reversed(components):
+            local = {node: pos for pos, node in enumerate(component)}
+            local_heads = [qheads[node] for node in component]
+            local_edges = []
+            external = {}
+            for node in component:
+                children = []
+                for child in qedges[node]:
+                    if child in local:
+                        children.append(local[child])
+                    else:
+                        identity = identities[child]
+                        if identity not in external:
+                            external[identity] = len(local_heads)
+                            local_heads.append(_wire(('external', identity)).decode('ascii'))
+                        children.append(external[identity])
+                local_edges.append(tuple(children))
+            local_edges.extend(() for _ in external)
+            partition = _bisimulation_classes(local_heads, local_edges)
+            order = sorted(component, key=lambda node: partition[local[node]])
+            ranks = {node: rank for rank, node in enumerate(order)}
+            key = tuple((qheads[node], tuple(
+                ('internal', ranks[child]) if child in local
+                else ('external', identities[child])
+                for child in qedges[node])) for node in order)
+            tokens = self.components.get(key)
+            if tokens is None:
+                tokens = tuple(range(self.next_identity,
+                                     self.next_identity + len(order)))
+                self.next_identity += len(order)
+                self.components[key] = tokens
+            identities.update(zip(order, tokens))
+        return {id(value): identities[positions[classes[node]]]
+                for node, value in enumerate(objects) if not isinstance(value, tuple)}
 
 
 def encode_type_key(key):
@@ -259,7 +407,8 @@ def _flags(pc_type):
     flags, seen = {}, set()
     while pc_type is not None and id(pc_type) not in seen:
         seen.add(id(pc_type))
-        if isinstance(pc_type, str):
+        from .type_resolver import TypeReference
+        if isinstance(pc_type, (str, TypeReference)):
             from .type_graph import _resolve
             pc_type = _resolve(pc_type)
             if pc_type is None:

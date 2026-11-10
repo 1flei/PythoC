@@ -120,9 +120,10 @@ def attach_class_methods(
     # ``ptr[_Vector]`` inside ``def push_back(...)``). We do not mutate the
     # caller's dict.
     method_symbols: Dict[str, Any] = dict(captured_symbols or {})
-    method_symbols.setdefault(target_cls.__name__, target_cls)
-    if source_cls is not target_cls:
-        method_symbols.setdefault(source_cls.__name__, target_cls)
+    self_types = {target_cls.__name__: target_cls,
+                  source_cls.__name__: target_cls,
+                  source_cls.__qualname__.rsplit('.', 1)[-1]: target_cls}
+    method_symbols.update(self_types)
 
     # Imported lazily to avoid circular import at module load time.
     from .compile import _compile_impl
@@ -141,6 +142,14 @@ def attach_class_methods(
         if member is None:
             # Should not happen for AST-discovered methods, but be defensive.
             continue
+
+        from ..type_resolver import TypeResolver
+        annotations = getattr(member, '__annotations__', None)
+        if annotations:
+            member.__annotations__ = {
+                parameter: (pc_type if isinstance(pc_type, str) else
+                            TypeResolver.bind_type_references(pc_type, self_types=self_types))
+                for parameter, pc_type in annotations.items()}
 
         # Already-compiled wrapper from an explicit @compile(...) on the
         # method: keep it verbatim, just make sure it lives on target_cls.

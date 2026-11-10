@@ -91,7 +91,7 @@ def compile_dynamic_class(
     
     # === BUILD TYPE RESOLUTION NAMESPACE ===
     from ..type_resolver import TypeResolver
-    from .annotation_resolver import build_annotation_namespace, resolve_string_annotation
+    from .annotation_resolver import build_annotation_namespace
     
     # Get globals from the module where the class is defined
     user_globals = {}
@@ -107,39 +107,33 @@ def compile_dynamic_class(
     # Build comprehensive namespace for type resolution
     type_namespace = build_annotation_namespace(
         user_globals,
-        is_dynamic=is_dynamic
+        is_dynamic=is_dynamic, definition=cls
     )
     
     # Add the class itself to namespace for self-referential types
     # Use BOTH original name and current name (after renaming)
     type_namespace[original_cls_name] = cls
     type_namespace[cls.__name__] = cls
+    type_namespace.type_owner_name = original_cls_name
+    type_namespace.type_owner_namespace = cls.__dict__
     
     type_resolver = TypeResolver(user_globals=type_namespace)
     
     # === RESOLVE FIELD TYPES ===
-    from ..builtin_entities.base import rebind_lazy_type_names
 
     parsed_field_types = []
     for fname, ftype in cls._struct_fields:
         if isinstance(ftype, str):
-            # A NameError here means the annotation names a type that is not
-            # visible yet (e.g. defined later in this module, or registered by
-            # another module via mark_type_defined).  Keep the annotation as a
-            # string so the forward-ref callback machinery below and the lazy
-            # _ensure_field_types_resolved path (which folds the session
-            # registry into the namespace) can resolve it once the type is
-            # actually defined.
-            try:
-                resolved_type = resolve_string_annotation(ftype, type_namespace, type_resolver)
-            except NameError:
-                resolved_type = ftype
+            # Delay the whole expression if a dependency is not defined yet.
+            resolved_type = type_resolver.parse_annotation(ftype, defer_unresolved=True)
         else:
             resolved_type = ftype
         # Formed pointers can still carry a quoted self-reference. Bind it
         # to this declaration before a later factory call reuses its name.
         parsed_field_types.append(
-            rebind_lazy_type_names(resolved_type, type_namespace.get))
+            TypeResolver.bind_type_references(
+                resolved_type, type_namespace,
+                self_types={original_cls_name: cls, cls.__name__: cls}))
 
     # Class-level static members (``name: static[T] = ...``) are not instance
     # fields; split them out before the unified type is built.
@@ -164,39 +158,10 @@ def compile_dynamic_class(
         layout_config=layout_config,
     )
     
-    # === HANDLE FORWARD/CIRCULAR REFERENCES ===
-    # Check if any field types are still strings (unresolved forward references)
-    unified_type._needs_type_resolution = any(isinstance(ft, str) for ft in parsed_field_types)
-    if unified_type._needs_type_resolution:
-        unified_type._type_namespace = type_namespace
-        
-        # Register callbacks for unresolved field types
-        from ..forward_ref import register_forward_ref_callback, extract_type_names_from_annotation
-        
-        for field_index, (fname, ftype) in enumerate(cls._struct_fields):
-            if isinstance(parsed_field_types[field_index], str):
-                type_str = parsed_field_types[field_index]
-                referenced_types = extract_type_names_from_annotation(type_str)
-                
-                for ref_type_name in referenced_types:
-                    def make_callback(idx, type_str_copy, namespace_copy, ref_type_name_copy):
-                        def callback(resolved_type_obj):
-                            namespace_copy[ref_type_name_copy] = resolved_type_obj
-                            from ..type_resolver import TypeResolver
-                            type_resolver_cb = TypeResolver(user_globals=namespace_copy)
-                            try:
-                                new_parsed = type_resolver_cb.parse_annotation(type_str_copy)
-                                if new_parsed is not None:
-                                    unified_type._field_types[idx] = new_parsed
-                            except Exception:
-                                pass
-                        return callback
-                    
-                    register_forward_ref_callback(
-                        ref_type_name,
-                        make_callback(field_index, type_str, type_namespace.copy(), ref_type_name)
-                    )
-    
+    # Keep references scoped until their first actual lowering. Name
+    # notifications must not freeze an intermediate registry placeholder.
+    unified_type._needs_type_resolution = True
+
     # === LINK PYTHON CLASS TO UNIFIED TYPE ===
     cls._struct_type = unified_type
     cls._canonical_name = unified_type._canonical_name

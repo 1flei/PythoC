@@ -28,7 +28,7 @@ an ``@extern`` declaration.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from ..logger import logger
 
@@ -36,36 +36,32 @@ _NO_INIT = object()
 
 
 def split_static_members(cls, parsed_field_types: List[Any]) -> List[Any]:
-    """Partition ``cls._struct_fields`` into instance fields and static members.
+    """Project declarations into static and instance storage.
 
-    ``parsed_field_types`` is the resolved parallel list of
-    ``cls._struct_fields`` (string annotations already resolved where
-    possible). Entries whose resolved type carries the ``static`` or
-    ``thread_local`` qualifier are registered on ``cls._static_members`` as
-    ``{name: (pc_type, init_value)}`` and removed from ``cls._struct_fields``
-    in place, keeping the two lists index-aligned for downstream users
-    (forward-ref callbacks etc.). Unresolved string annotations cannot be
-    static and stay in the field list.
-
-    Runs at most once per class, mirroring the build-once semantics of
-    ``_struct_fields``. Returns the filtered ``parsed_field_types``.
+    Keep the original declarations: a deferred alias can change storage kind
+    before compilation fixes its binding. Repeated projections must neither
+    lose fields nor retain obsolete static members.
     """
     from ..ir_helpers import is_static, is_thread_local
+    from ..type_resolver import TypeResolver
 
-    if hasattr(cls, '_static_members'):
-        return parsed_field_types
-
-    cls._static_members: Dict[str, Tuple[Any, Any]] = {}
+    if '_type_declaration' not in cls.__dict__:
+        cls._type_declaration = tuple(
+            (name, annotation, pc_type, cls.__dict__.get(name, _NO_INIT))
+            for (name, annotation), pc_type in
+            zip(cls._struct_fields, parsed_field_types))
+    members = {}
     keep_fields = []
     keep_types = []
-    for (fname, raw_annotation), ftype in zip(cls._struct_fields, parsed_field_types):
-        if not isinstance(ftype, str) and (is_static(ftype) or is_thread_local(ftype)):
-            init_value = cls.__dict__.get(fname, _NO_INIT)
-            cls._static_members[fname] = (ftype, init_value)
+    for fname, raw_annotation, ftype, init_value in cls._type_declaration:
+        resolved = TypeResolver.resolve_type(ftype, required=False)
+        if resolved is not None and (is_static(resolved) or is_thread_local(resolved)):
+            members[fname] = (ftype, init_value)
         else:
             keep_fields.append((fname, raw_annotation))
             keep_types.append(ftype)
 
+    cls._static_members = members
     cls._struct_fields = keep_fields
     return keep_types
 
@@ -78,6 +74,9 @@ def lookup_class_static(decorated_cls, attr_name: str) -> Optional[Tuple[Any, An
     subclass) rather than to the user's Python class, so ``_python_class``
     is checked as a transparent redirect.
     """
+    from ..type_graph import prepare_type
+    from ..type_resolver import TypeResolver
+    prepare_type(decorated_cls)
     candidates = [decorated_cls]
     py_cls = getattr(decorated_cls, '_python_class', None)
     if py_cls is not None and py_cls is not decorated_cls:
@@ -87,7 +86,7 @@ def lookup_class_static(decorated_cls, attr_name: str) -> Optional[Tuple[Any, An
         members = getattr(candidate, '_static_members', None)
         if members and attr_name in members:
             pc_type, init_value = members[attr_name]
-            return pc_type, init_value, candidate
+            return TypeResolver.resolve_type(pc_type, freeze=True), init_value, candidate
     return None
 
 

@@ -12,6 +12,14 @@ class array(BuiltinType):
     dimensions = None    # Tuple of dimensions (N,) or (N, M, ...)
 
     @classmethod
+    def map_type_components(cls, mapper):
+        element = mapper(cls.element_type)
+        if element is cls.element_type:
+            return cls
+        return cls.handle_type_subscript(((None, element),) + tuple(
+            (None, dim) for dim in cls.dimensions))
+
+    @classmethod
     def is_array(cls) -> bool:
         return True
     
@@ -56,16 +64,8 @@ class array(BuiltinType):
 
     @classmethod
     def _get_element_type(cls):
-        element_type = cls.element_type
-        if isinstance(element_type, str):
-            from ..forward_ref import get_defined_type
-            resolved = get_defined_type(element_type)
-            if resolved is None:
-                logger.error(
-                    f"array: unresolved forward reference '{element_type}'",
-                    node=None, exc_type=NameError,
-                )
-            element_type = resolved
+        from ..type_resolver import TypeResolver
+        element_type = TypeResolver.resolve_type(cls.element_type)
         from ..type_descriptor import contains_linear_storage
         if (cls.dimensions and all(cls.dimensions)
                 and contains_linear_storage(element_type)):
@@ -81,12 +81,17 @@ class array(BuiltinType):
         """
         if cls.element_type is None or cls.dimensions is None:
             logger.error("array type requires element type and dimensions", node=None, exc_type=TypeError)
+
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         
         # Get element LLVM type.  A string element type is an unresolved
         # forward-ref name kept by handle_type_subscript; resolve it here
         # (same lazy resolution as ptr's string pointee), failing loudly if
         # the name was never defined.
         element_type = cls._get_element_type()
+        from ..type_resolver import TypeResolver
+        TypeResolver.resolve_type(cls.element_type, freeze=True)
         if hasattr(element_type, 'get_llvm_type'):
             elem_llvm = element_type.get_llvm_type(module_context)
         elif isinstance(element_type, ir.Type):
@@ -152,6 +157,8 @@ class array(BuiltinType):
             from ..target_layout import TypeLayout
             return TypeLayout.empty()
 
+        from ..type_graph import prepare_type
+        prepare_type(cls)
         from ..target_layout import get_target_layout, get_type_layout
         element_layout = get_type_layout(cls._get_element_type())
         return get_target_layout().array(element_layout, cls.dimensions)

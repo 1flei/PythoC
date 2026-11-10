@@ -229,8 +229,7 @@ class NullBuilder(AbstractBuilder):
 
     # ========== Aggregate Operations ==========
     
-    def extract_value(self, agg: Any, idx: Any, name: str = "",
-                      value_type_hint: Any = None) -> Any:
+    def extract_value(self, agg: Any, idx: Any, name: str = "") -> Any:
         self._raise_error("extract_value")
     
     def insert_value(self, agg: Any, value: Any, idx: Any, name: str = "") -> Any:

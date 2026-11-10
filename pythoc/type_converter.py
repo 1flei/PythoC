@@ -55,6 +55,9 @@ def strip_qualifiers(pc_type):
     """
     if pc_type is None:
         return None
+    from .type_resolver import TypeResolver
+    resolved = TypeResolver.resolve_type(pc_type, required=False)
+    pc_type = pc_type if resolved is None else resolved
     
     # Refined types are NOT qualifiers - they carry semantic constraints
     # Do NOT strip them!
@@ -1480,13 +1483,10 @@ class ImplicitCoercer:
         """Resolve a quoted type name against the compiling module's visible
         namespace (plain ``A = SomeType`` aliases), then the session
         forward-ref registry.  Returns None when unresolvable."""
-        from .builtin_entities.base import lookup_ctx_type_name
+        from .type_resolver import TypeResolver
         visitor = getattr(self._tc, '_visitor', None)
-        resolved = lookup_ctx_type_name(getattr(visitor, 'ctx', None), name)
-        if resolved is not None:
-            return resolved
-        from .forward_ref import get_defined_type
-        return get_defined_type(name)
+        ctx = getattr(visitor, 'ctx', None)
+        return TypeResolver.resolve_type(name, getattr(ctx, 'user_globals', None), required=False)
 
     def coerce(self, value: ValueRef, target_type, node=None) -> ValueRef:
         """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""

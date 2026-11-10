@@ -47,6 +47,32 @@ def _parse_explicit_tag_value(expr) -> Optional[int]:
     return None
 
 
+def _enum_declarations(cls, annotations):
+    """Read variant order and tags without executing payload annotations."""
+    import textwrap
+    from ..utils.inspect_utils import get_object_source
+
+    try:
+        source = get_object_source(cls)
+    except (OSError, TypeError):
+        for name, annotation in annotations.items():
+            tag = cls.__dict__.get(name)
+            yield name, annotation, tag if isinstance(tag, int) else None
+        return
+    class_def = ast.parse(textwrap.dedent(source)).body[0]
+    for stmt in class_def.body:
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            name = stmt.target.id
+            yield name, annotations.get(name), _parse_explicit_tag_value(stmt.value)
+        elif isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith('_'):
+                    yield target.id, None, _parse_explicit_tag_value(stmt.value)
+        elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Name):
+            if not stmt.value.id.startswith('_'):
+                yield stmt.value.id, None, None
+
+
 def _create_enum_type(variants, tag_type, class_name=None):
     """Unified factory function to create enum types
 
@@ -178,6 +204,19 @@ class EnumType(CompositeType):
     _valid_tag_values = None
     _discriminant_type = None
     
+    @classmethod
+    def map_type_components(cls, mapper):
+        if getattr(cls, '_python_class', None) is not None or cls._variant_types is None:
+            return cls
+        payloads = [mapper(payload) for payload in cls._variant_types]
+        tag_type = mapper(cls._tag_type)
+        if tag_type is cls._tag_type and all(
+                a is b for a, b in zip(payloads, cls._variant_types)):
+            return cls
+        variants = [(name, payload, cls._tag_values[name])
+                    for name, payload in zip(cls._variant_names, payloads)]
+        return _create_enum_type(variants, tag_type, cls.__name__)
+
     @classmethod
     def is_enum_type(cls) -> bool:
         """Override base class to return True for enum types."""
@@ -643,79 +682,27 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     # enum body's plain-def methods can resolve factory closures.
     captured_symbols = capture_user_caller_symbols()
 
-    # Get annotations
-    annotations = getattr(cls, '__annotations__', {})
-    
     # Get user globals from the class's module
     import sys
     module_name = cls.__module__
     user_globals = {}
     if module_name in sys.modules:
         user_globals = vars(sys.modules[module_name])
+
+    from ..decorators.annotation_resolver import build_annotation_namespace
+    namespace = build_annotation_namespace(
+        user_globals, is_dynamic='.<locals>.' in cls.__qualname__, definition=cls)
+    namespace.pop(cls.__name__, None)
+    namespace.type_owner_name = cls.__name__
+    namespace.type_owner_namespace = cls.__dict__
+    type_resolver = TypeResolver(user_globals=namespace)
     
-    type_resolver = TypeResolver(user_globals=user_globals)
-    
-    # Parse class body IN SOURCE ORDER to preserve variant order
-    # Build variant list: (name, payload_type, explicit_tag_or_None)
-    variants: List[Tuple[str, Optional[Any], Optional[int]]] = []
-    
-    import inspect
-    try:
-        from ..utils.inspect_utils import get_object_source
-        src = get_object_source(cls)
-        import textwrap
-        src = textwrap.dedent(src)
-        tree = ast.parse(src)
-        if tree.body and isinstance(tree.body[0], ast.ClassDef):
-            class_def = tree.body[0]
-            for stmt in class_def.body:
-                # AnnAssign: VarName: Type = explicit_tag
-                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                    var_name = stmt.target.id
-                    var_annotation = annotations.get(var_name)
-                    
-                    # Parse payload type
-                    if var_annotation is None or var_annotation == 'None':
-                        payload_type = None
-                    else:
-                        payload_type = type_resolver.parse_annotation(var_annotation)
-                    
-                    # Parse explicit tag
-                    explicit_tag = None
-                    if stmt.value is not None:
-                        explicit_tag = _parse_explicit_tag_value(stmt.value)
-                    
-                    variants.append((var_name, payload_type, explicit_tag))
-                
-                # Assign without annotation: VarName = explicit_tag (no-payload variant)
-                elif isinstance(stmt, ast.Assign):
-                    for target in stmt.targets:
-                        if isinstance(target, ast.Name):
-                            var_name = target.id
-                            if not var_name.startswith('_'):
-                                # No payload, but has explicit tag
-                                explicit_tag = _parse_explicit_tag_value(stmt.value)
-                                variants.append((var_name, None, explicit_tag))
-                
-                # Bare name: VarName (no payload, no explicit tag)
-                elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Name):
-                    bare_name = stmt.value.id
-                    if not bare_name.startswith('_'):
-                        variants.append((bare_name, None, None))
-    except Exception as e:
-        # Fallback: use annotations dict (order not guaranteed)
-        for var_name, var_annotation in annotations.items():
-            if var_annotation is None or var_annotation == 'None':
-                payload_type = None
-            else:
-                payload_type = type_resolver.parse_annotation(var_annotation)
-            
-            # Try to get explicit tag from class dict
-            explicit_tag = None
-            if var_name in cls.__dict__ and isinstance(cls.__dict__[var_name], int):
-                explicit_tag = cls.__dict__[var_name]
-            
-            variants.append((var_name, payload_type, explicit_tag))
+    variants = []
+    annotations = getattr(cls, '__annotations__', {})
+    for name, annotation, tag in _enum_declarations(cls, annotations):
+        payload = (None if annotation is None or annotation == 'None' else
+                   type_resolver.parse_annotation(annotation, defer_unresolved=True))
+        variants.append((name, payload, tag))
     
     # Assign auto tags
     next_tag = 0
@@ -731,9 +718,20 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     
     # Use unified factory to create enum type
     enum_cls = _create_enum_type(resolved_variants, tag_type, cls.__name__)
+
+    # The decorator replaces the original class. Bind self references to the
+    # resulting enum, using the same rule as struct and union declarations.
+    namespace[cls.__name__] = enum_cls
+    enum_cls._variant_types[:] = [TypeResolver.bind_type_references(
+        payload, namespace, self_types={cls.__name__: enum_cls})
+        for payload in enum_cls._variant_types]
+    enum_cls._union_payload._field_types[:] = [
+        void if payload is None else payload for payload in enum_cls._variant_types]
     
     # Preserve original module for debugging
     enum_cls.__module__ = cls.__module__
+    enum_cls.__qualname__ = cls.__qualname__
+    enum_cls._python_class = cls
     
     # Inject Python-level constructor that returns pc_literal
     from .composite_base import _inject_pc_literal_constructor

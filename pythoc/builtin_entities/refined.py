@@ -269,6 +269,16 @@ class RefinedType(CompositeType):
     _param_names: Optional[List[str]] = None
     
     @classmethod
+    def map_type_components(cls, mapper):
+        original = (cls._base_type, cls._struct_type, *(cls._param_types or ()))
+        resolved = tuple(mapper(value) for value in original)
+        if all(a is b for a, b in zip(original, resolved)):
+            return cls
+        return _create_refined_type_class(
+            resolved[0], cls._predicates, cls._tags, resolved[1],
+            list(resolved[2:]), cls._param_names, cls._is_single_param)
+
+    @classmethod
     def get_qualifier_flags(cls):
         """Refinement preserves the storage qualifiers of its base."""
         from ..type_descriptor import _flags

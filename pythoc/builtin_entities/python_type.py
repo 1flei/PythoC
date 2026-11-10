@@ -9,37 +9,11 @@ Key concept: pyconst[value] encodes constant values in the type system,
 enabling zero-overhead conditional struct layouts.
 """
 
-from .base import BuiltinEntity, lookup_ctx_type_name
+from .base import BuiltinEntity
 from typing import Any, Optional
 from ..valueref import wrap_value
 from ..logger import logger
 import ast
-
-
-def _resolve_visible_type_names(visitor, normalized):
-    """Resolve quoted type names in subscript items against the visible
-    namespace.
-
-    A quoted name in type-subscript position (``ptr["A"]``) may denote a
-    plain module-level binding such as ``A = SomeType`` -- the natural
-    typedef-style alias, no registration needed.  Visible bindings take
-    precedence; names not visible here (or bound to non-types) keep the
-    string and fall through to the forward-ref registry / lazy resolution
-    inside handle_type_subscript.
-    """
-    ctx = getattr(visitor, 'ctx', None)
-    if ctx is None:
-        return normalized
-    items = []
-    changed = False
-    for name_opt, payload in normalized:
-        if isinstance(payload, str):
-            candidate = lookup_ctx_type_name(ctx, payload)
-            if candidate is not None:
-                payload = candidate
-                changed = True
-        items.append((name_opt, payload))
-    return tuple(items) if changed else normalized
 
 
 class _PythonTypeBase(BuiltinEntity):
@@ -415,8 +389,20 @@ class PythonType(_PythonTypeBase):
                 )
 
             normalized = self._python_object.normalize_subscript_items(index.value)
-            normalized = _resolve_visible_type_names(visitor, normalized)
             result_type = self._python_object.handle_type_subscript(normalized)
+            from ..type_resolver import TypeResolver
+            namespace = getattr(visitor.ctx.user_globals, 'type_binding_namespace',
+                                visitor.ctx.user_globals)
+
+            def local_lookup(name):
+                info = visitor.ctx.scope_manager.lookup_variable(name)
+                if (info is not None and info.value_ref is not None
+                        and info.value_ref.is_python_value()):
+                    return True, info.value_ref.get_python_value()
+                return False, None
+
+            result_type = TypeResolver.bind_type_references(
+                result_type, namespace, local_lookup=local_lookup)
             return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
 
         # Python sequence subscript (list, dict, etc.)
@@ -478,6 +464,11 @@ class PythonType(_PythonTypeBase):
                     node=node,
                     exc_type=IndexError,
                 )
+            return self._wrap_constant_result(visitor, self._python_object[index_val])
+
+        if (hasattr(type(self._python_object), '__getitem__')
+                or (isinstance(self._python_object, type)
+                    and hasattr(self._python_object, '__class_getitem__'))):
             return self._wrap_constant_result(visitor, self._python_object[index_val])
 
         logger.error(

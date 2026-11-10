@@ -250,20 +250,6 @@ class StructInfo:
                 pass
         
         return None
-    
-    def infer_from_llvm_type(self, llvm_type: ir.Type) -> bool:
-        """Try to match this struct with an LLVM type
-        
-        Returns True if the LLVM type matches this struct's structure.
-        """
-        if isinstance(llvm_type, ir.IdentifiedStructType):
-            # Match by name
-            struct_name = llvm_type.name.strip('"')
-            return struct_name == self.name or struct_name.startswith(f"{self.name}.")
-        elif isinstance(llvm_type, ir.LiteralStructType):
-            # Match by field count (fallback)
-            return len(llvm_type.elements) == self.get_field_count()
-        return False
 
 
 class _InternalVariableRegistry:
@@ -596,40 +582,6 @@ class UnifiedCompilationRegistry:
         """List all struct registry keys (qualified names where available)"""
         return list(self._structs.keys())
     
-    def infer_struct_from_llvm_type(self, llvm_type: ir.Type) -> Optional[StructInfo]:
-        """Try to infer struct metadata from LLVM type
-        
-        Args:
-            llvm_type: LLVM type to match
-        
-        Returns:
-            StructInfo if a match is found, None otherwise
-        """
-        if isinstance(llvm_type, ir.IdentifiedStructType):
-            # Look for struct by name
-            struct_name = llvm_type.name.strip('"')
-            
-            # Try exact match first
-            struct_info = self.get_struct(struct_name)
-            if struct_info:
-                return struct_info
-            
-            # Try matching without suffix (e.g., "TestStruct.3" -> "TestStruct")
-            if '.' in struct_name:
-                base_name = struct_name.split('.')[0]
-                struct_info = self.get_struct(base_name)
-                if struct_info:
-                    return struct_info
-        
-        elif isinstance(llvm_type, ir.LiteralStructType):
-            # For literal struct types, match by field count
-            field_count = len(llvm_type.elements)
-            for struct_info in self._structs.values():
-                if struct_info.get_field_count() == field_count:
-                    return struct_info
-        
-        return None
-
     def clear_structs(self):
         """Clear all registered structs"""
         self._structs.clear()

@@ -1,7 +1,9 @@
 """PythoC record declarations, recursive views and storage dependencies."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 import threading
+import weakref
 
 
 def record_view(pc_type):
@@ -32,10 +34,10 @@ def _owner(view):
 
 
 def _resolve(pc_type):
-    if isinstance(pc_type, str):
-        from .forward_ref import get_defined_type
-        resolved = get_defined_type(pc_type)
-        return _resolve(resolved) if resolved is not None else None
+    from .type_resolver import TypeResolver
+    pc_type = TypeResolver.resolve_type(pc_type, required=False)
+    if pc_type is None:
+        return None
     view = record_view(pc_type)
     if view is not None:
         return view
@@ -128,37 +130,58 @@ def _shape(pc_type):
     return ('leaf', leaf_key(pc_type)), ()
 
 
-def _equivalent(first, second, seen=None, resolver=None):
+def _equivalent(first, second, resolver=None):
+    """Compare directly while the visited graphs admit a one-to-one mapping.
+
+    Sharing and different cycle unrollings require bisimulation refinement.
+    Switching on a mapping conflict bounds pair traversal by graph size,
+    while shallow mismatches never need to project the remaining graph.
+    """
     if first is second:
         return True
-    def resolve(current):
-        if isinstance(current, str) and resolver is not None:
-            local = resolver(current)
-            if local is not None:
-                current = local
-        return _resolve(current)
+    from .type_descriptor import _wire, type_key
+    from .type_resolver import TypeReference, TypeResolver
 
-    a, b = resolve(first), resolve(second)
-    if a is None or b is None:
-        return isinstance(first, str) and first == second
-    first_record, second_record = named_record(a), named_record(b)
-    if first_record is not None or second_record is not None:
-        first_fields = tuple(getattr(first_record, '_field_types', ()) or ())
-        second_fields = tuple(getattr(second_record, '_field_types', ()) or ())
-        if any(field is None for field in first_fields + second_fields):
-            return (first_record is not None and second_record is not None
-                    and _owner(first_record) is _owner(second_record))
-    seen = set() if seen is None else seen
-    pair = (id(a), id(b))
-    if pair in seen:
-        return True
-    seen.add(pair)
-    head_a, children_a = _shape(a)
-    head_b, children_b = _shape(b)
-    from .type_descriptor import _wire
-    return (_wire(head_a) == _wire(head_b) and len(children_a) == len(children_b)
-            and all(_equivalent(x, y, seen, resolver)
-                    for (x, _), (y, _) in zip(children_a, children_b)))
+    def resolve(value):
+        if resolver is not None and isinstance(value, (str, TypeReference)):
+            resolved = resolver(value)
+            if resolved is not None:
+                value = resolved
+        return _resolve(value)
+
+    forward, backward = {}, {}
+    pending = [(first, second)]
+    while pending:
+        left, right = pending.pop()
+        if left is right:
+            continue
+        a, b = resolve(left), resolve(right)
+        if a is None or b is None:
+            if TypeResolver.reference_key(left) != TypeResolver.reference_key(right):
+                return False
+            continue
+        if a is b:
+            continue
+        key_a, key_b = id(a), id(b)
+        if key_a in forward and forward[key_a] == key_b:
+            continue
+        record_a, record_b = named_record(a), named_record(b)
+        if any(field is None for record in (record_a, record_b) if record is not None
+               for field in record._field_types or ()):
+            if (record_a is None or record_b is None
+                    or _owner(record_a) is not _owner(record_b)):
+                return False
+            continue
+        head_a, children_a = _shape(a)
+        head_b, children_b = _shape(b)
+        if _wire(head_a) != _wire(head_b) or len(children_a) != len(children_b):
+            return False
+        if key_a in forward or key_b in backward:
+            return type_key(first, resolver, _validate=False) == type_key(
+                second, resolver, _validate=False)
+        forward[key_a], backward[key_b] = key_b, key_a
+        pending.extend((a, b) for (a, _), (b, _) in zip(children_a, children_b))
+    return True
 
 
 @dataclass(frozen=True, eq=False)
@@ -170,6 +193,34 @@ class RecordDefinition:
     field_names: tuple
     field_types: tuple
     layout: tuple
+    declaration: object = None
+
+
+@dataclass
+class _TypeBinding:
+    value: object
+    frozen: bool = False
+
+
+class _RecordIndex:
+    """Keep the earliest declaration for each interned structural identity."""
+
+    def __init__(self):
+        self.views = {}
+        self.buckets = {}
+
+    def representative(self, view, key):
+        if view not in self.views:
+            self.views[view] = len(self.views)
+        current = key(view)
+        candidate = self.buckets.get(current)
+        if candidate is not None and key(candidate) != current:
+            del self.buckets[current]
+            candidate = None
+        if candidate is None or self.views[view] < self.views[candidate]:
+            candidate = view
+            self.buckets[current] = candidate
+        return candidate
 
 
 class TypeGraph:
@@ -180,10 +231,21 @@ class TypeGraph:
         self._declarations = {}
         self._canonical = {}
         self._by_name = {}
+        from .type_descriptor import StructuralTypeIndex
+        self._structural_index = StructuralTypeIndex()
         self._definitions = {}
         self._checked = {}
-        self._revision = -1
+        self._pending_names = {}
+        self._pending_references = weakref.WeakKeyDictionary()
+        self._dirty_roots = set()
         self.validating = False
+        self.ctypes_types = weakref.WeakKeyDictionary()
+        self.type_bindings = weakref.WeakKeyDictionary()
+        self._preparation = None
+        self.resolving_expressions = set()
+        self.binding_revision = 0
+        self.prepared_types = weakref.WeakSet()
+        self.type_scopes = weakref.WeakValueDictionary()
 
     def _collect(self, root):
         pending, nodes, records = [(root, True)], {}, []
@@ -209,78 +271,119 @@ class TypeGraph:
 
     def _check_storage(self, nodes):
         active, complete = set(), set()
-
-        def visit(pc_type):
-            key = _owner(pc_type) if named_record(pc_type) is not None else pc_type
-            if key in active:
-                raise TypeError('Illegal by-value recursion in PythoC type '
-                                + getattr(pc_type, '__name__', str(pc_type)))
-            if key in complete:
-                return
-            active.add(key)
-            for child, stored in nodes[id(pc_type)][1]:
-                resolved = _resolve(child)
-                if stored and resolved is not None:
-                    visit(resolved)
-            active.remove(key)
-            complete.add(key)
-
-        for pc_type, _ in nodes.values():
-            visit(pc_type)
+        for root, _ in nodes.values():
+            pending = [(root, False)]
+            while pending:
+                current, finish = pending.pop()
+                key = _owner(current) if named_record(current) is not None else current
+                if finish:
+                    active.remove(key)
+                    complete.add(key)
+                    continue
+                if key in active:
+                    raise TypeError('Illegal by-value recursion in PythoC type '
+                                    + getattr(current, '__name__', str(current)))
+                if key in complete:
+                    continue
+                active.add(key)
+                pending.append((current, True))
+                for child, stored in nodes[id(current)][1]:
+                    if stored:
+                        resolved = _resolve(child)
+                        if resolved is not None:
+                            pending.append((resolved, False))
 
     def validate(self, root, revision):
         with self._lock:
-            if self._revision != revision:
-                self._checked.clear()
-                self._revision = revision
-            snapshot = _fields(root) if named_record(root) is not None else None
-            if snapshot is not None and self._checked.get(root) == snapshot:
-                return
             if self.validating:
                 return
+            snapshot = _fields(root) if named_record(root) is not None else None
+            if (self._preparation is None and snapshot is not None
+                    and self._checked.get(root) == (revision, snapshot)):
+                return
             self.validating = True
-            declarations = self._declarations.copy()
-            canonical = self._canonical.copy()
-            by_name = {name: list(items) for name, items in self._by_name.items()}
+            declarations = {}
+            canonical = {}
             try:
                 nodes, records = self._collect(root)
                 for view in records:
                     owner = _owner(view)
                     names, fields, layout = _fields(view)
-                    definition = declarations.get(owner)
+                    declaration = getattr(owner, '_type_declaration', None)
+                    definition = declarations.get(owner, self._declarations.get(owner))
                     if definition is None:
                         definition = RecordDefinition(
-                            record_name(view), view, names, fields, layout)
+                            record_name(view), view, names, fields, layout,
+                            declaration)
                         declarations[owner] = definition
                     if (definition.field_names != names or definition.layout != layout
                             or len(definition.field_types) != len(fields)
                             or not all(_equivalent(a, b) for a, b in
                                        zip(definition.field_types, fields))):
-                        raise TypeError('Conflicting PythoC record views: '
-                                        + definition.name)
-                    canonical.setdefault(owner, definition.representative)
+                        # A declaration's storage projection can change while
+                        # its scoped aliases are still awaiting compilation.
+                        # A second view must still agree with that projection.
+                        if (declaration is None or definition.declaration is not declaration
+                                or definition.representative is not view
+                                or definition.layout != layout):
+                            raise TypeError('Conflicting PythoC record views: '
+                                            + definition.name)
+                        definition = RecordDefinition(
+                            record_name(view), view, names, fields, layout,
+                            declaration)
+                        declarations[owner] = definition
+                    canonical[owner] = definition.representative
                 self._check_storage(nodes)
+                unresolved, references = set(), set()
+
+                def pending(reference, names):
+                    from .type_resolver import TypeReference
+                    unresolved.update(names)
+                    if isinstance(reference, TypeReference):
+                        references.add(reference)
+
+                keys = self._structural_index.intern(root, on_unresolved=pending)
+
+                def key(view):
+                    if id(view) not in keys:
+                        keys.update(self._structural_index.intern(view))
+                    return keys[id(view)]
+
                 for view in records:
                     owner = _owner(view)
                     name = record_name(view)
-                    candidates = by_name.setdefault(name, [])
-                    equivalent = next((other for other in candidates
-                                       if _equivalent(view, other)), None)
-                    if equivalent is not None:
-                        canonical[owner] = equivalent
-                    else:
-                        candidates.append(view)
-                self._declarations = declarations
-                self._canonical = canonical
-                self._by_name = by_name
-                self._checked.update((view, _fields(view)) for view in records)
+                    index = self._by_name.setdefault(name, _RecordIndex())
+                    canonical[owner] = index.representative(view, key)
+                self._watch_pending(root, unresolved, references)
+                self._declarations.update(declarations)
+                self._canonical.update(canonical)
+                self._checked.update((view, (revision, _fields(view))) for view in records)
             finally:
                 self.validating = False
+
+    def _watch_pending(self, root, names, references):
+        from .session import CompileSession
+        for reference in references:
+            self._pending_references.setdefault(reference, set()).add(root)
+        waiting = self._pending_names.setdefault(root, set())
+        for name in names - waiting:
+            waiting.add(name)
+
+            def completed(value, root=root, name=name):
+                with self._lock:
+                    self._pending_names[root].discard(name)
+                    self._dirty_roots.add(root)
+
+            CompileSession.current().forward_refs.register_callback(
+                name, completed, include_existing=False)
 
     def canonical_record(self, view, revision):
         with self._lock:
             if self.validating:
                 return self._canonical.get(_owner(view), view)
+            while self._dirty_roots:
+                root = self._dirty_roots.pop()
+                self.validate(root, revision)
             self.validate(view, revision)
             return self._canonical[_owner(view)]
 
@@ -297,11 +400,114 @@ class TypeGraph:
                 self._definitions[canonical] = definition
             return definition
 
+    @contextmanager
+    def binding_transaction(self):
+        """Commit reachable bindings together, after successful preparation."""
+        if self._preparation is not None:
+            yield
+            return
+        bindings, prepared = {}, set()
+        self._preparation = (bindings, prepared)
+        try:
+            yield
+            for reference, binding in bindings.items():
+                previous = self.type_bindings.get(reference)
+                if (previous.value if previous is not None else None) is not binding.value:
+                    self.binding_revision += 1
+                    self._dirty_roots.update(self._pending_references.get(reference, ()))
+                self.type_bindings[reference] = binding
+            self.prepared_types.update(prepared)
+            for reference in bindings:
+                scope = getattr(reference.namespace, 'type_scope', None)
+                if scope is not None:
+                    scope.finish()
+        except BaseException:
+            if bindings:
+                self.binding_revision += 1
+            raise
+        finally:
+            self._preparation = None
+
+    def get_binding(self, reference):
+        if self._preparation is not None and reference in self._preparation[0]:
+            return self._preparation[0][reference]
+        return self.type_bindings.get(reference)
+
+    def record_bindings(self, references, value, freeze):
+        """Record observations while the resolver holds the graph lock."""
+        destination = (self.type_bindings if self._preparation is None
+                       else self._preparation[0])
+        for reference in references:
+            previous = self.get_binding(reference)
+            if previous is not None and previous.frozen:
+                continue
+            if (self._preparation is None
+                    and (previous.value if previous is not None else None) is not value):
+                self.binding_revision += 1
+                self._dirty_roots.update(self._pending_references.get(reference, ()))
+            destination[reference] = _TypeBinding(value, freeze and value is not None)
+
+    def prepare_type(self, pc_type):
+        """Fix reachable bindings before layout, ABI, or LLVM construction."""
+        from .type_resolver import TypeResolver
+        if pc_type is None:
+            return
+        with self._lock, self.binding_transaction():
+            prepared = self.prepared_types
+            pending, seen, active = [(pc_type, True, 0, False)], {}, {}
+            complete = True
+            while pending:
+                current, stored, depth, finish = pending.pop()
+                if finish:
+                    del active[id(current)]
+                    continue
+                current = TypeResolver.resolve_type(current, required=stored, freeze=True)
+                current = _resolve(current)
+                if current is None:
+                    complete = complete and stored
+                    continue
+                if isinstance(current, type) and (
+                        current in prepared or current in self._preparation[1]):
+                    continue
+                # Unions and enums have finite backing storage even when pointers
+                # refer back to them; unlike pointer-only aliases, they break the
+                # recursive LLVM construction dependency.
+                depth += (named_record(current) is not None
+                          or getattr(current, '_is_union', False)
+                          or getattr(current, '_is_enum', False))
+                key = id(current)
+                if key in active:
+                    if depth <= active[key]:
+                        raise TypeError('Recursive type constructors require a named record')
+                    continue
+                if key in seen:
+                    continue
+                seen[key] = current
+                active[key] = depth
+                pending.append((current, stored, depth, True))
+                _, children = _shape(current)
+                owner = getattr(current, '_python_class', None)
+                declaration = getattr(owner, '_type_declaration', None)
+                if declaration is not None:
+                    # Static fields are absent from the instance graph, but their
+                    # bindings also determine this declaration's storage projection.
+                    children = tuple((pc_type, True) for _, _, pc_type, _ in declaration)
+                pending.extend((child, bool(stored), depth, False) for child, stored in children
+                               if stored is not None)
+            if seen:
+                from .session import CompileSession
+                self.validate(pc_type, (CompileSession.current().forward_refs.revision,
+                                        self.binding_revision))
+            if complete:
+                self._preparation[1].update(
+                    value for value in seen.values() if isinstance(value, type))
+
 
 def _current_graph():
     from .session import CompileSession
     session = CompileSession.current()
-    return session.type_graph, session.forward_refs.revision
+    return session.type_graph, (session.forward_refs.revision,
+                                session.type_graph.binding_revision)
 
 
 def canonical_record_type(pc_type):
@@ -313,6 +519,7 @@ def canonical_record_type(pc_type):
 
 
 def record_definition(pc_type):
+    prepare_type(pc_type)
     graph, revision = _current_graph()
     return graph.definition(named_record(pc_type), revision)
 
@@ -329,3 +536,9 @@ def validation_in_progress():
         return CompileSession.current().type_graph.validating
     except RuntimeError:
         return False
+
+
+def prepare_type(pc_type):
+    """Prepare a type in the active compilation session."""
+    from .session import CompileSession
+    CompileSession.current().type_graph.prepare_type(pc_type)

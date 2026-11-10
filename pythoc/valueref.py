@@ -110,6 +110,9 @@ class ValueRef:
         # There must be a type hint
         if self.type_hint is None:
             raise ValueError("type_hint must be provided")
+        if self._kind != 'python':
+            from .type_resolver import TypeResolver
+            self.type_hint = TypeResolver.resolve_type(self.type_hint, freeze=True)
         # CRITICAL: Prevent double-wrapping ValueRef
         if isinstance(self.value, ValueRef):
             raise TypeError(
