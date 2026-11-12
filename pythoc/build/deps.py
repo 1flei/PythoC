@@ -222,6 +222,7 @@ class GroupDeps:
     # are expanded before persistence so cache reuse remains machine-safe.
     target_cpu: Optional[str] = None
     target_features: Optional[str] = None
+    optimization_identity: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict for JSON serialization with compressed group keys."""
@@ -266,6 +267,8 @@ class GroupDeps:
             result['target_cpu'] = self.target_cpu
         if self.target_features is not None:
             result['target_features'] = self.target_features
+        if self.optimization_identity is not None:
+            result['optimization_identity'] = self.optimization_identity
 
         # Add group keys table if we have any
         if unique_group_keys:
@@ -322,6 +325,7 @@ class GroupDeps:
             debug_info=debug_info,
             target_cpu=target_cpu,
             target_features=target_features,
+            optimization_identity=d.get('optimization_identity'),
         )
 
     

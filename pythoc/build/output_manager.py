@@ -478,6 +478,16 @@ class OutputManager:
                     f"({cached_deps.debug_info} -> {config.debug_info})"
                 )
                 return False
+            from ..optimization import optimization_identity
+            current_optimization = optimization_identity(int(config.opt_level))
+            if cached_deps.optimization_identity != current_optimization:
+                from ..logger import logger
+                logger.debug(
+                    f"Cache miss for {group_key}: optimization pipeline changed "
+                    f"({cached_deps.optimization_identity} -> "
+                    f"{current_optimization})"
+                )
+                return False
             target_cpu, target_features = target_machine_identity()
             if (
                 cached_deps.target_cpu != target_cpu
@@ -1550,6 +1560,9 @@ class OutputManager:
             # Persist object-emission settings that affect cache safety.
             from ..config import config
             from ..compiler import target_machine_identity
+            from ..optimization import optimization_identity
+            group_deps.optimization_identity = optimization_identity(
+                int(config.opt_level))
             group_deps.debug_info = bool(config.debug_info)
             (
                 group_deps.target_cpu,

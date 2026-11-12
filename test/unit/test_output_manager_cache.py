@@ -41,6 +41,10 @@ class TestCachedObjectCoversPendingSymbols(unittest.TestCase):
         group_deps = self.tracker.get_or_create_group_deps(self.group_key)
         group_deps.ast_content_hash = _combined_hash(hashes)
         group_deps.compiled_symbols = sorted(symbols)
+        from pythoc.config import config
+        from pythoc.optimization import optimization_identity
+        group_deps.optimization_identity = optimization_identity(
+            int(config.opt_level))
         (
             group_deps.target_cpu,
             group_deps.target_features,
@@ -107,6 +111,36 @@ class TestCachedObjectCoversPendingSymbols(unittest.TestCase):
             self.om._cached_object_covers_pending_symbols(
                 self.group_key, self._group(['aaa']))
         )
+
+    def test_changed_optimization_level_is_not_covered(self):
+        from pythoc.config import config
+        self._save_cached_deps(['aaa'])
+        with config.override(opt_level=0):
+            self.assertFalse(self.om._cached_object_covers_pending_symbols(
+                self.group_key, self._group(['aaa'])))
+
+    def test_changed_llvm_version_is_not_covered(self):
+        from unittest.mock import patch
+        self._save_cached_deps(['aaa'])
+        with patch('pythoc.optimization.binding.llvm_version_info', (99, 0, 0)):
+            self.assertFalse(self.om._cached_object_covers_pending_symbols(
+                self.group_key, self._group(['aaa'])))
+
+    def test_missing_optimization_identity_is_not_covered(self):
+        self._save_cached_deps(['aaa'])
+        deps = self.tracker.get_or_create_group_deps(self.group_key)
+        deps.optimization_identity = None
+        self.tracker.save_deps(self.group_key, self.obj_file)
+        self.assertFalse(self.om._cached_object_covers_pending_symbols(
+            self.group_key, self._group(['aaa'])))
+
+    def test_optimization_identity_is_persisted(self):
+        from pythoc.config import config
+        from pythoc.optimization import optimization_identity
+        self._save_cached_deps(['aaa'])
+        self.assertEqual(
+            self.tracker.load_deps(self.obj_file).optimization_identity,
+            optimization_identity(int(config.opt_level)))
 
 
 class TestFunctionContentHash(unittest.TestCase):
