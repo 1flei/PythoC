@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794321818167,
+  "lastUpdate": 1794493040233,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3631,6 +3631,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.489,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "2c4cae45e8618e6d0b83c569602f21152396340a",
+          "message": "Update optimization strategy to the the default pipeline by default",
+          "timestamp": "2026-11-12T22:06:24+08:00",
+          "tree_id": "5e64a09eeda12ce2c7441522ea3e5c9a62b25729",
+          "url": "https://github.com/1flei/PythoC/commit/2c4cae45e8618e6d0b83c569602f21152396340a"
+        },
+        "date": 1794493039225,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 1.13,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.955,
             "unit": "seconds/test"
           }
         ]
