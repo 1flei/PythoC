@@ -6,6 +6,7 @@ the various class-body shapes (struct/union/enum-style, descriptors,
 explicit ``@compile`` overrides, empty bodies).
 """
 import ast
+from importlib import import_module
 import unittest
 from unittest.mock import patch
 
@@ -136,7 +137,8 @@ class TestClassMethodEffectBinding(unittest.TestCase):
             def operation():
                 return 1
 
-        with patch('pythoc.decorators.compile._compile_impl') as compiler:
+        module = import_module('pythoc.decorators.compile')
+        with patch.object(module, '_compile_impl') as compiler:
             attach_class_methods(Source, **kwargs)
         return compiler.call_args.kwargs['effect_suffix']
 

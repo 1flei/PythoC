@@ -329,6 +329,29 @@ class TypeResolver:
         info.return_type_hint = result
 
     @staticmethod
+    def _is_definition_frame(frame, definition, parent):
+        if frame.f_globals.get('__name__') != definition.__module__:
+            return False
+        if not parent:
+            return frame.f_code.co_name == '<module>'
+        qualname = getattr(frame.f_code, 'co_qualname', None)
+        if qualname is not None:
+            return qualname == parent
+
+        # Python 3.10 stores nested definition code in the parent's constants.
+        # Code identity keeps equally named caller scopes out of the capture.
+        code = getattr(definition, '__code__', None)
+        if code is not None:
+            return any(constant is code for constant in frame.f_code.co_consts)
+        # Class-body code starts by storing its qualified name in __qualname__.
+        return any(
+            isinstance(constant, CodeType)
+            and not constant.co_flags & inspect.CO_NEWLOCALS
+            and constant.co_consts
+            and constant.co_consts[0] == definition.__qualname__
+            for constant in frame.f_code.co_consts)
+
+    @staticmethod
     def capture_type_namespace(names=None, *, definition=None):
         """Capture names from the definition's lexical activation."""
         from .decorators.visible import AccessibleSymbols
@@ -354,10 +377,7 @@ class TypeResolver:
             while frame is not None:
                 module = str(frame.f_globals.get('__name__', ''))
                 if definition is not None:
-                    qualname = frame.f_code.co_qualname
-                    if module == definition.__module__ and (
-                            qualname == parent
-                            or (not parent and frame.f_code.co_name == '<module>')):
+                    if TypeResolver._is_definition_frame(frame, definition, parent):
                         break
                 elif (not (module == 'pythoc' or module.startswith('pythoc.'))
                       or module.startswith(('pythoc.std', 'pythoc.libc'))):

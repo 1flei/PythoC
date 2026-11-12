@@ -14,7 +14,7 @@ from test.utils.test_utils import DeferredTestCase
 class AsmMemoryValidationTest(DeferredTestCase):
     def test_element_type_is_independent_of_pointer_storage(self):
         module = ir.Module()
-        byte_pointer = ir.PointerType(ir.IntType(8))
+        byte_pointer = ir.PointerType()
         function = ir.Function(module, ir.FunctionType(ir.VoidType(), [byte_pointer]),
                                name='store')
         builder = LLVMBuilder(ir.IRBuilder(function.append_basic_block('entry')))
@@ -22,6 +22,21 @@ class AsmMemoryValidationTest(DeferredTestCase):
                                 '', '=*m', side_effect=True)
         builder.call_inline_asm(assembly, [function.args[0]],
                                 element_types={0: ir.IntType(16)})
+        builder.ret_void()
+        text = str(module)
+        self.assertIn('elementtype(i16)', text)
+
+    def test_typed_memory_operand_produces_valid_ir(self):
+        module = ir.Module()
+        element_type = ir.IntType(16)
+        pointer_type = ir.PointerType(element_type)
+        function = ir.Function(
+            module, ir.FunctionType(ir.VoidType(), [pointer_type]), name='store')
+        builder = LLVMBuilder(ir.IRBuilder(function.append_basic_block('entry')))
+        assembly = ir.InlineAsm(
+            ir.FunctionType(ir.VoidType(), [pointer_type]), '', '=*m', side_effect=True)
+        builder.call_inline_asm(
+            assembly, [function.args[0]], element_types={0: element_type})
         builder.ret_void()
         text = str(module)
         self.assertIn('elementtype(i16)', text)

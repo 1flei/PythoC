@@ -29,7 +29,8 @@ class TestStdEffectBoundaries(unittest.TestCase):
                 continue
             package = '.'.join(
                 ('pythoc', 'std', *path.relative_to(std).parts[:-1]))
-            for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
+            source = path.read_text(encoding='utf-8')
+            for node in ast.walk(ast.parse(source, filename=str(path))):
                 forbidden = False
                 if isinstance(node, ast.Import):
                     forbidden = any(

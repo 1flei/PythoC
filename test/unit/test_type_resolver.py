@@ -198,5 +198,52 @@ class TestTypeResolver(unittest.TestCase):
                          ast.dump(ast.parse('array[i32, 2]', mode='eval').body))
 
 
+    def test_definition_captures_annotation_only_local(self):
+        local_type = i64
+
+        def declaration(value: 'local_type'):
+            pass
+
+        namespace = TypeResolver.capture_type_namespace(definition=declaration)
+        self.assertIs(namespace['local_type'], local_type)
+
+    def test_method_definition_captures_class_body(self):
+        class Owner:
+            local_type = i64
+
+            def declaration(value: 'local_type'):
+                pass
+
+            namespace = TypeResolver.capture_type_namespace(definition=declaration)
+
+        self.assertIs(Owner.namespace['local_type'], i64)
+
+    def test_class_definition_captures_its_factory(self):
+        local_type = i64
+
+        class Record:
+            pass
+
+        namespace = TypeResolver.capture_type_namespace(
+            {'local_type'}, definition=Record)
+        self.assertIs(namespace['local_type'], local_type)
+
+    def test_same_named_caller_is_not_a_definition_scope(self):
+        class Origin:
+            @staticmethod
+            def factory():
+                def declaration(value: 'local_type'):
+                    pass
+                return declaration
+
+        class Consumer:
+            @staticmethod
+            def factory(definition):
+                local_type = i32
+                return TypeResolver.capture_type_namespace(definition=definition)
+
+        self.assertNotIn('local_type', Consumer.factory(Origin.factory()))
+
+
 if __name__ == '__main__':
     unittest.main()

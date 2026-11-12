@@ -26,11 +26,12 @@ sys.path.insert(
 )
 
 from pythoc import (
-    compile, i32, i64, f32, f64, u64, ptr, i8, void, struct,
+    compile, extern, i32, i64, f32, f64, u8, u64, ptr, i8, void, struct,
     va_start, va_arg, va_end,
     flush_all_pending_outputs,
 )
 from pythoc.libc.stdio import printf
+from pythoc.native_executor import get_multi_so_executor
 
 
 # ============================================================================
@@ -332,6 +333,29 @@ def _get_pythoc_func_ptr(pc_func):
 # ============================================================================
 # Tests: pythoc @compile -> pythoc varargs (IR-level call, no ctypes involved)
 # ============================================================================
+
+class TestPythonExternVarargs(unittest.TestCase):
+    def test_small_integer_and_float_are_promoted_before_native_call(self):
+        get_multi_so_executor().execute_function(va_mixed_i32_f64)
+
+        @extern(lib=va_mixed_i32_f64._so_file,
+                name=va_mixed_i32_f64._actual_func_name)
+        def mixed(dummy: i32, *args) -> f64:
+            pass
+
+        self.assertEqual(mixed(0, u8(255), f32(1.25)), 256.25)
+        self.assertEqual(mixed(0, 42, 1.25), 43.25)
+
+    def test_wide_integer_keeps_all_bits_in_native_varargs(self):
+        get_multi_so_executor().execute_function(va_sum_two_i64)
+
+        @extern(lib=va_sum_two_i64._so_file,
+                name=va_sum_two_i64._actual_func_name)
+        def sum_wide(dummy: i32, *args) -> i64:
+            pass
+
+        self.assertEqual(sum_wide(0, u64(4294967297), u64(3)), 4294967300)
+
 
 class TestVaArgPythocCallsPythoc(unittest.TestCase):
     """pythoc @compile wrapper calls another @compile varargs function."""

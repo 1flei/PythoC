@@ -8,9 +8,9 @@ from llvmlite import ir
 from pythoc import extern, f16, f32, i24, i32, i64, i128, struct, u8, u64
 from pythoc.builder import LLVMBuilder
 from pythoc.callable_lowering import lower_extern_wrapper
+from pythoc.decorators.extern import ExternFunctionWrapper
 from pythoc.libc import stdlib, string
 from pythoc.libc.math import sqrt
-from pythoc.libc.stdio import snprintf
 from pythoc.valueref import ensure_ir
 
 
@@ -142,16 +142,20 @@ class TestExternPythonCall(unittest.TestCase):
                     absolute(*args, **kwargs)
 
     def test_variadic_values_use_c_default_promotions(self):
-        buffer = ctypes.create_string_buffer(80)
-        result = snprintf(buffer, len(buffer), '%u %.2f %llu',
-                          u8(255), f32(1.25), u64(4294967297))
-        self.assertEqual(buffer.value, b'255 1.25 4294967297')
-        self.assertEqual(result, len(buffer.value))
+        for value, ctype, expected in (
+            (u8(255), ctypes.c_int32, 255),
+            (f32(1.25), ctypes.c_double, 1.25),
+            (u64(4294967297), ctypes.c_uint64, 4294967297),
+        ):
+            with self.subTest(value=value):
+                promoted = ExternFunctionWrapper._ctypes_vararg(value)
+                self.assertIsInstance(promoted, ctype)
+                self.assertEqual(promoted.value, expected)
 
     def test_plain_python_float_is_a_double_vararg(self):
-        buffer = ctypes.create_string_buffer(40)
-        snprintf(buffer, len(buffer), b'%.2f', 1.25)
-        self.assertEqual(buffer.value, b'1.25')
+        promoted = ExternFunctionWrapper._ctypes_vararg(1.25)
+        self.assertIsInstance(promoted, ctypes.c_double)
+        self.assertEqual(promoted.value, 1.25)
 
     def test_unsupported_carriers_fail_before_symbol_lookup(self):
         for pc_type in (f16, i24, i128, struct[i24], struct[i128]):
