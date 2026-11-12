@@ -4,7 +4,7 @@ State-machine lowering for ``instantiate()``.
 Supports four cases:
   Case 1a: bare yield function (no args)      -> instantiate(yield_fn)
   Case 1b: yield function call (with args)     -> instantiate(yield_fn(args))
-  Case 2:  generator expression                -> instantiate(genexpr)
+  Case 2:  generator expression with known yield metadata
   Case 3:  constant iterable                   -> instantiate([1,2,3])
 
 Architecture:
@@ -37,7 +37,7 @@ from .._inline.scope_analyzer import ScopeAnalyzer, ScopeContext, analyze_functi
 from .._inline._intrinsics import _PC_INTRINSICS
 from .._inline.genexpr_builder import build_genexpr_yield_function_ast
 from .._inline.names import ExpansionNames
-from .._inline.definition_bindings import bind_definition
+from .._inline.definition_bindings import bind_definition, symbol_expression
 from .._inline.closure_capture import (
     RuntimeCapture,
     extract_value_from_vref,
@@ -135,78 +135,6 @@ class _InitDispatcher:
         return self._init_into_fn.handle_call(visitor, func_ref, args, node)
 
 
-class _CallDispatcher:
-    """Lazy per-call-site type specialization for ``api.call``.
-
-    Used when the instantiated closure has unannotated parameters. Each
-    compiled call site contributes its argument types; one specialized
-    ``call`` wrapper is compiled per signature and cached. This mirrors
-    how unannotated parameters behave for inline closures and ``param``
-    functions: the body is stamped out per use with the actual types.
-    """
-
-    def __init__(self, *, wrapper_ast, param_names, declared_param_types,
-                 state_ptr_type, state_param, return_type, suffix, gv):
-        self._wrapper_ast = wrapper_ast
-        self._param_names = list(param_names)
-        self._declared_param_types = dict(declared_param_types)
-        self._state_ptr_type = state_ptr_type
-        self._state_param = state_param
-        self._return_type = return_type
-        self._suffix = suffix
-        self._gv = gv
-        self._specializations = {}
-
-    def __call__(self, *args, **kwargs):
-        raise TypeError(
-            "instantiate: api.call of a closure with unannotated parameters "
-            "can only be used inside compiled code (parameter types are "
-            "taken from the call site)"
-        )
-
-    def handle_call(self, visitor, func_ref, args, node):
-        from ..logger import logger
-
-        call_args = list(args[1:])  # args[0] is the state pointer
-        if len(call_args) != len(self._param_names):
-            logger.error(
-                f"instantiate: closure call takes {len(self._param_names)} "
-                f"arguments, got {len(call_args)}",
-                node=node, exc_type=TypeError,
-            )
-
-        param_types = {self._state_param: self._state_ptr_type}
-        inferred = []
-        for name, arg in zip(self._param_names, call_args):
-            declared = self._declared_param_types.get(name)
-            if declared is not None:
-                param_types[name] = declared
-                continue
-            pc_type = arg.get_pc_type() if hasattr(arg, "get_pc_type") else None
-            if pc_type is None:
-                logger.error(
-                    "instantiate: cannot determine a parameter type from an "
-                    "untyped call argument; pass a typed value (e.g. i32(1))",
-                    node=node, exc_type=TypeError,
-                )
-            param_types[name] = pc_type
-            inferred.append(pc_type)
-
-        key = tuple(inferred)
-        wrapper = self._specializations.get(key)
-        if wrapper is None:
-            sig = "_".join(t.get_name() for t in inferred)
-            wrapper = _compile_ast_function(
-                copy.deepcopy(self._wrapper_ast),
-                param_types=param_types,
-                return_type=self._return_type,
-                suffix=f"{self._suffix}_{sig}" if sig else self._suffix,
-                gv=self._gv,
-            )
-            self._specializations[key] = wrapper
-        return wrapper.handle_call(visitor, func_ref, args, node)
-
-
 def _compile_normalized_source(source: _InstantiateSource) -> Any:
     """Dispatch a normalized instantiate source to the right lowerer."""
     if source.func_ast is None:
@@ -218,6 +146,10 @@ def _compile_normalized_source(source: _InstantiateSource) -> Any:
         source_object_id=source.source_object_id,
         func_name_hint=source.func_name_hint,
         callee_globals=source.callee_globals,
+        bound_types={
+            arg.arg: value.get_pc_type()
+            for arg, value in zip(source.func_ast.args.args, source.call_args)
+        },
     )
 
 
@@ -244,8 +176,12 @@ def _instantiate_yield(source) -> Any:
 
     # Extract compile-time constants from ValueRefs and build capture bindings
     capture_bindings: Dict[str, Any] = {}
+    from ..type_descriptor import _constant_value
     for name, vref in zip(arg_names, call_args):
-        val = _extract_value_from_vref(vref)
+        known, val = _constant_value(vref)
+        if not known:
+            raise TypeError(
+                "instantiate yield arguments must be compile-time constants")
         # ValueRef carries type_hint; we forward both value + type
         # to _compile_yield_fn_pipeline so the struct field gets
         # the right annotation.
@@ -275,7 +211,8 @@ def _instantiate_genexpr(source) -> Any:
     fa = build_genexpr_yield_function_ast(genexp_ast, "__pc_genexp")
 
     if isinstance(genexp_ast.elt, ast.Constant):
-        fa.returns = _type_to_annotation_ast(
+        fa.returns = symbol_expression(
+            '_instantiate_yield_type',
             _python_constant_pc_type(genexp_ast.elt.value))
 
     return _compile_normalized_source(_InstantiateSource(
@@ -293,7 +230,7 @@ def _instantiate_closure(source) -> Any:
     return _compile_closure_fn_pipeline(
         source.func_ast,
         capture_references=source._capture_references,
-        defaults=source._pc_call_signature['defaults'],
+        call_signature=source._pc_call_signature,
         source_object_id=id(source),
         func_name_hint=source.func_ast.name,
         callee_globals=source.func_globals,
@@ -334,7 +271,11 @@ def _find_external_names(
 
 def _instantiate_const_iterable(values: List[Any]) -> Any:
     """Case 3: compile-time constant iterable (e.g. ``[1, 2, 3]``)."""
-    elem_type = _python_constant_pc_type(values[0]) if values else i32
+    if not values:
+        raise TypeError(
+            "instantiate cannot determine the element type of an empty "
+            "iterable; use an annotated yield function")
+    elem_type = _python_constant_pc_type(values[0])
     for v in values:
         vt = _python_constant_pc_type(v)
         if vt is not elem_type:
@@ -358,7 +299,7 @@ def _instantiate_const_iterable(values: List[Any]) -> Any:
         (suffix, "init"), {"s": ip}, None, gv)
 
     # Build value-case statements via template
-    elem_converter = _type_to_annotation_ast(elem_type)
+    elem_converter = symbol_expression('_instantiate_element_type', elem_type)
     case_stmts = [
         _value_case.instantiate(i=i, converter=elem_converter, v=v, idx='idx').stmts[0]
         for i, v in enumerate(values)
@@ -409,18 +350,13 @@ def _splice_capture_bindings(
     fa.body = pre + fa.body
 
 
-def _infer_return_type(
-    fa: ast.FunctionDef,
-    type_resolver,
-    default: type = i32,
-) -> type:
-    """Infer the return/yield value type from annotations, falling back to ``default``."""
-    ret = (
-        _annotation_ast_to_type(fa.returns, type_resolver)
-        if fa.returns is not None
-        else None
-    )
-    return ret if ret is not None else default
+def _require_yield_type(fa: ast.FunctionDef, type_resolver) -> type:
+    """State storage requires a declared yield type before lowering."""
+    if fa.returns is None:
+        raise TypeError(
+            "instantiate requires a declared yield type; "
+            "use a yield function with a return annotation")
+    return type_resolver.parse_annotation(fa.returns)
 
 
 def _compute_instantiate_suffix(
@@ -591,6 +527,7 @@ def _compile_yield_fn_pipeline(
     source_object_id: int,
     func_name_hint: str,
     callee_globals: Optional[Dict[str, Any]] = None,
+    bound_types: Optional[Dict[str, Any]] = None,
     capture_runtime: Optional[List[Tuple[str, type]]] = None,
 ) -> Any:
     """
@@ -604,6 +541,7 @@ def _compile_yield_fn_pipeline(
         func_name_hint: Human-readable name fragment for suffix.
         callee_globals: Mapping ``name -> compile_time_value`` for
             external symbols that need to be bound at instantiate-time.
+        bound_types: Existing type metadata of evaluated call arguments.
         capture_runtime: Optional list of ``(name, pc_type)`` runtime captures
             that must be stored in the state struct and passed to ``init``.
     """
@@ -614,19 +552,9 @@ def _compile_yield_fn_pipeline(
     callee_globals.update(capture_bindings or {})
     _splice_capture_bindings(fa, capture_bindings, callee_globals)
 
-    captured_vars, local_vars, param_vars = analyze_function_scope(fa)
-    # Parameters need to be stored in the state struct too, because label/goto
-    # control flow breaks normal lexical scoping – a variable assigned in one
-    # state block is not visible in another unless it lives on the state object.
-    locals_set: Set[str] = local_vars | captured_vars | param_vars
-    # Runtime captures are also stored on the state struct and must be rewritten
-    # to state-field accesses inside the state-machine function.
-    locals_set.update(capture.name for capture in runtime_captures)
-    # Intrinsics + struct param ('s') should never be rewritten
-    protect_set: Set[str] = set(_INTRINSICS) | {'s'}
     type_resolver = _build_type_resolver(callee_globals)
 
-    yield_type = _infer_return_type(fa, type_resolver)
+    yield_type = _require_yield_type(fa, type_resolver)
 
     compiletime_globals = dict(callee_globals or {})
     if capture_bindings:
@@ -634,12 +562,17 @@ def _compile_yield_fn_pipeline(
 
     fa = inline_yield_function_iterators(fa, compiletime_globals)
 
-    sm_ast = lower_yield_state_machine(YieldStateMachineRequest(
-        func_ast=fa,
-        locals_set=locals_set,
-        protect_set=protect_set,
-        compiletime_globals=compiletime_globals,
-    ))
+    captured_vars, local_vars, param_vars = analyze_function_scope(fa)
+    # Read bindings must survive across state blocks. Store-only bindings
+    # remain ordinary locals; their statements still evaluate normally.
+    read_names = {node.id for node in ast.walk(fa)
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    locals_set: Set[str] = (local_vars | captured_vars | param_vars) & read_names
+    # Runtime captures are also stored on the state struct and must be rewritten
+    # to state-field accesses inside the state-machine function.
+    locals_set.update(capture.name for capture in runtime_captures)
+    # Intrinsics + struct param ('s') should never be rewritten
+    protect_set: Set[str] = set(_INTRINSICS) | {'s'}
 
     binding_parts = []
     if capture_bindings:
@@ -658,11 +591,24 @@ def _compile_yield_fn_pipeline(
     sfx = "_".join(str(p) for p in suffix)
 
     fields = {"_pc": i32, "_yield_value": yield_type}
-    for name in locals_set:
-        lt = _local_type_hint(name, fa, type_resolver)
-        fields[name] = lt if lt is not None else i32
-    for capture in runtime_captures:
-        fields[capture.name] = capture.pc_type
+    annotations = _local_annotations(fa)
+    capture_types = {capture.name: capture.pc_type for capture in runtime_captures}
+    for name in sorted(locals_set - protect_set):
+        hint = _annotation_ast_to_type(annotations.get(name), type_resolver)
+        if hint is None:
+            hint = capture_types.get(name, (bound_types or {}).get(name))
+        if hint is None:
+            raise TypeError(
+                f"instantiate cannot determine the state type of '{name}'; "
+                "add a type annotation")
+        fields[name] = hint
+
+    sm_ast = lower_yield_state_machine(YieldStateMachineRequest(
+        func_ast=fa,
+        locals_set=locals_set,
+        protect_set=protect_set,
+        compiletime_globals=compiletime_globals,
+    ))
 
     _State = _build_state_struct(fields, suffix)
     ip = pc_ptr[_State]
@@ -710,7 +656,7 @@ def _compile_closure_fn_pipeline(
     func_name_hint: str,
     callee_globals: Optional[Dict[str, Any]] = None,
     capture_references: Optional[Dict[str, Any]] = None,
-    defaults: Optional[Dict[str, Any]] = None,
+    call_signature: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """Compile a closure into a callable first-class object.
 
@@ -731,6 +677,11 @@ def _compile_closure_fn_pipeline(
             exc_type=TypeError,
         )
 
+    from ..call_normalization import _build_sig, lower_inline_signature
+
+    if call_signature is None:
+        func_ast, call_signature = lower_inline_signature(func_ast, {})
+
     names = ExpansionNames()
     definition = bind_definition(
         func_ast, callee_globals, capture_references, names=names)
@@ -744,23 +695,26 @@ def _compile_closure_fn_pipeline(
                      for alias, name in definition.reference_names.items()
                      if name in runtime_names}
 
-    # Defaults are already evaluated values, not lexical references.
-    defaults = defaults or {}
-    fa.args.args = [arg for arg in fa.args.args if arg.arg not in defaults]
-    for name, vref in defaults.items():
+    # Default values remain optional arguments. Runtime snapshots live on state.
+    python_defaults = {}
+    default_fields = {}
+    for name, vref in call_signature['defaults'].items():
         if vref.is_python_value():
-            capture_bindings[name] = extract_value_from_vref(vref)
+            python_defaults[name] = vref
         else:
-            runtime_captures.append(RuntimeCapture(name, vref.get_pc_type(), vref))
-            field_aliases[name] = name
+            field = names.fresh('_default_' + name)
+            runtime_captures.append(RuntimeCapture(field, vref.get_pc_type(), vref))
+            default_fields[name] = field
 
     callee_globals = definition.globals
     callee_globals.update(capture_bindings)
-    _splice_capture_bindings(fa, capture_bindings, callee_globals)
     state_arg = names.fresh('s')
     type_resolver = _build_type_resolver(callee_globals)
 
-    return_type = _infer_return_type(fa, type_resolver)
+    inline_call = (fa.returns is None
+                   or any(arg.annotation is None for arg in fa.args.args))
+    return_type = (None if inline_call else
+                   _annotation_ast_to_type(fa.returns, type_resolver))
 
     rewriter = StateFieldRewriter(StateFieldRewritePolicy(
         fields=field_aliases,
@@ -778,12 +732,6 @@ def _compile_closure_fn_pipeline(
             else:
                 rewritten_body.append(rewritten)
 
-    # Ensure the wrapper body always ends with a return (compile_ast needs
-    # a concrete return type; if the original closure lacked one we emit
-    # a zero of the inferred return type).
-    if not rewritten_body or not isinstance(rewritten_body[-1], ast.Return):
-        rewritten_body.append(ast.Return(value=_typed_zero(return_type)))
-
     wrapper_args = ast.arguments(
         posonlyargs=[],
         args=[ast.arg(arg=state_arg, annotation=None)] + list(fa.args.args),
@@ -793,8 +741,9 @@ def _compile_closure_fn_pipeline(
         vararg=fa.args.vararg,
         kwarg=fa.args.kwarg,
     )
-    wrapper_ast = _closure_call_template(rewritten_body, _Ret=return_type).stmts[0]
+    wrapper_ast = _closure_call_template(rewritten_body).stmts[0]
     wrapper_ast.args = wrapper_args
+    wrapper_ast.returns = copy.deepcopy(fa.returns)
     ast.fix_missing_locations(wrapper_ast)
 
     binding_parts = []
@@ -815,35 +764,22 @@ def _compile_closure_fn_pipeline(
     _State = _build_state_struct(fields, suffix)
     ip = pc_ptr[_State]
 
-    param_types: Dict[str, type] = {state_arg: ip}
-    for arg in fa.args.args:
-        at = (
-            _annotation_ast_to_type(arg.annotation, type_resolver)
-            if arg.annotation
-            else None
-        )
-        if at is not None:
-            param_types[arg.arg] = at
+    param_types = {}
+    if not inline_call:
+        param_types = {state_arg: ip}
+        for arg in fa.args.args:
+            param_types[arg.arg] = _annotation_ast_to_type(
+                arg.annotation, type_resolver)
 
     from pythoc import move
     gv = dict(callee_globals)
-    gv.update({"_State": _State, "_Ret": return_type, "move": move})
+    gv.update({"_State": _State, "move": move})
 
-    untyped_params = [arg.arg for arg in fa.args.args if arg.annotation is None]
-    if untyped_params:
-        # Unannotated parameters are handled like param parameters: the
-        # call wrapper is stamped out per call-site argument signature.
-        cf = _CallDispatcher(
-            wrapper_ast=wrapper_ast,
-            param_names=[arg.arg for arg in fa.args.args],
-            declared_param_types={k: v for k, v in param_types.items()
-                                  if k != state_arg},
-            state_ptr_type=ip,
-            state_param=state_arg,
-            return_type=return_type,
-            suffix=sfx,
-            gv=gv,
-        )
+    if inline_call:
+        from ..ast_visitor.functions import _ClosureWrapper
+        cf = _ClosureWrapper(
+            wrapper_ast, visitor=None, func_globals=gv,
+            defaults={}, capture_references={})
     else:
         cf = _compile_ast_function(
             wrapper_ast,
@@ -852,6 +788,20 @@ def _compile_closure_fn_pipeline(
             suffix=sfx,
             gv=gv,
         )
+
+    cf._pc_call_signature = _build_sig(
+        [state_arg, *call_signature['param_names']],
+        has_varargs=call_signature['has_varargs'],
+        has_kwargs=call_signature['has_kwargs'],
+        positional_only=call_signature['positional_only'],
+        keyword_only=call_signature['keyword_only'],
+        defaults=python_defaults,
+        default_resolvers={
+            **call_signature.get('default_resolvers', {}),
+            **{name: _StateFieldDefault(state_arg, field)
+               for name, field in default_fields.items()},
+        },
+    )
 
     init_into_fn = _build_init_into_fn(
         runtime_captures, ip, sfx + "_ii", gv, set_pc=False
@@ -873,6 +823,19 @@ def _compile_closure_fn_pipeline(
 # ---------------------------------------------------------------------------
 # API helpers
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _StateFieldDefault:
+    """Read an omitted argument from the supplied materialized state."""
+
+    state_param: str
+    field: str
+
+    def __call__(self, visitor, bound, node):
+        field_ref = visitor.value_dispatcher.handle_attribute(
+            bound[self.state_param], self.field, node)
+        return _capture_value_as_rvalue(visitor, field_ref)
+
 
 def _runtime_capture_values(captures: List[RuntimeCapture]) -> List[Any]:
     values = []
@@ -1014,8 +977,8 @@ def _value_tmpl(cases, default_value):
 
 
 @quote
-def _closure_call_template(body, *, _Ret):
-    def _call(s) -> _Ret:
+def _closure_call_template(body):
+    def _call(s):
         body
 
 
@@ -1040,11 +1003,6 @@ def _python_constant_pc_type(value: Any) -> type:
     return TypeConverter.infer_default_pc_type_from_python(value)
 
 
-def _extract_value_from_vref(vref) -> Any:
-    """Extract a Python compile-time constant from a ValueRef."""
-    return extract_value_from_vref(vref)
-
-
 def _build_type_resolver(callee_globals: Optional[Dict[str, Any]]):
     from ..type_resolver import TypeResolver
     return TypeResolver(user_globals=callee_globals or {})
@@ -1057,49 +1015,34 @@ def _annotation_ast_to_type(node, type_resolver) -> Optional[type]:
     return type_resolver.parse_annotation(node)
 
 
-def _type_to_annotation_ast(ty: type) -> ast.expr:
-    """Reverse of _annotation_ast_to_type."""
-    name = getattr(ty, '__name__', None)
-    if name is None:
-        return ast.Name(id="i32", ctx=ast.Load())
-    return ast.Name(id=name, ctx=ast.Load())
-
-
 def _typed_zero(ty: type) -> ast.expr:
     return ast.Call(
-        func=_type_to_annotation_ast(ty),
+        func=symbol_expression('_instantiate_type', ty),
         args=[ast.Constant(value=0)],
         keywords=[],
     )
 
 
-def _local_type_hint(
-    name: str,
-    fa: ast.FunctionDef,
-    type_resolver,
-) -> Optional[type]:
-    """Search function parameters and body for a type annotation of ``name``."""
-    # Search parameter annotations
-    for arg in fa.args.args:
-        if arg.arg == name and arg.annotation is not None:
-            return _annotation_ast_to_type(arg.annotation, type_resolver)
-    for arg in fa.args.posonlyargs:
-        if arg.arg == name and arg.annotation is not None:
-            return _annotation_ast_to_type(arg.annotation, type_resolver)
-    for arg in fa.args.kwonlyargs:
-        if arg.arg == name and arg.annotation is not None:
-            return _annotation_ast_to_type(arg.annotation, type_resolver)
-    if fa.args.vararg and fa.args.vararg.arg == name and fa.args.vararg.annotation is not None:
-        return _annotation_ast_to_type(fa.args.vararg.annotation, type_resolver)
-    if fa.args.kwarg and fa.args.kwarg.arg == name and fa.args.kwarg.annotation is not None:
-        return _annotation_ast_to_type(fa.args.kwarg.annotation, type_resolver)
-    # Search body annotated assignments
-    for stmt in fa.body:
-        if (isinstance(stmt, ast.AnnAssign) and
-                isinstance(stmt.target, ast.Name) and
-                stmt.target.id == name):
-            return _annotation_ast_to_type(stmt.annotation, type_resolver)
-    return None
+def _local_annotations(fa):
+    """Collect explicit local types once, including expanded compound bodies."""
+    from .._inline.renaming import _parameters
+    annotations = {arg.arg: arg.annotation for arg in _parameters(fa.args)
+                   if arg.annotation is not None}
+
+    class Collector(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            pass
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_AnnAssign(self, node):
+            if isinstance(node.target, ast.Name):
+                annotations.setdefault(node.target.id, node.annotation)
+
+    collector = Collector()
+    for statement in fa.body:
+        collector.visit(statement)
+    return annotations
 
 
 def _python_value_to_ast(v: Any) -> ast.expr:

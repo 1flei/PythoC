@@ -16,8 +16,6 @@ from .linear_checker import (
     LinearSnapshot,
     LinearError,
     LinearChecker,
-    copy_snapshot,
-    snapshots_compatible,
     find_snapshot_diffs,
     check_linear_types_on_cfg,
 )
@@ -31,8 +29,6 @@ __all__ = [
     'LinearSnapshot',
     'LinearError',
     'LinearChecker',
-    'copy_snapshot',
-    'snapshots_compatible',
     'find_snapshot_diffs',
     'check_linear_types_on_cfg',
 ]

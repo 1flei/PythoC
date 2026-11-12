@@ -18,8 +18,6 @@ from pythoc.cfg.graph import CFGBlock, CFGEdge, CFG
 from pythoc.cfg.linear_checker import (
     LinearSnapshot,
     LinearError,
-    copy_snapshot,
-    snapshots_compatible,
     find_snapshot_diffs,
 )
 
@@ -178,58 +176,8 @@ class TestCFG(unittest.TestCase):
         self.assertIn('B1', dot)
 
 
-class TestLinearSnapshotUtils(unittest.TestCase):
-    """Tests for linear snapshot utility functions"""
-    
-    def test_copy_snapshot(self):
-        original: LinearSnapshot = {'token': {(): 'active', (0,): 'consumed'}}
-        copied = copy_snapshot(original)
-        
-        # Modify copy
-        copied['token'][()] = 'consumed'
-        
-        # Original should be unchanged
-        self.assertEqual(original['token'][()], 'active')
-    
-    def test_snapshots_compatible_both_active(self):
-        s1: LinearSnapshot = {'token': {(): 'active'}}
-        s2: LinearSnapshot = {'token': {(): 'active'}}
-        
-        self.assertTrue(snapshots_compatible(s1, s2))
-    
-    def test_snapshots_compatible_both_consumed(self):
-        s1: LinearSnapshot = {'token': {(): 'consumed'}}
-        s2: LinearSnapshot = {'token': {(): 'consumed'}}
-        
-        self.assertTrue(snapshots_compatible(s1, s2))
-    
-    def test_snapshots_compatible_consumed_undefined(self):
-        # consumed and undefined are both "not active", so compatible
-        s1: LinearSnapshot = {'token': {(): 'consumed'}}
-        s2: LinearSnapshot = {'token': {(): 'undefined'}}
-        
-        self.assertTrue(snapshots_compatible(s1, s2))
-    
-    def test_snapshots_incompatible(self):
-        # active vs consumed - incompatible
-        s1: LinearSnapshot = {'token': {(): 'active'}}
-        s2: LinearSnapshot = {'token': {(): 'consumed'}}
-        
-        self.assertFalse(snapshots_compatible(s1, s2))
-    
-    def test_snapshots_compatible_multiple_paths(self):
-        # Struct with two linear fields
-        s1: LinearSnapshot = {'s': {(0,): 'active', (1,): 'consumed'}}
-        s2: LinearSnapshot = {'s': {(0,): 'active', (1,): 'consumed'}}
-        
-        self.assertTrue(snapshots_compatible(s1, s2))
-    
-    def test_snapshots_incompatible_one_path(self):
-        # One path differs
-        s1: LinearSnapshot = {'s': {(0,): 'active', (1,): 'consumed'}}
-        s2: LinearSnapshot = {'s': {(0,): 'consumed', (1,): 'consumed'}}
-        
-        self.assertFalse(snapshots_compatible(s1, s2))
+class TestLinearSnapshotDiffs(unittest.TestCase):
+    """Tests for linear snapshot diagnostics."""
     
     def test_find_snapshot_diffs_no_diff(self):
         s1: LinearSnapshot = {'token': {(): 'active'}}

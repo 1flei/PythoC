@@ -25,9 +25,9 @@ from collections import deque
 from typing import Dict, List, Optional, Set, Tuple, Any, Union, TYPE_CHECKING
 from ..logger import logger
 import ast
-import copy
 
 from .graph import CFG, CFGBlock, CFGEdge
+from .linear_state import LinearState
 
 if TYPE_CHECKING:
     from ..registry import VariableInfo
@@ -123,45 +123,6 @@ class LinearError:
                         lines.append(f"    - {state} (from block {block_id})")
             return '\n'.join(lines)
         return f"Error: {self.message}"
-
-
-def copy_snapshot(snapshot: LinearSnapshot) -> LinearSnapshot:
-    """Deep copy a snapshot"""
-    return {var_id: dict(paths) for var_id, paths in snapshot.items()}
-
-
-def snapshots_compatible(s1: LinearSnapshot, s2: LinearSnapshot) -> bool:
-    """Check if two snapshots are compatible for merging
-    
-    Two snapshots are compatible if for every (var_id, path):
-    - Both have 'valid' (active), OR
-    - Both have non-valid (invalid/undefined)
-    
-    We don't require exact state match - just whether it's usable or not.
-    
-    Args:
-        s1: First snapshot
-        s2: Second snapshot
-        
-    Returns:
-        True if snapshots are compatible
-    """
-    all_var_ids = set(s1.keys()) | set(s2.keys())
-    for var_id in all_var_ids:
-        paths1 = s1.get(var_id, {})
-        paths2 = s2.get(var_id, {})
-        all_paths = set(paths1.keys()) | set(paths2.keys())
-        
-        for path in all_paths:
-            state1 = paths1.get(path, 'invalid')
-            state2 = paths2.get(path, 'invalid')
-            # Only compare valid vs non-valid
-            # Map old states: 'active' -> 'valid', 'consumed'/'undefined' -> 'invalid'
-            is_valid1 = (state1 in ('valid', 'active'))
-            is_valid2 = (state2 in ('valid', 'active'))
-            if is_valid1 != is_valid2:
-                return False
-    return True
 
 
 def find_snapshot_diffs(
@@ -262,8 +223,24 @@ class LinearChecker:
         self._var_id_info: VarIdInfo = {}
         
         # Snapshots at block entry/exit (computed during dataflow analysis)
-        self.entry_snapshots: Dict[int, LinearSnapshot] = {}
-        self.exit_snapshots: Dict[int, LinearSnapshot] = {}
+        self.entry_snapshots: Dict[int, LinearState] = {}
+        self.exit_snapshots: Dict[int, LinearState] = {}
+        self._token_ids = {}
+        self._token_paths = []
+
+    def _token_id(self, var_id, path):
+        key = (var_id, path)
+        if key not in self._token_ids:
+            self._token_ids[key] = len(self._token_paths)
+            self._token_paths.append(key)
+        return self._token_ids[key]
+
+    def _describe_state(self, state):
+        snapshot = {}
+        for token in state:
+            var_id, path = self._token_paths[token]
+            snapshot.setdefault(var_id, {})[path] = 'valid'
+        return snapshot
     
     def check(
         self, 
@@ -281,8 +258,14 @@ class LinearChecker:
         """
         self.errors = []
         self._var_id_info = {}  # Reset var_id info for each check
-        
-        self.entry_snapshots = {cfg.entry_id: copy_snapshot(initial_snapshot)}
+        self._token_ids = {}
+        self._token_paths = []
+        initial = LinearState()
+        for var_id, paths in initial_snapshot.items():
+            for path, state in paths.items():
+                initial = initial.with_token(
+                    self._token_id(var_id, path), state in ('valid', 'active'))
+        self.entry_snapshots = {cfg.entry_id: initial}
         self.exit_snapshots = {}
         
         # Process blocks in topological order
@@ -306,7 +289,7 @@ class LinearChecker:
             # The exit block is a merge point - its entry snapshot is the merged
             # state from all return/fallthrough paths
             if block_id == cfg.exit_id:
-                self.exit_snapshots[block_id] = copy_snapshot(entry_snapshot)
+                self.exit_snapshots[block_id] = entry_snapshot
                 continue
             
             # Simulate block execution to get exit snapshot
@@ -324,7 +307,7 @@ class LinearChecker:
                     target_id = edge.target_id
                     if target_id not in self.entry_snapshots:
                         # First predecessor to reach this block
-                        self.entry_snapshots[target_id] = copy_snapshot(exit_snapshot)
+                        self.entry_snapshots[target_id] = exit_snapshot
         
         # After processing all blocks, check merge points for consistency
         self._check_merge_points(cfg)
@@ -356,7 +339,7 @@ class LinearChecker:
                 continue  # Not a merge point
             
             # Collect exit snapshots from predecessors
-            pred_info: List[Tuple[CFGEdge, LinearSnapshot]] = []
+            pred_info: List[Tuple[CFGEdge, LinearState]] = []
             for edge in preds:
                 if edge.source_id in self.exit_snapshots:
                     pred_info.append((edge, self.exit_snapshots[edge.source_id]))
@@ -367,7 +350,7 @@ class LinearChecker:
             # Check consistency
             first_edge, first_snapshot = pred_info[0]
             for edge, snapshot in pred_info[1:]:
-                if not snapshots_compatible(first_snapshot, snapshot):
+                if first_snapshot != snapshot:
                     self._error_merge_inconsistent(cfg, block_id, pred_info)
                     break  # Only report once per merge point
         
@@ -399,7 +382,7 @@ class LinearChecker:
 
         # Collect exit snapshots from all predecessors.  A token is unconsumed at
         # exit if it is valid/active in at least one predecessor's exit snapshot.
-        pred_snapshots: List[LinearSnapshot] = []
+        pred_snapshots: List[LinearState] = []
         for edge in preds:
             if edge.source_id in self.exit_snapshots:
                 pred_snapshots.append(self.exit_snapshots[edge.source_id])
@@ -409,10 +392,7 @@ class LinearChecker:
 
         unconsumed_set: Set[Tuple[int, Tuple[int, ...]]] = set()
         for snapshot in pred_snapshots:
-            for var_id, paths in snapshot.items():
-                for path, state in paths.items():
-                    if state in ('valid', 'active'):
-                        unconsumed_set.add((var_id, path))
+            unconsumed_set.update(self._token_paths[token] for token in snapshot)
 
         if not unconsumed_set:
             return
@@ -435,7 +415,7 @@ class LinearChecker:
     
     def _compute_entry_snapshot(
         self, cfg: CFG, block_id: int
-    ) -> Optional[LinearSnapshot]:
+    ) -> Optional[LinearState]:
         """Compute entry snapshot from predecessors
         
         For blocks with multiple predecessors (merge points), checks that
@@ -449,7 +429,7 @@ class LinearChecker:
             Entry snapshot, or None if not yet computable
         """
         # Collect snapshots from predecessors (excluding back edges)
-        pred_info: List[Tuple[CFGEdge, LinearSnapshot]] = []
+        pred_info: List[Tuple[CFGEdge, LinearState]] = []
         for edge in cfg.get_predecessors(block_id):
             if edge.kind == 'loop_back':
                 continue
@@ -460,15 +440,15 @@ class LinearChecker:
             return None
         
         if len(pred_info) == 1:
-            return copy_snapshot(pred_info[0][1])
+            return pred_info[0][1]
         
         # Multiple predecessors - MERGE POINT
         return self._merge_snapshots(cfg, block_id, pred_info)
     
     def _merge_snapshots(
         self, cfg: CFG, block_id: int,
-        pred_info: List[Tuple[CFGEdge, LinearSnapshot]]
-    ) -> LinearSnapshot:
+        pred_info: List[Tuple[CFGEdge, LinearState]]
+    ) -> LinearState:
         """Merge snapshots at merge point - all must be compatible
         
         Args:
@@ -482,11 +462,11 @@ class LinearChecker:
         first_edge, first_snapshot = pred_info[0]
         
         for edge, snapshot in pred_info[1:]:
-            if not snapshots_compatible(first_snapshot, snapshot):
+            if first_snapshot != snapshot:
                 self._error_merge_inconsistent(cfg, block_id, pred_info)
-                return copy_snapshot(first_snapshot)
+                return first_snapshot
         
-        return copy_snapshot(first_snapshot)
+        return first_snapshot
     
     def _get_block_source_node(self, cfg: CFG, block_id: int) -> Optional[ast.AST]:
         """Get a source AST node for a block for error reporting
@@ -540,9 +520,11 @@ class LinearChecker:
     
     def _error_merge_inconsistent(
         self, cfg: CFG, block_id: int,
-        pred_info: List[Tuple[CFGEdge, LinearSnapshot]]
+        pred_info: List[Tuple[CFGEdge, LinearState]]
     ):
         """Report inconsistent snapshots at merge point"""
+        pred_info = [(edge, self._describe_state(state))
+                     for edge, state in pred_info]
         # Find which (var_id, path) pairs have different valid status
         all_var_ids: Set[int] = set()
         for _, snapshot in pred_info:
@@ -583,8 +565,8 @@ class LinearChecker:
         ))
     
     def _simulate_block(
-        self, cfg: CFG, block: CFGBlock, entry_snapshot: LinearSnapshot
-    ) -> LinearSnapshot:
+        self, cfg: CFG, block: CFGBlock, entry_snapshot: LinearState
+    ) -> LinearState:
         """Simulate block execution by processing linear events
         
         Processes LinearRegister and LinearTransition events recorded in the block.
@@ -598,7 +580,7 @@ class LinearChecker:
         Returns:
             Snapshot at block exit
         """
-        result = copy_snapshot(entry_snapshot)
+        result = entry_snapshot
         
         # Process each linear event in the block
         for event in block.linear_events:
@@ -614,9 +596,8 @@ class LinearChecker:
                 # Variable enters scope with initial state
                 var_id = event.var_id
                 path = event.path
-                if var_id not in result:
-                    result[var_id] = {}
-                result[var_id][path] = event.initial_state
+                result = result.with_token(
+                    self._token_id(var_id, path), event.initial_state == 'valid')
                 # Store var info for error reporting
                 self._var_id_info[var_id] = (event.var_name, event.line_number)
                 logger.debug(f"LinearChecker: Register id={var_id} {event.var_name}{path} = {event.initial_state}")
@@ -627,7 +608,8 @@ class LinearChecker:
                 path = event.path
                 
                 # Get current state
-                current_state = result.get(var_id, {}).get(path, 'invalid')
+                token = self._token_id(var_id, path)
+                current_state = 'valid' if token in result else 'invalid'
                 
                 # Validate transition: current state must match expected old_state
                 if current_state != event.old_state:
@@ -653,15 +635,13 @@ class LinearChecker:
                         ))
                 
                 # Apply transition regardless (to continue analysis)
-                if var_id not in result:
-                    result[var_id] = {}
-                result[var_id][path] = event.new_state
+                result = result.with_token(token, event.new_state == 'valid')
                 logger.debug(f"LinearChecker: Transition id={var_id} {event.var_name}{path}: {current_state} -> {event.new_state}")
         
         return result
     
     def _check_loop_invariant(
-        self, cfg: CFG, back_edge: CFGEdge, exit_snapshot: LinearSnapshot
+        self, cfg: CFG, back_edge: CFGEdge, exit_snapshot: LinearState
     ):
         """Check that loop body preserves linear state
         
@@ -679,8 +659,9 @@ class LinearChecker:
         if header_entry is None:
             return
         
-        if not snapshots_compatible(exit_snapshot, header_entry):
-            diffs = find_snapshot_diffs(header_entry, exit_snapshot)
+        if exit_snapshot != header_entry:
+            diffs = find_snapshot_diffs(
+                self._describe_state(header_entry), self._describe_state(exit_snapshot))
             diff_strs = []
             for diff in diffs:
                 states_str = ', '.join(f"{s}" for _, s in diff['states'])
@@ -694,97 +675,6 @@ class LinearChecker:
                 source_node=self._get_block_source_node(cfg, back_edge.source_id)
             ))
     
-    def _get_effective_exit_snapshot(
-        self, cfg: CFG, block_id: int
-    ) -> Optional[LinearSnapshot]:
-        """Get effective exit snapshot for a block
-        
-        For exit points (blocks with no successors or return blocks), we need
-        to determine the correct linear state. The challenge is that AST visitor
-        executes sequentially, so recorded exit_snapshots may be incorrect for
-        blocks that are only reachable from specific branches.
-        
-        Strategy:
-        1. entry_snapshot (from dataflow) is the ground truth for block entry
-        2. exit_snapshot may be wrong if AST visitor recorded it at wrong time
-        3. Key insight: a block can only consume tokens (active -> consumed),
-           never resurrect them (consumed -> active). If exit shows active
-           but entry shows consumed, exit is wrong.
-        4. Merge entry and exit: for each token, if entry is consumed, use consumed;
-           otherwise use exit state (if available) or entry state.
-        
-        Args:
-            cfg: The CFG
-            block_id: Block ID
-            
-        Returns:
-            The effective exit snapshot, or None if not available
-        """
-        from ..logger import logger
-        
-        # Check if we have both entry and exit snapshots
-        has_entry = block_id in self.entry_snapshots
-        has_exit = block_id in self.exit_snapshots
-        
-        if has_entry and has_exit:
-            entry = self.entry_snapshots[block_id]
-            exit_snap = self.exit_snapshots[block_id]
-            
-            # Merge: for each token, take the "more consumed" state
-            # If entry is consumed, it stays consumed (can't resurrect)
-            # If entry is active and exit is consumed, use consumed (block consumed it)
-            # If entry is active and exit is active, use active
-            merged: LinearSnapshot = {}
-            all_vars = set(entry.keys()) | set(exit_snap.keys())
-            
-            for var_name in all_vars:
-                entry_paths = entry.get(var_name, {})
-                exit_paths = exit_snap.get(var_name, {})
-                all_paths = set(entry_paths.keys()) | set(exit_paths.keys())
-                
-                merged[var_name] = {}
-                for path in all_paths:
-                    entry_state = entry_paths.get(path, 'undefined')
-                    exit_state = exit_paths.get(path, 'undefined')
-                    
-                    # If entry is consumed, stay consumed (can't resurrect)
-                    if entry_state == 'consumed':
-                        merged[var_name][path] = 'consumed'
-                    # If entry is active and exit is consumed, use consumed
-                    elif entry_state == 'active' and exit_state == 'consumed':
-                        merged[var_name][path] = 'consumed'
-                    # If entry is active and exit is active, use active
-                    elif entry_state == 'active' and exit_state == 'active':
-                        merged[var_name][path] = 'active'
-                    # If entry is undefined and exit has a state, use exit state
-                    # (variable was created in this block)
-                    elif entry_state == 'undefined' and exit_state != 'undefined':
-                        merged[var_name][path] = exit_state
-                    # Otherwise use entry state
-                    else:
-                        merged[var_name][path] = entry_state
-            
-            logger.debug(f"_get_effective_exit_snapshot: block {block_id} merged, "
-                       f"entry={entry}, exit={exit_snap}, merged={merged}")
-            return merged
-        
-        if has_entry:
-            entry = self.entry_snapshots[block_id]
-            logger.debug(f"_get_effective_exit_snapshot: block {block_id} only has entry={entry}")
-            return entry
-        
-        if has_exit:
-            exit_snap = self.exit_snapshots[block_id]
-            logger.debug(f"_get_effective_exit_snapshot: block {block_id} only has exit={exit_snap}")
-            return exit_snap
-        
-        # No entry or exit snapshot found - this indicates a bug
-        logger.error(
-            None,
-            f"Internal error: no entry or exit snapshot for block {block_id}. "
-            f"This block should have been processed during dataflow analysis."
-        )
-        return None
 
 
 def check_linear_types_on_cfg(

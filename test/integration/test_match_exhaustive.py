@@ -6,14 +6,17 @@ Tests for the exhaustiveness checking feature that ensures all match
 statements cover all possible cases.
 """
 
+import ast
+from types import SimpleNamespace
+from unittest.mock import patch
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import i32, i8, compile, enum, ptr, struct
+from pythoc import CompileSession, LLVMCompiler, const, i32, i64, i8, compile, enum, ptr, struct
 from pythoc import bool as pc_bool
 from pythoc.build.output_manager import flush_all_pending_outputs, clear_failed_group
-from pythoc.logger import set_raise_on_error
+from pythoc.logger import logger, set_raise_on_error
 import unittest
 
 # Enable exception raising for tests
@@ -545,6 +548,113 @@ class TestNonExhaustiveMatches(unittest.TestCase):
         """Incomplete enum bool payload match should fail"""
         passed, msg = test_enum_bool_payload_incomplete_should_fail()
         self.assertTrue(passed, msg)
+
+
+class TestPatternResolution(unittest.TestCase):
+    def test_dense_integer_comparisons_become_an_llvm_switch(self):
+        values = [11, 29, 7, 42, 5, 83, 19, 37, 101, 3, 61, 47, 97, 2, 73, 31]
+        cases = ''.join(f'        case {index}:\n            return {value}\n'
+                        for index, value in enumerate(values))
+        syntax = ast.parse(
+            f'def dispatch(value):\n    match value:\n{cases}'
+            '        case _:\n            return -1').body[0]
+        with CompileSession():
+            compiler = LLVMCompiler()
+            compiler.compile_function_from_ast(
+                syntax, param_type_hints={'value': i32}, return_type_hint=i32)
+            self.assertNotIn('switch ', compiler.get_ir())
+            compiler.optimize_module(2)
+            optimized = compiler.get_ir()
+            self.assertTrue('switch i32' in optimized or '@switch.table' in optimized)
+
+    def test_duplicate_actual_tags_cannot_prove_exhaustiveness(self):
+        with CompileSession(), patch.object(logger, 'raise_on_error', True):
+            kind = enum['A': None, 'B': None]
+            compiler = LLVMCompiler(user_globals={'tags': SimpleNamespace(A=0, B=0)})
+            syntax = ast.parse('''
+def choose(value):
+    match value:
+        case tags.A:
+            return 1
+        case tags.B:
+            return 2
+''').body[0]
+            with self.assertRaisesRegex(ValueError, 'Non-exhaustive.*B'):
+                compiler.compile_function_from_ast(
+                    syntax, param_type_hints={'value': kind}, return_type_hint=i32)
+
+    def test_tag_alias_names_do_not_change_coverage(self):
+        with CompileSession():
+            kind = enum['A': None, 'B': None]
+            compiler = LLVMCompiler(user_globals={
+                'tags': SimpleNamespace(first=kind.B, second=kind.A)})
+            syntax = ast.parse('''
+def choose(value):
+    match value:
+        case tags.first:
+            return 1
+        case tags.second:
+            return 2
+''').body[0]
+            compiler.compile_function_from_ast(
+                syntax, param_type_hints={'value': kind}, return_type_hint=i32)
+            self.assertTrue(compiler.verify_module())
+
+    def test_runtime_members_with_variant_spellings_do_not_prove_coverage(self):
+        from pythoc import i8
+        with CompileSession(), patch.object(logger, 'raise_on_error', True):
+            kind = enum['A': None, 'B': None]
+            tags = struct['A': i8, 'B': i8]
+            compiler = LLVMCompiler()
+            syntax = ast.parse('''
+def choose(value, tags):
+    match value:
+        case tags.A:
+            return 1
+        case tags.B:
+            return 2
+''').body[0]
+            with self.assertRaisesRegex(ValueError, 'Non-exhaustive'):
+                compiler.compile_function_from_ast(
+                    syntax, param_type_hints={'value': kind, 'tags': tags},
+                    return_type_hint=i32)
+
+    def test_foreign_class_pattern_is_rejected_even_with_a_catch_all(self):
+        with CompileSession():
+            point, other = struct['value': i32], struct['value': i64]
+            compiler = LLVMCompiler(user_globals={'Other': other})
+            syntax = ast.parse('''
+def choose(value):
+    match value:
+        case Other(value=42):
+            return 1
+        case _:
+            return 0
+''').body[0]
+            with self.assertRaisesRegex(TypeError, 'does not match subject type'):
+                compiler.compile_function_from_ast(
+                    syntax, param_type_hints={'value': point}, return_type_hint=i32)
+
+    def test_unknown_pattern_is_not_treated_as_a_wildcard(self):
+        from pythoc.match_exhaustive import PatternNormalizer
+        with self.assertRaises(NotImplementedError):
+            PatternNormalizer(None).normalize(ast.MatchStar(name='rest'), i32)
+
+    def test_class_patterns_preserve_storage_qualifiers(self):
+        with CompileSession():
+            point = struct['value': i32]
+            compiler = LLVMCompiler(user_globals={'Point': point})
+            syntax = ast.parse('''
+def choose(value):
+    match value:
+        case Point(value=42):
+            return 1
+        case _:
+            return 0
+''').body[0]
+            compiler.compile_function_from_ast(
+                syntax, param_type_hints={'value': const[point]}, return_type_hint=i32)
+            self.assertTrue(compiler.verify_module())
 
 
 if __name__ == '__main__':

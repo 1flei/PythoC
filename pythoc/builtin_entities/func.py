@@ -154,7 +154,13 @@ class func(BuiltinType):
             else:
                 param_ctypes.append(ctypes.c_void_p)
 
-        return ctypes.CFUNCTYPE(ret_ctype, *param_ctypes)
+        prototype = ctypes.CFUNCTYPE
+        if cls.calling_convention == 'stdcall':
+            import sys
+            if sys.platform != 'win32':
+                raise TypeError('Python stdcall function pointers require Windows')
+            prototype = ctypes.WINFUNCTYPE
+        return prototype(ret_ctype, *param_ctypes)
 
     @classmethod
     def can_be_called(cls) -> bool:

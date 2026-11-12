@@ -60,54 +60,19 @@ class ResolvedVarArgs:
 
 
 def _extract_element_types(
-    annotation: ast.AST,
     parsed_type: Any,
-    type_resolver,
 ) -> List[Any]:
-    """Extract field / element types from the varargs annotation.
-
-    Strategy (in priority order):
-    1. Named schema type (e.g. ``Point``) -> field types from schema protocol
-    2. Subscript annotation (e.g. ``struct[i32, f64]``) -> resolve each slice item
-    3. Array type -> [element_type] * size
-    4. Single type fallback
-    """
-    # 1. Named / registered schema type -- authoritative even if empty
+    """Read collector elements from the resolved type, independent of syntax."""
+    from ..type_resolver import TypeResolver
     if is_schema_type(parsed_type):
-        result = []
-        for ft in get_schema_field_types(parsed_type):
-            if isinstance(ft, str):
-                resolved = type_resolver.parse_annotation(ft)
-                result.append(resolved if resolved is not None else ft)
-            else:
-                result.append(ft)
-        return result
-
-    # 2. Inline subscript (struct[i32, f64], union[i32, f64], ...)
-    if isinstance(annotation, ast.Subscript):
-        slice_node = annotation.slice
-        items = list(slice_node.elts) if isinstance(slice_node, ast.Tuple) else [slice_node]
-        result = []
-        for item in items:
-            elem = type_resolver.parse_annotation(item)
-            if elem is not None:
-                result.append(elem)
-        if result:
-            return result
-
-    # 3. field_layout (covers literal carriers, etc.)
+        return [TypeResolver.resolve_type(field)
+                for field in get_schema_field_types(parsed_type)]
     if has_field_layout(parsed_type):
-        layout = get_field_layout_types(parsed_type)
-        if layout:
-            return list(layout)
-
-    # 4. Array type: element_type * count
-    elem_type = getattr(parsed_type, 'element_type', None)
+        return get_field_layout_types(parsed_type)
     dims = getattr(parsed_type, 'dimensions', None)
-    if elem_type is not None and dims and len(dims) == 1:
-        return [elem_type] * dims[0]
-
-    # 5. Fallback: single element
+    if dims is not None:
+        from ..type_descriptor import array_decay_type
+        return [array_decay_type(parsed_type).pointee_type] * dims[0]
     if parsed_type is not None:
         return [parsed_type]
 
@@ -131,7 +96,7 @@ def resolve_varargs(func_node: ast.FunctionDef, type_resolver) -> ResolvedVarArg
     annotation = vararg.annotation
     parsed_type = type_resolver.parse_annotation(annotation)
 
-    element_types = _extract_element_types(annotation, parsed_type, type_resolver)
+    element_types = _extract_element_types(parsed_type)
 
     return ResolvedVarArgs(
         param_name=vararg.arg,

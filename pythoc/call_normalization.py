@@ -210,7 +210,7 @@ def prepare_call_target(func_ref):
     return func_ref, []
 
 
-def normalize_call_args(func_ref, args, node):
+def normalize_call_args(func_ref, args, node, *, visitor=None):
     """Bind values without evaluating or inspecting argument expressions."""
     signature = _get_callee_signature(func_ref)
     if signature is None:
@@ -226,10 +226,10 @@ def normalize_call_args(func_ref, args, node):
                                  node=node, exc_type=TypeError)
         return args
 
-    return bind_call_args(signature, args, args.keywords, node)
+    return bind_call_args(signature, args, args.keywords, node, visitor=visitor)
 
 
-def bind_call_args(signature, positional_args, keywords, node):
+def bind_call_args(signature, positional_args, keywords, node, *, visitor=None):
     """Bind evaluated arguments using the shared parameter-kind metadata."""
     fixed_param_names = signature['fixed_param_names']
     has_varargs = signature['has_varargs']
@@ -275,6 +275,10 @@ def bind_call_args(signature, positional_args, keywords, node):
 
     for name in fixed_param_names:
         if name not in bound:
+            resolver = signature.get('default_resolvers', {}).get(name)
+            if resolver is not None:
+                bound[name] = resolver(visitor, bound, node)
+                continue
             defaults = signature.get('defaults', {})
             if name in defaults:
                 bound[name] = defaults[name]
@@ -440,6 +444,7 @@ def _build_sig(
     positional_only=(),
     keyword_only=(),
     defaults=None,
+    default_resolvers=None,
 ) -> Dict[str, Any]:
     """Build signature metadata dict for AST keyword binding."""
     fixed_count = len(param_names)
@@ -459,6 +464,7 @@ def _build_sig(
         'positional_only': tuple(positional_only),
         'keyword_only': tuple(keyword_only),
         'defaults': dict(defaults or {}),
+        'default_resolvers': dict(default_resolvers or {}),
     }
 
 

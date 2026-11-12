@@ -13,8 +13,6 @@ from pythoc._inline.constant_loop_adapter import ConstantLoopAdapter
 from pythoc._inline.exit_rules import ReturnExitRule
 from pythoc._inline.kernel import MetaInlineRequest, expand_inline
 from pythoc._inline.names import ExpansionNames
-from pythoc._inline.definition_bindings import materialize_definition_symbols
-from pythoc._inline._intrinsics import _PC_INTRINSICS
 from pythoc._inline.renaming import ScopedVariableRenamer
 from pythoc._inline.scope_analyzer import ScopeContext
 from pythoc._inline.yield_state_machine import inline_yield_function_iterators
@@ -144,24 +142,6 @@ class ExpansionKernelContractTest(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, 'argument count mismatch'):
                     expand_inline(self.request(arguments))
 
-    def test_generated_parameter_cannot_clobber_a_caller_binding(self):
-        request = self.request([ast.Constant(value=4)], ['value_inline_7'])
-        original = ast.dump(request.callee_ast)
-        with patch('pythoc.utils.get_next_id', return_value=7):
-            result = expand_inline(request)
-        namespace = {
-            '__pc_intrinsics': SimpleNamespace(move=lambda value: value),
-            'value_inline_7': 99,
-        }
-        program = ast.fix_missing_locations(ast.Module(body=result.stmts, type_ignores=[]))
-        program, symbols = materialize_definition_symbols(program, namespace)
-        for name, value in symbols.items():
-            self.assertIs(value, _PC_INTRINSICS)
-            namespace[name] = namespace['__pc_intrinsics']
-        exec(compile(program, '<expanded>', 'exec'), namespace)
-        self.assertEqual(namespace['answer'], 5)
-        self.assertEqual(namespace['value_inline_7'], 99)
-        self.assertEqual(ast.dump(request.callee_ast), original)
 
     def test_reserved_callee_names_are_also_avoided(self):
         names = ExpansionNames()

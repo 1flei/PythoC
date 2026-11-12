@@ -363,7 +363,11 @@ class AssignmentsMixin:
             validate_static_storage(pc_type, zero_initialized=node.value is None)
         ownership_source = None
         # Now parse the RHS
-        if node is None or node.value is None:
+        from ..builtin_entities.python_type import PythonType
+        if node.value is None and isinstance(pc_type, PythonType):
+            rvalue = wrap_value(pc_type.get_python_object(), kind="python",
+                                type_hint=pc_type)
+        elif node.value is None:
             llvm_type = pc_type.get_llvm_type(self.module.context)
             from ..ir_helpers import is_thread_local
             if is_static(pc_type) or is_thread_local(pc_type):

@@ -1,19 +1,19 @@
-"""
-Integration tests for instantiate() with closure sources.
+"""Integration tests for materialized closures.
 
-Closures are defined *and* instantiated inside a single @compile function
-so that instantiate() runs at compile-time (as a builtin handle_call).
-Captured variables must be module-level Python constants so that
-ScopeAnalyzer + _capture_bindings can extract them as compile-time values.
-
-The compiled API for closures is ``{Obj, call}`` where:
-    Obj      – state struct type (holds capture variables)
-    call(s, *args) -> ret  – compiled wrapper function
+Runtime captures and default values live in State. Calls preserve the source
+parameter binding rules through the shared closure and call machinery.
 """
 from __future__ import annotations
+
 import unittest
-from pythoc import compile, i32, f64, bool, ptr, array, struct, union
+from unittest.mock import patch
+
+from pythoc import (
+    CompileSession, array, bool, compile, consume, defer, f64, i32, i64, linear, move, ptr,
+    struct, union, void,
+)
 from pythoc.builtin_entities.instantiate import instantiate
+from pythoc.logger import logger
 
 
 # =====================================================================
@@ -456,6 +456,288 @@ class TestClosureCompositeCapture(unittest.TestCase):
 
     def test_array_capture(self):
         self.assertEqual(run_closure_array_capture(), 15)
+
+
+@compile
+def float_lambda() -> i32:
+    api = instantiate(lambda value: value + 0.25)
+    state = api.init()
+    return i32(api.call(ptr(state), f64(1.0)) * 100.0)
+
+
+@compile
+def constant_capture() -> i32:
+    offset = 0.25
+    api = instantiate(lambda value: value + offset)
+    state = api.init()
+    offset = 99.0
+    return i32(api.call(ptr(state), f64(1.0)) * 100.0)
+
+
+@compile
+def wide_lambda() -> i64:
+    api = instantiate(lambda value: value + 1)
+    state = api.init()
+    return api.call(ptr(state), i64(1099511627776))
+
+
+@compile
+def inferred_return() -> i32:
+    offset: f64 = 0.25
+
+    def work(value: f64):
+        return value + offset
+
+    api = instantiate(work)
+    state = api.init()
+    return i32(api.call(ptr(state), 1.0) * 100.0)
+
+
+@compile
+def keyword_return() -> i32:
+    def work(value: f64):
+        return value + 0.25
+
+    api = instantiate(work)
+    state = api.init()
+    return i32(api.call(ptr(state), value=1.0) * 100.0)
+
+
+@compile
+def dependent_signature() -> i32:
+    def work(T, value: 'T') -> 'T':
+        return value + 0.25
+
+    api = instantiate(work)
+    state = api.init()
+    return i32(api.call(ptr(state), f64, 1.0) * 100.0)
+
+
+@compile
+def prefix_return() -> i32:
+    def work(value: f64):
+        amount = value + 0.25
+        return amount
+
+    api = instantiate(work)
+    state = api.init()
+    return i32(api.call(ptr(state), 1.0) * 100.0)
+
+
+@compile
+def increment(target: ptr[i32]) -> void:
+    target[0] += 1
+
+
+@compile
+def return_before_cleanup() -> i32:
+    def work(target: ptr[i32]):
+        defer(increment, target)
+        return target[0]
+
+    api = instantiate(work)
+    state = api.init()
+    count: i32 = 1
+    before = api.call(ptr(state), ptr(count))
+    return before * 10 + count
+
+
+@compile
+def linear_return_value() -> i32:
+    def work(token):
+        return move(token)
+
+    api = instantiate(work)
+    state = api.init()
+    token = linear()
+    returned = api.call(ptr(state), move(token))
+    consume(returned)
+    return 42
+
+
+@compile
+def read_once(count: ptr[i32]) -> f64:
+    count[0] += 1
+    return 1.25
+
+
+@compile
+def call_argument_once() -> i32:
+    count: i32 = 0
+    api = instantiate(lambda value: value)
+    state = api.init()
+    value = api.call(ptr(state), read_once(ptr(count)))
+    return count * 1000 + i32(value * 100.0)
+
+
+@compile
+def implicit_void() -> i32:
+    def work(target: ptr[i32]):
+        target[0] += 1
+
+    api = instantiate(work)
+    state = api.init()
+    count: i32 = 0
+    api.call(ptr(state), ptr(count))
+    return count
+
+
+@compile
+def optional_argument_calls() -> i32:
+    def choose(value: i32 = 7) -> i32:
+        return value
+
+    api = instantiate(choose)
+    state = api.init()
+    return (api.call(ptr(state)) * 10000
+            + api.call(ptr(state), 19) * 100
+            + api.call(ptr(state), value=23))
+
+
+@compile
+def runtime_default_calls() -> i32:
+    count: i32 = 0
+
+    def choose(value: f64 = read_once(ptr(count))) -> f64:
+        return value
+
+    api = instantiate(choose)
+    state = api.init()
+    override = api.call(ptr(state), 2.5)
+    first = api.call(ptr(state))
+    second = api.call(ptr(state))
+    return count * 10000 + i32((override + first + second) * 100.0)
+
+
+@compile
+def generic_runtime_default(seed: f64) -> i32:
+    def twice(value=seed):
+        return value * 2.0
+
+    api = instantiate(twice)
+    state = api.init()
+    return i32(api.call(ptr(state)) * 100.0) + i32(api.call(ptr(state), 2.5) * 100.0)
+
+
+@compile
+def mixed_parameter_calls() -> i32:
+    def combine(head: i32, /, *values: struct[i32, i32], tail: i32 = 5,
+                **named: struct['bonus': i32]) -> i32:
+        return head + values[0] + values[1] + tail + named.bonus
+
+    api = instantiate(combine)
+    state = api.init()
+    defaulted = api.call(ptr(state), 1, 19, 23, bonus=9)
+    explicit = api.call(ptr(state), 1, 19, 23, tail=7, bonus=9)
+    return defaulted * 100 + explicit
+
+
+@compile
+def default_parameter_name_collisions(seed: i32) -> i32:
+    def choose(s: i32 = seed, _default_s: i32 = 2) -> i32:
+        return s * 10 + _default_s
+
+    api = instantiate(choose)
+    state = api.init()
+    return api.call(ptr(state)) * 100 + api.call(ptr(state), 3, 4)
+
+
+@compile
+def runtime_default_state_instances(seed: i32) -> i32:
+    def choose(value: i32 = seed) -> i32:
+        return value
+
+    api = instantiate(choose)
+    first = api.init()
+    second: api.State
+    api.init(ptr(second), seed + 1)
+    return api.call(ptr(first)) * 100 + api.call(ptr(second))
+
+
+class TestClosureCallSignature(unittest.TestCase):
+    def test_keyword_only_parameter_rejects_positional_arguments(self):
+        with CompileSession(), patch.object(logger, 'raise_on_error', True):
+            @compile(suffix='materialized_keyword_only_rejection')
+            def bad() -> i32:
+                def choose(*, value: i32) -> i32:
+                    return value
+
+                api = instantiate(choose)
+                state = api.init()
+                return api.call(ptr(state), 99)
+
+            with self.assertRaisesRegex(TypeError, 'too many positional'):
+                bad()
+
+    def test_positional_only_parameter_rejects_keyword_arguments(self):
+        with CompileSession(), patch.object(logger, 'raise_on_error', True):
+            @compile(suffix='materialized_positional_only_rejection')
+            def bad() -> i32:
+                def choose(value: i32, /) -> i32:
+                    return value
+
+                api = instantiate(choose)
+                state = api.init()
+                return api.call(ptr(state), value=99)
+
+            with self.assertRaisesRegex(TypeError, 'positional-only'):
+                bad()
+
+    def test_optional_arguments_remain_overridable(self):
+        self.assertEqual(optional_argument_calls(), 71923)
+
+    def test_runtime_default_is_evaluated_once_at_definition(self):
+        self.assertEqual(runtime_default_calls(), 10500)
+
+    def test_generic_call_reads_the_materialized_default(self):
+        self.assertEqual(generic_runtime_default(1.25), 750)
+        self.assertEqual(generic_runtime_default(3.0), 1100)
+
+    def test_collectors_and_parameter_kinds_survive_materialization(self):
+        self.assertEqual(mixed_parameter_calls(), 5759)
+
+    def test_state_fields_cannot_collide_with_parameter_names(self):
+        self.assertEqual(default_parameter_name_collisions(7), 7234)
+        self.assertEqual(default_parameter_name_collisions(9), 9234)
+
+    def test_runtime_default_is_read_from_the_supplied_state(self):
+        self.assertEqual(runtime_default_state_instances(7), 708)
+        self.assertEqual(runtime_default_state_instances(11), 1112)
+
+
+class TestClosureReturnTypes(unittest.TestCase):
+    def test_lambda_float_return_is_not_truncated(self):
+        self.assertEqual(float_lambda(), 125)
+
+    def test_compiletime_capture_uses_definition_bindings(self):
+        self.assertEqual(constant_capture(), 125)
+
+    def test_lambda_wide_return_is_not_truncated(self):
+        self.assertEqual(wide_lambda(), 1099511627777)
+
+    def test_unannotated_return_reuses_inline_types(self):
+        self.assertEqual(inferred_return(), 125)
+
+    def test_keyword_arguments_use_normal_closure_binding(self):
+        self.assertEqual(keyword_return(), 125)
+
+    def test_dependent_annotations_resolve_after_argument_binding(self):
+        self.assertEqual(dependent_signature(), 125)
+
+    def test_return_expression_sees_callee_locals(self):
+        self.assertEqual(prefix_return(), 125)
+
+    def test_return_value_is_evaluated_before_defer_cleanup(self):
+        self.assertEqual(return_before_cleanup(), 12)
+
+    def test_linear_return_transfers_ownership_once(self):
+        self.assertEqual(linear_return_value(), 42)
+
+    def test_call_argument_is_evaluated_once(self):
+        self.assertEqual(call_argument_once(), 1125)
+
+    def test_implicit_void_has_no_synthetic_integer_return(self):
+        self.assertEqual(implicit_void(), 1)
 
 
 if __name__ == '__main__':

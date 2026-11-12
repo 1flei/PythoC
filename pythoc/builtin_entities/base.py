@@ -239,8 +239,9 @@ class BuiltinType(BuiltinEntity):
         if cls._is_float:
             if cls._size_bytes == 4:
                 return ctypes.c_float
-            else:
+            elif cls._size_bytes == 8:
                 return ctypes.c_double
+            raise TypeError(f'{cls.get_name()} has no scalar ctypes representation')
         
         # Pointer types
         if cls._is_pointer:
@@ -250,8 +251,7 @@ class BuiltinType(BuiltinEntity):
         if isinstance(cls._llvm_type, ir.VoidType):
             return None
         
-        # Default fallback
-        return ctypes.c_void_p
+        raise TypeError(f'{cls.get_name()} has no ctypes representation')
     
     @classmethod
     def normalize_subscript_items(cls, items):

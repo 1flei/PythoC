@@ -620,8 +620,8 @@ class ValueRefDispatcher:
             logger.error("Comparison chain is empty", node=node, exc_type=ValueError)
         return result
 
-    def _resolve_attribute_protocol(self, base: ValueRef, attr_name: str, node: ast.Attribute):
-        base = self._require_valueref(base, context="attribute base", node=node.value)
+    def _resolve_attribute_protocol(self, base: ValueRef, attr_name: str, node: ast.AST):
+        base = self._require_valueref(base, context="attribute base", node=node)
         base = self.prepare_protocol_base(base)
 
         if base.is_python_value():
@@ -650,7 +650,7 @@ class ValueRefDispatcher:
             exc_type=TypeError,
         )
 
-    def handle_attribute(self, base: ValueRef, attr_name: str, node: ast.Attribute) -> ValueRef:
+    def handle_attribute(self, base: ValueRef, attr_name: str, node: ast.AST) -> ValueRef:
         """Dispatch an attribute lookup through the attribute protocol."""
         base, attribute_protocol = self._resolve_attribute_protocol(base, attr_name, node)
         return attribute_protocol.handle_attribute(self.visitor, base, attr_name, node)

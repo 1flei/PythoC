@@ -23,7 +23,10 @@ _SCOPE_NOT_PROVIDED = object()
 
 from ..compiler import LLVMCompiler
 from ..registry import register_struct_from_class, get_unified_registry
-from ..context import FunctionBindingState
+from ..context import (
+    FunctionBindingState, INHERIT_EFFECT_SUFFIX, capture_compile_context,
+    resolve_effect_suffix,
+)
 
 from .structs import (
     compile_dynamic_class as _compile_dynamic_class,
@@ -454,15 +457,9 @@ def _materialize_single_specialization(template_wrapper, effect_key, effect_bind
 
         logger.debug(f"Materializing specialization: {state.original_name}_{effect_key}")
 
-        with restore_effect_context(effect_bindings):
-            specialized_wrapper = _compile_impl(
-                template_wrapper.__wrapped__,
-                compile_suffix=state.compile_suffix,
-                effect_suffix=effect_key,
-                captured_symbols=state.captured_symbols,
-                effect_scope=original_scope,
-                effect_override_names=effect_override_names,
-            )
+        with state.session, restore_effect_context(effect_bindings):
+            specialized_wrapper = state.specialize(
+                effect_key, original_scope, effect_override_names)
 
         state.effect_specialized_cache[effect_key] = specialized_wrapper
         return specialized_wrapper
@@ -597,7 +594,9 @@ def _rewrite_globals_to_effect_specializations(wrappers, effect_key, by_name=Non
             continue
 
         if by_name:
-            globals_dict.update(by_name)
+            globals_dict.update(
+                (name, by_name[name]) for name in binding.referenced_names
+                if name in by_name)
 
         for name, value in list(globals_dict.items()):
             replacement = get_replacement(value)
@@ -811,9 +810,10 @@ def compile(func_or_class=None, suffix=None, attrs=None,
         - name_{compile_suffix}_{effect_suffix} (compile_suffix first, then effect_suffix)
         - e.g., add_i32_mock for @compile(suffix=i32) with effect(suffix="mock")
     """
-    # Capture all visible symbols (globals + locals) at decoration time
-    from .visible import capture_caller_symbols
-    captured_symbols = capture_caller_symbols(depth=1)
+    from .visible import capture_caller_symbols, definition_names
+    captured_symbols = (capture_caller_symbols(
+        depth=1, names=definition_names(func_or_class))
+        if func_or_class is not None else None)
     
     # Normalize compile_suffix early
     compile_suffix = normalize_suffix(suffix)
@@ -829,18 +829,16 @@ def compile(func_or_class=None, suffix=None, attrs=None,
     linkage = validate_func_linkage(linkage, func_name)
     
     # Get effect_suffix from context if not explicitly provided
-    if _effect_suffix is None:
-        from ..effect import get_current_effect_suffix
-        effect_suffix = get_current_effect_suffix()
-    else:
-        effect_suffix = _effect_suffix
+    effect_suffix = resolve_effect_suffix(
+        INHERIT_EFFECT_SUFFIX if _effect_suffix is None else _effect_suffix)
     
     if func_or_class is None:
         def decorator(f):
             return _compile_impl(f, 
                                 compile_suffix=compile_suffix,
                                 effect_suffix=effect_suffix,
-                                captured_symbols=captured_symbols,
+                                captured_symbols=capture_caller_symbols(
+                                    depth=1, names=definition_names(f)),
                                 effect_scope=_effect_scope,
                                 fn_attrs=fn_attrs,
                                 linkage=linkage,
@@ -901,6 +899,7 @@ def _compile_impl(func_or_class,
     from ..python_call import create_compiled_callable, try_bind_installed_adapter
     from ..session import CompileSession
     session = CompileSession.current()
+    definition_context = capture_compile_context(effect_suffix, effect_override_names)
 
     wrapper = create_compiled_callable(func)
     wrapper.__wrapped__ = func
@@ -911,28 +910,32 @@ def _compile_impl(func_or_class,
     start_line = get_function_start_line(func)
     set_source_context(source_file, start_line - 1)
 
-    registry = _get_registry()
-    from .visible import get_all_accessible_symbols
-    user_globals = get_all_accessible_symbols(
-        func, 
-        include_closure=True, 
-        include_builtins=True,
-        captured_symbols=captured_symbols
-    )
-
-    # Determine if we have any suffix (for compiler instance decision)
-    has_suffix = compile_suffix is not None or effect_suffix is not None
-    compiler = get_compiler(source_file=source_file, user_globals=user_globals, has_suffix=has_suffix)
-
     func_source = source_code
-    registry.register_function_source(source_file, func.__name__, func_source)
-
     try:
         func_ast = ast.parse(func_source).body[0]
         if not isinstance(func_ast, ast.FunctionDef):
             raise RuntimeError(f"Expected FunctionDef, got {type(func_ast)}")
     except Exception as e:
         raise RuntimeError(f"Failed to parse function {func.__name__}: {e}")
+
+    registry = _get_registry()
+    from .visible import definition_names, get_all_accessible_symbols
+    names = definition_names(func, func_ast)
+    captured_symbols = {name: captured_symbols[name] for name in names
+                        if name in (captured_symbols or {})}
+    user_globals = get_all_accessible_symbols(
+        func, 
+        include_closure=True, 
+        include_builtins=True,
+        captured_symbols=captured_symbols,
+        names=names,
+    )
+
+    # Determine if we have any suffix (for compiler instance decision)
+    has_suffix = compile_suffix is not None or effect_suffix is not None
+    compiler = get_compiler(source_file=source_file, user_globals=user_globals, has_suffix=has_suffix)
+
+    registry.register_function_source(source_file, func.__name__, func_source)
 
     actual_func_name = func.__name__
 
@@ -1026,7 +1029,8 @@ def _compile_impl(func_or_class,
             func,
             include_closure=True,
             include_builtins=True,
-            captured_symbols=captured_symbols
+            captured_symbols=captured_symbols,
+            names=names,
         )
 
         from ..ast_visitor.yield_transform import create_yield_iterator_wrapper
@@ -1242,16 +1246,6 @@ def _compile_impl(func_or_class,
             output_manager.record_nested_captured_hash(content.digest)
     logger.debug(f"@compile {func.__name__}: group_key={group_key}")
     
-    from ..effect import capture_effect_context, capture_effect_override_names
-    from ..effect import restore_effect_context
-    from ..effect import push_compilation_context, pop_compilation_context
-    _captured_effect_context = capture_effect_context()
-    _effect_override_names = (
-        set(effect_override_names)
-        if effect_override_names is not None
-        else capture_effect_override_names()
-    )
-
     binding_state = FunctionBindingState(
         compiler=compiler,
         so_file=so_file,
@@ -1261,17 +1255,15 @@ def _compile_impl(func_or_class,
         actual_func_name=actual_func_name,
         group_key=group_key,
         compile_suffix=compile_suffix,
-        effect_suffix=effect_suffix,
         registration_identity=registration_identity,
-        captured_effect_context=_captured_effect_context,
-        effect_override_names=_effect_override_names,
         captured_symbols=captured_symbols,
+        referenced_names=frozenset(names),
         compilation_globals=AccessibleSymbols(
             user_globals,
             live_globals=getattr(user_globals, 'live_globals', None),
         ),
         wrapper=wrapper,
-        session=session,
+        **definition_context,
     )
     func_info.binding_state = binding_state
     wrapper._func_info = func_info
@@ -1279,54 +1271,18 @@ def _compile_impl(func_or_class,
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
 
-    # Always queue compilation callback - cache check is done at flush time
-    # These closure locals are needed because they are AST/source artifacts
-    # that don't belong on FunctionBindingState (they are compilation inputs,
-    # not per-function state).
-    _func_ast = func_ast
-    _func_source = func_source
-    _param_type_hints = param_type_hints
-    _return_type_hint = return_type_hint
-    _start_line = start_line
+    compile_callback = _make_compile_callback(
+        wrapper, func_ast, func_source, param_type_hints, return_type_hint, start_line)
 
-    def compile_callback(comp):
-        """Deferred compilation callback.
-
-        Reads phase-1 state from wrapper._binding (the FunctionBindingState),
-        not from closure locals that duplicate the same data.
-        """
+    def specialize(effect_key, scope, override_names):
         st = wrapper._binding
+        return _compile_impl(
+            func, compile_suffix=st.compile_suffix, effect_suffix=effect_key,
+            captured_symbols=st.captured_symbols, effect_scope=scope,
+            effect_override_names=override_names, fn_attrs=func_info.fn_attrs,
+            linkage=func_info.linkage)
 
-        if st.effect_suffix:
-            push_compilation_context(st)
-
-        try:
-            with restore_effect_context(st.captured_effect_context):
-                set_source_context(st.source_file, _start_line - 1)
-                comp.compile_function_from_ast(
-                    _func_ast,
-                    _func_source,
-                    reset_module=False,
-                    param_type_hints=_param_type_hints,
-                    return_type_hint=_return_type_hint,
-                    user_globals=st.compilation_globals,
-                    group_key=st.group_key,
-                    func_state=st,
-                    source_start_line=_start_line,
-                    original_name=st.original_name,
-                )
-        finally:
-            if st.effect_suffix:
-                pop_compilation_context()
-
-        # Effect usage recorded on this compile's ActiveCompileFrame
-        # (compiler.py sets st.active_frame).  Declared on the group's
-        # EffectGraph node once the whole group has been compiled
-        # (see OutputManager._compile_pending_for_group).
-        effect_deps = st.active_frame.effect_usage if st.active_frame is not None else set()
-        if effect_deps:
-            func_info.effect_dependencies = effect_deps
-            logger.debug(f"Function {_func_ast.name} uses effects: {effect_deps}")
+    binding_state.specialize = specialize
     
     from ..effect import is_effect_suffix_suppressed, effect as _effect_singleton
     # Template condition: suppress_effect_suffix() is hiding a real suffix AND
@@ -1378,6 +1334,32 @@ def _compile_impl(func_or_class,
     wrapper._is_compiled = True
     try_bind_installed_adapter(wrapper)
     return wrapper
+
+
+def _make_compile_callback(wrapper, syntax, source, param_types, return_type, start_line):
+    """Run source and generated definitions through one lowering lifecycle."""
+    from ..effect import restore_effect_context, push_compilation_context, pop_compilation_context
+
+    def compile_callback(compiler):
+        binding = wrapper._binding
+        if binding.effect_suffix:
+            push_compilation_context(binding)
+        try:
+            with restore_effect_context(binding.captured_effect_context):
+                set_source_context(binding.source_file, start_line - 1)
+                compiler.compile_function_from_ast(
+                    syntax, source, reset_module=False,
+                    param_type_hints=param_types, return_type_hint=return_type,
+                    user_globals=binding.compilation_globals,
+                    group_key=binding.group_key, func_state=binding,
+                    source_start_line=start_line, original_name=binding.original_name)
+        finally:
+            if binding.effect_suffix:
+                pop_compilation_context()
+        if binding.active_frame is not None:
+            wrapper._func_info.effect_dependencies = binding.active_frame.effect_usage
+
+    return compile_callback
 
 
 def _clone_binding_to_wrapper(binding, existing, wrapper):

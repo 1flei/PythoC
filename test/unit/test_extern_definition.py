@@ -1,12 +1,16 @@
-"""Extern declarations reuse matching C symbols without rewriting snapshots."""
+"""Extern symbol reuse, signature checks, and Python fallback calls."""
 
+import ctypes
 import unittest
 
 from llvmlite import ir
 
-from pythoc import extern, i32, i64, struct
+from pythoc import extern, f16, f32, i24, i32, i64, i128, struct, u8, u64
 from pythoc.builder import LLVMBuilder
 from pythoc.callable_lowering import lower_extern_wrapper
+from pythoc.libc import stdlib, string
+from pythoc.libc.math import sqrt
+from pythoc.libc.stdio import snprintf
 from pythoc.valueref import ensure_ir
 
 
@@ -91,6 +95,82 @@ class TestExternDefinition(unittest.TestCase):
         first = ensure_ir(lower_extern_wrapper(pair_declared, module))
         self.assertIs(ensure_ir(lower_extern_wrapper(pair_declared, module)),
                       first)
+
+
+@extern(lib='c', name='abs')
+def absolute(value: i32 = -17) -> i32:
+    pass
+
+
+Division = struct['quot': i32, 'rem': i32]
+
+
+@extern(lib='c', name='div')
+def integer_divide(numerator: i32, denominator: i32) -> Division:
+    pass
+
+
+class TestExternPythonCall(unittest.TestCase):
+    def test_declared_integer_return_preserves_all_bits(self):
+        self.assertEqual(stdlib.strtoull(b'18446744073709551615', None, 10), (1 << 64) - 1)
+        self.assertEqual(stdlib.strtoll(b'-4294967297', None, 10), -4294967297)
+
+    def test_float_return_and_pointer_output(self):
+        buffer = ctypes.create_string_buffer(b'1.25tail')
+        end = ctypes.c_void_p()
+        self.assertEqual(stdlib.strtod(buffer, ctypes.byref(end)), 1.25)
+        self.assertEqual(end.value, ctypes.addressof(buffer) + 4)
+
+    def test_math_library_name_is_resolved_to_a_loadable_image(self):
+        self.assertEqual(sqrt(2.25), 1.5)
+
+    def test_natural_aggregate_return_uses_the_c_signature(self):
+        result = integer_divide(-17, 5)
+        self.assertEqual((result.quot, result.rem), (-3, -2))
+
+    def test_pointer_returns_can_be_used_without_truncation(self):
+        buffer = ctypes.create_string_buffer(b'abcdef')
+        address = string.strchr(buffer, ord('d'))
+        self.assertEqual(address, ctypes.addressof(buffer) + 3)
+
+    def test_python_binding_defaults_keywords_and_errors(self):
+        self.assertEqual(absolute(), 17)
+        self.assertEqual(absolute(value=-23), 23)
+        for args, kwargs in [((1, 2), {}), ((1,), {'value': 2}), ((), {'unknown': 1})]:
+            with self.subTest(args=args, kwargs=kwargs):
+                with self.assertRaises(TypeError):
+                    absolute(*args, **kwargs)
+
+    def test_variadic_values_use_c_default_promotions(self):
+        buffer = ctypes.create_string_buffer(80)
+        result = snprintf(buffer, len(buffer), '%u %.2f %llu',
+                          u8(255), f32(1.25), u64(4294967297))
+        self.assertEqual(buffer.value, b'255 1.25 4294967297')
+        self.assertEqual(result, len(buffer.value))
+
+    def test_plain_python_float_is_a_double_vararg(self):
+        buffer = ctypes.create_string_buffer(40)
+        snprintf(buffer, len(buffer), b'%.2f', 1.25)
+        self.assertEqual(buffer.value, b'1.25')
+
+    def test_unsupported_carriers_fail_before_symbol_lookup(self):
+        for pc_type in (f16, i24, i128, struct[i24], struct[i128]):
+            with self.subTest(pc_type=pc_type):
+                @extern(lib='c', name='nonexistent_unsupported_symbol')
+                def unsupported(value: pc_type) -> i32:
+                    pass
+
+                with self.assertRaises(TypeError):
+                    unsupported(1)
+
+    def test_long_and_size_t_declarations_match_the_host_abi(self):
+        self.assertEqual(stdlib.strtol.return_type._bit_width, ctypes.sizeof(ctypes.c_long) * 8)
+        self.assertEqual(stdlib.strtoul.return_type._bit_width, ctypes.sizeof(ctypes.c_ulong) * 8)
+        self.assertFalse(stdlib.strtoul.return_type._is_signed)
+        self.assertFalse(stdlib.strtoull.return_type._is_signed)
+        size = dict(stdlib.malloc.param_types)['size']
+        self.assertEqual(size._bit_width, ctypes.sizeof(ctypes.c_size_t) * 8)
+        self.assertFalse(size._is_signed)
 
 
 if __name__ == "__main__":

@@ -30,6 +30,30 @@ class TestSchemaProtocol(unittest.TestCase):
         self.assertTrue(is_linear_schema_type(outer))
         self.assertEqual(get_linear_schema_paths(outer), [(1, 0)])
 
+    def test_indexed_field_queries_do_linear_total_work(self):
+        from pythoc.schema_protocol import (get_field_layout_type,
+                                            get_schema_field_type)
+
+        class CountedFields(list):
+            accesses = 0
+
+            def __iter__(self):
+                self.accesses += len(self)
+                return super().__iter__()
+
+            def __getitem__(self, index):
+                self.accesses += 1
+                return super().__getitem__(index)
+
+        class Record:
+            _field_types = CountedFields([i32] * 128)
+
+        for lookup in (get_field_layout_type, get_schema_field_type):
+            Record._field_types.accesses = 0
+            for index in range(128):
+                self.assertIs(lookup(Record, index), i32)
+            self.assertLessEqual(Record._field_types.accesses, 256)
+
 
 if __name__ == "__main__":
     unittest.main()

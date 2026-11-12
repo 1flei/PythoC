@@ -7,22 +7,6 @@ from ..logger import logger
 from ..scope_manager import ScopeType
 
 
-def _check_const_condition(test):
-    """Detect compile-time constant conditions without generating IR.
-
-    Uses AST-level analysis to detect ``while True``, ``while False``,
-    ``while not True``, etc.  This avoids calling ``visit_expression``
-    which would generate IR (and trigger side effects) for function-call
-    conditions like ``while sealed.next(ptr(it)):``.
-    """
-    if isinstance(test, ast.Constant):
-        return True, bool(test.value)
-    if (isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
-            and isinstance(test.operand, ast.Constant)):
-        return True, not bool(test.operand.value)
-    return False, None
-
-
 def _has_break_in_body(body: list) -> bool:
     """Check if body contains any break statement (at any nesting level)
     
@@ -91,25 +75,9 @@ class LoopsMixin:
         # may contain label definitions that need to be registered for forward
         # goto resolution.
         
-        # Check for compile-time constant condition via AST analysis (not via
-        # visit_expression, which would generate IR and trigger side effects
-        # for function-call conditions like sealed.next(ptr(it))).
-        is_constant_condition, constant_value = _check_const_condition(node.test)
-        
-        # while False - never executes
-        if is_constant_condition and not constant_value:
-            logger.debug("while False - skipping loop body entirely")
-            return
-        
-        # while True - special handling for infinite loop
-        if is_constant_condition and constant_value:
-            self._visit_while_impl(node, cf, is_constant_true=True)
-            return
-
-        # Normal while loop with runtime condition
-        self._visit_while_impl(node, cf, is_constant_true=False)
+        self._visit_while_impl(node, cf)
     
-    def _visit_while_impl(self, node: ast.While, cf, is_constant_true: bool):
+    def _visit_while_impl(self, node: ast.While, cf):
         """Unified while loop implementation.
 
         Handles both ``while True`` and ``while <cond>`` with the same
@@ -127,30 +95,27 @@ class LoopsMixin:
         Args:
             node: The While AST node.
             cf: ControlFlowBuilder.
-            is_constant_true: True for ``while True``, False for runtime cond.
         """
-        has_else = not is_constant_true and node.orelse and len(node.orelse) > 0
-
-        # -- Create blocks --
         loop_exit = cf.create_block("while_exit")
-
-        if is_constant_true:
-            # No separate header; body IS the loop top
-            loop_top = cf.create_block("while_true_body")
-            loop_body = loop_top
-        else:
-            loop_top = cf.create_block("while_header")
-            loop_body = cf.create_block("while_body")
-            if has_else:
-                else_block = cf.create_block("while_else")
-
-        # -- Branch to loop top --
+        loop_top = cf.create_block("while_header")
         cf.branch(loop_top)
+        cf.position_at_end(loop_top)
+        value = self.visit_expression(node.test)
+        is_constant_true = value.is_python_value() and bool(value.get_python_value())
+        if value.is_python_value() and not is_constant_true:
+            self._visit_stmt_list(node.orelse, add_to_cfg=True)
+            if not cf.is_terminated():
+                cf.branch(loop_exit)
+            cf.position_at_end(loop_exit)
+            if not cf.has_predecessors(loop_exit):
+                cf.unreachable()
+            return
 
-        # -- Condition check (runtime only) --
+        has_else = not is_constant_true and bool(node.orelse)
+        loop_body = loop_top if is_constant_true else cf.create_block("while_body")
         if not is_constant_true:
-            cf.position_at_end(loop_top)
-            condition = self.value_dispatcher.to_boolean(self.visit_expression(node.test))
+            else_block = cf.create_block("while_else") if has_else else None
+            condition = self.value_dispatcher.to_boolean(value)
             false_target = else_block if has_else else loop_exit
             cf.cbranch(condition, loop_body, false_target)
 

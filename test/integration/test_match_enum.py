@@ -5,11 +5,13 @@ Match/case enum pattern tests
 
 import sys
 import os
+from types import SimpleNamespace
+import unittest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import i8, i32, compile, ptr, enum
 from pythoc.build.output_manager import clear_failed_group
-import unittest
 
 
 @enum(i32)
@@ -456,6 +458,10 @@ class TestMatchEnumPatterns(unittest.TestCase):
     def test_enum_tag_binding(self):
         self.assertEqual(test_enum_tag_binding(), 0)
 
+    def test_enum_pattern_values(self):
+        self.assertEqual(match_tag_aliases(1), 22)
+        self.assertEqual(match_tag_aliases(0), 11)
+
 
 class TestMatchEnumTupleSyntax(unittest.TestCase):
     """Test enum matching with tuple syntax"""
@@ -555,6 +561,26 @@ class TestMatchEnumComplexPatterns(unittest.TestCase):
     
     def test_multiple_conditions(self):
         self.assertEqual(test_enum_multiple_conditions(), 3)
+
+
+Kind = enum['A': None, 'B': None]
+
+
+tags = SimpleNamespace(first=Kind.B, second=Kind.A)
+
+
+@compile
+def match_tag_aliases(flag: i32) -> i32:
+    value: Kind
+    if flag:
+        value = Kind(Kind.A)
+    else:
+        value = Kind(Kind.B)
+    match value:
+        case tags.first:
+            return 11
+        case tags.second:
+            return 22
 
 
 if __name__ == '__main__':

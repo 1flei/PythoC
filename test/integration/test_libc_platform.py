@@ -6,13 +6,14 @@ current platform.  They are expected to run on macOS, Linux and Windows CI
 runners; expected values differ by platform where noted.
 """
 
+import ctypes
 import importlib
 import os
 import platform
 import sys
 import unittest
 
-from pythoc import compile, i32, i64, u32, sizeof, offsetof, void
+from pythoc import compile, i32, i64, nullptr, u32, u64, sizeof, offsetof, void
 from pythoc.libc.signal import raise_, siginfo_t, sigset_t, sigaction
 from pythoc.libc.time import timeval, tm, time_t
 from pythoc.libc.ucontext import ucontext_t
@@ -20,6 +21,7 @@ from pythoc.libc.sys_stat import stat, stat_
 from pythoc.libc.sys_resource import rusage
 from pythoc.libc.pthread import pthread_mutex_t, PTHREAD_MUTEX_RECURSIVE
 from pythoc.libc.fcntl import flock
+from pythoc.libc.stdlib import strtol, strtoul, strtoll, strtoull
 
 
 IS_ARM64 = platform.machine().lower() in ('arm64', 'aarch64')
@@ -29,7 +31,7 @@ IS_POSIX = sys.platform != 'win32'
 if IS_POSIX:
     # dirent / cassert refuse to import on Windows; setenv / gethostname
     # have no UCRT symbol.  Guard the imports so collection works everywhere.
-    from pythoc import array, i8, nullptr, ptr
+    from pythoc import array, i8, ptr
     from pythoc.libc.dirent import DIR, dirent, opendir, readdir, closedir
     from pythoc.libc.stdlib import getenv, setenv, unsetenv
     from pythoc.libc.unistd import _SC_PAGESIZE, fsync, geteuid, gethostname, sysconf
@@ -318,6 +320,42 @@ class TestLibcPlatform(unittest.TestCase):
         shim_fn = getattr(m, shim)
         self.assertTrue(getattr(shim_fn, '_is_compiled', False))
 
+    def test_unsigned_return_type_controls_native_comparisons(self):
+        self.assertEqual(unsigned_long_is_positive(), 1)
+        self.assertEqual(unsigned_long_long_max(), (1 << 64) - 1)
+
+    def test_signed_long_and_long_long_remain_signed(self):
+        self.assertEqual(signed_long_is_negative(), 1)
+        self.assertEqual(signed_long_long_value(), -4294967297)
+
+
+
+ULONG_TEXT = str((1 << (ctypes.sizeof(ctypes.c_ulong) * 8)) - 1)
+
+
+@compile
+def unsigned_long_is_positive() -> i32:
+    value = strtoul(ULONG_TEXT, nullptr, 10)
+    if value > 0:
+        return 1
+    return 0
+
+
+@compile
+def unsigned_long_long_max() -> u64:
+    return strtoull('18446744073709551615', nullptr, 10)
+
+
+@compile
+def signed_long_long_value() -> i64:
+    return strtoll('-4294967297', nullptr, 10)
+
+
+@compile
+def signed_long_is_negative() -> i32:
+    if strtol('-17', nullptr, 10) < 0:
+        return 1
+    return 0
 
 
 if __name__ == '__main__':

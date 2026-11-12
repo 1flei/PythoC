@@ -49,7 +49,7 @@ class CallsMixin:
                              node=node, exc_type=TypeError)
             keywords[keyword.arg] = self.visit_rvalue_expression(keyword.value)
         args = normalize_call_args(
-            func_ref, CallArguments(positional_args, keywords), node)
+            func_ref, CallArguments(positional_args, keywords), node, visitor=self)
 
         return self.value_dispatcher.handle_call(
             func_ref,

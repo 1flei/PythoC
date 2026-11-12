@@ -19,6 +19,40 @@ def _run_in_empty_context(fn):
 
 class TestCurrentSession(unittest.TestCase):
 
+    def test_shared_session_context_tokens_are_local_to_each_thread(self):
+        session = CompileSession()
+        first_entered, second_entered, first_exited = [threading.Event() for _ in range(3)]
+        errors = []
+
+        def first():
+            try:
+                with session:
+                    first_entered.set()
+                    self.assertTrue(second_entered.wait(10))
+                    self.assertIs(CompileSession.current(), session)
+                first_exited.set()
+            except BaseException as error:
+                errors.append(error)
+                first_exited.set()
+
+        def second():
+            try:
+                self.assertTrue(first_entered.wait(10))
+                with session:
+                    second_entered.set()
+                    self.assertTrue(first_exited.wait(10))
+                    self.assertIs(CompileSession.current(), session)
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=target) for target in (first, second)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(15)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+
     def test_current_raises_without_session(self):
         def probe():
             with self.assertRaises(RuntimeError) as cm:

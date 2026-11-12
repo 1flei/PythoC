@@ -72,26 +72,24 @@ def inline(func=None, *, cls_method=False, method=False):
         func_ast, signature = lower_inline_signature(func_ast, defaults)
         param_names = signature['param_names']
 
-        from .visible import capture_caller_symbols, get_closure_variables
-        captured_symbols = capture_caller_symbols(depth=1)
-        # @inline may be used as @inline (via inline->decorator) or @inline(...)
-        # Merge one more caller level to reliably capture locals like option_type/result_type.
-        captured_symbols_deep = capture_caller_symbols(depth=2)
-        closure_symbols = get_closure_variables(f)
-        merged_func_globals = dict(f.__globals__)
-        merged_func_globals.update(closure_symbols)
-        merged_func_globals.update(captured_symbols)
-        merged_func_globals.update(captured_symbols_deep)
+        from .visible import definition_names, get_all_accessible_symbols
+        from ..type_resolver import TypeResolver
+        names = definition_names(f, func_ast)
+        captured_symbols = TypeResolver.capture_type_namespace(names, definition=f)
+        merged_func_globals = get_all_accessible_symbols(
+            f, include_builtins=True, captured_symbols=captured_symbols, names=names)
 
         def create_handler(visitor, args, node):
             if not isinstance(args, NormalizedCallArgs):
                 args = bind_call_args(
-                    signature, args, {}, node)
+                    signature, args, {}, node, visitor=visitor)
             param_bindings = dict(zip(param_names, args))
             # Execute inline to generate IR using unified kernel
             # Pass merged globals (module + closure + captured caller locals)
             from .._inline import InlineAdapter
-            definition_globals = {**f.__globals__, **merged_func_globals}
+            definition_globals = {name: f.__globals__[name] for name in names
+                                  if name in f.__globals__}
+            definition_globals.update(merged_func_globals)
             adapter = InlineAdapter(
                 visitor, param_bindings, func_globals=definition_globals)
             result = adapter.execute_inline(func_ast)

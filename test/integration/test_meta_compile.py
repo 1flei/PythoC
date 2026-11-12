@@ -15,7 +15,7 @@ import os
 import ast
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import compile, i32, i64, meta
+from pythoc import CompileSession, compile, effect, i32, i64, meta
 
 
 # ============================================================================
@@ -399,9 +399,119 @@ def test_wrapper_binding_state_split():
     print("OK test_wrapper_binding_state_split passed")
 
 
+effect.default(meta_native_number=7)
+
+@meta.compile_factory
+def make_number(key):
+    return meta.func(
+        'number', [], i32, ast.parse('return effect.meta_native_number').body,
+        required_globals={'effect': effect})
+
+base = make_number(0)
+
+specialization_seed = make_number(2)
+
+with effect(meta_native_number=41, suffix='meta_native'):
+    specialized_seed = specialization_seed.get_effect_specialized(
+        'meta_native', {'meta_native_number': 41})
+    overridden = make_number(0)
+    overridden_new_key = make_number(1)
+    artifact = meta.compile_artifact(meta.artifact(meta.func(
+        'artifact_number', [], i32, ast.parse('return effect.meta_native_number').body,
+        required_globals={'effect': effect})))
+
+    @compile
+    def ordinary_override() -> i32:
+        return effect.meta_native_number
+
+def generate_during_lowering():
+    return meta.compile_generated(meta.func(
+        'generated_during_lowering', [], i32,
+        ast.parse('return effect.meta_native_number').body,
+        required_globals={'effect': effect}))
+
+with effect(meta_native_number=41, suffix='meta_during_lowering'):
+    @compile
+    def nested_generation() -> i32:
+        return generate_during_lowering()()
+
+@meta.compile_factory()
+def make_constant(value):
+    return meta.func('session_constant', [], i32, [ast.Return(ast.Constant(value))])
+
+with CompileSession() as first_session:
+    first = make_constant(23)
+
+with CompileSession() as second_session:
+    second = make_constant(23)
+
+
+def test_all_entries_use_the_definition_effect():
+    assert base() == 7
+    assert specialization_seed() == 7
+    for function in (overridden, overridden_new_key, artifact, ordinary_override, nested_generation, specialized_seed):
+        assert function() == 41
+    assert base is not overridden
+
+
+def test_factory_results_execute_in_their_own_sessions():
+    assert first is not second
+    for session, function in ((first_session, first), (second_session, second)):
+        with session:
+            assert function() == 23
+            assert function._binding.session is session
+
+
 # ============================================================================
 # Run all tests
 # ============================================================================
+
+
+def test_generated_parameter_cannot_clobber_a_caller_binding():
+    from unittest.mock import patch
+    from pythoc._inline.exit_rules import ReturnExitRule
+    from pythoc._inline.kernel import MetaInlineRequest, expand_inline
+    from pythoc._inline.scope_analyzer import ScopeContext
+
+    source = ast.parse('def f(value):\n    return value + 1').body[0]
+    request = MetaInlineRequest(
+        callee_ast=source, callee_globals={}, call_args=[ast.Constant(4)],
+        call_site=ast.parse('f(4)', mode='eval').body,
+        caller_context=ScopeContext({'value_inline_7'}),
+        exit_rule=ReturnExitRule(result_var='answer'))
+    original = ast.dump(source)
+    with patch('pythoc.utils.get_next_id', return_value=7):
+        result = expand_inline(request)
+    syntax = ast.parse('def check():\n    value_inline_7 = 99').body[0]
+    syntax.body += result.stmts
+    syntax.body += ast.parse('return answer * 100 + value_inline_7').body
+    with CompileSession():
+        check = meta.compile_ast(
+            ast.fix_missing_locations(syntax), return_type=i32,
+            user_globals=result.required_globals, source_file=__file__,
+            suffix='inline_parameter_hygiene')
+        assert check() == 599
+    assert ast.dump(source) == original
+
+
+def test_lambda_expansion_uses_normal_return_assignment():
+    from pythoc._inline.exit_rules import ReturnExitRule
+    from pythoc._inline.kernel import MetaInlineRequest, expand_inline
+    from pythoc._inline.scope_analyzer import ScopeContext
+
+    with CompileSession():
+        expression = ast.parse('lambda value: value + 1', mode='eval').body
+        expanded = expand_inline(MetaInlineRequest(
+            expression, {}, [ast.Constant(2)], expression,
+            ScopeContext.empty(), ReturnExitRule(result_var='result')))
+        syntax = ast.parse('def choose():\n    return result').body[0]
+        syntax.body = expanded.stmts + syntax.body
+        choose = meta.compile_ast(
+            ast.fix_missing_locations(syntax), return_type=i32,
+            user_globals=expanded.required_globals, source_file=__file__,
+            suffix='lambda_return_assignment')
+        assert choose() == 3
+
 
 if __name__ == '__main__':
     test_compile_ast_basic()
@@ -418,4 +528,8 @@ if __name__ == '__main__':
     test_compile_factory_basic()
     test_compile_factory_cache()
     test_wrapper_binding_state_split()
+    test_all_entries_use_the_definition_effect()
+    test_factory_results_execute_in_their_own_sessions()
+    test_generated_parameter_cannot_clobber_a_caller_binding()
+    test_lambda_expansion_uses_normal_return_assignment()
     print("\nAll meta compile tests passed!")

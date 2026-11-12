@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from pythoc.builtin_entities.python_type import PythonType
 from pythoc.call_normalization import (
-    _build_sig_from_ast, bind_call_args,
+    _build_sig, _build_sig_from_ast, bind_call_args,
 )
 from pythoc.literal_protocol import get_mapping_entries, get_sequence_elements
 from pythoc.logger import logger
@@ -44,6 +44,29 @@ def bind(function, positional, keywords):
 
 
 class CallBindingTest(unittest.TestCase):
+    def test_state_default_is_read_only_when_argument_is_omitted(self):
+        events = []
+        state, default, explicit = value_ref(10), value_ref(7), value_ref(99)
+        context = object()
+
+        def read_default(visitor, bound, node):
+            self.assertIs(visitor, context)
+            self.assertIs(bound['state'], state)
+            events.append('default')
+            return default
+
+        signature = _build_sig(
+            ['state', 'value'], default_resolvers={'value': read_default})
+        self.assertEqual(bind_call_args(
+            signature, [state], {}, None, visitor=context), [state, default])
+        self.assertEqual(bind_call_args(
+            signature, [state, explicit], {}, None, visitor=context),
+            [state, explicit])
+        self.assertEqual(bind_call_args(
+            signature, [state], {'value': explicit}, None, visitor=context),
+            [state, explicit])
+        self.assertEqual(events, ['default'])
+
     def test_mixed_parameter_binding_matches_python(self):
         cases = [
             ((1,), {'c': 3}),

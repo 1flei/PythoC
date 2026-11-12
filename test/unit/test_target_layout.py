@@ -250,7 +250,7 @@ class TestTargetLayout(unittest.TestCase):
         for pc_type in (struct[i8, simd[i32, 4]], union[simd[i32, 4]],
                         array[simd[i32, 4], 2]):
             with self.subTest(type=pc_type):
-                with self.assertRaisesRegex(ValueError, 'ctypes cannot represent'):
+                with self.assertRaisesRegex(TypeError, 'no ctypes representation'):
                     pc_type.get_ctypes_type()
 
     def test_layout_rejects_invalid_allocation(self):

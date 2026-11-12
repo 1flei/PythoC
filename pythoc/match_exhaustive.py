@@ -7,17 +7,19 @@ a pattern matrix algorithm (Maranget-style).
 Key design decisions:
 - Pattern matrix algorithm is sound for product types (preserves cross-field correlations)
 - Guards are treated as potentially False (conservative but sound)
-- Reuses pattern semantics from stmt_match.py to avoid drift
+- Shares resolved patterns with code generation
 - Wildcard and variable bindings are equivalent for exhaustiveness
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Dict, Tuple, Any, Union
+from typing import List, Optional, Set, Dict, Tuple, Any
 from enum import Enum as PyEnum
 import ast
 
 from .logger import logger
-from .schema_protocol import get_field_layout_types, get_schema_field_names, get_schema_field_types, is_schema_type
+from .schema_protocol import (
+    get_schema_field_names, get_schema_field_types, is_schema_type,
+)
 
 
 class PatternKind(PyEnum):
@@ -30,7 +32,7 @@ class PatternKind(PyEnum):
 
 @dataclass
 class NormalizedPattern:
-    """Normalized pattern for exhaustiveness checking.
+    """Resolved pattern shared by exhaustiveness checking and code generation.
 
     This is a shared representation that captures pattern semantics
     without AST-specific details.
@@ -48,6 +50,11 @@ class NormalizedPattern:
     type_info: Optional[Any] = None
     # Original AST node (for error messages)
     ast_node: Optional[Any] = None
+    value_ref: Optional[Any] = None
+    bindings: Tuple[str, ...] = ()
+    pointer_capture: bool = False
+    field_indices: Tuple[int, ...] = ()
+    payload_index: Optional[int] = None
 
     @staticmethod
     def wildcard(type_info: Any = None) -> 'NormalizedPattern':
@@ -236,44 +243,7 @@ class TypeInfo:
 
     @staticmethod
     def get_constructor_arity(pc_type, tag: int) -> int:
-        """Get the number of sub-patterns for a constructor."""
-        from .builtin_entities import bool as pc_bool
-
-        # Bool has no sub-patterns
-        if pc_type is pc_bool:
-            return 0
-
-        # Enum: find variant by tag and return 1 if has payload, 0 otherwise
-        if hasattr(pc_type, '_is_enum') and pc_type._is_enum:
-            variant_names = getattr(pc_type, '_variant_names', [])
-            variant_types = getattr(pc_type, '_variant_types', [])
-            tag_values = getattr(pc_type, '_tag_values', {})
-
-            for i, name in enumerate(variant_names):
-                if tag_values.get(name, i) == tag:
-                    payload_type = variant_types[i] if i < len(variant_types) else None
-                    from .builtin_entities.types import void
-                    if payload_type is not None and payload_type != void:
-                        return 1
-                    return 0
-            return 0
-
-        # Struct: arity is the number of fields
-        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
-            field_types = get_schema_field_types(pc_type)
-            return len(field_types)
-
-        # Array: arity is the number of elements
-        if hasattr(pc_type, 'is_array') and pc_type.is_array():
-            # Get array length from type
-            length = getattr(pc_type, 'length', None)
-            if length is not None:
-                return length
-            # Fallback: use field-layout helper for fixed aggregate layouts
-            field_types = get_field_layout_types(pc_type)
-            return len(field_types)
-
-        return 0
+        return len(TypeInfo.get_constructor_sub_types(pc_type, tag))
 
     @staticmethod
     def get_constructor_sub_types(pc_type, tag: int) -> List[Any]:
@@ -304,15 +274,9 @@ class TypeInfo:
             field_types = get_schema_field_types(pc_type)
             return list(field_types)
 
-        # Array: sub-types are element type repeated for each position
-        if hasattr(pc_type, 'is_array') and pc_type.is_array():
-            element_type = getattr(pc_type, 'element_type', None)
-            length = getattr(pc_type, 'length', None)
-            if element_type and length:
-                return [element_type] * length
-            # Fallback: use field-layout helper for fixed aggregate layouts
-            field_types = get_field_layout_types(pc_type)
-            return list(field_types)
+        if getattr(pc_type, 'dimensions', None) is not None:
+            from .type_descriptor import array_decay_type
+            return [array_decay_type(pc_type).pointee_type] * pc_type.dimensions[0]
 
         return []
 
@@ -520,332 +484,216 @@ def specialize_default(matrix: PatternMatrix) -> PatternMatrix:
 
 
 class PatternNormalizer:
-    """Convert AST patterns to normalized form.
+    """Resolve patterns once for both coverage checking and code generation."""
 
-    This class captures the pattern semantics used by stmt_match.py
-    to ensure the exhaustiveness checker and codegen agree.
-    """
-
-    def __init__(self, visitor=None):
-        """Initialize normalizer.
-
-        Args:
-            visitor: Optional AST visitor for expression evaluation
-        """
+    def __init__(self, visitor):
         self.visitor = visitor
 
-    def normalize(self, pattern: ast.pattern, subject_type: Any) -> NormalizedPattern:
-        """Convert AST pattern to normalized form."""
-
-        # MatchAs: wildcard or binding (possibly with sub-pattern)
-        if isinstance(pattern, ast.MatchAs):
-            if pattern.pattern is None:
-                # case _: or case x: - both are wildcards for exhaustiveness
-                return NormalizedPattern.wildcard(subject_type)
-            else:
-                # case P(...) as x: recurse into sub-pattern
-                return self.normalize(pattern.pattern, subject_type)
-
-        # MatchSingleton: True, False, None
-        if isinstance(pattern, ast.MatchSingleton):
-            return NormalizedPattern.literal(pattern.value, subject_type)
-
-        # MatchValue: literal value
-        if isinstance(pattern, ast.MatchValue):
-            value = self._extract_constant_value(pattern.value)
-
-            # Check if this is an enum variant constant
-            if self._is_enum_variant(pattern.value, subject_type):
-                tag = self._resolve_enum_tag(pattern.value, subject_type)
-                name = self._get_variant_name(subject_type, tag)
-                return NormalizedPattern.constructor(tag, name, [], subject_type)
-
-            return NormalizedPattern.literal(value, subject_type)
-
-        # MatchOr: expand into alternatives
-        if isinstance(pattern, ast.MatchOr):
-            alts = [self.normalize(p, subject_type) for p in pattern.patterns]
-            return NormalizedPattern.or_pattern(alts, subject_type)
-
-        # MatchSequence: tuple/struct pattern or enum pattern
-        if isinstance(pattern, ast.MatchSequence):
-            return self._normalize_sequence(pattern, subject_type)
-
-        # MatchClass: struct destructuring
-        if isinstance(pattern, ast.MatchClass):
-            return self._normalize_class(pattern, subject_type)
-
-        # Fallback: treat as wildcard (conservative)
-        return NormalizedPattern.wildcard(subject_type)
-
-    def _normalize_sequence(self, pattern: ast.MatchSequence,
-                           subject_type: Any) -> NormalizedPattern:
-        """Normalize sequence pattern.
-
-        Handles:
-        - Enum tuple syntax: (Status.Ok, payload)
-        - Regular tuple/struct patterns
-        """
-        # Check if this is enum pattern matching: (EnumClass.Variant, x)
-        is_enum = hasattr(subject_type, '_is_enum') and subject_type._is_enum
-
-        if is_enum and len(pattern.patterns) >= 1:
-            first_pattern = pattern.patterns[0]
-
-            # Check if first element is a variant tag
-            if isinstance(first_pattern, ast.MatchValue):
-                if self._is_enum_variant(first_pattern.value, subject_type):
-                    tag = self._resolve_enum_tag(first_pattern.value, subject_type)
-                    name = self._get_variant_name(subject_type, tag)
-
-                    # Get payload pattern(s)
-                    sub_patterns = []
-                    if len(pattern.patterns) > 1:
-                        # Has payload
-                        payload_type = self._get_variant_payload_type(subject_type, tag)
-                        payload_pattern = self.normalize(pattern.patterns[1], payload_type)
-                        sub_patterns = [payload_pattern]
-
-                    return NormalizedPattern.constructor(tag, name, sub_patterns, subject_type)
-
-        # Regular tuple/struct pattern - treat as single constructor with sub-patterns
-        field_types = self._get_field_types(subject_type)
-        sub_patterns = []
-        for i, sub_pat in enumerate(pattern.patterns):
-            field_type = field_types[i] if i < len(field_types) else None
-            sub_patterns.append(self.normalize(sub_pat, field_type))
-
-        return NormalizedPattern.constructor(0, "tuple", sub_patterns, subject_type)
-
-    def _normalize_class(self, pattern: ast.MatchClass,
-                        subject_type: Any) -> NormalizedPattern:
-        """Normalize class (struct) pattern."""
-        field_names = get_schema_field_names(subject_type)
-        field_types = get_schema_field_types(subject_type)
-
-        # Build sub-patterns in field order
-        sub_patterns = []
-        for fname, ftype in zip(field_names, field_types):
-            # Check if this field is specified in pattern
-            if fname in pattern.kwd_attrs:
-                idx = pattern.kwd_attrs.index(fname)
-                sub_pat = self.normalize(pattern.kwd_patterns[idx], ftype)
-            else:
-                # Field not in pattern = wildcard
-                sub_pat = NormalizedPattern.wildcard(ftype)
-            sub_patterns.append(sub_pat)
-
-        return NormalizedPattern.constructor(0, "struct", sub_patterns, subject_type)
-
-    def _extract_constant_value(self, node: ast.expr) -> Any:
-        """Extract constant value from AST node."""
-        if isinstance(node, ast.Constant):
-            return node.value
-        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
-            if isinstance(node.operand, ast.Constant):
-                return -node.operand.value
-        # Can't determine constant value
-        return None
-
-    def _is_enum_variant(self, node: ast.expr, subject_type: Any) -> bool:
-        """Check if AST node is an enum variant access like Status.Ok."""
-        if not hasattr(subject_type, '_is_enum') or not subject_type._is_enum:
-            return False
-
-        if isinstance(node, ast.Attribute):
-            # Status.Ok -> check if 'Ok' is a variant
-            variant_names = getattr(subject_type, '_variant_names', [])
-            return node.attr in variant_names
-
-        return False
-
-    def _resolve_enum_tag(self, node: ast.expr, subject_type: Any) -> int:
-        """Resolve enum variant node to tag value."""
-        if isinstance(node, ast.Attribute):
-            attr_name = node.attr
-            tag_values = getattr(subject_type, '_tag_values', {})
-            return tag_values.get(attr_name, 0)
-
-        # Try constant evaluation
-        if isinstance(node, ast.Constant) and isinstance(node.value, int):
-            return node.value
-
-        return 0
-
-    def _get_variant_name(self, subject_type: Any, tag: int) -> str:
-        """Get variant name from tag."""
-        if hasattr(subject_type, '_is_enum') and subject_type._is_enum:
-            variant_names = getattr(subject_type, '_variant_names', [])
-            tag_values = getattr(subject_type, '_tag_values', {})
-            for name in variant_names:
-                if tag_values.get(name) == tag:
-                    return name
-        return f"<tag={tag}>"
-
-    def _get_variant_payload_type(self, subject_type: Any, tag: int) -> Any:
-        """Get payload type for enum variant."""
-        if hasattr(subject_type, '_is_enum') and subject_type._is_enum:
-            variant_names = getattr(subject_type, '_variant_names', [])
-            variant_types = getattr(subject_type, '_variant_types', [])
-            tag_values = getattr(subject_type, '_tag_values', {})
-
-            for i, name in enumerate(variant_names):
-                if tag_values.get(name) == tag:
-                    return variant_types[i] if i < len(variant_types) else None
-        return None
-
-    def _get_field_types(self, subject_type: Any) -> List[Any]:
-        """Get field types for struct/tuple type."""
-        return get_schema_field_types(subject_type)
-
-
-def _check_linear_variant_exhaustiveness(node: ast.Match, enum_type: Any,
-                                         visitor: Any) -> None:
-    """Ensure linear enum variants are explicitly matched when a wildcard exists.
-
-    An enum with linear variants must be exhaustively matched, and a wildcard
-    pattern is not allowed to silently swallow a linear variant (which would leak
-    its payload). If all linear variants are already explicitly matched, the
-    wildcard is fine.
-    """
-    from .schema_protocol import is_linear_schema_type
-    from .valueref import ValueRef
-
-    if not hasattr(enum_type, '_is_enum') or not enum_type._is_enum:
-        return
-
-    variant_types = getattr(enum_type, '_variant_types', [])
-    variant_names = getattr(enum_type, '_variant_names', [])
-
-    linear_variants = {
-        name for name, vt in zip(variant_names, variant_types)
-        if vt is not None and is_linear_schema_type(vt)
-    }
-    if not linear_variants:
-        return
-
-    matched_variants: Set[str] = set()
-    has_wildcard = False
-
-    for case in node.cases:
-        pattern = case.pattern
-        if isinstance(pattern, ast.MatchSequence) and len(pattern.patterns) >= 1:
-            first = pattern.patterns[0]
-            if isinstance(first, ast.MatchValue):
-                tag_val = visitor.visit_rvalue_expression(first.value)
-                if isinstance(tag_val, ValueRef) and tag_val.is_python_value():
-                    tag_int = tag_val.value
-                    tag_values = getattr(enum_type, '_tag_values', {})
-                    for vname, vtag in tag_values.items():
-                        if vtag == tag_int:
-                            matched_variants.add(vname)
-                            break
-        elif isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
-            has_wildcard = True
-
-    if has_wildcard:
-        unmatched = linear_variants - matched_variants
-        if unmatched:
-            logger.error(
-                f"Match with wildcard does not explicitly handle linear variants: "
-                f"{', '.join(sorted(unmatched))}. "
-                f"Linear payloads must be explicitly matched and consumed.",
-                node=node, exc_type=ValueError,
-            )
-
-
-def check_match_exhaustiveness(node: ast.Match, subject_types: List[Any],
-                               visitor=None) -> None:
-    """Check if a match statement is exhaustive.
-
-    Raises CompileError if not exhaustive.
-
-    Args:
-        node: ast.Match node
-        subject_types: List of types for subjects
-        visitor: Optional AST visitor for expression evaluation
-    """
-    # Check linear-variant exhaustiveness for enum subjects.
-    # This must run even if there is an unguarded catch-all, because a wildcard
-    # cannot silently swallow a linear enum variant.
-    for subject_type in subject_types:
-        if isinstance(subject_type, type) and getattr(subject_type, '_is_enum', False):
-            _check_linear_variant_exhaustiveness(node, subject_type, visitor)
-
-    # Fast path: unguarded catch-all = exhaustive
-    for case in node.cases:
-        pattern = case.pattern
-        if isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
-            if case.guard is None:
-                return  # Immediately exhaustive
-
-    # Build pattern matrix
-    normalizer = PatternNormalizer(visitor)
-    rows = []
-
-    for case in node.cases:
-        # Normalize the pattern
+    def normalize_case(self, pattern, subject_types):
         if len(subject_types) == 1:
-            normalized = normalizer.normalize(case.pattern, subject_types[0])
-            row_patterns = [normalized]
+            return self.normalize(pattern, subject_types[0])
+        if isinstance(pattern, ast.MatchOr):
+            result = NormalizedPattern.or_pattern([
+                self.normalize_case(item, subject_types) for item in pattern.patterns])
+        elif isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
+            if pattern.name is not None:
+                raise TypeError('Multi-subject match requires individual captures')
+            result = NormalizedPattern.constructor(0, 'subjects', [
+                NormalizedPattern.wildcard(ty) for ty in subject_types])
+        elif isinstance(pattern, ast.MatchSequence):
+            if len(pattern.patterns) != len(subject_types):
+                raise TypeError('Multi-subject pattern count does not match subjects')
+            result = NormalizedPattern.constructor(0, 'subjects', [
+                self.normalize(item, ty)
+                for item, ty in zip(pattern.patterns, subject_types)])
         else:
-            # Multi-subject: pattern should be a sequence or wildcard
-            if isinstance(case.pattern, ast.MatchSequence):
-                row_patterns = []
-                for i, sub_pat in enumerate(case.pattern.patterns):
-                    stype = subject_types[i] if i < len(subject_types) else None
-                    row_patterns.append(normalizer.normalize(sub_pat, stype))
-                # Pad with wildcards if fewer patterns than subjects
-                while len(row_patterns) < len(subject_types):
-                    stype = subject_types[len(row_patterns)]
-                    row_patterns.append(NormalizedPattern.wildcard(stype))
-            elif isinstance(case.pattern, ast.MatchAs) and case.pattern.pattern is None:
-                # Single wildcard/binding for multiple subjects
-                # Expand to wildcards for all columns
-                row_patterns = [NormalizedPattern.wildcard(stype) for stype in subject_types]
-            elif isinstance(case.pattern, ast.MatchOr):
-                # OR pattern for multi-subject - normalize and check if any alt is a tuple
-                # This handles cases like: case (True, True) | (False, False):
-                normalized = normalizer.normalize(case.pattern, subject_types[0] if subject_types else None)
-                # If it normalizes to an OR of constructors with sub-patterns, we need to expand
-                if normalized.kind == PatternKind.OR:
-                    # Check if all alternatives are sequences that we can expand
-                    all_tuples = True
-                    for alt in normalized.alternatives:
-                        if alt.kind != PatternKind.CONSTRUCTOR or len(alt.sub_patterns) != len(subject_types):
-                            all_tuples = False
-                            break
-                    if all_tuples:
-                        # Keep as single pattern for now - the algorithm will handle OR alternatives
-                        row_patterns = [normalized]
-                    else:
-                        row_patterns = [normalized]
-                else:
-                    row_patterns = [normalized]
-            else:
-                # Single pattern for multiple subjects - normalize as single column
-                # This handles complex patterns that apply to a tuple type
-                normalized = normalizer.normalize(case.pattern, subject_types[0] if subject_types else None)
-                row_patterns = [normalized]
+            raise TypeError('Multi-subject match requires a sequence pattern')
+        result.ast_node = pattern
+        return result
 
-        has_guard = case.guard is not None
-        rows.append(PatternRow(row_patterns, has_guard, case))
+    def normalize(self, pattern, subject_type):
+        from dataclasses import replace
+        if isinstance(pattern, ast.MatchAs):
+            result = (NormalizedPattern.wildcard(subject_type)
+                      if pattern.pattern is None
+                      else self.normalize(pattern.pattern, subject_type))
+            if pattern.name is not None:
+                result = replace(result, bindings=result.bindings + (pattern.name,))
+        elif isinstance(pattern, ast.MatchSingleton):
+            if pattern.value is None:
+                raise TypeError('None singleton patterns are unsupported')
+            result = self._value(ast.Constant(pattern.value), subject_type)
+        elif isinstance(pattern, ast.MatchValue):
+            result = self._value(pattern.value, subject_type)
+        elif isinstance(pattern, ast.MatchOr):
+            result = NormalizedPattern.or_pattern([
+                self.normalize(item, subject_type) for item in pattern.patterns],
+                subject_type)
+        elif isinstance(pattern, ast.MatchClass):
+            result = self._class(pattern, subject_type)
+        elif isinstance(pattern, ast.MatchSequence):
+            result = self._sequence(pattern, subject_type)
+        else:
+            raise NotImplementedError(
+                f'Unsupported match pattern: {type(pattern).__name__}')
+        result.ast_node = pattern
+        return result
 
-    matrix = PatternMatrix(rows, subject_types)
+    def _resolve_value(self, expression):
+        from .type_descriptor import _constant_value
+        value = self.visitor.visit_rvalue_expression(expression)
+        known, constant = _constant_value(value)
+        return value, constant if known else None
 
-    # Check exhaustiveness
-    exhaustive, uncovered = is_exhaustive(matrix)
+    def _value(self, expression, subject_type):
+        value_ref, value = self._resolve_value(expression)
+        if getattr(subject_type, '_is_enum', False) and value is not None:
+            tags = subject_type._tag_values
+            for index, name in enumerate(subject_type._variant_names):
+                if tags[name] == value:
+                    fields = TypeInfo.get_constructor_sub_types(subject_type, value)
+                    result = NormalizedPattern.constructor(value, name, [
+                        NormalizedPattern.wildcard(ty) for ty in fields], subject_type)
+                    result.payload_index = index
+                    result.value_ref = value_ref
+                    return result
+            raise TypeError(f'{value!r} is not a tag of {subject_type.get_name()}')
+        result = NormalizedPattern.literal(value, subject_type)
+        result.value_ref = value_ref
+        return result
 
+    def _class(self, pattern, subject_type):
+        from .builtin_entities import ptr
+        from .type_converter import strip_qualifiers
+        from .type_descriptor import same_type
+        from .type_resolver import TypeResolver
+        _, pattern_type = self._resolve_value(pattern.cls)
+        if pattern_type is ptr:
+            if pattern.kwd_attrs or len(pattern.patterns) != 1:
+                raise TypeError('ptr pattern requires one capture name')
+            inner = pattern.patterns[0]
+            if not isinstance(inner, ast.MatchAs) or inner.pattern is not None:
+                raise TypeError('ptr pattern requires a capture name')
+            result = NormalizedPattern.wildcard(subject_type)
+            result.pointer_capture = True
+            result.bindings = (inner.name,) if inner.name is not None else ()
+            return result
+        pattern_type = TypeResolver._require_type(pattern_type)
+        if not same_type(strip_qualifiers(pattern_type), strip_qualifiers(subject_type)):
+            raise TypeError(
+                f'Pattern type {pattern_type.get_name()} does not match '
+                f'subject type {subject_type.get_name()}')
+        if not is_schema_type(pattern_type) or getattr(pattern_type, '_is_enum', False):
+            raise TypeError('Class patterns require a struct type')
+        fields = get_schema_field_types(pattern_type)
+        names = get_schema_field_names(pattern_type)
+        if len(pattern.patterns) > len(fields):
+            raise TypeError('Too many positional fields in class pattern')
+        specified = dict(enumerate(pattern.patterns))
+        for name, item in zip(pattern.kwd_attrs, pattern.kwd_patterns):
+            if name not in names:
+                raise TypeError(f'Unknown pattern field: {name}')
+            index = names.index(name)
+            if index in specified:
+                raise TypeError(f'Duplicate pattern field: {name}')
+            specified[index] = item
+        subs = [self.normalize(specified[index], ty) if index in specified
+                else NormalizedPattern.wildcard(ty)
+                for index, ty in enumerate(fields)]
+        result = NormalizedPattern.constructor(0, 'struct', subs, subject_type)
+        result.field_indices = tuple(specified)
+        return result
+
+    def _sequence(self, pattern, subject_type):
+        if (getattr(subject_type, '_is_enum', False) and pattern.patterns
+                and isinstance(pattern.patterns[0], ast.MatchValue)):
+            result = self._value(pattern.patterns[0].value, subject_type)
+            if result.kind == PatternKind.LITERAL:
+                if len(pattern.patterns) == 1:
+                    return result
+                if len(pattern.patterns) != 2:
+                    raise TypeError('Enum patterns accept a tag and one payload pattern')
+                fields = get_schema_field_types(subject_type)
+                result = NormalizedPattern.constructor(None, 'enum-fields', [
+                    result, self.normalize(pattern.patterns[1], fields[1])], subject_type)
+                result.field_indices = (0, 1)
+                return result
+            if len(pattern.patterns) > 2:
+                raise TypeError('Enum patterns accept a tag and one payload pattern')
+            if len(pattern.patterns) == 2:
+                fields = TypeInfo.get_constructor_sub_types(
+                    subject_type, result.constructor_tag)
+                item = pattern.patterns[1]
+                if fields:
+                    result.sub_patterns = [self.normalize(item, fields[0])]
+                    result.field_indices = (0,)
+                elif not (isinstance(item, ast.MatchAs) and item.pattern is None
+                          and item.name is None):
+                    raise TypeError('This enum variant has no payload to match')
+            return result
+        fields = get_schema_field_types(subject_type)
+        if getattr(subject_type, 'dimensions', None) is not None:
+            fields = TypeInfo.get_constructor_sub_types(subject_type, 0)
+        if len(pattern.patterns) != len(fields):
+            raise TypeError('Sequence pattern length does not match subject fields')
+        result = NormalizedPattern.constructor(0, 'sequence', [
+            self.normalize(item, ty) for item, ty in zip(pattern.patterns, fields)],
+            subject_type)
+        result.field_indices = tuple(range(len(fields)))
+        return result
+
+
+def _case_alternatives(pattern, multi_subject):
+    if multi_subject and pattern.kind == PatternKind.OR:
+        for alternative in pattern.alternatives:
+            yield from _case_alternatives(alternative, True)
+    else:
+        yield pattern.sub_patterns if multi_subject else [pattern]
+
+
+def _check_linear_variant_exhaustiveness(node, subject_types, patterns):
+    from .schema_protocol import is_linear_schema_type
+    for index, subject_type in enumerate(subject_types):
+        if not getattr(subject_type, '_is_enum', False):
+            continue
+        linear = {subject_type._tag_values[name]
+                  for name, ty in zip(subject_type._variant_names,
+                                      subject_type._variant_types)
+                  if ty is not None and is_linear_schema_type(ty)}
+        if not linear:
+            continue
+        matched, has_wildcard = set(), False
+        for case, pattern in zip(node.cases, patterns):
+            for row in _case_alternatives(pattern, len(subject_types) > 1):
+                item = row[index]
+                alternatives = (item.alternatives if item.kind == PatternKind.OR
+                                else [item])
+                for alternative in alternatives:
+                    has_wildcard |= alternative.is_wildcard()
+                    if case.guard is None and alternative.kind == PatternKind.CONSTRUCTOR:
+                        matched.add(alternative.constructor_tag)
+        if has_wildcard and linear - matched:
+            names = [name for name, tag in subject_type._tag_values.items()
+                     if tag in linear - matched]
+            logger.error(
+                'Match with wildcard does not explicitly handle linear variants: '
+                + ', '.join(names) + '. Linear payloads must be explicitly matched '
+                'and consumed.', node=node, exc_type=ValueError)
+
+
+def check_match_exhaustiveness(node, subject_types, patterns):
+    """Check coverage of the same resolved patterns consumed by codegen."""
+    _check_linear_variant_exhaustiveness(node, subject_types, patterns)
+    rows = [PatternRow(row, case.guard is not None, case)
+            for case, pattern in zip(node.cases, patterns)
+            for row in _case_alternatives(pattern, len(subject_types) > 1)]
+    exhaustive, uncovered = is_exhaustive(PatternMatrix(rows, subject_types))
     if not exhaustive:
-        # Build error message
-        msg = "Non-exhaustive match statement."
+        message = 'Non-exhaustive match statement.'
         if uncovered:
-            msg += f" Uncovered cases: {', '.join(uncovered)}"
-
-        # Check if any guards were present
-        has_guards = any(c.guard is not None for c in node.cases)
-        if has_guards:
-            msg += "\nNote: Guard conditions (if clauses) are treated as potentially False. "
-            msg += "Add a wildcard case (_) to ensure exhaustiveness."
-
-        logger.error(msg, node=node, exc_type=ValueError)
+            message += " Uncovered cases: " + ', '.join(uncovered)
+        if any(case.guard is not None for case in node.cases):
+            message += ('\nNote: Guard conditions (if clauses) are treated as '
+                        'potentially False. Add a wildcard case (_) to ensure '
+                        'exhaustiveness.')
+        logger.error(message, node=node, exc_type=ValueError)

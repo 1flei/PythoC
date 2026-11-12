@@ -400,13 +400,37 @@ def run_bool_encode() -> i32:
 
 
 # =====================================================================
-# J. Generator expressions (already in test_instantiate_extended.py,
-#    plus more complex cases)
+# J. Typed generators with filters and nested ranges
 # =====================================================================
 
 @compile
-def run_genexpr_filter_squares() -> i32:
-    api = instantiate(i32(x * x) for x in range(10) if x % 2 == 1)
+def odd_squares_source() -> i32:
+    x: i32
+    for x in range(10):
+        if x % 2 == 1:
+            yield x * x
+
+
+@compile
+def below_five_source() -> i32:
+    x: i32
+    for x in range(20):
+        if x < 5:
+            yield x
+
+
+@compile
+def nested_range_source() -> i32:
+    x: i32
+    y: i32
+    for x in range(3):
+        for y in range(2):
+            yield x + y
+
+
+@compile
+def run_odd_squares() -> i32:
+    api = instantiate(odd_squares_source)
     it: api.Iter; api.init(ptr(it))
     total: i32 = 0
     while api.next(ptr(it)):
@@ -415,8 +439,8 @@ def run_genexpr_filter_squares() -> i32:
 
 
 @compile
-def run_genexpr_range_filter() -> i32:
-    api = instantiate(i32(x) for x in range(20) if x < 5)
+def run_below_five() -> i32:
+    api = instantiate(below_five_source)
     it: api.Iter; api.init(ptr(it))
     total: i32 = 0
     while api.next(ptr(it)):
@@ -425,8 +449,8 @@ def run_genexpr_range_filter() -> i32:
 
 
 @compile
-def run_genexpr_nested() -> i32:
-    api = instantiate(i32(x + y) for x in range(3) for y in range(2))
+def run_nested_ranges() -> i32:
+    api = instantiate(nested_range_source)
     it: api.Iter; api.init(ptr(it))
     total: i32 = 0
     while api.next(ptr(it)):
@@ -724,15 +748,15 @@ class TestInstantiateStrength(unittest.TestCase):
     def test_bool_encode(self):
         self.assertEqual(run_bool_encode(), 2)
 
-    # ---- J. Generator expressions ----
-    def test_genexpr_filter_squares(self):
-        self.assertEqual(run_genexpr_filter_squares(), 165)
+    # ---- J. Typed generators ----
+    def test_odd_squares(self):
+        self.assertEqual(run_odd_squares(), 165)
 
-    def test_genexpr_range_filter(self):
-        self.assertEqual(run_genexpr_range_filter(), 10)
+    def test_below_five(self):
+        self.assertEqual(run_below_five(), 10)
 
-    def test_genexpr_nested(self):
-        self.assertEqual(run_genexpr_nested(), 9)
+    def test_nested_ranges(self):
+        self.assertEqual(run_nested_ranges(), 9)
 
     # ---- K. Partial iteration ----
     def test_partial_3_of_10(self):

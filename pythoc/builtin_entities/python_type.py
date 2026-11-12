@@ -405,19 +405,13 @@ class PythonType(_PythonTypeBase):
                 result_type, namespace, local_lookup=local_lookup)
             return wrap_value(result_type, kind="python", type_hint=PythonType.wrap(result_type))
 
-        # Python sequence subscript (list, dict, etc.)
-        # Extract the index value
-        if index.is_python_value():
-            index_val = index.value
-        else:
-            # Try to extract constant from AST node
-            import ast
-            if isinstance(node.slice, ast.Constant):
-                index_val = node.slice.value
-            else:
-                logger.error(f"List subscript requires constant index at compile time, got {type(node.slice)}",
-                            node=node, exc_type=TypeError)
-        
+        # Index policy depends on the evaluated value, never its syntax.
+        from ..type_descriptor import _constant_value
+        known, index_val = _constant_value(index)
+        if not known:
+            logger.error("Python subscript requires a compile-time constant index",
+                         node=node, exc_type=TypeError)
+
         if is_mapping_carrier(self._python_object):
             try:
                 result = get_mapping_value(self._python_object, index_val)

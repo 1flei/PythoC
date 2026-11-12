@@ -152,6 +152,16 @@ class TypeResolver:
         """Validate an evaluated type value without executing syntax."""
         return self._extract_type_from_valueref(value_ref)
 
+    @staticmethod
+    def annotation_expression(annotation):
+        """Expose names in quoted annotations before binding or evaluation."""
+        while isinstance(annotation, str) or (
+                isinstance(annotation, ast.Constant)
+                and isinstance(annotation.value, str)):
+            text = annotation if isinstance(annotation, str) else annotation.value
+            annotation = ast.parse(text, mode="eval").body
+        return annotation
+
     def _evaluate_type_expression(self, node):
         """
         Evaluate type annotation AST, returning ValueRef(kind='python').
@@ -165,19 +175,9 @@ class TypeResolver:
         Returns:
             ValueRef(kind='python', value=<type>)
         """
-        # Handle string annotations (from __future__ import annotations)
-        if isinstance(node, str):
-            parsed = ast.parse(node, mode="eval")
-            return self._evaluate_type_expression(parsed.body)
-
-        # Already a Python value (not AST, not string) - wrap it
+        node = self.annotation_expression(node)
         if not isinstance(node, ast.AST):
             return self._wrap_as_python_value(node)
-
-        # String constant (from __future__ annotations) -> parse recursively
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            parsed = ast.parse(node.value, mode="eval")
-            return self._evaluate_type_expression(parsed.body)
 
         # Use provided visitor (for local type variable access) or constexpr visitor
         # The visitor's visit_List will check is_constexpr() or element types

@@ -8,6 +8,20 @@ that individual libc binding modules can select the correct ABI definitions.
 
 import platform
 import sys
+import ctypes
+
+from ..builtin_entities import get_builtin_entity
+
+
+def _integer_type(ctype, signed):
+    prefix = 'i' if signed else 'u'
+    return get_builtin_entity(f'{prefix}{ctypes.sizeof(ctype) * 8}')
+
+
+C_LONG = _integer_type(ctypes.c_long, True)
+C_ULONG = _integer_type(ctypes.c_ulong, False)
+C_LLONG = _integer_type(ctypes.c_longlong, True)
+C_ULLONG = _integer_type(ctypes.c_ulonglong, False)
 
 # Operating system
 IS_WINDOWS = sys.platform == 'win32'

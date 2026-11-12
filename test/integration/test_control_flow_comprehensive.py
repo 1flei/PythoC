@@ -4,8 +4,14 @@ Comprehensive tests for control flow including complex nesting,
 edge cases, and various control flow patterns.
 """
 
+import ast
+from types import SimpleNamespace
+from pythoc import LLVMCompiler, goto, label
+from pythoc._inline.definition_bindings import symbol_expression
 import unittest
-from pythoc import i32, i64, bool, compile, seq
+
+from pythoc import i32, i64, bool, compile, ptr, seq
+from pythoc import bool as pc_bool
 
 
 # =============================================================================
@@ -760,6 +766,10 @@ class TestWhileLoop(unittest.TestCase):
     def test_multiple_conditions(self):
         self.assertEqual(test_while_with_multiple_conditions(), 10)
 
+    def test_runtime_condition_stays_in_the_loop_header(self):
+        self.assertEqual(runtime_loop(3), 4103)
+        self.assertEqual(runtime_loop(0), 1100)
+
 
 class TestBreak(unittest.TestCase):
     def test_first_iteration(self):
@@ -845,6 +855,10 @@ class TestBooleanConditions(unittest.TestCase):
     def test_if_false(self):
         self.assertEqual(test_if_false(), 42)
 
+    def test_compile_time_loop_conditions(self):
+        self.assertEqual(false_loops(), 111)
+        self.assertEqual(true_loop_break(), 3)
+
 
 class TestPatterns(unittest.TestCase):
     def test_state_machine(self):
@@ -858,6 +872,113 @@ class TestPatterns(unittest.TestCase):
     
     def test_count_matching(self):
         self.assertEqual(test_count_matching_pattern(), 6)
+
+
+FALSE = False
+
+
+TRUE = True
+
+
+def false_value():
+    return False
+
+
+@compile
+def false_loops() -> i32:
+    result: i32 = 0
+    while False:
+        result = -100
+    else:
+        result += 1
+    while FALSE:
+        result = -100
+    else:
+        result += 10
+    while false_value():
+        result = -100
+    else:
+        result += 100
+    return result
+
+
+@compile
+def true_loop_break() -> i32:
+    result: i32 = 0
+    while TRUE:
+        result += 1
+        if result == 3:
+            break
+    else:
+        result = -100
+    return result
+
+
+@compile
+def step(calls: ptr[i32], limit: i32) -> pc_bool:
+    calls[0] += 1
+    return calls[0] <= limit
+
+
+@compile
+def runtime_loop(limit: i32) -> i32:
+    calls: i32 = 0
+    total: i32 = 0
+    while step(ptr(calls), limit):
+        total += 1
+    else:
+        total += 100
+    return calls * 1000 + total
+
+
+class TestForwardLabelEvaluation(unittest.TestCase):
+    def test_root_and_nested_labels_accept_compile_time_expressions(self):
+        for nested in (False, True):
+            for callee in ('label', 'alias', 'namespace.label',
+                           'choose_label()', 'labels[0]'):
+                with self.subTest(nested=nested, callee=callee):
+                    def name():
+                        return 'target'
+
+                    def choose_label():
+                        return label
+
+                    body = ("goto('target')\n"
+                            f"with {callee}(name()):\n    return 42\n")
+                    if nested:
+                        body = "with label('outer'):\n" + ''.join(
+                            '    ' + line + '\n' for line in body.splitlines())
+                    source = 'def forward():\n' + ''.join(
+                        '    ' + line + '\n' for line in body.splitlines())
+                    compiler = LLVMCompiler(user_globals={
+                        'goto': goto, 'label': label, 'alias': label,
+                        'namespace': SimpleNamespace(label=label), 'name': name,
+                        'choose_label': choose_label, 'labels': [label],
+                    })
+                    compiler.compile_function_from_ast(
+                        ast.parse(source).body[0], return_type_hint=i32)
+                    self.assertTrue(compiler.verify_module())
+
+    def test_bound_symbol_label_uses_the_same_discovery(self):
+        syntax = ast.parse(
+            "def forward():\n    goto('target')\n"
+            "    with alias('target'):\n        return 42\n").body[0]
+        syntax.body[1].items[0].context_expr.func = symbol_expression('alias', label)
+        ast.fix_missing_locations(syntax)
+        compiler = LLVMCompiler(user_globals={'goto': goto})
+        compiler.compile_function_from_ast(syntax, return_type_hint=i32)
+        self.assertTrue(compiler.verify_module())
+
+    def test_non_label_context_does_not_make_a_dead_body_reachable(self):
+        def context():
+            return None
+
+        syntax = ast.parse(
+            "def dead():\n    with label('outer'):\n        return 42\n"
+            "        with context():\n            undefined_name()\n").body[0]
+        compiler = LLVMCompiler(user_globals={'label': label, 'context': context})
+        compiler.compile_function_from_ast(syntax, return_type_hint=i32)
+        self.assertTrue(compiler.verify_module())
 
 
 if __name__ == '__main__':

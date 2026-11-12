@@ -10,7 +10,7 @@ Type classes (i32, f64, etc.) are now used directly instead of PCType instances.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Any, Dict, List, Union, TYPE_CHECKING
 from llvmlite import ir
 import ast
@@ -38,6 +38,43 @@ from .scope_manager import ScopeManager
 from .valueref import ValueRef as EnhancedValueRef
 
 
+INHERIT_EFFECT_SUFFIX = object()
+
+
+def resolve_effect_suffix(suffix=INHERIT_EFFECT_SUFFIX):
+    from .effect import get_current_effect_suffix
+    from .utils.naming import normalize_suffix
+    if suffix is INHERIT_EFFECT_SUFFIX:
+        return get_current_effect_suffix()
+    return normalize_suffix(suffix) if suffix is not None else None
+
+
+def validate_effect_context(effect_suffix, override_names=None):
+    """Validate a definition request before looking up a specialization."""
+    from .effect import _current_effect
+    if effect_suffix is not None:
+        manager = _current_effect()
+        scope = manager._scope.get()
+        if override_names is not None:
+            scope = replace(scope, override_names=frozenset(override_names))
+        if not scope.replay:
+            manager._register_import_bindings(effect_suffix, scope)
+
+
+def capture_compile_context(effect_suffix, override_names=None):
+    """Definition-time context shared by source and generated functions."""
+    from .effect import capture_effect_context, capture_effect_override_names
+    from .session import CompileSession
+    validate_effect_context(effect_suffix, override_names)
+    return dict(
+        effect_suffix=effect_suffix,
+        captured_effect_context=capture_effect_context(),
+        effect_override_names=(capture_effect_override_names()
+                               if override_names is None else set(override_names)),
+        session=CompileSession.current(),
+    )
+
+
 @dataclass
 class FunctionBindingState:
     """Long-lived wrapper binding state.
@@ -61,6 +98,8 @@ class FunctionBindingState:
     captured_symbols: Optional[Any] = None
     effect_specialized_cache: Dict[str, Any] = field(default_factory=dict)
     template_compile_callback: Optional[Any] = None
+    specialize: Optional[Any] = None
+    referenced_names: frozenset[str] = field(default_factory=frozenset)
     compilation_globals: Dict[str, Any] = field(default_factory=dict)
     registration_identity: Optional[str] = None
     wrapper: Optional[Any] = None

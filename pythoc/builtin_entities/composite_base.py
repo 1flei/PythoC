@@ -9,7 +9,6 @@ with shared functionality for:
 - Type ID generation
 """
 
-import ast
 from typing import Any, Dict, List, Optional, Tuple
 from llvmlite import ir
 
@@ -41,56 +40,6 @@ class CompositeType(BuiltinType):
     _type_namespace: Optional[dict] = None
 
     _layout_config = NATURAL_LAYOUT
-    
-    @classmethod
-    def _extract_constant_index(cls, node: ast.Subscript, visitor=None, index_value=None) -> int:
-        """Extract constant integer from subscript node or ValueRef
-        
-        NEW: This is a compatibility wrapper around extract_constant_index().
-        Supports both old API (node only) and new API (visitor + index_value).
-        
-        Old API (deprecated but still supported):
-            index = cls._extract_constant_index(node)
-        
-        New API (recommended):
-            index_value = visitor.visit_expression(node.slice)
-            index = cls._extract_constant_index(node, visitor, index_value)
-        
-        Args:
-            node: ast.Subscript node (for error context and old API)
-            visitor: Optional AST visitor (for new API)
-            index_value: Optional pre-evaluated ValueRef (for new API)
-            
-        Returns:
-            Integer index value
-            
-        Raises:
-            TypeError: If index is not a constant integer
-        """
-        from ..valueref import extract_constant_index
-        
-        # New API: use pre-evaluated index_value
-        if index_value is not None:
-            return extract_constant_index(index_value, f"{cls.get_name()} subscript")
-        
-        # Old API: parse AST node directly (for backward compatibility)
-        if isinstance(node.slice, ast.Constant):
-            index_val = node.slice.value
-        elif isinstance(node.slice, ast.Index):  # Python 3.8 compatibility
-            if isinstance(node.slice.value, ast.Constant):
-                index_val = node.slice.value.value
-            else:
-                logger.error(f"{cls.get_name()} subscript index must be a constant",
-                            node=node, exc_type=TypeError)
-        else:
-            logger.error(f"{cls.get_name()} subscript index must be a constant",
-                        node=node, exc_type=TypeError)
-        
-        if not isinstance(index_val, int):
-            logger.error(f"{cls.get_name()} subscript index must be an integer, got {type(index_val)}",
-                        node=node, exc_type=TypeError)
-        
-        return index_val
     
     @classmethod
     def _get_value_address(cls, visitor, base: ValueRef):

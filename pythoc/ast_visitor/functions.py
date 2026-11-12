@@ -65,7 +65,7 @@ class _ClosureWrapper:
 
         if not isinstance(args, NormalizedCallArgs):
             args = bind_call_args(
-                self._pc_call_signature, args, {}, call_node)
+                self._pc_call_signature, args, {}, call_node, visitor=visitor)
         if self._has_yield:
             from ..builtin_entities.python_type import PythonType
             result = wrap_value(self, kind='python', type_hint=PythonType(self))
@@ -244,14 +244,21 @@ class FunctionsMixin:
 
     def _make_closure_wrapper(self, node: ast.FunctionDef, defaults):
         """Build the callable wrapper for a closure/lambda AST."""
-        # Capture the current user_globals at closure definition time
-        # This is the caller's globals context
-        closure_globals = dict(self.ctx.user_globals)
+        from ..decorators.visible import definition_names
+
+        names = definition_names(None, node)
+        closure_globals = {name: self.ctx.user_globals[name] for name in names
+                           if name in self.ctx.user_globals}
+        references = {}
+        for name in names:
+            binding = self.scope_manager.lookup_variable(name)
+            if binding is not None:
+                references[name] = binding
 
         return _ClosureWrapper(
             node,
             self,
             closure_globals,
             defaults,
-            self.scope_manager.get_all_visible(),
+            references,
         )

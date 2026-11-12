@@ -1001,7 +1001,13 @@ def get_current_effect_suffix() -> Optional[str]:
     """
     if is_effect_suffix_suppressed():
         return None
-    return _current_effect()._get_current_suffix()
+    suffix = _current_effect()._get_current_suffix()
+    stack = getattr(_compilation_context, 'stack', ())
+    if suffix is None and stack:
+        binding = stack[-1]
+        if getattr(binding, 'session', None) is CompileSession.current():
+            return binding.effect_suffix
+    return suffix
 
 
 # Suppression is local to definition/import execution, before a compile frame

@@ -100,18 +100,40 @@ def _param_binding(has_annotation, target, annotation, value):
     if not has_annotation:
         target = __pc_intrinsics.move(value)  # noqa: F821
 
-# converter(value) -- type-convert a constant arg
-@quote
-def _type_convert(converter, value):
-    return converter(value)
+
+class _InlineReturnValue:
+    """Carry one evaluated value across inline scope cleanup."""
+
+    _pc_compile_level_callable = True
+
+    @staticmethod
+    def create():
+        return _InlineReturnValue()
+
+    def handle_call(self, visitor, func_ref, args, node):
+        from ..valueref import wrap_python_constant
+        self.value = args[0].clone(
+            var_name=None, linear_path=None, linear_owner_id=None)
+        return wrap_python_constant(None)
+
+    def take(self):
+        value = self.value
+        del self.value
+        return value
 
 
-# label scope around inlined prefix statements (keeps defer semantics for
-# the inlined region when the result assignment lives outside the label)
 @quote
-def _prefix_label_scope(label_name, body):
+def _terminal_return(label_name, body, has_value, make_capture, capture,
+                     value, result_var):
+    if has_value:
+        capture = make_capture()
     with __pc_intrinsics.label(label_name):  # noqa: F821
         body
+        if has_value:
+            capture(__pc_intrinsics.move(value))  # noqa: F821
+    if has_value:
+        result_var = __pc_intrinsics.move(capture.take())  # noqa: F821
+
 
 # -- Frame templates --
 # Unified: all branches encoded as const guards.
@@ -200,17 +222,12 @@ def _build_param_bindings(callee_params, call_args, rename_map):
         raise TypeError(
             f'AST expansion argument count mismatch: expected {len(callee_params)}, '
             f'got {len(call_args)}')
+    from .renaming import ScopedVariableRenamer
     frags = []
     for param, argument in zip(callee_params, call_args):
         param_name = param.arg
         renamed = rename_map.get(param_name, param_name)
         arg_value = copy.deepcopy(argument)
-
-        # Type-convert constants when param has annotation
-        if param.annotation and isinstance(arg_value, ast.Constant):
-            arg_value = _type_convert(
-                copy.deepcopy(param.annotation), arg_value
-            ).expr
 
         target = ast.Name(id=renamed, ctx=ast.Store())
         has_annotation = bool(param.annotation)
@@ -218,7 +235,8 @@ def _build_param_bindings(callee_params, call_args, rename_map):
         frags.append(_param_binding(
             meta_const(has_annotation),
             target,
-            copy.deepcopy(param.annotation) if has_annotation else ast.Constant(value=0),
+            ScopedVariableRenamer(rename_map).visit(copy.deepcopy(param.annotation))
+            if has_annotation else ast.Constant(value=0),
             arg_value,
         ))
     return frags
@@ -235,17 +253,27 @@ def _transform_body(callee_body, exit_rule, rename_map):
     return transformer.transform(callee_body)
 
 
-def _get_result_type(callee_ast, globals_=None):
-    """Extract non-void return type from callee, or None."""
-    if callee_ast and hasattr(callee_ast, 'returns') and callee_ast.returns:
-        ret = callee_ast.returns
-        if isinstance(ret, ast.Name):
-            from ..builtin_entities import void
-            default = void if ret.id == 'void' else None
-            if (globals_ or {}).get(ret.id, default) is void:
-                return None
-        return ret
-    return None
+def _result_storage_type(annotation):
+    """Represent a void inline result as a compile-time None value."""
+    from ..builtin_entities import pyconst, void
+    from ..type_resolver import TypeResolver
+    resolved = (void if annotation is None else
+                TypeResolver.resolve_type(annotation, freeze=True))
+    return pyconst[None] if resolved is void else resolved
+
+
+def _tuple_element_type(annotation, index):
+    from ..schema_protocol import get_schema_field_type
+    from ..type_resolver import TypeResolver
+    from ..type_converter import get_base_type
+    resolved = TypeResolver.resolve_type(annotation, freeze=True)
+    return get_schema_field_type(get_base_type(resolved), index)
+
+
+def _type_expression(function, *arguments):
+    from .definition_bindings import symbol_expression
+    return ast.Call(func=symbol_expression(function.__name__, function),
+                    args=list(arguments), keywords=[])
 
 
 def _build_loop_var_declarations(
@@ -281,8 +309,9 @@ def _build_loop_var_declarations(
     elif isinstance(loop_var, ast.Tuple):
         for i, elt in enumerate(loop_var.elts):
             if isinstance(elt, ast.Name) and elt.id not in visible_names:
-                element_type = _extract_tuple_element_type(
-                    return_type_annotation, i)
+                element_type = _type_expression(
+                    _tuple_element_type, copy.deepcopy(return_type_annotation),
+                    ast.Constant(i))
                 decl = ast.AnnAssign(
                     target=ast.Name(id=elt.id, ctx=ast.Store()),
                     annotation=element_type,
@@ -293,22 +322,6 @@ def _build_loop_var_declarations(
                 decls.append(decl)
 
     return decls
-
-
-def _extract_tuple_element_type(type_annotation, index):
-    """Extract the type of a tuple element from a struct type annotation.
-
-    For struct[T1, T2, ...], returns T_index.
-    If we can't determine the type, returns the full annotation.
-    """
-    if isinstance(type_annotation, ast.Subscript):
-        slice_node = type_annotation.slice
-        if isinstance(slice_node, ast.Tuple):
-            if index < len(slice_node.elts):
-                return copy.deepcopy(slice_node.elts[index])
-        elif index == 0:
-            return copy.deepcopy(slice_node)
-    return copy.deepcopy(type_annotation)
 
 
 # ---------------------------------------------------------------------------
@@ -540,22 +553,15 @@ def expand_inline(request):
         exit_label = names.fresh("_inline_exit_{}".format(inline_id))
         request.exit_rule.exit_label = exit_label
 
-    # --- Single terminal return (unannotated callees) ---
-    # Without a return annotation the result variable's type cannot be
-    # declared up front, so a result assignment inside the label scope
-    # would die with it. When the body has exactly one return and it is
-    # the last statement, emit the result assignment at the frame's top
-    # level instead (inferred-type assignment); the remaining prefix keeps
-    # a label scope so inlined defers still fire at the end of the region.
-    # Unannotated callees with multiple return points are rejected.
-    # Callees without any return (void) need no handling.
+    # Unannotated terminal returns retain the evaluated value across cleanup.
+    # Multiple return points require an explicit type for their shared slot.
     result_var = getattr(request.exit_rule, 'result_var', None)
     terminal_value = None
     has_terminal_return = False
     prefix_label = exit_label
     if (isinstance(request.exit_rule, ReturnExitRule)
             and result_var
-            and _get_result_type(callee_ast, request.callee_globals) is None):
+            and getattr(callee_ast, 'returns', None) is None):
         n_returns = _count_returns(callee_body)
         if n_returns == 1 and isinstance(callee_body[-1], ast.Return):
             terminal_value = callee_body[-1].value
@@ -573,39 +579,35 @@ def expand_inline(request):
     body_stmts = _transform_body(callee_body, request.exit_rule, rename_map)
 
     if has_terminal_return:
-        from .exit_rules import VariableRenamer, _return_exit_template
-        if body_stmts:
-            body_stmts = _prefix_label_scope(
-                ast.Constant(value=prefix_label), body_stmts).stmts
-        if terminal_value is not None:
-            renamed_value = VariableRenamer(rename_map).visit(
-                copy.deepcopy(terminal_value))
-            body_stmts += _return_exit_template(
-                meta_const(True), meta_const(False),
-                ast.Name(id=result_var, ctx=ast.Store()),
-                renamed_value,
-                ast.Constant(value="_unused"),
-            ).stmts
+        from .exit_rules import VariableRenamer
+        from .definition_bindings import symbol_expression
+        renamed_value = (VariableRenamer(rename_map).visit(
+            copy.deepcopy(terminal_value))
+            if terminal_value is not None else ast.Constant(None))
+        body_stmts = _terminal_return(
+            ast.Constant(prefix_label), body_stmts,
+            meta_const(terminal_value is not None),
+            symbol_expression('_inline_return_factory', _InlineReturnValue.create),
+            ast.Name(id=names.fresh('_inline_return_value'), ctx=ast.Load()),
+            renamed_value, ast.Name(id=result_var, ctx=ast.Store()),
+        ).stmts
 
-    # --- Compute frame parameters ---
+    # Resolve type expressions through normal annotation evaluation.
+    return_annotation = getattr(callee_ast, 'returns', None)
+    result_type = None
+    if return_annotation is not None:
+        from .exit_rules import VariableRenamer
+        annotation = VariableRenamer(rename_map).visit(
+            copy.deepcopy(return_annotation))
+        result_type = _type_expression(_result_storage_type, annotation)
+
     has_label = exit_label is not None
-    result_type = (_get_result_type(callee_ast, request.callee_globals)
-                   if has_label else None)
-    has_result_decl = bool(result_type and result_var)
-
+    has_result_decl = result_type is not None and result_var is not None
     decl_stmts = []
-    if isinstance(request.exit_rule, YieldExitRule):
-        exit_rule = request.exit_rule
-        # A void-returning producer yields no payload: no loop-var
-        # declaration (declaring one would be a void-typed variable).
-        is_void_return = _get_result_type(callee_ast, request.callee_globals) is None
-        if exit_rule.return_type_annotation and not is_void_return:
-            decl_stmts = _build_loop_var_declarations(
-                exit_rule.loop_var,
-                exit_rule.return_type_annotation,
-                request.call_site,
-                request.caller_context.available_vars,
-            )
+    if isinstance(request.exit_rule, YieldExitRule) and result_type is not None:
+        decl_stmts = _build_loop_var_declarations(
+            request.exit_rule.loop_var, result_type, request.call_site,
+            request.caller_context.available_vars)
     has_decls = bool(decl_stmts)
 
     # --- Single unified frame template call ---

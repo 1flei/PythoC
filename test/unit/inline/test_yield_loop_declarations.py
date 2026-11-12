@@ -39,7 +39,11 @@ class TestYieldLoopDeclarations(unittest.TestCase):
         )
         self.assertEqual(len(declarations), 1)
         self.assertEqual(declarations[0].target.id, "value")
-        self.assertEqual(declarations[0].annotation.id, "f32")
+        from pythoc import f32, i32, struct
+        from pythoc.type_resolver import TypeResolver
+        resolver = TypeResolver(user_globals={'struct': struct, 'i32': i32,
+                                              'f32': f32})
+        self.assertIs(resolver.parse_annotation(declarations[0].annotation), f32)
 
 
 if __name__ == "__main__":

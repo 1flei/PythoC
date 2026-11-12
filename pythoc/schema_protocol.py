@@ -125,7 +125,8 @@ def get_field_layout_count(type_hint: Any) -> int:
 
 
 def get_field_layout_type(type_hint: Any, index: int) -> Any:
-    field_types = get_field_layout_types(type_hint)
+    owner = get_field_layout_owner(type_hint)
+    field_types = owner._field_types if owner is not None else ()
     if index < 0 or index >= len(field_types):
         logger.error(
             f"Field layout index {index} out of range for {type_hint}",
@@ -187,7 +188,8 @@ def get_schema_field_count(type_hint: Any) -> int:
 
 
 def get_schema_field_type(type_hint: Any, index: int) -> Any:
-    field_types = get_schema_field_types(type_hint)
+    owner = get_schema_type_owner(type_hint)
+    field_types = owner._field_types if owner is not None else ()
     if index < 0 or index >= len(field_types):
         logger.error(
             f"Schema field index {index} out of range for {type_hint}",

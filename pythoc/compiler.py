@@ -627,32 +627,7 @@ class LLVMCompiler:
         from .scope_manager import ScopeType
         visitor.scope_manager.enter_scope(ScopeType.FUNCTION)
         
-        # Visit function body
-        # Skip statements after control flow termination (e.g., after infinite loops)
-        # Exception: with label() statements are always processed because they create new reachable blocks
-        from .builtin_entities.scoped_label import label
-        for stmt in ast_node.body:
-            # Check if current block is terminated (unreachable code)
-            if visitor.builder.is_terminated():
-                # Check if this is a with label() statement - these should always be processed
-                is_label_stmt = False
-                if isinstance(stmt, ast.With):
-                    for item in stmt.items:
-                        if isinstance(item.context_expr, ast.Call):
-                            func = item.context_expr.func
-                            binding = (visitor.lookup_variable(func.id)
-                                       if isinstance(func, ast.Name) else None)
-                            value = binding.value_ref if binding is not None else None
-                            if (value is not None and value.is_python_value()
-                                    and value.get_python_value() is label):
-                                is_label_stmt = True
-                                break
-                
-                if not is_label_stmt:
-                    logger.debug(f"Skipping unreachable statement at line {getattr(stmt, 'lineno', '?')}")
-                    continue
-            visitor.builder.add_stmt(stmt)
-            visitor.visit(stmt)
+        visitor._visit_stmt_list(ast_node.body)
 
         # Record fall-through defers before finalizing and checking ownership.
         # Explicit return/goto paths have already emitted their own defers.

@@ -25,21 +25,26 @@ class ControlFlowMixin:
         cf = self._get_cf_builder()
         for stmt in stmts:
             if cf.is_terminated():
-                # Check if this is a with-label statement that needs visiting
                 if isinstance(stmt, ast.With) and len(stmt.items) == 1:
-                    ctx_expr = self.visit_expression(stmt.items[0].context_expr)
-                    if ctx_expr.is_python_value():
-                        py_val = ctx_expr.get_python_value()
-                        if isinstance(py_val, tuple) and len(py_val) == 2 and py_val[0] == '__scoped_label__':
-                            if add_to_cfg:
-                                cf.add_stmt(stmt)
-                            self.visit(stmt)
-                            continue
-                # Skip non-label statements when block is terminated
+                    context = self.visit_expression(stmt.items[0].context_expr)
+                    label_name = self._scoped_label_name(context)
+                    if label_name is not None:
+                        if add_to_cfg:
+                            cf.add_stmt(stmt)
+                        self._visit_with_scoped_label(stmt, label_name)
                 continue
             if add_to_cfg:
                 cf.add_stmt(stmt)
             self.visit(stmt)
+
+    @staticmethod
+    def _scoped_label_name(context):
+        if context.is_python_value():
+            value = context.get_python_value()
+            if (isinstance(value, tuple) and len(value) == 2
+                    and value[0] == '__scoped_label__'):
+                return value[1]
+        return None
     
     def visit_Return(self, node: ast.Return):
         """Handle return statements with termination check
@@ -175,12 +180,10 @@ class ControlFlowMixin:
             ctx_expr = self.visit_expression(item.context_expr)
 
         # Check if this is a scoped label
-        if ctx_expr.is_python_value():
-            py_val = ctx_expr.get_python_value()
-            if isinstance(py_val, tuple) and len(py_val) == 2 and py_val[0] == '__scoped_label__':
-                label_name = py_val[1]
-                self._visit_with_scoped_label(node, label_name)
-                return
+        label_name = self._scoped_label_name(ctx_expr)
+        if label_name is not None:
+            self._visit_with_scoped_label(node, label_name)
+            return
 
         # Other with statements not supported yet
         logger.error("with statement currently only supports 'label' context manager",

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import inspect
+import os
 import sys
 
 
@@ -14,7 +15,7 @@ def _load_lib_handle(lib):
     - anything containing '/' -> treated as a path
     """
     import ctypes
-    import platform
+    from ctypes.util import find_library
     from ..utils.c_runtime import load_c_runtime
 
     if not lib:
@@ -40,27 +41,17 @@ def _load_lib_handle(lib):
         return ctypes.CDLL(None)
 
     # Map library names to platform-specific library paths
-    system = platform.system()
-    if lib == 'c' or (system == 'Windows' and lib == 'm'):
+    if lib == 'c' or (sys.platform == 'win32' and lib == 'm'):
         return load_c_runtime()
-    if system == 'Windows':
-        lib_map = {
-            'gcc_s': 'libgcc_s_seh-1.dll',
-        }
-    else:
-        # On Unix, use standard library loading
-        # None means current process (for libc functions)
-        lib_map = {
-            'c': None,
-        }
-
-    lib_path = lib_map.get(lib)
-    if lib_path is None and lib not in lib_map:
-        # Not in map, build default library name based on platform
+    if os.path.isabs(lib) or '/' in lib or '\\' in lib:
+        return ctypes.CDLL(lib)
+    lib_path = find_library(lib)
+    if lib_path is None:
         if sys.platform == 'win32':
-            lib_path = f'{lib}.dll'
+            lib_path = 'libgcc_s_seh-1.dll' if lib == 'gcc_s' else f'{lib}.dll'
         else:
-            lib_path = f'lib{lib}.so'
+            extension = '.dylib' if sys.platform == 'darwin' else '.so'
+            lib_path = f'lib{lib}{extension}'
 
     try:
         return ctypes.CDLL(lib_path)
@@ -192,14 +183,118 @@ class ExternFunctionWrapper:
         return func_type.handle_call(visitor, lowered, args, node)
 
     def __call__(self, *args, **kwargs):
+        bound = self._signature.bind(*args, **kwargs)
+        bound.apply_defaults()
         if self._ctypes_func is None:
             self._load_ctypes_function()
-        return self._ctypes_func(*args, **kwargs)
+        values = [self._ctypes_argument(bound.arguments[name], ctype)
+                  for name, ctype in self._ctypes_params]
+        if self._ctypes_varargs is not None:
+            values.extend(self._ctypes_vararg(value)
+                          for value in bound.arguments[self._ctypes_varargs])
+        return self._ctypes_func(*values)
+
+    @staticmethod
+    def _ctypes_argument(value, ctype):
+        convert = getattr(value, '_to_ctypes', None)
+        if convert is not None:
+            return convert(ctype)
+        return value.encode('utf-8') if isinstance(value, str) else value
+
+    @classmethod
+    def _ctypes_vararg(cls, value):
+        import ctypes
+        from ..type_converter import TypeConverter
+        from ..type_descriptor import default_argument_promotion
+        from ..builtin_entities.pc_literal import pc_literal
+
+        if isinstance(value, (str, bytes)):
+            return cls._ctypes_argument(value, ctypes.c_void_p)
+        if value is None:
+            return ctypes.c_void_p()
+        if isinstance(value, ctypes.c_float):
+            return ctypes.c_double(value.value)
+        if isinstance(value, pc_literal):
+            source = value._pc_type
+        elif isinstance(value, (int, float)):
+            source = TypeConverter.infer_default_pc_type_from_python(value)
+        else:
+            return value
+        target = default_argument_promotion(source) or source
+        ctype = cls._ctypes_type(target)
+        converted = cls._ctypes_argument(value, ctype)
+        return converted if isinstance(converted, ctype) else ctype(converted)
+
+    @staticmethod
+    def _ctypes_type(pc_type):
+        """Require a faithful libffi carrier before entering native code."""
+        import ctypes
+        from ..type_graph import prepare_type
+        from ..type_converter import strip_qualifiers
+
+        if pc_type is None:
+            return None
+        prepare_type(pc_type)
+        pc_type = strip_qualifiers(pc_type)
+        from ..schema_protocol import get_field_layout_types
+        from ..type_converter import get_base_type
+
+        pending, seen = [pc_type], set()
+        while pending:
+            stored = get_base_type(pending.pop())
+            if stored in seen:
+                continue
+            seen.add(stored)
+            layout_config = getattr(stored, '_layout_config', None)
+            if (getattr(stored, '_is_union', False)
+                    or (layout_config is not None and not layout_config.is_natural)):
+                raise TypeError(
+                    f'{stored.get_name()} requires a native trampoline '
+                    'for Python extern calls')
+            if getattr(stored, '_is_integer', False):
+                width = stored._bit_width
+                carrier = stored.get_ctypes_type()
+                if width > 64 or ctypes.sizeof(carrier) * 8 != width:
+                    raise TypeError(
+                        f'{stored.get_name()} requires a native trampoline '
+                        'for Python extern calls')
+            pending.extend(get_field_layout_types(stored))
+            if getattr(stored, 'dimensions', None) is not None:
+                pending.append(stored.element_type)
+            if getattr(stored, 'param_types', None) is not None:
+                pending.extend((*stored.param_types, stored.return_type))
+        ctype = pc_type.get_ctypes_type()
+
+        if ctype is not None and issubclass(ctype, ctypes.Array):
+            raise TypeError('Python extern calls do not accept arrays by value')
+        layout = pc_type.get_layout()
+        if ctype is None:
+            if layout.allocation_size:
+                raise TypeError(f'{pc_type.get_name()} has no ctypes representation')
+        elif (ctypes.sizeof(ctype) != layout.allocation_size
+              or ctypes.alignment(ctype) != layout.alignment):
+            raise TypeError(f'ctypes layout differs from {pc_type.get_name()}')
+        return ctype
 
     def _load_ctypes_function(self):
+        import ctypes
+        from ..callable_lowering import extern_callable_type
+
+        callable_type, params, varargs = extern_callable_type(self)
+        param_ctypes = [(name, self._ctypes_type(pc_type)) for name, pc_type in params]
+        if any(ctype is None for _, ctype in param_ctypes):
+            raise TypeError('Python extern calls do not accept zero-sized parameters')
+        restype = self._ctypes_type(callable_type.return_type)
+        prototype_factory = ctypes.CFUNCTYPE
+        if self.calling_convention == 'stdcall':
+            if sys.platform != 'win32':
+                raise TypeError('Python stdcall extern calls require Windows')
+            prototype_factory = ctypes.WINFUNCTYPE
+        prototype = prototype_factory(restype, *(ctype for _, ctype in param_ctypes))
         lib_handle = _load_lib_handle(self.lib)
-        self._ctypes_func = getattr(lib_handle, self.c_name)
-        # TODO: map argtypes/restype
+        self._ctypes_params = param_ctypes
+        self._ctypes_varargs = varargs
+        self._ctypes_func = prototype((self.c_name, lib_handle))
 
     def __repr__(self):
         return f"ExternFunctionWrapper({self.func_name}, lib={self.lib})"

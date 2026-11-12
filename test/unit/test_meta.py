@@ -6,11 +6,15 @@ single ``const`` binding helper, and the unified ``@quote`` decorator.
 """
 
 import ast
-import unittest
-import sys
+import gc
 import os
+import sys
+import unittest
+import weakref
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
+from pythoc import CompileSession, effect, i32, meta
 from pythoc.meta.fragment import Fragment
 from pythoc.meta.generated import GeneratedFunction, MetaArtifact, func, artifact
 from pythoc.meta.template import (
@@ -578,6 +582,86 @@ class TestFactory(unittest.TestCase):
 
         with self.assertRaises(TypeError):
             make_fn()
+
+
+@meta.compile_factory
+def make_constant(value):
+    return meta.func('constant', [], i32, [ast.Return(ast.Constant(value))])
+
+
+class TestMetaCompileContext(unittest.TestCase):
+    def test_group_specializations_keep_only_definition_names(self):
+        for count in (40, 80):
+            with self.subTest(count=count), CompileSession():
+                effect.default(meta_group_number=7)
+                functions = [meta.compile_ast(
+                    ast.parse('def value_{}():\n'
+                              '    return effect.meta_group_number'.format(index)).body[0],
+                    return_type=i32, user_globals={'effect': effect})
+                    for index in range(count)]
+                with effect(meta_group_number=41, suffix='bounded_group'):
+                    functions[0].get_effect_specialized(
+                        'bounded_group', {'meta_group_number': 41})
+                specialized = [function._binding.effect_specialized_cache['bounded_group']
+                               for function in functions]
+                self.assertLessEqual(sum(len(function._binding.compilation_globals)
+                                         for function in specialized), 4 * count)
+
+    def test_factory_reuses_within_a_session_and_separates_sessions(self):
+        with CompileSession() as first:
+            initial = make_constant(7)
+            self.assertIs(make_constant(7), initial)
+            self.assertIs(initial._binding.session, first)
+        with CompileSession() as second:
+            other = make_constant(7)
+            self.assertIsNot(other, initial)
+            self.assertIs(other._binding.session, second)
+
+    def test_factory_does_not_keep_unused_sessions_alive(self):
+        session = CompileSession()
+        reference = weakref.ref(session)
+        with session:
+            result = make_constant(23)
+        del result, session
+        gc.collect()
+        self.assertIsNone(reference())
+
+    def test_effect_context_is_inherited_by_every_meta_entry(self):
+        with CompileSession():
+            effect.default(meta_context_number=7)
+            with effect(meta_context_number=41, suffix='meta_context'):
+                syntax = ast.parse('def from_ast():\n    return effect.meta_context_number').body[0]
+                first = meta.compile_ast(
+                    syntax, return_type=i32, user_globals={'effect': effect})
+                second = meta.compile_generated(meta.func(
+                    'from_generated', [], i32, syntax.body,
+                    required_globals={'effect': effect}))
+                third = make_constant(7)
+            for result in (first, second, third):
+                self.assertEqual(result._binding.effect_suffix, 'meta_context')
+                self.assertEqual(result._binding.captured_effect_context['meta_context_number'], 41)
+
+    def test_suffix_reuse_with_different_bindings_is_rejected_before_factory_cache(self):
+        with CompileSession():
+            with effect(meta_context_number=7, suffix='meta_fixed'):
+                make_constant(7)
+            with effect(meta_context_number=41, suffix='meta_fixed'):
+                with self.assertRaisesRegex(ValueError, 'different import bindings'):
+                    make_constant(7)
+
+    def test_explicit_default_suffix_and_factory_attrs(self):
+        @meta.compile_factory(attrs={'noinline'})
+        def make():
+            return meta.func('with_attrs', [], i32, [ast.Return(ast.Constant(7))])
+
+        with CompileSession():
+            with effect(meta_context_number=41, suffix='meta_override'):
+                result = make()
+                default = meta.compile_ast(
+                    ast.parse('def explicit_default():\n    return 7').body[0],
+                    return_type=i32, effect_suffix=None)
+            self.assertIn('noinline', result._func_info.fn_attrs)
+            self.assertIsNone(default._binding.effect_suffix)
 
 
 if __name__ == '__main__':

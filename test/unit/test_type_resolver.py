@@ -191,6 +191,12 @@ class TestTypeResolver(unittest.TestCase):
         self.assertIsInstance(result.pointee, ir.PointerType)
         self.assertEqual(result.pointee.pointee, ir.IntType(32))
 
+    def test_quoted_annotations_expose_the_same_names(self):
+        expression = TypeResolver.annotation_expression(
+            ast.Constant('"array[i32, 2]"'))
+        self.assertEqual(ast.dump(expression),
+                         ast.dump(ast.parse('array[i32, 2]', mode='eval').body))
+
 
 if __name__ == '__main__':
     unittest.main()

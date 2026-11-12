@@ -519,6 +519,29 @@ def test_large_struct_varargs():
         return False
 
 
+ArrayAlias = array[i32, 2]
+
+
+@compile
+def collect_inline(*values: array[i32, 2]) -> i32:
+    return values[0] + values[1]
+
+
+@compile
+def collect_alias(*values: ArrayAlias) -> i32:
+    return values[0] + values[1]
+
+
+@compile
+def use_collectors(value: i32) -> i32:
+    return collect_inline(value, 2) + collect_alias(value, 2)
+
+
+def test_array_varargs():
+    assert use_collectors(19) == 42
+    return True
+
+
 # =============================================================================
 # Test Runner
 # =============================================================================
@@ -532,6 +555,7 @@ def run_all_tests():
     tests = [
         # Phase 1: Struct varargs
         ("Phase 1: Struct Varargs", [
+            ("Array type aliases", test_array_varargs),
             ("Basic struct varargs", test_struct_varargs_basic),
             ("len(args)", test_struct_varargs_len),
             ("Mixed types", test_struct_varargs_mixed_types),
@@ -640,6 +664,8 @@ def run_all_tests():
     print("=" * 70)
     
     return overall_results
+
+
 
 
 if __name__ == "__main__":

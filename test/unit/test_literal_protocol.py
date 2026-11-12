@@ -2,11 +2,15 @@ import ast
 import os
 import sys
 import unittest
+from unittest.mock import patch
+
+from llvmlite import ir
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from pythoc.builtin_entities import i32, linear
 from pythoc.builtin_entities.consume import consume
+from pythoc.builtin_entities.python_type import PythonType
 from pythoc.builtin_entities.struct import struct
 from pythoc.literal_protocol import (
     extract_subscript_items,
@@ -23,6 +27,7 @@ from pythoc.literal_protocol import (
     rebuild_sequence_carrier,
     wrap_literal_result,
 )
+from pythoc.logger import logger
 from pythoc.valueref import wrap_value
 
 
@@ -126,6 +131,19 @@ class TestLiteralProtocol(unittest.TestCase):
 
         self.assertTrue(result.is_python_value())
         self.assertEqual(result.type_hint.get_name(), "void")
+
+    def test_runtime_index_cannot_borrow_a_literal_from_source_ast(self):
+        function = ir.Function(ir.Module(),
+                               ir.FunctionType(ir.VoidType(), [ir.IntType(32)]),
+                               'read')
+        index = function.args[0]
+        base = PythonType.wrap((10, 20))
+        node = ast.parse('values[1]', mode='eval').body
+        with patch.object(logger, 'raise_on_error', True):
+            with self.assertRaisesRegex(TypeError, 'compile-time constant index'):
+                base.handle_subscript(None, None,
+                                      wrap_value(index, kind='value', type_hint=i32),
+                                      node)
 
 
 if __name__ == "__main__":

@@ -3,9 +3,11 @@ Standard I/O Library Functions (stdio.h)
 """
 
 from ..decorators import compile, extern, extern_global
-from ..builtin_entities import ptr, i8, i32, i64, u32, void
+from ..builtin_entities import ptr, i8, i32, u32, void
 from ..forward_ref import mark_type_defined
 from ._platform import IS_MACOS, IS_WINDOWS
+from ._platform import C_LONG
+from .stddef import size_t
 
 # FILE is an opaque stdio stream type.  Exposing it as a named alias lets
 # generated code use ``ptr[FILE]`` while keeping the actual representation as
@@ -84,12 +86,12 @@ def fdopen(fd: i32, mode: ptr[i8]) -> ptr[i8]:
     pass
 
 @extern(lib='c')
-def fread(ptr: ptr[void], size: i64, count: i64, stream: ptr[i8]) -> i64:
+def fread(ptr: ptr[void], size: size_t, count: size_t, stream: ptr[i8]) -> size_t:
     """Read data from file"""
     pass
 
 @extern(lib='c')
-def fwrite(ptr: ptr[void], size: i64, count: i64, stream: ptr[i8]) -> i64:
+def fwrite(ptr: ptr[void], size: size_t, count: size_t, stream: ptr[i8]) -> size_t:
     """Write data to file"""
     pass
 
@@ -193,12 +195,12 @@ def perror(s: ptr[i8]) -> void:
 
 
 @extern(lib='c')
-def fseek(stream: ptr[i8], offset: i64, whence: i32) -> i32:
+def fseek(stream: ptr[i8], offset: C_LONG, whence: i32) -> i32:
     """Reposition stream position indicator"""
     pass
 
 @extern(lib='c')
-def ftell(stream: ptr[i8]) -> i64:
+def ftell(stream: ptr[i8]) -> C_LONG:
     """Obtain current value of the file position indicator"""
     pass
 
@@ -223,7 +225,7 @@ def clearerr(stream: ptr[i8]) -> None:
     pass
 
 @extern(lib='c')
-def setvbuf(stream: ptr[i8], buf: ptr[i8], mode: i32, size: i64) -> i32:
+def setvbuf(stream: ptr[i8], buf: ptr[i8], mode: i32, size: size_t) -> i32:
     """Set buffering mode and buffer"""
     pass
 
@@ -253,7 +255,7 @@ def sprintf(s: ptr[i8], format: ptr[i8], *args) -> i32:
     pass
 
 @extern(lib='c')
-def snprintf(s: ptr[i8], n: i64, format: ptr[i8], *args) -> i32:
+def snprintf(s: ptr[i8], n: size_t, format: ptr[i8], *args) -> i32:
     """Write formatted output to sized buffer"""
     pass
 
@@ -268,6 +270,6 @@ def vfprintf(stream: ptr[i8], format: ptr[i8], ap: ptr[i8]) -> i32:
     pass
 
 @extern(lib='c')
-def vsnprintf(s: ptr[i8], n: i64, format: ptr[i8], ap: ptr[i8]) -> i32:
+def vsnprintf(s: ptr[i8], n: size_t, format: ptr[i8], ap: ptr[i8]) -> i32:
     """Formatted to sized buffer using va_list"""
     pass

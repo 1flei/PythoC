@@ -3,7 +3,8 @@ String Manipulation Functions (string.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64, void
+from ..builtin_entities import ptr, i8, i32, void
+from .stddef import size_t
 
 # String length
 @extern(lib='c')
@@ -13,7 +14,7 @@ def strerror(errnum: i32) -> ptr[i8]:
 
 
 @extern(lib='c')
-def strlen(s: ptr[i8]) -> i64:
+def strlen(s: ptr[i8]) -> size_t:
     """Get string length"""
     pass
 
@@ -24,7 +25,7 @@ def strcpy(dest: ptr[i8], src: ptr[i8]) -> ptr[i8]:
     pass
 
 @extern(lib='c')
-def strncpy(dest: ptr[i8], src: ptr[i8], n: i64) -> ptr[i8]:
+def strncpy(dest: ptr[i8], src: ptr[i8], n: size_t) -> ptr[i8]:
     """Copy string with limit"""
     pass
 
@@ -41,7 +42,7 @@ def strcat(dest: ptr[i8], src: ptr[i8]) -> ptr[i8]:
     pass
 
 @extern(lib='c')
-def strncat(dest: ptr[i8], src: ptr[i8], n: i64) -> ptr[i8]:
+def strncat(dest: ptr[i8], src: ptr[i8], n: size_t) -> ptr[i8]:
     """Concatenate strings with limit"""
     pass
 
@@ -52,7 +53,7 @@ def strcmp(s1: ptr[i8], s2: ptr[i8]) -> i32:
     pass
 
 @extern(lib='c')
-def strncmp(s1: ptr[i8], s2: ptr[i8], n: i64) -> i32:
+def strncmp(s1: ptr[i8], s2: ptr[i8], n: size_t) -> i32:
     """Compare strings with limit"""
     pass
 
@@ -69,27 +70,27 @@ def strstr(haystack: ptr[i8], needle: ptr[i8]) -> ptr[i8]:
 
 # Memory operations
 @extern(lib='c')
-def memcpy(dest: ptr[void], src: ptr[void], n: i64) -> ptr[void]:
+def memcpy(dest: ptr[void], src: ptr[void], n: size_t) -> ptr[void]:
     """Copy memory block"""
     pass
 
 @extern(lib='c')
-def memset(s: ptr[void], c: i32, n: i64) -> ptr[void]:
+def memset(s: ptr[void], c: i32, n: size_t) -> ptr[void]:
     """Fill memory with constant byte"""
     pass
 
 @extern(lib='c')
-def memcmp(s1: ptr[void], s2: ptr[void], n: i64) -> i32:
+def memcmp(s1: ptr[void], s2: ptr[void], n: size_t) -> i32:
     """Compare memory blocks"""
     pass
 
 @extern(lib='c')
-def memmove(dest: ptr[void], src: ptr[void], n: i64) -> ptr[void]:
+def memmove(dest: ptr[void], src: ptr[void], n: size_t) -> ptr[void]:
     """Move memory block (handles overlap)"""
     pass
 
 @extern(lib='c')
-def memchr(s: ptr[void], c: i32, n: i64) -> ptr[void]:
+def memchr(s: ptr[void], c: i32, n: size_t) -> ptr[void]:
     """Locate byte in memory"""
     pass
 
@@ -110,12 +111,12 @@ def strrchr(s: ptr[i8], c: i32) -> ptr[i8]:
     pass
 
 @extern(lib='c')
-def strspn(s: ptr[i8], accept: ptr[i8]) -> i64:
+def strspn(s: ptr[i8], accept: ptr[i8]) -> size_t:
     """Span of characters in accept"""
     pass
 
 @extern(lib='c')
-def strcspn(s: ptr[i8], reject: ptr[i8]) -> i64:
+def strcspn(s: ptr[i8], reject: ptr[i8]) -> size_t:
     """Span of characters not in reject"""
     pass
 

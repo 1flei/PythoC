@@ -30,23 +30,6 @@ from ..valueref import ValueRef, wrap_value, extract_constant_index
 from ..logger import logger
 
 
-def _parse_explicit_tag_value(expr) -> Optional[int]:
-    """Parse an explicit enum tag from a class-body assignment RHS.
-
-    Accepts integer constants and unary +/- applied to them (e.g. `X = -1`,
-    which parses as UnaryOp(USub, Constant(1)) rather than a plain Constant).
-    """
-    if isinstance(expr, ast.Constant) and isinstance(expr.value, int):
-        return expr.value
-    if (isinstance(expr, ast.UnaryOp)
-            and isinstance(expr.op, (ast.USub, ast.UAdd))
-            and isinstance(expr.operand, ast.Constant)
-            and isinstance(expr.operand.value, int)):
-        value = expr.operand.value
-        return -value if isinstance(expr.op, ast.USub) else value
-    return None
-
-
 def _enum_declarations(cls, annotations):
     """Read variant order and tags without executing payload annotations."""
     import textwrap
@@ -56,18 +39,17 @@ def _enum_declarations(cls, annotations):
         source = get_object_source(cls)
     except (OSError, TypeError):
         for name, annotation in annotations.items():
-            tag = cls.__dict__.get(name)
-            yield name, annotation, tag if isinstance(tag, int) else None
+            yield name, annotation, cls.__dict__.get(name)
         return
     class_def = ast.parse(textwrap.dedent(source)).body[0]
     for stmt in class_def.body:
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
             name = stmt.target.id
-            yield name, annotations.get(name), _parse_explicit_tag_value(stmt.value)
+            yield name, annotations.get(name), cls.__dict__.get(name)
         elif isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 if isinstance(target, ast.Name) and not target.id.startswith('_'):
-                    yield target.id, None, _parse_explicit_tag_value(stmt.value)
+                    yield target.id, None, cls.__dict__[target.id]
         elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Name):
             if not stmt.value.id.startswith('_'):
                 yield stmt.value.id, None, None

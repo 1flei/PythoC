@@ -6,7 +6,9 @@ which is critical for resolving type annotation names in @compile decorated
 functions.
 """
 
+import ast
 import inspect
+import textwrap
 from typing import Dict, Any, Optional
 
 
@@ -43,7 +45,35 @@ def get_closure_variables(func) -> Dict[str, Any]:
     return closure_vars
 
 
-def capture_caller_symbols(depth: int = 1) -> Dict[str, Any]:
+def definition_names(definition, syntax=None):
+    """Names read by a definition, including quoted type annotations."""
+    from ..type_resolver import TypeResolver
+    names = {'__name__', '__builtins__'}
+    if syntax is None and inspect.isclass(definition):
+        for annotation in getattr(definition, '__annotations__', {}).values():
+            if isinstance(annotation, str):
+                names.update(TypeResolver.expression_names(annotation))
+        for member in vars(definition).values():
+            if isinstance(member, (staticmethod, classmethod)):
+                member = member.__func__
+            if inspect.isfunction(member):
+                names.update(definition_names(member))
+        return names
+    if syntax is None:
+        from ..utils.inspect_utils import get_function_source_with_inspect
+        source = get_function_source_with_inspect(definition)
+        syntax = ast.parse(textwrap.dedent(source))
+    for node in ast.walk(syntax):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        annotation = (node.returns if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      else getattr(node, 'annotation', None))
+        if annotation is not None:
+            names.update(TypeResolver.expression_names(ast.unparse(annotation)))
+    return names
+
+
+def capture_caller_symbols(depth: int = 1, *, names=None) -> Dict[str, Any]:
     """Capture all visible symbols from the caller's frame at decoration time.
     
     This captures both globals and locals from the caller's frame, providing
@@ -70,8 +100,13 @@ def capture_caller_symbols(depth: int = 1) -> Dict[str, Any]:
             return {}
         
         # Capture globals first, then locals (locals override globals)
-        symbols = dict(frame.f_globals)
-        symbols.update(frame.f_locals)
+        if names is None:
+            symbols = dict(frame.f_globals)
+            symbols.update(frame.f_locals)
+        else:
+            symbols = {name: frame.f_locals[name] if name in frame.f_locals
+                       else frame.f_globals[name] for name in names
+                       if name in frame.f_locals or name in frame.f_globals}
         return symbols
     finally:
         del frame

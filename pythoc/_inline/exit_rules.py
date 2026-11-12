@@ -61,39 +61,6 @@ def _yield_exit_template(has_label, no_label, has_value,
         loop_body
 
 
-# Legacy single-purpose templates kept for other callers
-@quote
-def _return_assign_and_goto(result_var, value, label):
-    result_var = __pc_intrinsics.move(value)  # noqa: F821
-    __pc_intrinsics.goto_end(label)  # noqa: F821
-
-
-@quote
-def _return_goto_only(label):
-    __pc_intrinsics.goto_end(label)  # noqa: F821
-
-
-@quote
-def _yield_assign(target, value):
-    target = __pc_intrinsics.move(value)  # noqa: F821
-
-
-@quote
-def _yield_tuple_assign(targets, value):
-    targets = __pc_intrinsics.move(value)  # noqa: F821
-
-
-@quote
-def _yield_labeled_block(label_name, inner):
-    with __pc_intrinsics.label(label_name):  # noqa: F821
-        inner
-
-
-@quote
-def _type_convert(converter, value):
-    return converter(value)
-
-
 @quote
 def _macro_expr(value):
     value
@@ -373,10 +340,6 @@ class YieldExitRule(ExitPointRule):
         # Prepare value (apply type conversion if needed, before template)
         if has_value:
             value = self._rename(yield_val, context)
-            if self.return_type_annotation and isinstance(value, ast.Constant):
-                value = _type_convert(
-                    copy.deepcopy(self.return_type_annotation), value,
-                ).expr
         else:
             value = ast.Constant(value=0)  # dummy, dead-code eliminated
 

@@ -25,6 +25,7 @@ Example::
     add_20 = make_adder(20)
 """
 
+import ast
 import inspect
 from functools import wraps
 from typing import Any, Dict, Optional
@@ -132,24 +133,20 @@ def compile_factory(func=None, *, cache=True, suffix=None, attrs=None):
         add_10b = make_adder(10)  # same as add_10 (cached)
     """
     def decorator(f):
-        _cache = {} if cache else None
+        from ..context import resolve_effect_suffix, validate_effect_context
+        from ..decorators.visible import definition_names, get_all_accessible_symbols
+        from ..session import CompileSession
 
-        # Capture caller's globals for compilation
-        frame = inspect.currentframe()
-        try:
-            caller = frame.f_back
-            if caller is not None:
-                caller_back = caller.f_back
-                caller_globals = dict(caller_back.f_globals) if caller_back else {}
-                caller_file = caller_back.f_code.co_filename if caller_back else "<meta_factory>"
-            else:
-                caller_globals = {}
-                caller_file = "<meta_factory>"
-        finally:
-            del frame
+        caller_file = inspect.getfile(f)
+        definition_globals = get_all_accessible_symbols(
+            f, include_builtins=True, names=definition_names(f))
 
         @wraps(f)
         def wrapper(*args, **kwargs):
+            session = CompileSession.current()
+            effect_suffix = resolve_effect_suffix()
+            validate_effect_context(effect_suffix)
+            results = session.meta_factory_cache.setdefault(wrapper, {}) if cache else {}
             # Normalize factory arguments into a suffix
             factory_suffix = normalize_factory_key(*args, **kwargs)
 
@@ -160,11 +157,22 @@ def compile_factory(func=None, *, cache=True, suffix=None, attrs=None):
                 combined_suffix = factory_suffix
 
             # Check cache
-            if _cache is not None and combined_suffix in _cache:
-                return _cache[combined_suffix]
+            key = (combined_suffix, effect_suffix)
+            if key in results:
+                return results[key]
 
             # Call the user function to get GeneratedFunction or MetaArtifact
             result = f(*args, **kwargs)
+
+            functions = ((result,) if isinstance(result, GeneratedFunction)
+                         else (*result.helpers, result.primary)
+                         if isinstance(result, MetaArtifact) else ())
+            syntax = ast.Module(body=[
+                item.to_func_def() if isinstance(item, GeneratedFunction) else item
+                for item in functions], type_ignores=[])
+            caller_globals = get_all_accessible_symbols(
+                f, include_builtins=True, names=definition_names(f, syntax),
+                captured_symbols=definition_globals)
 
             # Compile based on result type
             if isinstance(result, GeneratedFunction):
@@ -173,6 +181,8 @@ def compile_factory(func=None, *, cache=True, suffix=None, attrs=None):
                     user_globals=caller_globals,
                     suffix=combined_suffix,
                     source_file=caller_file,
+                    attrs=attrs,
+                    effect_suffix=effect_suffix,
                 )
             elif isinstance(result, MetaArtifact):
                 compiled = compile_artifact(
@@ -180,6 +190,8 @@ def compile_factory(func=None, *, cache=True, suffix=None, attrs=None):
                     user_globals=caller_globals,
                     suffix=combined_suffix,
                     source_file=caller_file,
+                    attrs=attrs,
+                    effect_suffix=effect_suffix,
                 )
             else:
                 raise TypeError(
@@ -190,14 +202,13 @@ def compile_factory(func=None, *, cache=True, suffix=None, attrs=None):
                 )
 
             # Cache the compiled wrapper
-            if _cache is not None:
-                _cache[combined_suffix] = compiled
+            if cache:
+                results[key] = compiled
 
             return compiled
 
         wrapper._is_meta_compile_factory = True
         wrapper._factory_func = f
-        wrapper._factory_cache = _cache
         return wrapper
 
     if func is None:

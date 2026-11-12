@@ -1,14 +1,17 @@
 """Raw calls and ABI-shaped calls converge without repacking their carriers."""
 
+import ast
 import unittest
 
 from llvmlite import ir
-from pythoc import enum, i32, struct
+from pythoc import CompileSession, array, enum, i32, struct
+from pythoc.ast_visitor.varargs import resolve_varargs
 from pythoc.call_normalization import (
     NormalizedCallArgs, build_kwargs_carrier, build_varargs_carrier,
     normalize_typed_collectors,
 )
 from pythoc.literal_protocol import get_sequence_elements
+from pythoc.type_resolver import TypeResolver
 from pythoc.valueref import wrap_value
 
 
@@ -93,6 +96,19 @@ class CollectorNormalizationTest(unittest.TestCase):
         self.assertIs(normalize_typed_collectors(
             normalized, (struct[struct[i32, i32]],),
             has_varargs=True, has_kwargs=False), normalized)
+
+    def test_varargs_read_the_same_array_fields_for_all_annotation_forms(self):
+        with CompileSession():
+            collector = array[i32, 2]
+            resolver = TypeResolver(user_globals={
+                'array': array, 'i32': i32, 'Alias': collector,
+                'make_type': lambda: collector})
+            for annotation in ('array[i32, 2]', 'Alias', 'make_type()'):
+                with self.subTest(annotation=annotation):
+                    syntax = ast.parse(
+                        f'def collect(*values: {annotation}):\n    pass').body[0]
+                    self.assertEqual(resolve_varargs(syntax, resolver).element_types,
+                                     [i32, i32])
 
 
 if __name__ == '__main__':

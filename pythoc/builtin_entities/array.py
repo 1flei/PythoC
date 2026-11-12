@@ -113,45 +113,6 @@ class array(BuiltinType):
         return result_type
     
     @classmethod
-    def _parse_dimensions(cls, dim_nodes, user_globals=None):
-        """Parse array dimensions from AST nodes
-        
-        Args:
-            dim_nodes: List of AST nodes representing dimensions
-            user_globals: Optional dict to resolve variable names
-            
-        Returns:
-            List of dimension values (integers)
-        """
-        dimensions = []
-        for dim_node in dim_nodes:
-            dim_value = None
-            if isinstance(dim_node, ast.Constant):
-                dim_value = dim_node.value
-            elif isinstance(dim_node, ast.Num):  # Python 3.6 compatibility
-                dim_value = dim_node.n
-            elif isinstance(dim_node, ast.Name) and user_globals is not None:
-                # Try to resolve the name from user_globals
-                if dim_node.id in user_globals:
-                    dim_value = user_globals[dim_node.id]
-                    if not isinstance(dim_value, int):
-                        logger.error(f"array dimension '{dim_node.id}' must be an integer, got {type(dim_value)}",
-                                    node=dim_node, exc_type=TypeError)
-                else:
-                    logger.error(f"array dimension '{dim_node.id}' not found in scope",
-                                node=dim_node, exc_type=TypeError)
-            else:
-                logger.error(f"array dimensions must be constants or variable names, got {ast.dump(dim_node)}",
-                            node=dim_node, exc_type=TypeError)
-            
-            if dim_value is None:
-                logger.error(f"Failed to resolve array dimension: {ast.dump(dim_node)}",
-                            node=dim_node, exc_type=TypeError)
-            
-            dimensions.append(dim_value)
-        return dimensions
-    
-    @classmethod
     def get_layout(cls):
         if cls.element_type is None or cls.dimensions is None:
             from ..target_layout import TypeLayout

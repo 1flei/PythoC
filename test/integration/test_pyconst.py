@@ -1,6 +1,10 @@
 """
 Test pyconst and typeof features
 """
+import ast
+from unittest.mock import patch
+from pythoc import CompileSession, LLVMCompiler
+from pythoc.logger import logger
 import unittest
 from pythoc import *
 
@@ -66,6 +70,30 @@ class TestPyconst(unittest.TestCase):
         """Test compiled function with pyconst field"""
         result = test_pyconst_field_access()
         self.assertEqual(result, 42)
+
+    def test_typed_constants_work_as_python_indices(self):
+        self.assertEqual(typed_constant_indices(), 70)
+
+
+TABLE = (10, 20)
+
+
+MAPPING = {-1: 40, 1: 20}
+
+
+@compile
+def typed_constant_indices() -> i32:
+    return TABLE[i32(1)] + TABLE[i32(0)] + MAPPING[i32(-1)]
+
+
+class TestPythonConstantIndexing(unittest.TestCase):
+    def test_runtime_index_is_rejected_by_normal_compilation(self):
+        syntax = ast.parse('def read(index):\n    return TABLE[index]').body[0]
+        with CompileSession(), patch.object(logger, 'raise_on_error', True):
+            compiler = LLVMCompiler(user_globals={'TABLE': (10, 20)})
+            with self.assertRaisesRegex(TypeError, 'compile-time constant index'):
+                compiler.compile_function_from_ast(
+                    syntax, param_type_hints={'index': i32}, return_type_hint=i32)
 
 
 if __name__ == "__main__":

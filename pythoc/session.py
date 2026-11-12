@@ -24,8 +24,9 @@ session when they create them.
 """
 
 import threading
+import weakref
 from contextvars import ContextVar, Token
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 
 NO_ACTIVE_SESSION_MSG = (
@@ -62,8 +63,8 @@ class CompileSession:
         self.forward_refs: ForwardRefNamespace = ForwardRefNamespace()
         from .type_graph import TypeGraph
         self.type_graph = TypeGraph()
-        # Tokens of nested ``with session:`` blocks, innermost last.
-        self._enter_tokens: List[Token] = []
+        # Factory results containing compiled wrappers belong to this session.
+        self.meta_factory_cache = weakref.WeakKeyDictionary()
 
     @classmethod
     def current(cls) -> 'CompileSession':
@@ -102,16 +103,25 @@ class CompileSession:
         _current_session.reset(token)
 
     def __enter__(self) -> 'CompileSession':
-        self._enter_tokens.append(self.activate())
+        _session_enter_tokens.set(
+            _session_enter_tokens.get() + ((self, self.activate()),))
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
-        self.deactivate(self._enter_tokens.pop())
+        tokens = _session_enter_tokens.get()
+        session, token = tokens[-1]
+        if session is not self:
+            raise RuntimeError('Compile sessions must exit in reverse entry order')
+        self.deactivate(token)
+        _session_enter_tokens.set(tokens[:-1])
         return False
 
 
 _current_session: ContextVar[Optional[CompileSession]] = ContextVar(
     'pythoc_current_session', default=None,
+)
+_session_enter_tokens: ContextVar[tuple] = ContextVar(
+    'pythoc_session_enter_tokens', default=(),
 )
 _process_session: Optional[CompileSession] = None
 _process_owner: Optional[int] = None

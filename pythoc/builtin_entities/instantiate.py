@@ -3,9 +3,9 @@ instantiate: Hoist compile-time generators to runtime iterators.
 
 instantiate([1, 2, 3])      -> constant iterable
 instantiate(yield_fn())     -> yield fn call (zero or more args)
-instantiate((f(x) for x))   -> generator expression
 
 Returns api with .Iter / .next(s) / .value(s) / .init(s).
+State storage requires known yield and field types; missing types are errors.
 """
 
 from __future__ import annotations

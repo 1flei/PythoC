@@ -2,7 +2,7 @@
 Extended integration tests for instantiate() builtin.
 
 Covers: heterogeneous types (f64/bool), multi-param, nested control flow,
-break/continue, complex genexpr, compile-time for-unroll, error paths.
+break/continue, filtered generators, compile-time for-unroll, error paths.
 """
 from __future__ import annotations
 import ast
@@ -253,12 +253,28 @@ def run_post_all() -> i32:
 
 
 # ====================================================================
-# Case: complex generator expression (filter + nested range)
+# Case: typed generators with filters
 # ====================================================================
 
 @compile
-def run_complex_genexpr() -> i32:
-    api = instantiate(i32(x * x) for x in range(10) if x % 2 == 1)
+def odd_squares() -> i32:
+    x: i32
+    for x in range(10):
+        if x % 2 == 1:
+            yield x * x
+
+
+@compile
+def below_five() -> i32:
+    x: i32
+    for x in range(20):
+        if x < 5:
+            yield x
+
+
+@compile
+def run_odd_squares() -> i32:
+    api = instantiate(odd_squares)
     it: api.Iter; api.init(ptr(it))
     total: i32 = 0
     while api.next(ptr(it)):
@@ -266,8 +282,8 @@ def run_complex_genexpr() -> i32:
     return total  # 1+9+25+49+81 = 165
 
 @compile
-def run_genexpr_filter() -> i32:
-    api = instantiate(i32(x) for x in range(20) if x < 5)
+def run_below_five() -> i32:
+    api = instantiate(below_five)
     it: api.Iter; api.init(ptr(it))
     total: i32 = 0
     while api.next(ptr(it)):
@@ -281,6 +297,7 @@ def run_genexpr_filter() -> i32:
 
 @compile
 def yield_for_unroll() -> i32:
+    x: i32
     for x in range(3):
         yield x * 7
 
@@ -329,9 +346,9 @@ class TestLongSequence(unittest.TestCase):
 class TestPostYield(unittest.TestCase):
     def test_all(self): self.assertEqual(run_post_all(), 129)
 
-class TestComplexGenExpr(unittest.TestCase):
-    def test_filter_squares(self): self.assertEqual(run_complex_genexpr(), 165)
-    def test_range_filter(self):   self.assertEqual(run_genexpr_filter(), 10)
+class TestFilteredGenerators(unittest.TestCase):
+    def test_filter_squares(self): self.assertEqual(run_odd_squares(), 165)
+    def test_range_filter(self):   self.assertEqual(run_below_five(), 10)
 
 class TestForUnroll(unittest.TestCase):
     def test_all(self): self.assertEqual(run_for_unroll(), 21)

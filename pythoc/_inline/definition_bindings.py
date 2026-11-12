@@ -120,6 +120,12 @@ def _global_aliases(syntax, globals_, protected, names):
 
 def bind_definition(syntax, globals_, references=None, *, names=None):
     """Rename accesses to original bindings; never snapshot their values."""
+    from ..type_resolver import TypeResolver
+    syntax = copy.deepcopy(syntax)
+    for parameter in _parameters(syntax.args):
+        parameter.annotation = TypeResolver.annotation_expression(
+            parameter.annotation)
+    syntax.returns = TypeResolver.annotation_expression(syntax.returns)
     references = references or {}
     globals_ = dict(globals_ or {})
     names = names if names is not None else ExpansionNames()
@@ -134,7 +140,7 @@ def bind_definition(syntax, globals_, references=None, *, names=None):
         syntax, globals_, bound | references.keys(), names)
     renamer = ScopedVariableRenamer(
         {**{name: name for name in bound}, **captures}, global_names)
-    prepared = copy.deepcopy(syntax)
+    prepared = syntax
     prepared.body = [renamer.visit(statement) for statement in prepared.body]
     for parameter in _parameters(prepared.args):
         if parameter.annotation is not None:

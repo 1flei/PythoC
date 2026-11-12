@@ -41,11 +41,15 @@ def inline_yield_function_iterators(
     from ..utils import get_next_id
 
     compiletime_globals = compiletime_globals or {}
+    constexpr = _ConstexprEvaluator(compiletime_globals)
 
     def _is_yield_function_call(expr: ast.expr) -> Optional[Any]:
         if not isinstance(expr, ast.Call):
             return None
-        func_obj = _resolve_expr_object(expr.func, compiletime_globals)
+        try:
+            func_obj = constexpr.eval(expr.func)
+        except (NameError, TypeError):
+            return None
         if func_obj is None:
             return None
         if not hasattr(func_obj, "_original_ast"):
@@ -118,8 +122,13 @@ def inline_yield_function_iterators(
             raise TypeError(
                 'instantiate: nested yield keyword calls must be bound before '
                 'state-machine expansion')
-        callee_globals = dict(getattr(callee, "__globals__", None) or {})
-        callee_globals.update(compiletime_globals)
+        from .definition_bindings import bind_definition
+        callee_globals = getattr(callee, '_yield_callee_globals', None)
+        if callee_globals is None:
+            callee_globals = getattr(callee, '__globals__', {})
+        definition = bind_definition(fa, callee_globals)
+        fa = definition.syntax
+        callee_globals = definition.globals
 
         loop_var = for_node.target
         if not isinstance(loop_var, ast.Name):
@@ -172,18 +181,6 @@ class _YieldInlinabilityChecker(ast.NodeVisitor):
         if node.value is not None:
             self.has_return_value = True
         self.generic_visit(node)
-
-
-def _resolve_expr_object(expr: ast.expr, globs: Dict[str, Any]) -> Optional[Any]:
-    """Resolve a simple expression to a Python object using globals."""
-    if isinstance(expr, ast.Name):
-        return globs.get(expr.id)
-    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name):
-        obj = globs.get(expr.value.id)
-        if obj is None:
-            return None
-        return getattr(obj, expr.attr, None)
-    return None
 
 
 @dataclass(frozen=True)

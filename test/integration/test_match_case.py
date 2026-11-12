@@ -7,7 +7,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import i32, compile
+from pythoc import i8, i32, u8, compile
 
 
 @compile
@@ -202,10 +202,50 @@ def match_negative_values() -> i32:
     return result
 
 
+@compile
+def match_narrowed_signed(value: i8) -> i32:
+    match value:
+        case 256:
+            return 1
+        case 0:
+            return 2
+        case _:
+            return 3
+
+
+@compile
+def match_narrowed_unsigned(value: u8) -> i32:
+    match value:
+        case 256:
+            return 1
+        case 0:
+            return 2
+        case _:
+            return 3
+
+
+@compile
+def match_narrowed_or(value: i8) -> i32:
+    match value:
+        case 0 | 256:
+            return 1
+        case _:
+            return 3
+
+
 import unittest
 
 
 class TestMatchCase(unittest.TestCase):
+    def test_narrowed_literals_preserve_first_match(self):
+        for function in (match_narrowed_signed, match_narrowed_unsigned):
+            self.assertEqual(function(0), 1)
+            self.assertEqual(function(1), 3)
+
+    def test_narrowed_or_patterns_do_not_create_duplicate_switch_cases(self):
+        self.assertEqual(match_narrowed_or(0), 1)
+        self.assertEqual(match_narrowed_or(1), 3)
+
     def test_simple_match(self):
         self.assertEqual(match_simple(), 20)
     

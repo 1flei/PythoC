@@ -92,6 +92,46 @@ class TestCaptureCallerSymbols(unittest.TestCase):
         symbols = test_func()
         self.assertEqual(symbols['unittest'], 'shadowed')
 
+    def test_requested_capture_does_not_copy_unreferenced_bindings(self):
+        selected, unrelated = object(), object()
+        symbols = capture_caller_symbols(depth=0, names={'selected', 'absent'})
+        self.assertEqual(symbols, {'selected': selected})
+
+    def test_definition_names_include_nested_quoted_annotations(self):
+        from pythoc.decorators.visible import definition_names
+
+        def outer():
+            def nested(value: 'ptr[LocalType]') -> 'ReturnType':
+                return value
+            return nested
+
+        names = definition_names(outer)
+        self.assertTrue({'ptr', 'LocalType', 'ReturnType'}.issubset(names))
+
+    def test_quoted_names_inside_constructed_annotations_are_captured(self):
+        import ast
+        from pythoc.decorators.visible import definition_names
+
+        syntax = ast.parse("def method(value: ptr['Box']):\n    pass").body[0]
+        self.assertIn('Box', definition_names(None, syntax))
+
+    def test_compile_retains_only_needed_globals(self):
+        from types import FunctionType
+        from pythoc import CompileSession, compile, i32
+
+        def definition(value: i32) -> i32:
+            return value
+
+        namespace = {'__name__': __name__, 'i32': i32}
+        namespace.update((f'unused_{index}', object()) for index in range(1000))
+        function = FunctionType(definition.__code__, namespace)
+        function.__annotations__ = definition.__annotations__
+        with CompileSession():
+            compiled = compile(function)
+            self.assertLess(len(compiled._binding.compilation_globals), 10)
+            self.assertFalse(any(name.startswith('unused_')
+                                 for name in compiled._binding.compilation_globals))
+
 
 class TestGetAllAccessibleSymbols(unittest.TestCase):
     """Test get_all_accessible_symbols function."""

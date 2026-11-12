@@ -5,10 +5,13 @@ Match/case struct destructuring tests
 
 import sys
 import os
+from types import SimpleNamespace
+import unittest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import i32, compile
-import unittest
+from pythoc import i32, compile, inline, ptr
+from pythoc import bool as pc_bool
 
 from test.utils.test_utils import DeferredTestCase, expect_error
 
@@ -508,6 +511,12 @@ class TestMatchStructDestructuring(unittest.TestCase):
     def test_nested_struct_tuple(self):
         self.assertEqual(test_nested_struct_tuple(), 10)
 
+    def test_pattern_bindings_survive_inline_renaming(self):
+        self.assertEqual(match_inline_bindings(21), 42)
+
+    def test_runtime_pattern_values_are_read_in_their_own_branches(self):
+        self.assertEqual(match_runtime_members(42), 2)
+
 
 class TestMatchStructTupleSyntax(unittest.TestCase):
     """Test struct matching with tuple syntax"""
@@ -538,6 +547,50 @@ class TestMatchStructNonExhaustive(DeferredTestCase):
     def test_literal_cases_without_catch_all_rejected(self):
         passed, msg = run_error_struct_no_catch_all()
         self.assertTrue(passed, msg)
+
+
+@compile
+class PatternRecord:
+    value: i32
+record_namespace = SimpleNamespace(Record=PatternRecord)
+PointerAlias = ptr
+
+@inline
+def read_record(value: PatternRecord) -> i32:
+    match value:
+        case record_namespace.Record(value=field):
+            return field
+
+@inline
+def pointer_capture(value: i32) -> i32:
+    match value:
+        case PointerAlias(item):
+            return item[0]
+
+@compile
+def match_inline_bindings(value: i32) -> i32:
+    record: PatternRecord
+    record.value = value
+    return read_record(record) + pointer_capture(value)
+
+@compile
+def update_record(value: ptr[PatternRecord]) -> pc_bool:
+    value.value += 1
+    return False
+
+@compile
+def match_runtime_members(value: i32) -> i32:
+    first: PatternRecord
+    first.value = value
+    second: PatternRecord
+    second.value = value - 1
+    match value:
+        case first.value if update_record(ptr(second)):
+            return 1
+        case second.value:
+            return 2
+        case _:
+            return 0
 
 
 if __name__ == '__main__':

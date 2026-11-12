@@ -23,7 +23,6 @@ import ast
 from typing import Dict, Optional, Any, TYPE_CHECKING
 from .exit_rules import ReturnExitRule
 from .scope_analyzer import ScopeContext, build_caller_context
-from .kernel import ReturnValueChecker
 from ..valueref import ValueRef, wrap_value
 from ..logger import logger
 from ..utils import get_next_id
@@ -144,7 +143,7 @@ class InlineAdapter:
                 logger.debug(f"{tag}: visiting stmt[{i}]: {stmt_str}")
                 self.visitor.visit(stmt)
 
-        if self._has_return_value(func_ast):
+        if self.visitor.scope_manager.lookup_variable(result_var) is not None:
             return self._lookup_result_var(result_var)
 
         # Void callee -- return a void ValueRef.
@@ -183,15 +182,6 @@ class InlineAdapter:
         scope_manager = getattr(self.visitor, 'scope_manager', None)
         return build_caller_context(scope_manager, visibility="all_visible")
 
-    def _has_return_value(self, func_ast: ast.FunctionDef) -> bool:
-        """True if ``func_ast`` can return a non-void value."""
-        if func_ast.returns:
-            from .kernel import _get_result_type
-            return _get_result_type(func_ast, self.func_globals) is not None
-        checker = ReturnValueChecker()
-        checker.visit(func_ast)
-        return checker.has_return_value
-
     def _lookup_result_var(self, var_name: str) -> Optional[ValueRef]:
         """Resolve the generated result variable and load its value.
 
@@ -213,6 +203,11 @@ class InlineAdapter:
         # pass the stored value through instead of loading from an alloca.
         if var_info.alloca is None or var_info.value_ref.is_python_value():
             return var_info.value_ref
+
+        from ..builtin_entities.python_type import PythonType
+        if isinstance(var_info.type_hint, PythonType):
+            from ..valueref import wrap_python_constant
+            return wrap_python_constant(var_info.type_hint.get_python_object())
 
         alloca = var_info.alloca
         loaded_value = self.visitor.builder.load(alloca)

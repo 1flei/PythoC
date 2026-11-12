@@ -32,9 +32,7 @@ import textwrap
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..logger import logger
-
-
-_INHERIT_EFFECT_SUFFIX = object()
+from ..context import INHERIT_EFFECT_SUFFIX as _INHERIT_EFFECT_SUFFIX
 
 
 def _is_class_callable(member) -> bool:

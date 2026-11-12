@@ -9,9 +9,11 @@ caller's basic block.
 
 import sys
 import os
+from types import SimpleNamespace
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
-from pythoc import compile, inline, i32, i64, bool
+from pythoc import compile, inline, i32, i64, bool, ptr, void
 
 
 # ============================================================================
@@ -263,6 +265,89 @@ def test_complex_example():
     assert abs_example(0) == 0
     print("OK test_complex_example passed")
 
+InlineTypes = SimpleNamespace(Void=void)
+
+
+@inline
+def convert(T, value: 'T') -> 'T':
+    return value
+
+@inline
+def increment_none(target: ptr[i32]) -> None:
+    target[0] += 1
+
+@inline
+def increment_alias(target: ptr[i32]) -> InlineTypes.Void:
+    target[0] += 1
+
+@compile
+def annotated_inline_types() -> i32:
+    count: i32 = 0
+    increment_none(ptr(count))
+    increment_alias(ptr(count))
+    return convert(i32, 7) + count
+
+
+def test_void_and_dependent_annotations():
+    assert annotated_inline_types() == 9
+
+
+INLINE_SCOPE_GLOBAL = 7
+
+
+def define_global_inlines():
+    @inline
+    def bare() -> i32:
+        return INLINE_SCOPE_GLOBAL
+
+    @inline()
+    def parenthesized() -> i32:
+        return INLINE_SCOPE_GLOBAL
+
+    return bare, parenthesized
+
+
+def define_local_type_inlines():
+    LocalType = i64
+
+    @inline
+    def bare(value: 'LocalType') -> 'LocalType':
+        return value
+
+    @inline()
+    def parenthesized(value: 'LocalType') -> 'LocalType':
+        return value
+
+    return bare, parenthesized
+
+
+def invoke_inline_factories():
+    INLINE_SCOPE_GLOBAL = 99
+    LocalType = i32
+    return define_global_inlines(), define_local_type_inlines()
+
+
+(scope_bare, scope_parenthesized), (type_bare, type_parenthesized) = invoke_inline_factories()
+
+
+@compile
+def inline_definition_globals() -> i32:
+    return scope_bare() * 100 + scope_parenthesized()
+
+
+@compile
+def inline_definition_types(value: i64) -> i64:
+    return type_bare(value) + type_parenthesized(value)
+
+
+def test_inline_definition_scope():
+    assert inline_definition_globals() == 707
+
+
+def test_inline_definition_annotation_scope():
+    assert inline_definition_types(1099511627777) == 2199023255554
+
+
 # ============================================================================
 # Main test runner
 # ============================================================================
@@ -274,6 +359,9 @@ def main():
     print()
     
     tests = [
+        ("Definition globals", test_inline_definition_scope),
+        ("Definition annotations", test_inline_definition_annotation_scope),
+        ("Void and dependent annotations", test_void_and_dependent_annotations),
         ("Simple inline", test_simple),
         ("Inline with if", test_clamp),
         ("Inline with local vars", test_abs_diff),

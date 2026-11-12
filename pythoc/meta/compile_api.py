@@ -14,11 +14,14 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from ..compiler import LLVMCompiler
-from ..context import FunctionBindingState
+from ..context import (
+    FunctionBindingState, INHERIT_EFFECT_SUFFIX, capture_compile_context,
+    resolve_effect_suffix,
+)
 from ..session import CompileSession
 from ..registry import FunctionInfo, get_unified_registry
 from ..build import get_output_manager
-from ..decorators.compile import get_compiler
+from ..decorators.compile import get_compiler, _make_compile_callback, materialize_specialization
 from ..utils import (
     normalize_suffix,
     sanitize_filename,
@@ -43,8 +46,9 @@ def compile_ast(
     start_line=1,
     user_globals=None,
     debug_source=None,
-    effect_suffix=None,
+    effect_suffix=INHERIT_EFFECT_SUFFIX,
     effect_scope=None,
+    _effect_override_names=None,
     group_key=None,
     copy_ast=True,
     debug=False,
@@ -115,7 +119,10 @@ def compile_ast(
         from ..builtin_entities.types import void
         return_type_hint = void
 
-    user_globals = dict(user_globals) if user_globals else {}
+    from ..decorators.visible import definition_names
+    names = definition_names(None, fn_ast)
+    user_globals = {name: user_globals[name] for name in names
+                    if name in (user_globals or {})}
     from .._inline.definition_bindings import materialize_definition_symbols
     fn_ast, symbol_values = materialize_definition_symbols(fn_ast, user_globals)
     user_globals.update(symbol_values)
@@ -151,7 +158,10 @@ def compile_ast(
 
     # Normalize suffixes
     compile_suffix = normalize_suffix(suffix)
-    effect_suffix = normalize_suffix(effect_suffix) if effect_suffix else None
+    if group_key is not None and effect_suffix is INHERIT_EFFECT_SUFFIX:
+        effect_suffix = group_key[3]
+    effect_suffix = resolve_effect_suffix(effect_suffix)
+    definition_context = capture_compile_context(effect_suffix, _effect_override_names)
 
     # Build mangled name
     mangled_name = None
@@ -311,13 +321,6 @@ def compile_ast(
 
     logger.debug("meta.compile_ast {}: group_key={}".format(func_name, group_key))
 
-    # Capture effect context
-    from ..effect import capture_effect_context, capture_effect_override_names
-    from ..effect import restore_effect_context
-    from ..effect import push_compilation_context, pop_compilation_context
-    captured_effect_ctx = capture_effect_context()
-    effect_override_names = capture_effect_override_names()
-
     binding_state = FunctionBindingState(
         compiler=compiler,
         so_file=so_file,
@@ -327,13 +330,12 @@ def compile_ast(
         actual_func_name=actual_func_name,
         group_key=group_key,
         compile_suffix=compile_suffix,
-        effect_suffix=effect_suffix,
         registration_identity=registration_identity,
-        captured_effect_context=captured_effect_ctx,
-        effect_override_names=effect_override_names,
+        captured_symbols=user_globals,
+        referenced_names=frozenset(definition_names(None, fn_ast)),
         compilation_globals=dict(user_globals),
         wrapper=wrapper,
-        session=CompileSession.current(),
+        **definition_context,
     )
     func_info.binding_state = binding_state
     wrapper._func_info = func_info
@@ -341,47 +343,20 @@ def compile_ast(
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
 
-    # Closure locals for compile_callback
-    _fn_ast = fn_ast
-    _source_code = source_code
-    _param_type_hints = param_type_hints
-    _return_type_hint = return_type_hint
-    _start_line = start_line
+    compile_callback = _make_compile_callback(
+        wrapper, fn_ast, source_code, param_type_hints, return_type_hint, start_line)
 
-    def compile_callback(comp):
+    def specialize(effect_key, scope, override_names):
         st = wrapper._binding
+        return compile_ast(
+            fn_ast, name=func_name, param_types=param_type_hints,
+            return_type=return_type_hint, user_globals=st.captured_symbols,
+            suffix=st.compile_suffix, attrs=fn_attrs, linkage=linkage,
+            source_file=st.source_file, source_code=source_code, start_line=start_line,
+            effect_suffix=effect_key, effect_scope=scope,
+            _effect_override_names=override_names)
 
-        if st.effect_suffix:
-            push_compilation_context(st)
-
-        try:
-            with restore_effect_context(st.captured_effect_context):
-                set_source_context(st.source_file, _start_line - 1)
-                comp.compile_function_from_ast(
-                    _fn_ast,
-                    _source_code,
-                    reset_module=False,
-                    param_type_hints=_param_type_hints,
-                    return_type_hint=_return_type_hint,
-                    user_globals=st.compilation_globals,
-                    group_key=st.group_key,
-                    func_state=st,
-                    source_start_line=_start_line,
-                )
-        finally:
-            if st.effect_suffix:
-                pop_compilation_context()
-
-        # Effect usage recorded on this compile's ActiveCompileFrame
-        # (compiler.py sets st.active_frame).  Declared on the group's
-        # EffectGraph node once the whole group has been compiled
-        # (see OutputManager._compile_pending_for_group).
-        effect_deps = st.active_frame.effect_usage if st.active_frame is not None else set()
-        if effect_deps:
-            func_info.effect_dependencies = effect_deps
-            logger.debug(
-                "Function {} uses effects: {}".format(_fn_ast.name, effect_deps)
-            )
+    binding_state.specialize = specialize
 
     # Queue compilation and set state
     output_manager.queue_compilation(group_key, compile_callback, func_info)
@@ -406,6 +381,13 @@ def compile_ast(
         return lower_compile_handle_call(wrapper, visitor, func_ref, args, node)
 
     wrapper.handle_call = handle_call
+
+    def get_effect_specialized(target_effect_suffix, effect_overrides):
+        if wrapper._binding.effect_suffix == target_effect_suffix:
+            return wrapper
+        return materialize_specialization(wrapper, target_effect_suffix, effect_overrides)
+
+    wrapper.get_effect_specialized = get_effect_specialized
     wrapper._is_compiled = True
     try_bind_installed_adapter(wrapper)
 
@@ -419,6 +401,8 @@ def compile_generated(
     suffix=None,
     source_file=None,
     group_key=None,
+    attrs=None,
+    effect_suffix=INHERIT_EFFECT_SUFFIX,
     debug=False,
 ):
     """Compile a GeneratedFunction through the standard lifecycle.
@@ -467,11 +451,12 @@ def compile_generated(
         return_type=fn.get_return_type_hint(),
         user_globals=globals_to_use,
         suffix=suffix,
-        attrs=fn.attrs,
+        attrs=set(fn.attrs or ()) | set(attrs or ()),
         source_file=source_file,
         source_code=fn.debug_source,
         start_line=fn.start_line,
         group_key=group_key,
+        effect_suffix=effect_suffix,
         copy_ast=False,
         debug=debug,
     )
@@ -483,6 +468,8 @@ def compile_artifact(
     user_globals=None,
     suffix=None,
     source_file=None,
+    attrs=None,
+    effect_suffix=INHERIT_EFFECT_SUFFIX,
 ):
     """Compile all functions in a MetaArtifact.
 
@@ -536,6 +523,8 @@ def compile_artifact(
                 user_globals=globals_to_use,
                 suffix=suffix,
                 source_file=source_file,
+                attrs=attrs,
+                effect_suffix=effect_suffix,
             )
             globals_to_use[fn.name] = w
         elif isinstance(fn, ast.FunctionDef):
@@ -544,6 +533,8 @@ def compile_artifact(
                 user_globals=globals_to_use,
                 suffix=suffix,
                 source_file=source_file,
+                attrs=attrs,
+                effect_suffix=effect_suffix,
             )
             globals_to_use[fn.name] = w
         else:

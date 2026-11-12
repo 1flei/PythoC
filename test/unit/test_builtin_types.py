@@ -5,6 +5,7 @@ Unit tests for builtin type entities
 import unittest
 from llvmlite import ir
 
+from pythoc import CompileSession, enum
 from pythoc.builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -206,6 +207,24 @@ class TestBuiltinEntityRegistry(unittest.TestCase):
         """Test getting invalid entity returns None"""
         entity = get_builtin_entity("invalid_type")
         self.assertIsNone(entity)
+
+
+class TestEnumType(unittest.TestCase):
+    def test_enum_tags_use_evaluated_class_values(self):
+        base = 8
+
+        def computed():
+            return 1 << 4
+
+        with CompileSession():
+            @enum(i32)
+            class Tags:
+                Literal: None = base
+                Computed: None = computed()
+                Following: None
+
+            self.assertEqual(Tags._tag_values,
+                             {'Literal': 8, 'Computed': 16, 'Following': 17})
 
 
 if __name__ == '__main__':

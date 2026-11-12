@@ -26,7 +26,6 @@ from ..cfg.linear_checker import (
     LinearRegister,
     LinearTransition,
     LinearEvent,
-    copy_snapshot,
 )
 from ..logger import logger
 from .pcir import (
@@ -745,7 +744,7 @@ class ControlFlowBuilder:
         Steps:
         1. Create real ir.Blocks for each CFG block (except entry which exists)
         2. Build a mapping from CFG block ID -> real ir.Block
-        3. Replay PCIR instructions block by block using block creation order
+        3. Replay PCIR instructions in control-flow order
         4. Resolve VReg arguments and map results
         5. Replay PHI incoming edges and switch cases
         6. Patch unterminated blocks
@@ -779,7 +778,7 @@ class ControlFlowBuilder:
         self._block_map = real_block_map
 
         # Step 3: Replay PCIR instructions block by block
-        # Use block creation order (sorted by ID)
+        # Definitions in dominating blocks must precede their uses.
         phi_nodes: List[Tuple[VRegPhi, Any]] = []  # (vphi, real_phi) pairs
         switch_nodes: List[Tuple[VRegSwitch, Any]] = []  # (vswitch, real_switch) pairs
 
@@ -792,14 +791,19 @@ class ControlFlowBuilder:
         # branch/switch targets keep resolving to the block's entry real block.
         phi_pred_map: Dict[int, ir.Block] = dict(real_block_map)
 
-        for block_id in sorted(self._cfg.blocks.keys()):
+        ordered = self._cfg.topological_order()
+        reachable_ids = {block.id for block in ordered}
+        ordered.extend(self._cfg.blocks[block_id]
+                       for block_id in sorted(self._cfg.blocks)
+                       if block_id not in reachable_ids)
+        for cfg_block in ordered:
+            block_id = cfg_block.id
             if block_id == self._exit_block.id:
                 continue
             if block_id not in real_block_map:
                 continue
 
             ir_block = real_block_map[block_id]
-            cfg_block = self._cfg.blocks[block_id]
 
             # Position at the real block
             self._real_builder.position_at_end(ir_block)

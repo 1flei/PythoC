@@ -3,11 +3,13 @@ Standard Library Functions (stdlib.h)
 """
 
 from ..decorators import extern
-from ..builtin_entities import ptr, i8, i32, i64, f64, void, func
+from ..builtin_entities import ptr, i8, i32, f64, void, func
+from .stddef import size_t
+from ._platform import C_LONG, C_ULONG, C_LLONG, C_ULLONG
 
 # Memory management
 @extern(lib='c')
-def malloc(size: i64) -> ptr[void]:
+def malloc(size: size_t) -> ptr[void]:
     """Allocate memory"""
     pass
 
@@ -17,12 +19,12 @@ def free(ptr: ptr[void]) -> None:
     pass
 
 @extern(lib='c')
-def calloc(count: i64, size: i64) -> ptr[void]:
+def calloc(count: size_t, size: size_t) -> ptr[void]:
     """Allocate and zero-initialize memory"""
     pass
 
 @extern(lib='c')
-def realloc(ptr: ptr[void], size: i64) -> ptr[void]:
+def realloc(ptr: ptr[void], size: size_t) -> ptr[void]:
     """Reallocate memory"""
     pass
 
@@ -49,7 +51,7 @@ def atoi(str: ptr[i8]) -> i32:
     pass
 
 @extern(lib='c')
-def atol(str: ptr[i8]) -> i64:
+def atol(str: ptr[i8]) -> C_LONG:
     """Convert string to long integer"""
     pass
 
@@ -59,7 +61,7 @@ def atof(str: ptr[i8]) -> f64:
     pass
 
 @extern(lib='c')
-def strtol(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> i64:
+def strtol(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> C_LONG:
     """Convert string to long integer"""
     pass
 
@@ -102,28 +104,29 @@ def unsetenv(name: ptr[i8]) -> i32:
     pass
 
 @extern(lib='c')
-def qsort(base: ptr[void], nmemb: i64, size: i64, compar: ptr[void]) -> None:
+def qsort(base: ptr[void], nmemb: size_t, size: size_t, compar: ptr[void]) -> None:
     """Sort array with comparator (function pointer approximated as ptr[void])"""
     pass
 
 @extern(lib='c')
-def bsearch(key: ptr[void], base: ptr[void], nmemb: i64, size: i64, compar: ptr[void]) -> ptr[void]:
+def bsearch(key: ptr[void], base: ptr[void], nmemb: size_t, size: size_t,
+            compar: ptr[void]) -> ptr[void]:
     """Binary search in array (function pointer approximated as ptr[void])"""
     pass
 
 @extern(lib='c')
-def strtoul(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> i64:
-    """Convert string to unsigned long (mapped to i64)"""
+def strtoul(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> C_ULONG:
+    """Convert string to unsigned long."""
     pass
 
 @extern(lib='c')
-def strtoll(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> i64:
-    """Convert string to long long (mapped to i64)"""
+def strtoll(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> C_LLONG:
+    """Convert string to long long."""
     pass
 
 @extern(lib='c')
-def strtoull(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> i64:
-    """Convert string to unsigned long long (mapped to i64)"""
+def strtoull(str: ptr[i8], endptr: ptr[ptr[i8]], base: i32) -> C_ULLONG:
+    """Convert string to unsigned long long."""
     pass
 
 
