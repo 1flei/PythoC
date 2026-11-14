@@ -323,16 +323,17 @@ class ValueRefDispatcher:
             return operand
 
         if isinstance(node.op, ast.USub):
-            zero = self._zero_constant_for(operand)
             if (
                 self._has_type_flag(operand_pc_type, "_is_float")
                 or self.visitor.type_converter.is_llvm_float_type(operand_llvm_type)
             ):
-                result = self.visitor.builder.fsub(zero, ensure_ir(operand))
+                from .llvm_extensions import negate
+                result = negate(self.visitor.builder, ensure_ir(operand))
             elif (
                 self._is_integer_like_pc_type(operand_pc_type)
                 or self.visitor.type_converter.is_llvm_integer_type(operand_llvm_type)
             ):
+                zero = self._zero_constant_for(operand)
                 result = self.visitor.builder.sub(zero, ensure_ir(operand))
             else:
                 logger.error(

@@ -36,6 +36,43 @@ class TestPcLiteralCreation(unittest.TestCase):
         self.assertAlmostEqual(x._value, 2.718, places=10)
         self.assertIs(x._pc_type, f64)
 
+    def test_float_constructors_round_before_integer_conversion(self):
+        from pythoc import f16, bf16, f128
+
+        for pc_type, source, expected in (
+                (f16, 1.9999, 2), (bf16, 1.00390625, 1),
+                (f32, 16777217, 16777216),
+                (f128, 9007199254740993, 9007199254740993)):
+            with self.subTest(pc_type=pc_type):
+                self.assertEqual(int(pc_type(source)), expected)
+
+    def test_wide_float_arithmetic_keeps_precision_and_zero_sign(self):
+        import math
+        from pythoc import f128
+
+        large = f128(1 << 100)
+        self.assertEqual(int((large + f128(1)) - large), 1)
+        self.assertEqual(math.copysign(1, float(-f128(0.0))), -1)
+        self.assertEqual(math.copysign(1, float(f128(-0.0) + f128(-0.0))), -1)
+        huge = f128(1 << 10000)
+        self.assertLess(huge, f128(math.inf))
+        self.assertNotEqual(huge, f128(math.inf))
+        self.assertLess(f128(1 << 113), (1 << 113) + 1)
+        exact = f128('1267650600228229401496703205377')
+        self.assertEqual(int(exact), (1 << 100) + 1)
+        from decimal import Inexact, localcontext
+        with localcontext() as context:
+            context.prec = 1
+            context.traps[Inexact] = True
+            self.assertIn('1267650600228229401496703205377', repr(exact))
+
+    def test_mixed_half_formats_reuse_the_compiler_numeric_policy(self):
+        from pythoc import f16, bf16
+
+        result = f16(1.5) + bf16(2.5)
+        self.assertIs(result._pc_type, f32)
+        self.assertEqual(float(result), 4.0)
+
     def test_integer_overflow_wraps(self):
         x = i8(200)
         self.assertEqual(x._value, -56)  # 200 wraps in signed 8-bit

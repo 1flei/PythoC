@@ -5,6 +5,7 @@ These lower to LLVM constant bit patterns; the C11 macro ``INFINITY``
 """
 
 from llvmlite import ir
+from ..llvm_extensions import constant
 
 from .types import f32, f64
 from ..valueref import wrap_value
@@ -16,10 +17,10 @@ _F64 = ir.DoubleType()
 # +inf: exponent all ones, mantissa zero; quiet NaN: exponent all ones,
 # MSB of mantissa set.  Python float('inf')/float('nan') carry exactly
 # these IEEE-754 bit patterns.
-_F32_INF = ir.Constant(_F32, float("inf"))
-_F64_INF = ir.Constant(_F64, float("inf"))
-_F32_NAN = ir.Constant(_F32, float("nan"))
-_F64_NAN = ir.Constant(_F64, float("nan"))
+_F32_INF = constant(_F32, float("inf"))
+_F64_INF = constant(_F64, float("inf"))
+_F32_NAN = constant(_F32, float("nan"))
+_F64_NAN = constant(_F64, float("nan"))
 
 inf = wrap_value(_F64_INF, kind="value", type_hint=f64)
 inff = wrap_value(_F32_INF, kind="value", type_hint=f32)

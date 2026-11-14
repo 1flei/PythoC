@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 from llvmlite import ir
 
 from .abstract import AbstractBuilder
+from .. import llvm_extensions as floating
 from ..ir_helpers import is_link_time_constant
 
 
@@ -80,16 +81,16 @@ class LLVMBuilder(AbstractBuilder):
         return self._builder.urem(lhs, rhs, name=name)
     
     def fadd(self, lhs: Any, rhs: Any, name: str = "") -> Any:
-        return self._builder.fadd(lhs, rhs, name=name)
+        return floating.binary(self._builder, 'fadd', lhs, rhs, name=name)
     
     def fsub(self, lhs: Any, rhs: Any, name: str = "") -> Any:
-        return self._builder.fsub(lhs, rhs, name=name)
+        return floating.binary(self._builder, 'fsub', lhs, rhs, name=name)
     
     def fmul(self, lhs: Any, rhs: Any, name: str = "") -> Any:
-        return self._builder.fmul(lhs, rhs, name=name)
+        return floating.binary(self._builder, 'fmul', lhs, rhs, name=name)
     
     def fdiv(self, lhs: Any, rhs: Any, name: str = "") -> Any:
-        return self._builder.fdiv(lhs, rhs, name=name)
+        return floating.binary(self._builder, 'fdiv', lhs, rhs, name=name)
     
     # ========== Bitwise Operations ==========
     
@@ -140,10 +141,10 @@ class LLVMBuilder(AbstractBuilder):
         return self._builder.icmp_unsigned(op, lhs, rhs, name=name)
     
     def fcmp_ordered(self, op: str, lhs: Any, rhs: Any, name: str = "") -> Any:
-        return self._builder.fcmp_ordered(op, lhs, rhs, name=name)
+        return floating.compare(self._builder, op, lhs, rhs, ordered=True, name=name)
     
     def fcmp_unordered(self, op: str, lhs: Any, rhs: Any, name: str = "") -> Any:
-        return self._builder.fcmp_unordered(op, lhs, rhs, name=name)
+        return floating.compare(self._builder, op, lhs, rhs, ordered=False, name=name)
     
     # ========== Memory Operations ==========
     

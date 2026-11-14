@@ -145,6 +145,25 @@ class TestLiteralProtocol(unittest.TestCase):
                                       wrap_value(index, kind='value', type_hint=i32),
                                       node)
 
+    def test_named_item_syntax_keeps_its_slice_identity(self):
+        from types import SimpleNamespace
+        from pythoc import func
+        from pythoc.ast_visitor.expressions import ExpressionsMixin
+        from pythoc.valueref import wrap_python_constant
+
+        visitor = SimpleNamespace(
+            visit_expression=lambda node: wrap_python_constant(i32))
+        syntax = ast.Slice(lower=ast.Constant('result'),
+                           upper=ast.Name(id='i32', ctx=ast.Load()))
+        value = ExpressionsMixin.visit_Slice(visitor, syntax).get_python_value()
+        self.assertIsInstance(value, slice)
+        self.assertEqual((value.start, value.stop), ('result', i32))
+        normalized = func.normalize_subscript_items(value)
+        self.assertEqual(normalized, (('result', i32),))
+        with self.assertRaisesRegex(
+                TypeError, 'return type cannot have a parameter name'):
+            func.handle_type_subscript(normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

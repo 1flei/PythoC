@@ -213,18 +213,21 @@ def get_schema_field_name(type_hint: Any, index: int) -> Optional[str]:
 def is_linear_schema_type(type_hint: Any) -> bool:
     from .builtin_entities import linear
 
-    schema_type = resolve_schema_type(type_hint)
-
-    if schema_type is linear:
-        return True
-
-    if isinstance(schema_type, type) and getattr(schema_type, '_is_linear', False):
-        return True
-
-    for field_type in get_schema_field_types(schema_type):
-        if is_linear_schema_type(field_type):
+    pending = [type_hint]
+    visited = {}
+    while pending:
+        schema_type = resolve_schema_type(pending.pop())
+        if schema_type is linear:
             return True
-
+        if not isinstance(schema_type, type):
+            continue
+        identity = id(schema_type)
+        if identity in visited:
+            continue
+        visited[identity] = schema_type
+        if getattr(schema_type, '_is_linear', False):
+            return True
+        pending.extend(reversed(get_schema_field_types(schema_type)))
     return False
 
 

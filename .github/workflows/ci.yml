@@ -15,22 +15,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ['3.10', '3.11', '3.12']
-        llvmlite-version: ['default']
-        include:
-          # Pinned llvmlite 0.44 (legacy PM, LLVM 15)
-          - os: ubuntu-latest
-            python-version: '3.12'
-            llvmlite-version: '0.44.*'
-          - os: macos-latest
-            python-version: '3.12'
-            llvmlite-version: '0.44.*'
-          # Pinned llvmlite 0.46 (new PM, LLVM 20)
-          - os: ubuntu-latest
-            python-version: '3.12'
-            llvmlite-version: '0.46.*'
-          - os: macos-latest
-            python-version: '3.12'
-            llvmlite-version: '0.46.*'
+        llvmlite-version: ['0.44.*', '0.45.*', '0.46.*']
 
     steps:
       - uses: actions/checkout@v4
@@ -43,10 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ "${{ matrix.llvmlite-version }}" != "default" ]; then
-            pip install "llvmlite==${{ matrix.llvmlite-version }}"
-          fi
-          pip install -e .
+          pip install -e . "llvmlite==${{ matrix.llvmlite-version }}"
 
       - name: Show llvmlite version
         run: python -c "import llvmlite; print(f'llvmlite {llvmlite.__version__}')"
@@ -77,12 +59,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.12']
-        llvmlite-version: ['default']
-        include:
-          - python-version: '3.12'
-            llvmlite-version: '0.44.*'
-          - python-version: '3.12'
-            llvmlite-version: '0.46.*'
+        llvmlite-version: ['0.44.*', '0.45.*', '0.46.*']
 
     steps:
       - uses: actions/checkout@v4
@@ -95,10 +72,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if ("${{ matrix.llvmlite-version }}" -ne "default") {
-            pip install "llvmlite==${{ matrix.llvmlite-version }}"
-          }
-          pip install -e .
+          pip install -e . "llvmlite==${{ matrix.llvmlite-version }}"
 
       - name: Show llvmlite version
         run: python -c "import llvmlite; print(f'llvmlite {llvmlite.__version__}')"
@@ -123,20 +97,28 @@ jobs:
           python test/run_all_tests.py --suite-timeout 900 --test-timeout 600
 
   test-arm64:
-    name: Test on ARM64 (AArch64)
+    name: Test py${{ matrix.python-version }} / llvmlite ${{ matrix.llvmlite-version }} on ARM64 (AArch64)
     runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12']
+        llvmlite-version: ['0.44.*', '0.45.*', '0.46.*']
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e . "llvmlite==${{ matrix.llvmlite-version }}"
+
+      - name: Show llvmlite version
+        run: python -c "import llvmlite; print(f'llvmlite {llvmlite.__version__}')"
 
       - name: Run tests (first run - no cache)
         env:

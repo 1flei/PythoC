@@ -732,5 +732,38 @@ class TestStructPatterns(unittest.TestCase):
         self.assertEqual(test_struct_conditional_init(), 30)
 
 
+SharedLeaf = struct['value': i32]
+
+
+SharedPair = struct['left': SharedLeaf, 'right': SharedLeaf]
+
+
+SharedQuad = struct['left': SharedPair, 'right': SharedPair]
+
+
+SharedOctet = struct['left': SharedQuad, 'right': SharedQuad]
+
+
+@compile
+def pass_record(value: SharedOctet) -> SharedOctet:
+    return value
+
+
+@compile
+def independent_record_copies() -> i32:
+    original: SharedOctet = 0
+    original.left.right.left.value = 19
+    copied: SharedOctet = pass_record(original)
+    original.left.right.left.value = 23
+    copied.right.left.right.value = 7
+    return (copied.left.right.left.value * 100
+            + original.left.right.left.value + copied.right.left.right.value)
+
+
+class SharedNonlinearSchemaTest(unittest.TestCase):
+    def test_copy_preserves_independent_nested_fields(self):
+        self.assertEqual(independent_record_copies(), 1930)
+
+
 if __name__ == '__main__':
     unittest.main()

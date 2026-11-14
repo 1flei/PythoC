@@ -297,5 +297,98 @@ class TestFunc(unittest.TestCase):
         self.assertEqual(void_discard_cast(41), 41)
 
 
+@compile
+class Pair:
+    first: i32
+    second: i32
+
+
+Mapper = func['Pair', 'Pair']
+
+
+Reader = func['Pair', i32]
+
+
+NamedMapper = func['value':'Pair', 'Pair']
+
+
+@compile
+def swap(value: Pair) -> Pair:
+    return (value.second, value.first)
+
+
+@compile
+def read(value: Pair) -> i32:
+    return value.first * 100 + value.second
+
+
+@compile
+def call_quoted_callback() -> i32:
+    mapper: Mapper = swap
+    reader: Reader = read
+    value: Pair = (7, 11)
+    return reader(mapper(value))
+
+
+@compile
+def call_named_quoted_callback() -> i32:
+    mapper: NamedMapper = swap
+    value: Pair = (7, 11)
+    result: Pair = mapper(value=value)
+    return result.first * 100 + result.second
+
+
+class QuotedFunctionArgumentsTest(unittest.TestCase):
+    def test_unnamed_quoted_aggregate_signature_executes(self):
+        self.assertEqual(call_quoted_callback(), 1107)
+
+    def test_named_quoted_aggregate_signature_executes(self):
+        self.assertEqual(call_named_quoted_callback(), 1107)
+
+    def test_named_return_is_rejected_inside_compiled_code(self):
+        import ast
+        from pythoc import CompileSession, flush_all_pending_outputs, meta
+
+        source = ('def bad(value: i32) -> i32:\n'
+                  '    signature = func["i32": i32]\n'
+                  '    return value\n')
+        with CompileSession(), self.assertRaisesRegex(
+                TypeError, 'return type cannot have a parameter name'):
+            meta.compile_ast(
+                ast.parse(source).body[0], source_file=__file__,
+                suffix='named_return_rejected', param_types={'value': i32},
+                return_type=i32, user_globals={'i32': i32, 'func': func})
+            flush_all_pending_outputs()
+
+
+@compile
+class CallbackBox:
+    callback: func[ptr[Pair], i32]
+    argument: ptr[Pair]
+
+
+@compile
+def read_callback_argument(value: ptr[Pair]) -> i32:
+    return value.first * 100 + value.second
+
+
+@compile
+def preserve_callback_box(value: CallbackBox) -> CallbackBox:
+    return value
+
+
+@compile
+def exchange_callback_box() -> i32:
+    argument: Pair = (7, 11)
+    value: CallbackBox = (read_callback_argument, ptr(argument))
+    result: CallbackBox = preserve_callback_box(value)
+    return result.callback(result.argument)
+
+
+class CallbackRecordTest(unittest.TestCase):
+    def test_record_and_callback_survive_native_by_value_calls(self):
+        self.assertEqual(exchange_callback_box(), 711)
+
+
 if __name__ == '__main__':
     unittest.main()

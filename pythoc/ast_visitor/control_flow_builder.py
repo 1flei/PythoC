@@ -203,6 +203,10 @@ class ControlFlowBuilder:
 
         # During build phase: return a PCIR recorder
         def _record(*args, **kwargs):
+            from ..llvm_extensions import fold_instruction
+            folded = fold_instruction(name, args)
+            if folded is not None:
+                return folded
             infer_kwargs = dict(kwargs)
             if self._visitor is not None and getattr(self._visitor, 'module', None) is not None:
                 infer_kwargs['_module_context'] = self._visitor.module.context

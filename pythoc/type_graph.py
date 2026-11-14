@@ -293,12 +293,18 @@ class TypeGraph:
                         if resolved is not None:
                             pending.append((resolved, False))
 
-    def validate(self, root, revision):
+    def _revision(self):
+        from .session import CompileSession
+        return (CompileSession.current().forward_refs.revision,
+                self.binding_revision)
+
+    def validate(self, root):
         with self._lock:
             if self.validating:
                 return
-            snapshot = _fields(root) if named_record(root) is not None else None
-            if (self._preparation is None and snapshot is not None
+            snapshot = _fields(root) if record_view(root) is not None else None
+            revision = self._revision()
+            if (snapshot is not None
                     and self._checked.get(root) == (revision, snapshot)):
                 return
             self.validating = True
@@ -357,7 +363,12 @@ class TypeGraph:
                 self._watch_pending(root, unresolved, references)
                 self._declarations.update(declarations)
                 self._canonical.update(canonical)
-                self._checked.update((view, (revision, _fields(view))) for view in records)
+                checked = {view: _fields(view) for view in records}
+                if snapshot is not None:
+                    checked[root] = _fields(root)
+                # Bindings discovered during validation require another pass.
+                self._checked.update((view, (revision, fields))
+                                     for view, fields in checked.items())
             finally:
                 self.validating = False
 
@@ -377,21 +388,21 @@ class TypeGraph:
             CompileSession.current().forward_refs.register_callback(
                 name, completed, include_existing=False)
 
-    def canonical_record(self, view, revision):
+    def canonical_record(self, view):
         with self._lock:
             if self.validating:
                 return self._canonical.get(_owner(view), view)
             while self._dirty_roots:
                 root = self._dirty_roots.pop()
-                self.validate(root, revision)
-            self.validate(view, revision)
+                self.validate(root)
+            self.validate(view)
             return self._canonical[_owner(view)]
 
-    def definition(self, view, revision):
+    def definition(self, view):
         # A canonical declaration remains the same type when a forward
         # reference completes. Mangling strings are not declaration identities.
         with self._lock:
-            canonical = self.canonical_record(view, revision)
+            canonical = self.canonical_record(view)
             definition = self._definitions.get(canonical)
             if definition is None:
                 names, fields, layout = _fields(canonical)
@@ -411,10 +422,6 @@ class TypeGraph:
         try:
             yield
             for reference, binding in bindings.items():
-                previous = self.type_bindings.get(reference)
-                if (previous.value if previous is not None else None) is not binding.value:
-                    self.binding_revision += 1
-                    self._dirty_roots.update(self._pending_references.get(reference, ()))
                 self.type_bindings[reference] = binding
             self.prepared_types.update(prepared)
             for reference in bindings:
@@ -434,15 +441,18 @@ class TypeGraph:
         return self.type_bindings.get(reference)
 
     def record_bindings(self, references, value, freeze):
-        """Record observations while the resolver holds the graph lock."""
+        """Record visible bindings while the resolver holds the graph lock.
+
+        Tentative changes invalidate validation immediately; rollback revises
+        again so a rejected transaction cannot leave a reusable checked view.
+        """
         destination = (self.type_bindings if self._preparation is None
                        else self._preparation[0])
         for reference in references:
             previous = self.get_binding(reference)
             if previous is not None and previous.frozen:
                 continue
-            if (self._preparation is None
-                    and (previous.value if previous is not None else None) is not value):
+            if (previous.value if previous is not None else None) is not value:
                 self.binding_revision += 1
                 self._dirty_roots.update(self._pending_references.get(reference, ()))
             destination[reference] = _TypeBinding(value, freeze and value is not None)
@@ -495,9 +505,7 @@ class TypeGraph:
                 pending.extend((child, bool(stored), depth, False) for child, stored in children
                                if stored is not None)
             if seen:
-                from .session import CompileSession
-                self.validate(pc_type, (CompileSession.current().forward_refs.revision,
-                                        self.binding_revision))
+                self.validate(pc_type)
             if complete:
                 self._preparation[1].update(
                     value for value in seen.values() if isinstance(value, type))
@@ -505,29 +513,24 @@ class TypeGraph:
 
 def _current_graph():
     from .session import CompileSession
-    session = CompileSession.current()
-    return session.type_graph, (session.forward_refs.revision,
-                                session.type_graph.binding_revision)
+    return CompileSession.current().type_graph
 
 
 def canonical_record_type(pc_type):
     view = named_record(pc_type)
     if view is None:
         return pc_type
-    graph, revision = _current_graph()
-    return graph.canonical_record(view, revision)
+    return _current_graph().canonical_record(view)
 
 
 def record_definition(pc_type):
     prepare_type(pc_type)
-    graph, revision = _current_graph()
-    return graph.definition(named_record(pc_type), revision)
+    return _current_graph().definition(named_record(pc_type))
 
 
 def validate_type_graph(pc_type):
-    graph, revision = _current_graph()
     view = record_view(pc_type)
-    graph.validate(view if view is not None else pc_type, revision)
+    _current_graph().validate(view if view is not None else pc_type)
 
 
 def validation_in_progress():

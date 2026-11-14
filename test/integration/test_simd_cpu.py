@@ -8,10 +8,13 @@ import unittest
 from llvmlite import binding
 
 from pythoc import (
+    array,
     compile,
     f32,
     i32,
+    i64,
     ptr,
+    seq,
     simd,
     simd_bf16_dot,
     simd_bf16_dot_packed,
@@ -110,6 +113,43 @@ class TestCpuSimd(unittest.TestCase):
         out = (ctypes.c_float * 4)()
         test_simd_store(ctypes.addressof(out))
         self.assertEqual(list(out), [3.0, 3.0, 3.0, 3.0])
+
+
+@compile
+def check_integer_array(seed: i64) -> i32:
+    values: array[simd[i64, 4], 4]
+    values = (simd[i64, 4](seed),)
+    for lane in seq(4):
+        if values[0][lane] != seed:
+            return 1
+        for element in seq(1, 4):
+            if values[element][lane] != i64(0):
+                return 2
+    return 0
+
+
+@compile
+class TaggedVector:
+    tag: i32
+    lanes: simd[f32, 4]
+
+
+@compile
+def check_float_field(tag: i32) -> i32:
+    value: TaggedVector = (tag,)
+    for lane in seq(4):
+        if value.lanes[lane] != f32(0):
+            return 1
+    return value.tag
+
+
+class SimdZeroFillTest(unittest.TestCase):
+    def test_array_assignment_keeps_seed_and_zeros_omitted_vectors(self):
+        for seed in (17, -23, 1 << 60):
+            self.assertEqual(check_integer_array(seed), 0)
+
+    def test_struct_initialization_zeros_omitted_float_vector(self):
+        self.assertEqual(check_float_field(29), 29)
 
 
 if __name__ == "__main__":

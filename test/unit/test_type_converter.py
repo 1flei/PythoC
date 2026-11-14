@@ -330,6 +330,239 @@ class TestTypeConverter(unittest.TestCase):
         self.assertEqual(get_type(right), ir.IntType(32))
         self.assertFalse(is_float)
 
+    def test_supported_float_zero_constants(self):
+        from pythoc import bf16, f16, f32, f64, f128
+
+        for pc_type in (f16, bf16, f32, f64, f128):
+            with self.subTest(pc_type=pc_type):
+                llvm_type = pc_type.get_llvm_type(self.module.context)
+                self.assertTrue(self.converter.is_llvm_float_type(llvm_type))
+                zero = self.converter.create_zero_constant(llvm_type)
+                self.assertEqual(zero.type, llvm_type)
+                self.assertEqual(zero.constant, 0.0)
+
+    def test_vector_zero_constants_keep_lane_type_and_count(self):
+        for element, lanes in ((ir.IntType(64), 4), (ir.FloatType(), 8)):
+            with self.subTest(element=element, lanes=lanes):
+                vector_type = ir.VectorType(element, lanes)
+                zero = self.converter.create_zero_constant(vector_type)
+                self.assertEqual(zero.type, vector_type)
+                self.assertEqual(len(zero.constant), lanes)
+                self.assertTrue(all(lane.type == element for lane in zero.constant))
+
+    def test_fp128_constants_match_llvm_widening(self):
+        import math
+        from llvmlite import binding
+        from pythoc.compiler import LLVMCompiler
+        from pythoc.llvm_extensions import FP128Type
+
+        values = (0.0, -0.0, 1.0, -2.5, math.inf, -math.inf, math.nan,
+                  float.fromhex('0x0.0000000000001p-1022'),
+                  float.fromhex('0x0.fffffffffffffp-1022'),
+                  float.fromhex('0x1.fffffffffffffp+1023'))
+        for value in values:
+            with self.subTest(value=value):
+                compiler = LLVMCompiler()
+                function = ir.Function(
+                    compiler.module, ir.FunctionType(ir.IntType(1), []),
+                    name='same_bits')
+                builder = ir.IRBuilder(function.append_basic_block('entry'))
+                wide = FP128Type()
+                actual = ir.Constant(wide, value)
+                expected = builder.fpext(
+                    ir.Constant(ir.DoubleType(), value), wide)
+                builder.ret(builder.icmp_unsigned(
+                    '==', builder.bitcast(actual, ir.IntType(128)),
+                    builder.bitcast(expected, ir.IntType(128))))
+                compiler.optimize_module(2)
+                with binding.parse_assembly(compiler.get_ir()) as module:
+                    block = next(module.get_function('same_bits').blocks)
+                    result = next(list(block.instructions)[-1].operands)
+                    self.assertEqual(result.get_constant_value(), 1)
+
+    def test_float_formats_match_llvm_integer_conversion(self):
+        from pythoc.compiler import LLVMCompiler
+        from pythoc.llvm_extensions import FLOAT_FORMATS, constant
+
+        compiler = LLVMCompiler()
+        values = (0, 1, -1, 65519, 65520, (1 << 24) + 1,
+                  (1 << 53) + 1, (1 << 80) + (1 << 56) + 1,
+                  (1 << 113) + 1, -((1 << 113) + 3))
+        for fmt in FLOAT_FORMATS:
+            for index, value in enumerate(values):
+                function = ir.Function(
+                    compiler.module, ir.FunctionType(ir.IntType(1), []),
+                    name=f'{fmt.llvm_type.intrinsic_name}_{index}')
+                builder = ir.IRBuilder(function.append_basic_block('entry'))
+                expected = builder.sitofp(ir.Constant(ir.IntType(256), value),
+                                          fmt.llvm_type)
+                bits = ir.IntType(fmt.bits)
+                builder.ret(builder.icmp_unsigned(
+                    '==', builder.bitcast(constant(fmt.llvm_type, value), bits),
+                    builder.bitcast(expected, bits)))
+        compiler.optimize_module(2)
+        from llvmlite import binding
+        with binding.parse_assembly(compiler.get_ir()) as module:
+            for function in module.functions:
+                with self.subTest(function=function.name):
+                    block = next(function.blocks)
+                    result = next(list(block.instructions)[-1].operands)
+                    self.assertEqual(result.get_constant_value(), 1)
+
+    def test_native_float_constants_do_not_require_bit_decoding(self):
+        from unittest.mock import patch
+        import operator
+        from pythoc.llvm_extensions import (
+            F16, F32, F64, FloatFormat, constant, constant_operation,
+        )
+
+        with patch.object(FloatFormat, 'encode', side_effect=AssertionError('decoded')):
+            for fmt in (F16, F32, F64):
+                self.assertEqual(constant(fmt.llvm_type, 1.5).constant, 1.5)
+                self.assertEqual(constant_operation(fmt.llvm_type, operator.add,
+                                                    1.5, 2.5), 4.0)
+
+    def test_float_to_int_observes_the_source_format_rounding(self):
+        from pythoc import f16, f32, i64
+        for source, value, expected in (
+                (f16, 1.9999, 2), (f32, 16777217.0, 16777216)):
+            with self.subTest(source=source):
+                operand = wrap_value(ir.Constant(source.get_llvm_type(), value),
+                                     kind='value', type_hint=source)
+                self.assertEqual(self.converter.convert(operand, i64).ir_value.constant,
+                                 expected)
+
+    def test_half_bfloat_conversion_uses_a_common_containing_format(self):
+        from pythoc import f16, bf16
+        for source, target in ((f16, bf16), (bf16, f16)):
+            function = ir.Function(
+                self.module, ir.FunctionType(target.get_llvm_type(),
+                                              [source.get_llvm_type()]),
+                name=source.get_name())
+            builder = ir.IRBuilder(function.append_basic_block('entry'))
+            from pythoc.llvm_extensions import convert
+            result = convert(builder, function.args[0], target.get_llvm_type())
+            self.assertEqual(result.type, target.get_llvm_type())
+            self.assertEqual(result.operands[0].type, ir.FloatType())
+            builder.ret(result)
+
+    def test_mixed_precision_intrinsics_keep_distinct_signatures(self):
+        from types import SimpleNamespace
+        from pythoc.ast_visitor.helpers import HelpersMixin
+        from pythoc.llvm_extensions import FLOAT_FORMATS
+
+        visitor = SimpleNamespace(module=self.module)
+        for operation in ('_get_floor_intrinsic', '_get_pow_intrinsic'):
+            names = set()
+            for fmt in FLOAT_FORMATS:
+                function = getattr(HelpersMixin, operation)(visitor, fmt.llvm_type)
+                self.assertEqual(function.function_type.return_type, fmt.llvm_type)
+                names.add(function.name)
+            self.assertEqual(len(names), len(FLOAT_FORMATS))
+
+    def test_float_rounding_boundaries_match_llvm(self):
+        from pythoc.compiler import LLVMCompiler
+        from pythoc.llvm_extensions import FLOAT_FORMATS, constant
+
+        compiler = LLVMCompiler()
+        values = (0.0, -0.0, 1.00390625, 1.01171875, 65519.0, 65520.0,
+                  2.0 ** -24, 2.0 ** -25, 2.0 ** -133, 2.0 ** -134,
+                  float.fromhex('0x1.0000010000001p+0'),
+                  float.fromhex('0x1.fffffffffffffp+1023'))
+        for fmt in FLOAT_FORMATS:
+            for index, value in enumerate(values):
+                function = ir.Function(
+                    compiler.module, ir.FunctionType(ir.IntType(1), []),
+                    name=f'{fmt.llvm_type.intrinsic_name}_{index}')
+                builder = ir.IRBuilder(function.append_basic_block('entry'))
+                source = ir.Constant(ir.DoubleType(), value)
+                if fmt.bits < 64:
+                    expected = builder.fptrunc(source, fmt.llvm_type)
+                elif fmt.bits > 64:
+                    expected = builder.fpext(source, fmt.llvm_type)
+                else:
+                    expected = source
+                bits = ir.IntType(fmt.bits)
+                builder.ret(builder.icmp_unsigned(
+                    '==', builder.bitcast(constant(fmt.llvm_type, value), bits),
+                    builder.bitcast(expected, bits)))
+        compiler.optimize_module(2)
+        from llvmlite import binding
+        with binding.parse_assembly(compiler.get_ir()) as module:
+            for function in module.functions:
+                with self.subTest(function=function.name):
+                    block = next(function.blocks)
+                    result = next(list(block.instructions)[-1].operands)
+                    self.assertEqual(result.get_constant_value(), 1)
+
+    def test_constant_arithmetic_matches_llvm_in_every_float_format(self):
+        from pythoc.compiler import LLVMCompiler
+        from pythoc.llvm_extensions import FLOAT_FORMATS, binary, constant
+
+        compiler = LLVMCompiler()
+        cases = ((0.0, -0.0), (-0.0, -0.0), (1.5, 2.5),
+                 (-7.0, 3.0), (1.0, 0.0), (-1.0, -0.0))
+        for fmt in FLOAT_FORMATS:
+            for operation in ('fadd', 'fsub', 'fmul', 'fdiv'):
+                for index, (a, b) in enumerate(cases):
+                    if not a and not b and operation == 'fdiv':
+                        continue
+                    function = ir.Function(
+                        compiler.module, ir.FunctionType(ir.IntType(1), []),
+                        name=f'{fmt.llvm_type.intrinsic_name}_{operation}_{index}')
+                    builder = ir.IRBuilder(function.append_basic_block('entry'))
+                    left, right = constant(fmt.llvm_type, a), constant(fmt.llvm_type, b)
+                    actual = binary(builder, operation, left, right)
+                    expected = getattr(builder, operation)(left, right)
+                    bits = ir.IntType(fmt.bits)
+                    builder.ret(builder.icmp_unsigned(
+                        '==', builder.bitcast(actual, bits),
+                        builder.bitcast(expected, bits)))
+        compiler.optimize_module(2)
+        from llvmlite import binding
+        with binding.parse_assembly(compiler.get_ir()) as module:
+            for function in module.functions:
+                with self.subTest(function=function.name):
+                    block = next(function.blocks)
+                    result = next(list(block.instructions)[-1].operands)
+                    self.assertEqual(result.get_constant_value(), 1)
+
+    def test_external_float_cast_remains_a_backend_operation(self):
+        from pythoc.llvm_extensions import fold_instruction
+
+        class X87(ir.Type):
+            def __str__(self):
+                return 'x86_fp80'
+
+        source = ir.Constant(ir.DoubleType(), 1.5)
+        self.assertIsNone(fold_instruction('fpext', (source, X87())))
+
+    def test_constant_compare_preserves_explicit_llvm_predicates(self):
+        from pythoc.compiler import LLVMCompiler
+        from pythoc.llvm_extensions import compare, constant
+
+        compiler = LLVMCompiler()
+        for index, value in enumerate((0.0, float('nan'))):
+            for operation in ('==', '!=', '<', 'ord', 'uno', 'true',
+                              'false', 'oeq', 'ueq', 'one', 'une'):
+                function = ir.Function(
+                    compiler.module, ir.FunctionType(ir.IntType(1), []),
+                    name=f'compare_{index}_{operation.encode().hex()}')
+                builder = ir.IRBuilder(function.append_basic_block('entry'))
+                left = constant(ir.DoubleType(), value)
+                right = constant(ir.DoubleType(), 0.0)
+                actual = compare(builder, operation, left, right, ordered=True)
+                expected = builder.fcmp_ordered(operation, left, right)
+                builder.ret(builder.icmp_unsigned('==', actual, expected))
+        compiler.optimize_module(2)
+        from llvmlite import binding
+        with binding.parse_assembly(compiler.get_ir()) as module:
+            for function in module.functions:
+                with self.subTest(function=function.name):
+                    block = next(function.blocks)
+                    result = next(list(block.instructions)[-1].operands)
+                    self.assertEqual(result.get_constant_value(), 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -15,6 +15,7 @@ from .type_check import is_struct_type, is_enum_type
 from .logger import logger
 from .builtin_entities.base import BuiltinType
 from .schema_protocol import get_schema_field_types, is_schema_type
+from . import llvm_extensions as floating
 import ast
 
 
@@ -525,7 +526,7 @@ class TypeConverter:
         if isinstance(python_val, float) and hasattr(target_type, '_is_integer') and target_type._is_integer:
             python_val = int(python_val)
 
-        ir_val = ir.Constant(llvm_type, python_val)
+        ir_val = floating.constant(llvm_type, python_val)
         return wrap_value(ir_val, kind="value", type_hint=target_type)
 
     @staticmethod
@@ -643,7 +644,7 @@ class TypeConverter:
             ir_val = ir.Constant(ir.IntType(64), python_val)
             return wrap_value(ir_val, kind="value", type_hint=pc_type)
         elif isinstance(python_val, float):
-            ir_val = ir.Constant(ir.DoubleType(), python_val)
+            ir_val = floating.constant(ir.DoubleType(), python_val)
             return wrap_value(ir_val, kind="value", type_hint=pc_type)
         elif isinstance(python_val, str):
             str_const = self._visitor._create_string_constant(python_val)
@@ -1009,17 +1010,8 @@ class TypeConverter:
         # llvmlite pointer type class may be private; derive dynamically
         ptr_type_class = type(ir.PointerType(ir.IntType(8)))
         
-        # Get BFloatType and FP128Type if available (from monkey patch)
-        bfloat_type_class = getattr(ir, 'BFloatType', None)
-        fp128_type_class = getattr(ir, 'FP128Type', None)
-        
-        # Build registry with all float types
-        float_types = [ir.HalfType, ir.FloatType, ir.DoubleType]
-        if bfloat_type_class:
-            float_types.append(bfloat_type_class)
-        if fp128_type_class:
-            float_types.append(fp128_type_class)
-        
+        float_types = floating.float_type_classes()
+
         registry = {
             # Integer to integer
             (ir.IntType, ir.IntType): self._convert_int_to_int,
@@ -1089,132 +1081,30 @@ class TypeConverter:
         return wrap_value(result, kind="value", type_hint=type_hint)
 
     def _convert_int_to_float(
-        self,
-        value,
-        source_type: ir.IntType,
-        target_type,
-        source_is_unsigned: bool,
-        target_is_unsigned: bool,
-        type_hint,
+        self, value, source_type, target_type, source_is_unsigned,
+        target_is_unsigned, type_hint,
     ) -> ValueRef:
-        value_ir = ensure_ir(value)
-
-        # Constant-fold integer -> float conversion by computing the float value
-        # directly. Avoids emitting a sitofp/uitofp constexpr, which LLVM 20+
-        # rejects as an instruction operand.
-        if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, int) and value_ir.constant is not ir.Undefined:
-            from .type_descriptor import integer_value
-            v = integer_value(value.type_hint, value_ir.constant)
-            result = ir.Constant(target_type, float(v))
-            return wrap_value(result, kind="value", type_hint=type_hint)
-
-        result = (
-            self.builder.uitofp(value_ir, target_type)
-            if source_is_unsigned
-            else self.builder.sitofp(value_ir, target_type)
-        )
+        result = floating.convert(
+            getattr(self._visitor, "builder", None), ensure_ir(value), target_type,
+            source_unsigned=source_is_unsigned)
         return wrap_value(result, kind="value", type_hint=type_hint)
 
     def _convert_float_to_int(
-        self,
-        value,
-        source_type,
-        target_type: ir.IntType,
-        source_is_unsigned: bool,
-        target_is_unsigned: bool,
-        type_hint,
+        self, value, source_type, target_type, source_is_unsigned,
+        target_is_unsigned, type_hint,
     ) -> ValueRef:
-        value_ir = ensure_ir(value)
-        if getattr(get_base_type(type_hint), '_is_bool', False):
-            if isinstance(value_ir, ir.Constant):
-                result = ir.Constant(target_type, int(value_ir.constant != 0))
-            else:
-                result = self.builder.fcmp_unordered(
-                    '!=', value_ir, ir.Constant(source_type, 0.0))
-            return wrap_value(result, kind="value", type_hint=type_hint)
-
-
-        # Constant-fold float -> integer conversion by computing the integer value
-        # directly. Avoids emitting a fptosi/fptoui constexpr, which LLVM 20+
-        # rejects as an instruction operand.
-        if isinstance(value_ir, ir.Constant) and isinstance(value_ir.constant, float):
-            v = value_ir.constant
-            # C-style truncation toward zero
-            int_val = int(v)
-            if target_is_unsigned:
-                tw = target_type.width
-                int_val = int_val & ((1 << tw) - 1)
-            result = ir.Constant(target_type, int_val)
-            return wrap_value(result, kind="value", type_hint=type_hint)
-
-        result = (
-            self.builder.fptoui(value_ir, target_type)
-            if target_is_unsigned
-            else self.builder.fptosi(value_ir, target_type)
-        )
+        result = floating.convert(
+            getattr(self._visitor, "builder", None), ensure_ir(value), target_type,
+            target_unsigned=target_is_unsigned,
+            target_bool=getattr(get_base_type(type_hint), '_is_bool', False))
         return wrap_value(result, kind="value", type_hint=type_hint)
 
     def _convert_float_to_float(
-        self,
-        value,
-        source_type,
-        target_type,
-        source_is_unsigned: bool,
-        target_is_unsigned: bool,
-        type_hint,
+        self, value, source_type, target_type, source_is_unsigned,
+        target_is_unsigned, type_hint,
     ) -> ValueRef:
-        value_ir = ensure_ir(value)
-
-        # Determine source and target bit widths
-        # Map types to bit widths: half/bf16=16, float=32, double=64, fp128=128
-        def get_float_bits(float_type):
-            type_class = type(float_type)
-            if type_class == ir.HalfType or type_class.__name__ == 'BFloatType':
-                return 16
-            elif type_class == ir.FloatType:
-                return 32
-            elif type_class == ir.DoubleType:
-                return 64
-            elif type_class.__name__ == 'FP128Type':
-                return 128
-            else:
-                # Fallback: unknown float type
-                raise TypeError(f"Unknown float type: {type_class}")
-
-        source_bits = get_float_bits(source_type)
-        target_bits = get_float_bits(target_type)
-
-        # Constant-fold float conversions by computing the target float value
-        # directly. Avoids emitting fpext/fptrunc constexprs, which LLVM 20+
-        # rejects as instruction operands. Only fold 32/64-bit IEEE floats.
-        if (
-            isinstance(value_ir, ir.Constant)
-            and isinstance(value_ir.constant, float)
-            and source_bits in (32, 64)
-            and target_bits in (32, 64)
-        ):
-            v = value_ir.constant
-            if source_bits < target_bits:
-                # float -> double: Python float already has double precision
-                result = ir.Constant(target_type, v)
-            elif source_bits > target_bits:
-                # double -> float: round to single precision
-                import struct
-                v32 = struct.unpack('f', struct.pack('f', v))[0]
-                result = ir.Constant(target_type, v32)
-            else:
-                result = ir.Constant(target_type, v)
-            return wrap_value(result, kind="value", type_hint=type_hint)
-
-        if source_bits < target_bits:
-            # Extend to larger type
-            result = self.builder.fpext(value_ir, target_type)
-        elif source_bits > target_bits:
-            # Truncate to smaller type
-            result = self.builder.fptrunc(value_ir, target_type)
-        else:
-            # Same bit width, no conversion needed
-            result = value_ir
+        result = floating.convert(getattr(self._visitor, "builder", None),
+                                  ensure_ir(value), target_type)
         return wrap_value(result, kind="value", type_hint=type_hint)
 
     def _convert_array_value_to_ptr(
@@ -1327,13 +1217,10 @@ class TypeConverter:
         """Create a zero constant for the given LLVM type."""
         if isinstance(llvm_type, ir.IntType):
             return ir.Constant(llvm_type, 0)
-        elif isinstance(llvm_type, (ir.FloatType, ir.DoubleType)):
-            return ir.Constant(llvm_type, 0.0)
-        elif isinstance(llvm_type, ir.PointerType):
-            return ir.Constant(llvm_type, None)
-        elif isinstance(llvm_type, ir.ArrayType):
-            return ir.Constant(llvm_type, None)
-        elif isinstance(llvm_type, ir.BaseStructType):
+        elif self.is_llvm_float_type(llvm_type):
+            return floating.constant(llvm_type, 0.0)
+        elif isinstance(llvm_type, (ir.PointerType, ir.ArrayType,
+                                    ir.BaseStructType, ir.VectorType)):
             return ir.Constant(llvm_type, None)
         elif isinstance(llvm_type, ir.VoidType):
             raise TypeError("Cannot create zero constant for void type")
@@ -1348,7 +1235,7 @@ class TypeConverter:
 
     @staticmethod
     def is_llvm_float_type(llvm_type: ir.Type) -> bool:
-        return isinstance(llvm_type, (ir.FloatType, ir.DoubleType))
+        return floating.is_float_type(llvm_type)
 
     @staticmethod
     def is_llvm_pointer_type(llvm_type: ir.Type) -> bool:

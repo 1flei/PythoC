@@ -44,6 +44,8 @@ Documentation = "https://github.com/1flei/PythoC/blob/master/README.md"
 
 [tool.setuptools]
 packages = ["pythoc"]
+include-package-data = true
+zip-safe = false
 
 [tool.setuptools.package-data]
 pythoc = ["py.typed"]

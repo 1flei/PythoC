@@ -277,12 +277,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         if cls._field_types is None:
             logger.error("struct type requires field types", node=node, exc_type=TypeError)
 
-        from ..type_graph import prepare_type
-        prepare_type(cls)
-        
-        from ..type_graph import validate_type_graph
-        validate_type_graph(cls)
-
         from ..target_layout import NATURAL_LAYOUT
         layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
         if not layout_config.is_natural:
@@ -290,17 +284,22 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             return get_bit_storage_type(cls.get_layout())
         
         if cls._is_compile_class() or cls._force_identified:
+            from ..type_graph import record_definition
+            definition = record_definition(cls)
             if module_context is None:
                 logger.error(
                     f"@compile class '{cls._canonical_name}' requires module_context",
                     node=node, exc_type=TypeError)
-            from ..type_graph import record_definition
             from ..builder.record_types import materialize_record
-            return materialize_record(record_definition(cls), module_context)
+            return materialize_record(definition, module_context)
 
         # Rule: Anonymous struct[...] always uses LiteralStructType
         # Note: Field names affect PC type caching (via canonical_name) but not LLVM structure
         
+        from ..type_graph import prepare_type, validate_type_graph
+        prepare_type(cls)
+        validate_type_graph(cls)
+
         # For LiteralStructType, need all fields resolved
         cls._ensure_field_types_resolved()
         

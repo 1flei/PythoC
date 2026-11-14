@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -53,6 +54,39 @@ class TestSchemaProtocol(unittest.TestCase):
             for index in range(128):
                 self.assertIs(lookup(Record, index), i32)
             self.assertLessEqual(Record._field_types.accesses, 256)
+
+    def test_shared_nonlinear_schema_work_is_bounded_by_unique_nodes(self):
+        for depth in (16, 64, 256):
+            with self.subTest(depth=depth):
+                schema = i32
+                for _ in range(depth):
+                    schema = type('SharedSchema', (), {
+                        '_field_types': [schema, schema],
+                    })
+                with patch('pythoc.schema_protocol.get_schema_field_types',
+                           wraps=get_schema_field_types) as fields:
+                    self.assertFalse(is_linear_schema_type(schema))
+                self.assertEqual(fields.call_count, depth + 1)
+
+    def test_linear_sibling_after_shared_nonlinear_schema_is_found(self):
+        shared = struct['value': i32]
+        pair = struct['left': shared, 'right': shared]
+        schema = struct['data': pair, 'token': struct['proof': linear]]
+        self.assertTrue(is_linear_schema_type(schema))
+
+    def test_linearity_queries_observe_current_schema_fields(self):
+        schema = struct['value': i32]
+        self.assertFalse(is_linear_schema_type(schema))
+        with patch.object(schema, '_field_types', [linear]):
+            self.assertTrue(is_linear_schema_type(schema))
+        self.assertFalse(is_linear_schema_type(schema))
+
+    def test_cyclic_schema_queries_terminate_and_find_linear_fields(self):
+        schema = type('RecursiveSchema', (), {})
+        schema._field_types = [schema, i32]
+        self.assertFalse(is_linear_schema_type(schema))
+        schema._field_types.append(linear)
+        self.assertTrue(is_linear_schema_type(schema))
 
 
 if __name__ == "__main__":

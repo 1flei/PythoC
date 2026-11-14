@@ -56,12 +56,9 @@ def _coerce_types(left_type, right_type):
     l_float = _is_float(left_type)
     r_float = _is_float(right_type)
 
-    if l_float and not r_float:
-        return left_type
-    if r_float and not l_float:
-        return right_type
-    if l_float and r_float:
-        return left_type if _get_type_width(left_type) >= _get_type_width(right_type) else right_type
+    if l_float or r_float:
+        from ..type_descriptor import common_numeric_type
+        return common_numeric_type(left_type, right_type)
 
     l_w = _get_type_width(left_type)
     r_w = _get_type_width(right_type)
@@ -121,7 +118,8 @@ def _lower_field_to_ir_constant(value, field_pc_type):
         return ir.Constant(llvm_ty, int(raw))
     if _is_float(field_pc_type):
         llvm_ty = field_pc_type.get_llvm_type()
-        return ir.Constant(llvm_ty, float(raw))
+        from ..llvm_extensions import constant
+        return constant(llvm_ty, raw)
     if getattr(field_pc_type, '_is_pointer', False):
         from .types import i64
         llvm_ty = field_pc_type.get_llvm_type()
@@ -135,7 +133,7 @@ def _lower_field_to_ir_constant(value, field_pc_type):
 class pc_literal:
     """Tagged Python value carrying a PythoC type.
 
-    Scalars store a plain ``int`` / ``float`` / ``bool`` in ``_value``.
+    Scalars store numeric values; wide floats retain exact target bits.
     Compound types (struct, array, enum) store richer payloads; see
     ``_from_composite_call`` and ``_from_ctypes_result``.
     """
@@ -144,6 +142,10 @@ class pc_literal:
                  '_ctypes_owner')
 
     def __init__(self, value: Any, pc_type: Any):
+        if _is_float(pc_type):
+            from ..llvm_extensions import format_for_type
+            fmt = format_for_type(pc_type.get_llvm_type())
+            value = fmt.normalize(value) if fmt is not None else float(value)
         self._value = value
         self._pc_type = pc_type
         self._fields: Optional[dict] = None
@@ -171,9 +173,7 @@ class pc_literal:
         value = args[0]
         if isinstance(value, pc_literal):
             value = value._value
-        if _is_float(pc_type):
-            value = float(value)
-        elif _is_integer(pc_type) or _is_bool_type(pc_type):
+        if _is_integer(pc_type) or _is_bool_type(pc_type):
             value = _mask_int(int(value), pc_type)
         return cls(value, pc_type)
 
@@ -394,6 +394,11 @@ class pc_literal:
             pt = PythonType.wrap(self._value, is_constant=True,
                                  preferred_pc_type=self._pc_type)
             return wrap_value(self._value, kind='python', type_hint=pt)
+
+        if _is_float(self._pc_type):
+            from ..llvm_extensions import constant
+            return wrap_value(constant(self._pc_type.get_llvm_type(), self._value),
+                              kind='value', type_hint=self._pc_type)
 
         pt = PythonType.wrap(self._value, is_constant=True,
                              preferred_pc_type=self._pc_type)
@@ -688,12 +693,18 @@ class pc_literal:
     def _binop(self, other, op):
         if isinstance(other, pc_literal):
             result_type = _coerce_types(self._pc_type, other._pc_type)
-            raw = op(self._value, other._value)
+            operand = other._value
         elif isinstance(other, (int, float)):
             result_type = self._pc_type
-            raw = op(self._value, other)
+            operand = other
         else:
             return NotImplemented
+        if _is_float(result_type):
+            from ..llvm_extensions import constant_operation
+            raw = constant_operation(result_type.get_llvm_type(), op,
+                                     self._value, operand)
+        else:
+            raw = op(self._value, operand)
         if _is_integer(result_type) and isinstance(raw, (int, float)):
             raw = _mask_int(int(raw), result_type)
         return pc_literal(raw, result_type)
@@ -701,7 +712,12 @@ class pc_literal:
     def _rbinop(self, other, op):
         if isinstance(other, (int, float)):
             result_type = self._pc_type
-            raw = op(other, self._value)
+            if _is_float(result_type):
+                from ..llvm_extensions import constant_operation
+                raw = constant_operation(result_type.get_llvm_type(), op,
+                                         other, self._value)
+            else:
+                raw = op(other, self._value)
         else:
             return NotImplemented
         if _is_integer(result_type) and isinstance(raw, (int, float)):

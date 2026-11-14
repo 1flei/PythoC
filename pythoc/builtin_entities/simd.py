@@ -26,16 +26,11 @@ def _i32_type():
 
 def _vector_suffix(vec_type):
     elem = vec_type.element
-    if isinstance(elem, ir.FloatType):
-        scalar = "f32"
-    elif isinstance(elem, ir.DoubleType):
-        scalar = "f64"
+    from ..llvm_extensions import is_float_type
+    if is_float_type(elem):
+        scalar = elem.intrinsic_name
     elif isinstance(elem, ir.IntType):
         scalar = "i%d" % elem.width
-    elif isinstance(elem, ir.HalfType):
-        scalar = "f16"
-    elif elem.__class__.__name__ == "BFloatType":
-        scalar = "bf16"
     else:
         logger.error(
             "simd intrinsics do not support element type %s" % elem,

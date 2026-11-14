@@ -541,6 +541,7 @@ class PythonType(_PythonTypeBase):
         
         from llvmlite import ir
         from ..valueref import wrap_value
+        from ..llvm_extensions import constant, is_float_type
         
         python_val = self._python_object
         
@@ -554,11 +555,11 @@ class PythonType(_PythonTypeBase):
                             node=None, exc_type=TypeError)
             ir_val = ir.Constant(target_llvm_type, int(python_val))
             return wrap_value(ir_val, kind="value", type_hint=target_pc_type)
-        elif isinstance(target_llvm_type, (ir.FloatType, ir.DoubleType)):
+        elif is_float_type(target_llvm_type):
             if not isinstance(python_val, (int, float)):
                 logger.error(f"Cannot convert {type(python_val).__name__} to float type",
                             node=None, exc_type=TypeError)
-            ir_val = ir.Constant(target_llvm_type, float(python_val))
+            ir_val = constant(target_llvm_type, python_val)
             return wrap_value(ir_val, kind="value", type_hint=target_pc_type)
         else:
             logger.error(f"Cannot promote Python value to PC type {target_pc_type}",
@@ -603,7 +604,8 @@ class PythonType(_PythonTypeBase):
                 return wrap_value(ir_val, kind="value", type_hint=i64)
         elif isinstance(python_val, float):
             from .types import f64
-            ir_val = ir.Constant(ir.DoubleType(), python_val)
+            from ..llvm_extensions import constant
+            ir_val = constant(ir.DoubleType(), python_val)
             return wrap_value(ir_val, kind="value", type_hint=f64)
         else:
             logger.error(f"Cannot promote Python type {type(python_val).__name__} to PC type",

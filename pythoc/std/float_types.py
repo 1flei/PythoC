@@ -1,23 +1,12 @@
-"""
-Extended Floating Point Types
-
-These types require libgcc for software floating point support.
-"""
+"""Extended binary floats sharing the LLVM floating-point boundary."""
 
 from ..builtin_entities.base import BuiltinType
-from llvmlite import ir
-
-# Import LLVM extensions to enable BFloatType and FP128Type
-try:
-    from .. import llvm_extensions
-except ImportError:
-    pass
+from ..llvm_extensions import F16, BF16, F128
 
 
 class f16(BuiltinType):
-    """16-bit floating point type (IEEE 754 half precision)"""
-    _llvm_type = ir.HalfType()
-    _size_bytes = 2
+    _llvm_type = F16.llvm_type
+    _size_bytes = F16.bits // 8
     _is_signed = True
     _is_float = True
 
@@ -25,24 +14,10 @@ class f16(BuiltinType):
     def get_name(cls) -> str:
         return 'f16'
 
-    @classmethod
-    def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Get LLVM type and register library dependency"""
-        # add_link_library is set-based: registering on every call keeps
-        # each compile session's link set complete without a cross-session
-        # "already registered" flag.
-        from ..registry import get_unified_registry
-        get_unified_registry().add_link_library('gcc_s')
-        return cls._llvm_type
-
 
 class bf16(BuiltinType):
-    """16-bit brain floating point type (bfloat16)
-    
-    Uses monkey-patched BFloatType if available, otherwise falls back to HalfType.
-    LLVM natively supports bfloat starting from LLVM 11.
-    """
-    _size_bytes = 2
+    _llvm_type = BF16.llvm_type
+    _size_bytes = BF16.bits // 8
     _is_signed = True
     _is_float = True
 
@@ -50,40 +25,13 @@ class bf16(BuiltinType):
     def get_name(cls) -> str:
         return 'bf16'
 
-    @classmethod
-    def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Get LLVM type for bf16 and register library dependency"""
-        from ..registry import get_unified_registry
-        get_unified_registry().add_link_library('gcc_s')
-        return ir.BFloatType()
-
-
-# Set _llvm_type after class definition (will call get_llvm_type once)
-bf16._llvm_type = ir.BFloatType()
-
 
 class f128(BuiltinType):
-    """128-bit floating point type (IEEE 754 quad precision)
-    
-    Uses monkey-patched FP128Type if available, otherwise falls back to DoubleType.
-    LLVM natively supports fp128 for quad precision.
-    """
-    _size_bytes = 16
+    _llvm_type = F128.llvm_type
+    _size_bytes = F128.bits // 8
     _is_signed = True
     _is_float = True
 
     @classmethod
     def get_name(cls) -> str:
         return 'f128'
-
-    @classmethod
-    def get_llvm_type(cls, module_context=None) -> ir.Type:
-        """Get LLVM type for f128 and register library dependency"""
-        from ..registry import get_unified_registry
-        get_unified_registry().add_link_library('gcc_s')
-        return ir.FP128Type()
-
-
-# Set _llvm_type after class definition
-f128._llvm_type = ir.FP128Type()
-

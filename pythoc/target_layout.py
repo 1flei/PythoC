@@ -414,11 +414,16 @@ def _llvm_context(llvm_type):
         return _llvm_context(llvm_type.element)
     if isinstance(llvm_type, ir.PointerType) and not llvm_type.is_opaque:
         return _llvm_context(llvm_type.pointee)
-    if isinstance(llvm_type, ir.LiteralStructType):
-        for element in llvm_type.elements:
-            context = _llvm_context(element)
-            if context is not None:
-                return context
+    if isinstance(llvm_type, ir.FunctionType):
+        elements = (llvm_type.return_type, *llvm_type.args)
+    elif isinstance(llvm_type, ir.LiteralStructType):
+        elements = llvm_type.elements
+    else:
+        return None
+    for element in elements:
+        context = _llvm_context(element)
+        if context is not None:
+            return context
     return None
 
 

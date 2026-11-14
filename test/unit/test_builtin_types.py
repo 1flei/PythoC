@@ -5,7 +5,8 @@ Unit tests for builtin type entities
 import unittest
 from llvmlite import ir
 
-from pythoc import CompileSession, enum
+from pythoc import CompileSession, enum, func
+from pythoc.literal_protocol import wrap_literal_result
 from pythoc.builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -225,6 +226,37 @@ class TestEnumType(unittest.TestCase):
 
             self.assertEqual(Tags._tag_values,
                              {'Literal': 8, 'Computed': 16, 'Following': 17})
+
+
+class FunctionTypeArgumentsTest(unittest.TestCase):
+    def test_two_quoted_types_are_unnamed_parameter_and_return(self):
+        self.assertEqual(
+            func.normalize_subscript_items(('Argument', 'Result')),
+            ((None, 'Argument'), (None, 'Result')),
+        )
+
+    def test_quoted_parameter_and_concrete_return_keep_both_positions(self):
+        self.assertEqual(
+            func.normalize_subscript_items(('Argument', i32)),
+            ((None, 'Argument'), (None, i32)),
+        )
+
+    def test_sequence_carrier_keeps_function_argument_positions(self):
+        carrier = wrap_literal_result(('Argument', 'Result')).get_python_value()
+        self.assertEqual(
+            func.normalize_subscript_items(carrier),
+            ((None, 'Argument'), (None, 'Result')),
+        )
+
+    def test_nested_parameter_name_is_preserved(self):
+        self.assertEqual(
+            func.normalize_subscript_items((('value', 'Argument'), 'Result')),
+            (('value', 'Argument'), (None, 'Result')),
+        )
+
+    def test_return_type_rejects_a_parameter_name(self):
+        with self.assertRaisesRegex(TypeError, 'return type cannot have a parameter name'):
+            func[i32, 'result':i32]
 
 
 if __name__ == '__main__':

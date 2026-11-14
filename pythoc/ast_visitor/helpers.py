@@ -10,7 +10,7 @@ from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
-    f32, f64, ptr,
+    ptr,
     sizeof, nullptr,
     get_builtin_entity,
     is_builtin_type,
@@ -25,22 +25,9 @@ class HelpersMixin:
     """Mixin containing helpers-related visitor methods"""
     
     def _get_pow_intrinsic(self, type_):
-        """Get pow intrinsic for the given type"""
-        if isinstance(type_, ir.FloatType):
-            intrinsic_name = "llvm.pow.f32"
-        elif isinstance(type_, ir.DoubleType):
-            intrinsic_name = "llvm.pow.f64"
-        else:
-            # For integers, convert to double, pow, then back
-            intrinsic_name = "llvm.pow.f64"
-        
-        try:
-            return self.module.get_global(intrinsic_name)
-        except KeyError:
-            # Declare the intrinsic
-            func_type = ir.FunctionType(type_, [type_, type_])
-            return ir.Function(self.module, func_type, intrinsic_name)
-    
+        from ..llvm_extensions import intrinsic
+        return intrinsic(self.module, 'llvm.pow', type_)
+
     def _create_string_constant(self, value: str):
         """Create a global string constant"""
         # Convert string to byte array
@@ -61,21 +48,8 @@ class HelpersMixin:
         return gep_result
     
     def _get_floor_intrinsic(self, type_):
-        """Get floor intrinsic for the given type"""
-        if isinstance(type_, ir.FloatType):
-            intrinsic_name = "llvm.floor.f32"
-        elif isinstance(type_, ir.DoubleType):
-            intrinsic_name = "llvm.floor.f64"
-        else:
-            intrinsic_name = "llvm.floor.f64"
-        
-        try:
-            return self.module.get_global(intrinsic_name)
-        except KeyError:
-            # Declare the intrinsic
-            func_type = ir.FunctionType(type_, [type_])
-            return ir.Function(self.module, func_type, intrinsic_name)
-    
+        from ..llvm_extensions import intrinsic
+        return intrinsic(self.module, 'llvm.floor', type_)
 
     def _create_alloca_in_entry(self, llvm_type, name):
         """Create an alloca instruction in the entry block of the current function"""

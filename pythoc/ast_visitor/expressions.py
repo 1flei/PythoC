@@ -397,19 +397,7 @@ class ExpressionsMixin:
     
 
     def visit_Slice(self, node: ast.Slice):
-        """Handle slice syntax (x: Type) as a named-item pc_tuple carrier.
-        
-        ast.Slice structure:
-        - lower: field name (ast.Name 'x' -> string "x")
-        - upper: field type (type expression like i32)
-        - step: None (not used)
-        
-        Equivalence:
-            x: i32       <=> pc_tuple["x", i32]
-            "name": f64 <=> pc_tuple["name", f64]
-        
-        Returns: ValueRef representing a 2-item literal carrier.
-        """
+        """Preserve named-item syntax as a Python slice for normalization."""
         # Extract field name as STRING (not variable lookup!)
         if node.lower is None:
             logger.error("Slice must have lower bound (field name)", node=node, exc_type=TypeError)
@@ -436,7 +424,7 @@ class ExpressionsMixin:
         else:
             field_type = field_type_ref.type_hint
 
-        return wrap_literal_result((field_name, field_type))
+        return wrap_literal_result(slice(field_name, field_type))
 
     def visit_Tuple(self, node: ast.Tuple):
         """Handle tuple expressions as pc_tuple literal carriers."""

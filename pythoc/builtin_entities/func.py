@@ -339,6 +339,16 @@ class func(BuiltinType):
         return cls.handle_type_subscript(tuple(zip(names, resolved)))
 
     @classmethod
+    def normalize_subscript_items(cls, items):
+        """Read function parameters and the final return type as separate items."""
+        from ..literal_protocol import extract_subscript_items
+
+        return tuple(
+            cls._normalize_single_item(item)
+            for item in extract_subscript_items(items)
+        )
+
+    @classmethod
     def handle_type_subscript(cls, items):
         """Handle type subscript with normalized items for func
 

@@ -259,6 +259,50 @@ class TestTargetLayout(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 TypeLayout(*args)
 
+    def test_callback_pointer_layout_accepts_an_opaque_parameter(self):
+        context = ir.Context()
+        opaque = context.get_identified_type('OpaqueCallbackArgument')
+        callback = ir.FunctionType(ir.IntType(32), [opaque.as_pointer()]).as_pointer()
+        layout = TargetLayout().primitive(callback)
+        expected = TargetLayout().primitive(ir.IntType(8).as_pointer())
+        self.assertEqual((layout.allocation_size, layout.alignment),
+                         (expected.allocation_size, expected.alignment))
+        self.assertTrue(opaque.is_opaque)
+
+    def test_callback_pointer_layout_preserves_address_space(self):
+        from llvmlite import binding
+        context = ir.Context()
+        opaque = context.get_identified_type('AddressSpaceCallbackArgument')
+        callback = ir.FunctionType(ir.VoidType(), [opaque.as_pointer()]).as_pointer(1)
+        target = TargetLayout(target_data=binding.create_target_data(
+            'e-p:64:64-p1:32:32-i64:64-n8:16:32:64-S128'))
+        layout = target.primitive(callback)
+        self.assertEqual((layout.allocation_size, layout.alignment), (4, 4))
+        self.assertTrue(opaque.is_opaque)
+
+    def test_literal_record_layout_finds_callback_signature_context(self):
+        context = ir.Context()
+        opaque = context.get_identified_type('LiteralCallbackArgument')
+        callback = ir.FunctionType(ir.IntType(32), [opaque.as_pointer()]).as_pointer()
+        record = ir.LiteralStructType([callback])
+        target = TargetLayout()
+        layout = target.primitive(record)
+        pointer = target.primitive(ir.IntType(8).as_pointer())
+        self.assertEqual((layout.allocation_size, layout.alignment),
+                         (pointer.allocation_size, pointer.alignment))
+        self.assertTrue(opaque.is_opaque)
+
+    def test_callback_pointer_layout_finds_return_type_context(self):
+        context = ir.Context()
+        opaque = context.get_identified_type('OpaqueCallbackResult')
+        callback = ir.FunctionType(opaque.as_pointer(), []).as_pointer()
+        target = TargetLayout()
+        actual = target.primitive(callback)
+        expected = target.primitive(ir.IntType(8).as_pointer())
+        self.assertEqual((actual.allocation_size, actual.alignment),
+                         (expected.allocation_size, expected.alignment))
+        self.assertTrue(opaque.is_opaque)
+
 
 if __name__ == "__main__":
     unittest.main()

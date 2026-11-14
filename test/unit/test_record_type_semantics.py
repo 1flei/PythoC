@@ -9,9 +9,10 @@ from pythoc.forward_ref import mark_type_defined
 from pythoc.session import CompileSession
 from pythoc.target_layout import make_aggregate_layout_config
 from pythoc.type_graph import (
-    canonical_record_type, record_definition, validate_type_graph,
+    canonical_record_type, prepare_type, record_definition, validate_type_graph,
 )
 from pythoc.type_id import get_type_id
+from pythoc.type_resolver import TypeReference, TypeResolver
 
 
 def recursive_views(value_type=i32, other_type=i32):
@@ -290,6 +291,126 @@ class RecordTypeSemanticsTest(unittest.TestCase):
             validate_type_graph(second)
         with self.assertRaisesRegex(TypeError, 'Conflicting PythoC record views'):
             validate_type_graph(second)
+
+    def test_unchanged_unresolved_pointer_reuses_record_validation(self):
+        reference = TypeReference('PendingCacheTarget', {})
+        record = create_struct_type(
+            [ptr[reference], i32], ['next', 'value'],
+            python_class=type('CacheHolder', (), {}))
+        graph = self.session.type_graph
+        with patch.object(graph, '_collect', wraps=graph._collect) as collect:
+            prepare_type(record)
+            prepare_type(record)
+        self.assertEqual(collect.call_count, 1)
+
+    def test_anonymous_record_reuses_preparation_and_validation(self):
+        reference = TypeReference('PendingAnonymousCacheTarget', {})
+        record = create_struct_type([ptr[reference], i32], ['next', 'value'])
+        graph = self.session.type_graph
+        with patch.object(graph, '_collect', wraps=graph._collect) as collect:
+            prepare_type(record)
+            validate_type_graph(record)
+            prepare_type(record)
+            validate_type_graph(record)
+        self.assertEqual(collect.call_count, 1)
+
+    def test_new_staged_binding_still_checks_reachable_views(self):
+        for holder_owner in (type('StagedCacheHolder', (), {}), None):
+            with self.subTest(named=holder_owner is not None):
+                owner = type('StagedCacheTarget', (), {})
+                first = create_struct_type([i32], ['value'], python_class=owner)
+                conflict = create_struct_type([i64], ['value'], python_class=owner)
+                namespace = {}
+                reference = TypeReference('StagedCacheAlias', namespace)
+                holder = create_struct_type(
+                    [ptr[first], ptr[reference]], ['first', 'pending'],
+                    python_class=holder_owner)
+                prepare_type(holder)
+                namespace['StagedCacheAlias'] = conflict
+                with self.assertRaisesRegex(TypeError, 'Conflicting PythoC record views'):
+                    with self.session.type_graph.binding_transaction():
+                        TypeResolver.resolve_type(reference, freeze=True)
+                        prepare_type(holder)
+                namespace['StagedCacheAlias'] = first
+                prepare_type(holder)
+
+    def test_named_materialization_prepares_the_declaration_once(self):
+        from llvmlite import ir
+        from pythoc import type_graph
+
+        owner = type('MaterializedOnce', (), {})
+        record = create_struct_type(
+            [ptr['UnfinishedMaterializationTarget'], i32],
+            ['next', 'value'], python_class=owner)
+        context = ir.Context()
+        with patch.object(type_graph, 'prepare_type',
+                          wraps=type_graph.prepare_type) as prepare:
+            first = record.get_llvm_type(context)
+            second = record.get_llvm_type(context)
+        self.assertIs(first, second)
+        calls = [call for call in prepare.call_args_list if call.args[0] is record]
+        self.assertEqual(len(calls), 2)
+
+    def test_staged_validation_does_not_rescan_all_pending_bindings(self):
+        for size in (8, 16, 32):
+            with self.subTest(size=size), CompileSession() as session:
+                references = [TypeReference(f'PendingTarget{index}', {})
+                              for index in range(size)]
+                records = [create_struct_type(
+                    [ptr[reference], i32], ['next', 'value'],
+                    python_class=type(f'PendingHolder{index}', (), {}))
+                    for index, reference in enumerate(references)]
+                for record in records:
+                    prepare_type(record)
+                graph = session.type_graph
+                with graph.binding_transaction():
+                    for reference in references:
+                        TypeResolver.resolve_type(reference, required=False)
+                    with patch.object(graph.type_bindings, 'get',
+                                      wraps=graph.type_bindings.get) as lookup:
+                        for record in records:
+                            validate_type_graph(record)
+                    self.assertLessEqual(lookup.call_count, 4 * size)
+
+    def test_rolled_back_bindings_can_be_retried_with_another_type(self):
+        namespace = {}
+        reference = TypeReference('RollbackTarget', namespace)
+        record = create_struct_type([ptr[reference]], ['next'])
+        prepare_type(record)
+        graph = self.session.type_graph
+        namespace['RollbackTarget'] = i32
+        with self.assertRaisesRegex(RuntimeError, 'abort preparation'):
+            with graph.binding_transaction():
+                TypeResolver.resolve_type(reference, freeze=True)
+                prepare_type(record)
+                self.assertIs(graph.get_binding(reference).value, i32)
+                raise RuntimeError('abort preparation')
+        self.assertIsNone(graph.get_binding(reference).value)
+        namespace['RollbackTarget'] = i64
+        prepare_type(record)
+        self.assertIs(TypeResolver.resolve_type(reference), i64)
+
+    def test_binding_completed_during_validation_requires_revalidation(self):
+        owner = type('LateTarget', (), {})
+        first = create_struct_type([i32], ['value'], python_class=owner)
+        conflict = create_struct_type([i64], ['value'], python_class=owner)
+        namespace = {}
+        reference = TypeReference('LateTargetAlias', namespace)
+        holder = create_struct_type(
+            [ptr[first], ptr[reference]], ['first', 'late'])
+        graph = self.session.type_graph
+        collect = graph._collect
+
+        def collect_then_bind(root):
+            result = collect(root)
+            namespace['LateTargetAlias'] = conflict
+            TypeResolver.resolve_type(reference)
+            return result
+
+        with patch.object(graph, '_collect', side_effect=collect_then_bind):
+            validate_type_graph(holder)
+        with self.assertRaisesRegex(TypeError, 'Conflicting PythoC record views'):
+            validate_type_graph(holder)
 
 
 if __name__ == '__main__':

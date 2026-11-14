@@ -12,11 +12,7 @@ from .base import BuiltinType, _get_unified_registry
 from ..valueref import ensure_ir, wrap_value, get_type, get_type_hint
 from ..logger import logger
 
-# Import LLVM extensions to enable BFloatType and FP128Type
-try:
-    from .. import llvm_extensions
-except ImportError:
-    pass  # Extensions not available, will use fallbacks
+from ..llvm_extensions import F32, F64
 
 
 # ============================================================================
@@ -53,8 +49,8 @@ for _w in range(1, 129):
 
 class f32(BuiltinType):
     """32-bit floating point type (IEEE 754 single precision)"""
-    _llvm_type = ir.FloatType()
-    _size_bytes = 4
+    _llvm_type = F32.llvm_type
+    _size_bytes = F32.bits // 8
     _is_signed = True
     _is_float = True
     
@@ -65,8 +61,8 @@ class f32(BuiltinType):
 
 class f64(BuiltinType):
     """64-bit floating point type (IEEE 754 double precision)"""
-    _llvm_type = ir.DoubleType()
-    _size_bytes = 8
+    _llvm_type = F64.llvm_type
+    _size_bytes = F64.bits // 8
     _is_signed = True
     _is_float = True
     
