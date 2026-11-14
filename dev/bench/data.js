@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794496471318,
+  "lastUpdate": 1794640044500,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3709,6 +3709,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.962,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "ea8eb3a11ef0d1fcb93b6872e1a4d7d308a06769",
+          "message": "Update float constant value representation and the range of CI",
+          "timestamp": "2026-11-14T14:58:56+08:00",
+          "tree_id": "121dac60a09ac4882406f3a838d23b7ea7f0335f",
+          "url": "https://github.com/1flei/PythoC/commit/ea8eb3a11ef0d1fcb93b6872e1a4d7d308a06769"
+        },
+        "date": 1794640044056,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 1.15,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.03,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 1.415,
             "unit": "seconds/test"
           }
         ]
