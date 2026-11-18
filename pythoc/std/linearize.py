@@ -1,151 +1,55 @@
-# varargs ABI v2
-"""
-Linearize resource management functions.
-# *args: T refactored to single-param ABI
+"""Build a proof type carrying a fixed acquire/release pair."""
 
-Provides metaprogramming utilities to transform a pair of acquire/release
-functions into linear-token enforced APIs for resource safety.
-
-Usage:
-    from pythoc.std.linearize import linearize
-    from pythoc import compile, effect, u64
-    from pythoc.std import mem
-
-    # Use the memory effect's linear allocation interface.
-    @compile
-    def allocate_and_free(size: u64):
-        p, proof = effect.mem.lmalloc(size)
-        effect.mem.lfree(p, proof)
-
-    # Use with custom proof struct name
-    from pythoc.libc.stdio import fopen, fclose
-    FileHandle, lfopen, lfclose = linearize(
-        fopen,
-        fclose,
-        struct_name="FileHandle",
-    )
-"""
-
-from ..decorators import compile
-from ..builtin_entities import linear, struct, consume, refined, assume
+from pythoc import compile, linear, struct, consume, refined, assume, typeof, meta
 
 
-def _extract_function_info(func):
-    """Extract function info from either compiled functions or extern wrappers."""
-    # Handle ExternFunctionWrapper
-    if hasattr(func, 'func_name') and hasattr(func, 'param_types'):
-        func_name = func.func_name
-        param_types = [ptype for name, ptype in func.param_types if name != 'args']
-        return_type = func.return_type
-        return func_name, param_types, return_type
+def linearize(acquire_func, release_func, name=None):
+    """Return a proof type with acquire and release methods.
 
-    # Handle @compile functions - get func_info directly from wrapper
-    func_info = getattr(func, '_func_info', None)
-    if not func_info:
-        func_name = getattr(func, '__name__', str(func))
-        raise NameError(f"Function '{func_name}' not found - missing _func_info attribute")
-
-    func_name = getattr(func, '__name__', str(func))
-    param_types = [
-        func_info.param_type_hints[name]
-        for name in func_info.param_names
-    ]
-    return_type = func_info.return_type_hint
-
-    return func_name, param_types, return_type
-
-
-def linearize(acquire_func, release_func, struct_name=None):
-    """Linearize an acquire/release pair with a linear proof token.
-
-    Args:
-        acquire_func: Function that acquires a resource (e.g., malloc, fopen)
-        release_func: Function that releases a resource (e.g., free, fclose)
-        struct_name: Optional custom name for the proof struct type.
-            If provided, returns (ProofType, wrapped_acquire, wrapped_release).
-            If None, returns (wrapped_acquire, wrapped_release) with raw linear.
-
-    Returns:
-        If struct_name is None:
-            (wrapped_acquire, wrapped_release)
-            - acquire returns struct[resource, linear]
-            - release takes (resource_params..., linear)
-        If struct_name is provided:
-            (ProofType, wrapped_acquire, wrapped_release)
-            - ProofType is refined[linear, struct_name]
-            - acquire returns struct[resource, ProofType]
-            - release takes (resource_params..., ProofType)
-
-    Note:
-        The proof is always the SECOND field in the acquire return struct.
-        This matches the natural resource-first calling convention.
+    acquire returns struct[resource, ProofType]. release accepts the original
+    release arguments followed by that proof. The proof records the selected
+    callable pair; a display name alone never establishes protocol identity.
     """
+    acquire_type, release_type = typeof(acquire_func), typeof(release_func)
+    if (getattr(acquire_type, 'param_types', None) is None
+            or getattr(release_type, 'param_types', None) is None):
+        raise TypeError('linearize requires concrete callable signatures')
+    acquire_param_types = list(acquire_type.param_types)
+    release_param_types = list(release_type.param_types)
+    acquire_return_type = acquire_type.return_type
+    identity = meta.normalize_factory_key(acquire_func, release_func, name=name)
+    proof_tag = 'linearize:' + identity
+    ProofType = refined[linear, proof_tag]
+    ProofType.__name__ = name or 'ResourceProof'
+    suffix = ('linearize', identity)
 
-    acquire_name, acquire_param_types, acquire_return_type = _extract_function_info(acquire_func)
-    release_name, release_param_types, _ = _extract_function_info(release_func)
+    @compile(suffix=(suffix, 'make_proof'))
+    def make_proof() -> ProofType:
+        return assume(linear(), proof_tag)
 
-    # Deterministic suffix ensures stable symbol names across processes.
-    # Format: lz_<acquire>_<release>[_<struct_name>] (lz = linearize)
-    if struct_name:
-        deterministic_suffix = f"lz_{acquire_name}_{release_name}_{struct_name}"
-    else:
-        deterministic_suffix = f"lz_{acquire_name}_{release_name}"
+    ReturnStruct = struct[acquire_return_type, ProofType]
+    AcquireParams = struct[tuple(acquire_param_types)]
 
-    # Suppress the effect suffix so @compile inside linearize always produces
-    # the default (non-suffixed) version. Without this, if linearize() is called
-    # during module init inside `with effect(...)`, the wrappers would pick up
-    # the effect suffix and permanently contaminate the module-level bindings.
-    # Effect specialization is handled later by the import hook via
-    # get_effect_specialized().
-    from ..effect import suppress_effect_suffix
+    @compile(suffix=(suffix, 'acquire'))
+    def acquire(*args: AcquireParams) -> ReturnStruct:
+        result: ReturnStruct
+        result[0] = acquire_func(*args)
+        result[1] = make_proof()
+        return result
 
-    with suppress_effect_suffix():
-        # Create proof type
-        if struct_name:
-            ProofType = refined[linear, struct_name]
+    ReleaseParams = struct[tuple(release_param_types)]
+    ReleaseWithProof = struct[tuple(release_param_types + [ProofType])]
+    count = len(release_param_types)
 
-            @compile(suffix=deterministic_suffix)
-            def make_proof() -> ProofType:
-                return assume(linear(), struct_name)
-        else:
-            ProofType = linear
+    @compile(suffix=(suffix, 'release'))
+    def release(*args: ReleaseWithProof):
+        params: ReleaseParams
+        for index in range(count):
+            params[index] = args[index]
+        proof: ProofType = args[count]
+        release_func(*params)
+        consume(proof)
 
-            @compile(suffix=deterministic_suffix)
-            def make_proof() -> ProofType:
-                return linear()
-
-        @compile(suffix=deterministic_suffix)
-        def release_proof(prf: ProofType):
-            consume(prf)
-
-        # acquire returns (resource, proof)
-        ReturnStruct = struct[acquire_return_type, ProofType]
-
-        AcquireParamsStruct = struct[tuple(acquire_param_types)]
-
-        @compile(suffix=deterministic_suffix)
-        def wrapped_acquire(*args: AcquireParamsStruct) -> ReturnStruct:
-            ret: ReturnStruct
-            ret[0] = acquire_func(*args)
-            ret[1] = make_proof()
-            return ret
-
-        # release takes (resource_params..., proof)
-        ReleaseParamsStruct = struct[tuple(release_param_types)]
-        ReleaseWithProofStruct = struct[tuple(release_param_types + [ProofType])]
-        num_release_params = len(release_param_types)
-
-        @compile(suffix=deterministic_suffix)
-        def wrapped_release(*args: ReleaseWithProofStruct):
-            params: ReleaseParamsStruct
-            for i in range(num_release_params):
-                params[i] = args[i]
-
-            prf: ProofType = args[num_release_params]
-            release_func(*params)
-            release_proof(prf)
-
-    if struct_name:
-        return ProofType, wrapped_acquire, wrapped_release
-    else:
-        return wrapped_acquire, wrapped_release
+    ProofType.acquire = acquire
+    ProofType.release = release
+    return ProofType

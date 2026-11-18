@@ -5,11 +5,11 @@ import unittest
 from pythoc import compile, effect, i32, ptr
 from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
 from pythoc.logger import set_raise_on_error
-from pythoc.std.result import ErrnoSlotProvider, result_wrap
+from pythoc.std.result import ErrnoSlotProvider, Result as ResultType
 
 
 set_raise_on_error(True)
-Result, result = result_wrap(i32, i32, name='ExplicitFailurePolicyResult')
+Result = ResultType(i32, i32, name='ExplicitFailurePolicyResult')
 provider = ErrnoSlotProvider()
 explicit_slot = provider.get_slot(i32)
 
@@ -17,16 +17,16 @@ explicit_slot = provider.get_slot(i32)
 @compile
 def checked(value: i32) -> Result:
     if value >= 0:
-        return result.ok(value)
-    return result.err(-value * 10)
+        return Result.ok(value)
+    return Result.err(-value * 10)
 
 
 @compile
 def compose(first: i32, second: i32) -> Result:
-    return result.do(
+    return Result.do(
         left + right
-        for left in result.bind(checked(first))
-        for right in result.bind(checked(second))
+        for left in Result.bind(checked(first))
+        for right in Result.bind(checked(second))
     )
 
 
@@ -42,8 +42,8 @@ def propagate(first: i32, second: i32) -> i32:
 
 @compile
 def nested(value: i32) -> i32:
-    composed = result.do(
-        item + 1 for item in result.bind(compose(value, 3))
+    composed = Result.do(
+        item + 1 for item in Result.bind(compose(value, 3))
     )
     match composed:
         case (Result.Ok, answer):
@@ -55,13 +55,13 @@ def nested(value: i32) -> i32:
 with effect(errno=provider, suffix='explicit_result_errno'):
     @compile
     def record_failure(value: i32) -> i32:
-        for item in result.bind(checked(value)):
+        for item in Result.bind(checked(value)):
             return item
         return i32(-1)
 
     @compile
     def local_composition(value: i32) -> i32:
-        composed = result.do(item for item in result.bind(checked(value)))
+        composed = Result.do(item for item in Result.bind(checked(value)))
         match composed:
             case (Result.Ok, answer):
                 return answer
@@ -109,7 +109,7 @@ class TestResultFailurePolicy(unittest.TestCase):
     def test_unhandled_bind_is_rejected_at_compilation(self):
         @compile(suffix='unhandled_result_bind')
         def unhandled() -> i32:
-            for value in result.bind(result.err(31)):
+            for value in Result.bind(Result.err(31)):
                 return value
             return i32(-1)
 

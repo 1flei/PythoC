@@ -732,7 +732,6 @@ class TypeRelationsTest(unittest.TestCase):
             return value + 2
 
         dispatch = Poly(original)
-        dispatch.prepare_dynamic_dispatch(number)
         dispatch.append(replacement)
 
         @compile(suffix='relation_poly_replaced_call')
@@ -969,8 +968,8 @@ class TypeRelationsTest(unittest.TestCase):
 
     def test_equivalent_standard_predicates_share_refinement_at_calls(self):
         from pythoc.std.refinement import positive
-        first = positive(i32)[1]
-        second = positive(i32)[1]
+        first = positive(i32)
+        second = positive(i32)
 
         @compile(suffix='relation_standard_predicate_parameter')
         def accept(value: second) -> i32:
@@ -986,10 +985,10 @@ class TypeRelationsTest(unittest.TestCase):
 
     def test_standard_predicate_families_keep_independent_runtime_behavior(self):
         from pythoc.std.refinement import positive, nonnegative, nonzero, in_range
-        is_positive = positive(i32)[0]
-        is_nonnegative = nonnegative(i32)[0]
-        is_nonzero = nonzero(i32)[0]
-        is_bounded = in_range(i32, 0, 10)[0]
+        is_positive = positive(i32).predicate
+        is_nonnegative = nonnegative(i32).predicate
+        is_nonzero = nonzero(i32).predicate
+        is_bounded = in_range(i32, 0, 10).predicate
 
         @compile(suffix='relation_predicate_family_behavior')
         def check(value: i32) -> i32:

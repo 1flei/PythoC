@@ -203,6 +203,12 @@ class EnumType(CompositeType):
     def is_enum_type(cls) -> bool:
         """Override base class to return True for enum types."""
         return True
+
+    @classmethod
+    def get_variants(cls):
+        """Return declaration-order (name, payload type, tag) metadata."""
+        return tuple((name, payload, cls._tag_values[name])
+                     for name, payload in zip(cls._variant_names, cls._variant_types))
     
     @classmethod
     def get_ctypes_type(cls):

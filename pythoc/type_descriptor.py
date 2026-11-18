@@ -120,8 +120,7 @@ def leaf_key(pc_type):
         from .builtin_entities import types as builtin_types
         if vars(builtin_types).get(pc_type.__name__) is pc_type:
             return ('builtin', 'pythoc.builtin_entities.types', pc_type.__name__)
-        if (pc_type.__module__.startswith('pythoc.builtin_entities')
-                or pc_type.__module__ == 'pythoc.std.float_types'):
+        if pc_type.__module__.startswith('pythoc.builtin_entities'):
             import importlib
             module = importlib.import_module(pc_type.__module__)
             if vars(module).get(pc_type.__name__) is pc_type:
@@ -1122,6 +1121,13 @@ def specialization_key(value, _active=None):
     if _is_type_like(value):
         from .type_id import get_type_id
         return ('pc-type', get_type_id(value))
+    if getattr(value, '_is_compiled', False):
+        binding = getattr(value, '_binding', None)
+        if binding is not None and binding.registration_identity is not None:
+            return ('compiled-callable', binding.source_file, binding.original_name,
+                    specialization_key(binding.compile_suffix),
+                    specialization_key(binding.effect_suffix),
+                    binding.registration_identity)
     kind = type(value)
     if kind not in (tuple, list, dict):
         return atom(value)

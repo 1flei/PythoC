@@ -12,7 +12,7 @@ from .base import BuiltinType, _get_unified_registry
 from ..valueref import ensure_ir, wrap_value, get_type, get_type_hint
 from ..logger import logger
 
-from ..llvm_extensions import F32, F64
+from ..llvm_extensions import F16, BF16, F32, F64, F128
 
 
 # ============================================================================
@@ -47,6 +47,30 @@ for _w in range(1, 129):
 # Floating Point Types
 # ============================================================================
 
+class f16(BuiltinType):
+    """16-bit IEEE 754 floating point type."""
+    _llvm_type = F16.llvm_type
+    _size_bytes = F16.bits // 8
+    _is_signed = True
+    _is_float = True
+
+    @classmethod
+    def get_name(cls) -> str:
+        return 'f16'
+
+
+class bf16(BuiltinType):
+    """16-bit brain floating point type."""
+    _llvm_type = BF16.llvm_type
+    _size_bytes = BF16.bits // 8
+    _is_signed = True
+    _is_float = True
+
+    @classmethod
+    def get_name(cls) -> str:
+        return 'bf16'
+
+
 class f32(BuiltinType):
     """32-bit floating point type (IEEE 754 single precision)"""
     _llvm_type = F32.llvm_type
@@ -69,6 +93,18 @@ class f64(BuiltinType):
     @classmethod
     def get_name(cls) -> str:
         return 'f64'
+
+
+class f128(BuiltinType):
+    """128-bit IEEE 754 floating point type."""
+    _llvm_type = F128.llvm_type
+    _size_bytes = F128.bits // 8
+    _is_signed = True
+    _is_float = True
+
+    @classmethod
+    def get_name(cls) -> str:
+        return 'f128'
 
 
 # ============================================================================

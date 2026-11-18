@@ -5,7 +5,7 @@ import unittest
 from pythoc import compile, i8, i32, ptr
 from pythoc.build.output_manager import flush_all_pending_outputs
 from pythoc.libc.string import strlen
-from pythoc.std.result import result_wrap
+from pythoc.std.result import Result as ResultType
 from test.utils.test_utils import DeferredTestCase
 
 
@@ -14,15 +14,15 @@ class Marker:
     value: i32
 
 
-Outcome, outcome = result_wrap(i32, Marker, name='YieldHygieneOutcome')
+Outcome = ResultType(i32, Marker, name='YieldHygieneOutcome')
 
 
 @compile
 def fallible_values() -> Outcome:
-    result = outcome.ok(7)
+    result = Outcome.ok(7)
     match result:
         case (Outcome.Err, name):
-            yield outcome.err(name)
+            yield Outcome.err(name)
             return
         case Outcome.Ok:
             pass
@@ -38,7 +38,7 @@ def pointer_consumer(name: ptr[i8]) -> i32:
 
 @compile
 def pattern_values() -> i32:
-    result = outcome.ok(7)
+    result = Outcome.ok(7)
     match result:
         case (Outcome.Ok, name):
             yield name
@@ -68,7 +68,7 @@ def assignment_consumer(name: i32) -> i32:
 
 @compile
 def parameter_values() -> i32:
-    result = outcome.ok(7)
+    result = Outcome.ok(7)
     match result:
         case (Outcome.Ok, name):
             def inner(name: i32) -> i32:
@@ -87,7 +87,7 @@ def parameter_consumer(name: i32) -> i32:
 
 @compile
 def annotated_values() -> i32:
-    result = outcome.ok(7)
+    result = Outcome.ok(7)
     match result:
         case (Outcome.Ok, name):
             def inner() -> i32:
@@ -107,7 +107,7 @@ def annotated_consumer(name: i32) -> i32:
 
 @compile
 def captured_values() -> i32:
-    result = outcome.ok(7)
+    result = Outcome.ok(7)
     match result:
         case (Outcome.Ok, name):
             def inner() -> i32:
@@ -130,7 +130,7 @@ def captured_consumer(name: i32) -> i32:
 def closure_consumer(name: i32) -> i32:
     def values() -> i32:
         name += 2
-        result = outcome.ok(7)
+        result = Outcome.ok(7)
         match result:
             case (Outcome.Ok, increment):
                 name += increment
@@ -145,7 +145,7 @@ def closure_consumer(name: i32) -> i32:
 @compile
 def closure_pattern_consumer(name: i32) -> i32:
     def values() -> i32:
-        result = outcome.ok(7)
+        result = Outcome.ok(7)
         match result:
             case (Outcome.Ok, name):
                 yield name

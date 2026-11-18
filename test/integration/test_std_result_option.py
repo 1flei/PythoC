@@ -5,14 +5,14 @@ import unittest
 
 from pythoc import compile, enum, i32, struct
 from pythoc import bool as pc_bool
-from pythoc.std.result import result_wrap, option_wrap, make_note, make_hush
+from pythoc.std.result import Result as ResultType, Option as OptionType
 
 
 # =============================================================================
 # Basic Option/Result types
 # =============================================================================
 
-O, O_api = option_wrap(i32, name="O")
+O = OptionType(i32, name="O")
 
 
 @enum(i32)
@@ -20,11 +20,9 @@ class Err:
     Code: i32
 
 
-R, R_api = result_wrap(i32, Err, name="R")
+R = ResultType(i32, Err, name="R")
 
 # Pre-bind cross-type conversions at Python meta layer
-note_O_to_R = make_note(O_api, R_api)
-hush_R_to_O = make_hush(R_api, O_api)
 
 
 # =============================================================================
@@ -38,7 +36,7 @@ class MultiErr:
     InvalidArg: i32
 
 
-MR, MR_api = result_wrap(i32, MultiErr, name="MR")
+MR = ResultType(i32, MultiErr, name="MR")
 
 
 # =============================================================================
@@ -47,8 +45,8 @@ MR, MR_api = result_wrap(i32, MultiErr, name="MR")
 
 Point = struct["x": i32, "y": i32]
 
-OP, OP_api = option_wrap(Point, name="OP")
-RP, RP_api = result_wrap(Point, Err, name="RP")
+OP = OptionType(Point, name="OP")
+RP = ResultType(Point, Err, name="RP")
 
 
 # =============================================================================
@@ -58,22 +56,22 @@ RP, RP_api = result_wrap(Point, Err, name="RP")
 @compile
 def maybe_add1(x: i32) -> O:
     if x > 0:
-        return O_api.some(x + 1)
-    return O_api.none()
+        return O.some(x + 1)
+    return O.none()
 
 
 @compile
 def checked_add2(x: i32) -> R:
     if x > 0:
-        return R_api.ok(x + 2)
-    return R_api.err(Err(Err.Code, 7))
+        return R.ok(x + 2)
+    return R.err(Err(Err.Code, 7))
 
 
 @compile
 def checked_add3(x: i32) -> R:
     if x > 3:
-        return R_api.ok(x + 3)
-    return R_api.err(Err(Err.Code, 9))
+        return R.ok(x + 3)
+    return R.err(Err(Err.Code, 9))
 
 
 # =============================================================================
@@ -82,7 +80,7 @@ def checked_add3(x: i32) -> R:
 
 @compile
 def test_option_do_ok() -> i32:
-    r = O_api.do(v + 10 for v in O_api.bind(maybe_add1(5)))
+    r = O.do(v + 10 for v in O.bind(maybe_add1(5)))
     match r:
         case (O.Some, value):
             return value
@@ -92,7 +90,7 @@ def test_option_do_ok() -> i32:
 
 @compile
 def test_option_do_none() -> i32:
-    r = O_api.do(v + 10 for v in O_api.bind(maybe_add1(0)))
+    r = O.do(v + 10 for v in O.bind(maybe_add1(0)))
     match r:
         case (O.Some, value):
             return value
@@ -102,7 +100,7 @@ def test_option_do_none() -> i32:
 
 @compile
 def test_result_do_ok() -> i32:
-    r = R_api.do(v1 + v2 for v1 in R_api.bind(checked_add2(3)) for v2 in R_api.bind(checked_add3(v1)))
+    r = R.do(v1 + v2 for v1 in R.bind(checked_add2(3)) for v2 in R.bind(checked_add3(v1)))
     match r:
         case (R.Ok, value):
             return value
@@ -112,7 +110,7 @@ def test_result_do_ok() -> i32:
 
 @compile
 def test_result_do_first_err() -> i32:
-    r = R_api.do(v1 + v2 for v1 in R_api.bind(checked_add2(0)) for v2 in R_api.bind(checked_add3(v1)))
+    r = R.do(v1 + v2 for v1 in R.bind(checked_add2(0)) for v2 in R.bind(checked_add3(v1)))
     match r:
         case (R.Ok, value):
             return value
@@ -126,7 +124,7 @@ def test_result_do_first_err() -> i32:
 
 @compile
 def test_result_do_second_err() -> i32:
-    r = R_api.do(v1 + v2 for v1 in R_api.bind(checked_add2(1)) for v2 in R_api.bind(checked_add3(v1)))
+    r = R.do(v1 + v2 for v1 in R.bind(checked_add2(1)) for v2 in R.bind(checked_add3(v1)))
     match r:
         case (R.Ok, value):
             return value
@@ -145,18 +143,18 @@ def test_result_do_second_err() -> i32:
 @compile
 def checked_double(x: i32) -> R:
     if x < 100:
-        return R_api.ok(x * 2)
-    return R_api.err(Err(Err.Code, 11))
+        return R.ok(x * 2)
+    return R.err(Err(Err.Code, 11))
 
 
 @compile
 def test_triple_bind_all_ok() -> i32:
     # 3 -> +2=5 -> +3=8 -> *2=16, final = 5+8+16 = 29
-    r = R_api.do(
+    r = R.do(
         v1 + v2 + v3
-        for v1 in R_api.bind(checked_add2(3))
-        for v2 in R_api.bind(checked_add3(v1))
-        for v3 in R_api.bind(checked_double(v2))
+        for v1 in R.bind(checked_add2(3))
+        for v2 in R.bind(checked_add3(v1))
+        for v3 in R.bind(checked_double(v2))
     )
     match r:
         case (R.Ok, value):
@@ -168,11 +166,11 @@ def test_triple_bind_all_ok() -> i32:
 @compile
 def test_triple_bind_fail_third() -> i32:
     # 3 -> +2=5 -> +3=8, but double(200) -> err(11)
-    r = R_api.do(
+    r = R.do(
         v1 + v2 + v3
-        for v1 in R_api.bind(checked_add2(3))
-        for v2 in R_api.bind(checked_add3(v1))
-        for v3 in R_api.bind(checked_double(200))
+        for v1 in R.bind(checked_add2(3))
+        for v2 in R.bind(checked_add3(v1))
+        for v3 in R.bind(checked_double(200))
     )
     match r:
         case (R.Ok, value):
@@ -192,15 +190,15 @@ def test_triple_bind_fail_third() -> i32:
 @compile
 def multi_err_fn(x: i32) -> MR:
     if x > 0:
-        return MR_api.ok(x * 10)
+        return MR.ok(x * 10)
     if x == 0:
-        return MR_api.err(MultiErr(MultiErr.Overflow))
-    return MR_api.err(MultiErr(MultiErr.NotFound, -x))
+        return MR.err(MultiErr(MultiErr.Overflow))
+    return MR.err(MultiErr(MultiErr.NotFound, -x))
 
 
 @compile
 def test_multi_err_ok() -> i32:
-    r = MR_api.do(v + 1 for v in MR_api.bind(multi_err_fn(5)))
+    r = MR.do(v + 1 for v in MR.bind(multi_err_fn(5)))
     match r:
         case (MR.Ok, value):
             return value
@@ -210,7 +208,7 @@ def test_multi_err_ok() -> i32:
 
 @compile
 def test_multi_err_overflow() -> i32:
-    r = MR_api.do(v + 1 for v in MR_api.bind(multi_err_fn(0)))
+    r = MR.do(v + 1 for v in MR.bind(multi_err_fn(0)))
     match r:
         case (MR.Ok, _):
             return -1
@@ -226,7 +224,7 @@ def test_multi_err_overflow() -> i32:
 
 @compile
 def test_multi_err_not_found() -> i32:
-    r = MR_api.do(v + 1 for v in MR_api.bind(multi_err_fn(-7)))
+    r = MR.do(v + 1 for v in MR.bind(multi_err_fn(-7)))
     match r:
         case (MR.Ok, _):
             return -1
@@ -247,17 +245,17 @@ def test_multi_err_not_found() -> i32:
 @compile
 def multi_err_fn2(x: i32) -> MR:
     if x > 10:
-        return MR_api.ok(x - 10)
-    return MR_api.err(MultiErr(MultiErr.InvalidArg, x))
+        return MR.ok(x - 10)
+    return MR.err(MultiErr(MultiErr.InvalidArg, x))
 
 
 @compile
 def test_multi_err_chain_first_wins() -> i32:
     # multi_err_fn(0) -> Overflow, multi_err_fn2 never runs
-    r = MR_api.do(
+    r = MR.do(
         v1 + v2
-        for v1 in MR_api.bind(multi_err_fn(0))
-        for v2 in MR_api.bind(multi_err_fn2(v1))
+        for v1 in MR.bind(multi_err_fn(0))
+        for v2 in MR.bind(multi_err_fn2(v1))
     )
     match r:
         case (MR.Ok, _):
@@ -275,10 +273,10 @@ def test_multi_err_chain_first_wins() -> i32:
 @compile
 def test_multi_err_chain_second_wins() -> i32:
     # multi_err_fn(1) -> ok(10), multi_err_fn2(10) -> err(InvalidArg, 10)
-    r = MR_api.do(
+    r = MR.do(
         v1 + v2
-        for v1 in MR_api.bind(multi_err_fn(1))
-        for v2 in MR_api.bind(multi_err_fn2(v1))
+        for v1 in MR.bind(multi_err_fn(1))
+        for v2 in MR.bind(multi_err_fn2(v1))
     )
     match r:
         case (MR.Ok, _):
@@ -301,8 +299,8 @@ def test_multi_err_chain_second_wins() -> i32:
 def make_point(x: i32, y: i32) -> OP:
     if x >= 0:
         p: Point = (x, y)
-        return OP_api.some(p)
-    return OP_api.none()
+        return OP.some(p)
+    return OP.none()
 
 
 @compile
@@ -313,9 +311,9 @@ def offset_point(p: Point, dx: i32, dy: i32) -> Point:
 
 @compile
 def test_option_struct_some() -> i32:
-    r = OP_api.do(
+    r = OP.do(
         offset_point(p, 10, 20)
-        for p in OP_api.bind(make_point(3, 4))
+        for p in OP.bind(make_point(3, 4))
     )
     match r:
         case (OP.Some, value):
@@ -326,9 +324,9 @@ def test_option_struct_some() -> i32:
 
 @compile
 def test_option_struct_none() -> i32:
-    r = OP_api.do(
+    r = OP.do(
         offset_point(p, 10, 20)
-        for p in OP_api.bind(make_point(-1, 4))
+        for p in OP.bind(make_point(-1, 4))
     )
     match r:
         case (OP.Some, _):
@@ -345,15 +343,15 @@ def test_option_struct_none() -> i32:
 def checked_make_point(x: i32, y: i32) -> RP:
     if x >= 0:
         p: Point = (x, y)
-        return RP_api.ok(p)
-    return RP_api.err(Err(Err.Code, 42))
+        return RP.ok(p)
+    return RP.err(Err(Err.Code, 42))
 
 
 @compile
 def test_result_struct_ok() -> i32:
-    r = RP_api.do(
+    r = RP.do(
         offset_point(p, 100, 200)
-        for p in RP_api.bind(checked_make_point(5, 7))
+        for p in RP.bind(checked_make_point(5, 7))
     )
     match r:
         case (RP.Ok, value):
@@ -364,9 +362,9 @@ def test_result_struct_ok() -> i32:
 
 @compile
 def test_result_struct_err() -> i32:
-    r = RP_api.do(
+    r = RP.do(
         offset_point(p, 100, 200)
-        for p in RP_api.bind(checked_make_point(-1, 7))
+        for p in RP.bind(checked_make_point(-1, 7))
     )
     match r:
         case (RP.Ok, _):
@@ -385,10 +383,10 @@ def test_result_struct_err() -> i32:
 
 @compile
 def test_result_struct_chain_ok() -> i32:
-    r = RP_api.do(
+    r = RP.do(
         offset_point(p1, p2.x, p2.y)
-        for p1 in RP_api.bind(checked_make_point(10, 20))
-        for p2 in RP_api.bind(checked_make_point(30, 40))
+        for p1 in RP.bind(checked_make_point(10, 20))
+        for p2 in RP.bind(checked_make_point(30, 40))
     )
     match r:
         case (RP.Ok, value):
@@ -399,10 +397,10 @@ def test_result_struct_chain_ok() -> i32:
 
 @compile
 def test_result_struct_chain_second_err() -> i32:
-    r = RP_api.do(
+    r = RP.do(
         offset_point(p1, p2.x, p2.y)
-        for p1 in RP_api.bind(checked_make_point(10, 20))
-        for p2 in RP_api.bind(checked_make_point(-5, 40))
+        for p1 in RP.bind(checked_make_point(10, 20))
+        for p2 in RP.bind(checked_make_point(-5, 40))
     )
     match r:
         case (RP.Ok, _):
@@ -422,17 +420,17 @@ def test_result_struct_chain_second_err() -> i32:
 @compile
 def clamp_positive(x: i32) -> O:
     if x > 0:
-        return O_api.some(x)
-    return O_api.none()
+        return O.some(x)
+    return O.none()
 
 
 @compile
 def test_option_chain_two_binds_ok() -> i32:
     # 5 -> +1=6 -> clamp(6)=Some(6) -> 6+100=106
-    r = O_api.do(
+    r = O.do(
         v2 + 100
-        for v1 in O_api.bind(maybe_add1(5))
-        for v2 in O_api.bind(clamp_positive(v1))
+        for v1 in O.bind(maybe_add1(5))
+        for v2 in O.bind(clamp_positive(v1))
     )
     match r:
         case (O.Some, value):
@@ -444,10 +442,10 @@ def test_option_chain_two_binds_ok() -> i32:
 @compile
 def test_option_chain_first_none() -> i32:
     # 0 -> maybe_add1 -> None, second bind never runs
-    r = O_api.do(
+    r = O.do(
         v2 + 100
-        for v1 in O_api.bind(maybe_add1(0))
-        for v2 in O_api.bind(clamp_positive(v1))
+        for v1 in O.bind(maybe_add1(0))
+        for v2 in O.bind(clamp_positive(v1))
     )
     match r:
         case (O.Some, _):
@@ -461,10 +459,10 @@ def test_option_chain_second_none() -> i32:
     # maybe_add1(5)=Some(6), clamp_positive(-6) would be None
     # but 6 > 0, so let's use clamp_positive with a negative input
     # We need a function that returns None for positive inputs > threshold
-    r = O_api.do(
+    r = O.do(
         v2 + 100
-        for v1 in O_api.bind(maybe_add1(5))
-        for v2 in O_api.bind(clamp_positive(-v1))
+        for v1 in O.bind(maybe_add1(5))
+        for v2 in O.bind(clamp_positive(-v1))
     )
     match r:
         case (O.Some, _):
@@ -480,10 +478,10 @@ def test_option_chain_second_none() -> i32:
 @compile
 def test_result_boundary_one() -> i32:
     # x=1 -> checked_add2(1)=ok(3), checked_add3(3)=err(9) (3 <= 3)
-    r = R_api.do(
+    r = R.do(
         v1 + v2
-        for v1 in R_api.bind(checked_add2(1))
-        for v2 in R_api.bind(checked_add3(v1))
+        for v1 in R.bind(checked_add2(1))
+        for v2 in R.bind(checked_add3(v1))
     )
     match r:
         case (R.Ok, _):
@@ -499,10 +497,10 @@ def test_result_boundary_one() -> i32:
 @compile
 def test_result_boundary_two() -> i32:
     # x=2 -> checked_add2(2)=ok(4), checked_add3(4)=ok(7), final = 4+7 = 11
-    r = R_api.do(
+    r = R.do(
         v1 + v2
-        for v1 in R_api.bind(checked_add2(2))
-        for v2 in R_api.bind(checked_add3(v1))
+        for v1 in R.bind(checked_add2(2))
+        for v2 in R.bind(checked_add3(v1))
     )
     match r:
         case (R.Ok, value):
@@ -517,40 +515,40 @@ def test_result_boundary_two() -> i32:
 
 @compile
 def test_is_some_true() -> i32:
-    o: O = O_api.some(42)
-    if O_api.is_some(o):
+    o: O = O.some(42)
+    if O.is_some(o):
         return 1
     return 0
 
 
 @compile
 def test_is_some_false() -> i32:
-    o: O = O_api.none()
-    if O_api.is_some(o):
+    o: O = O.none()
+    if O.is_some(o):
         return 1
     return 0
 
 
 @compile
 def test_is_none_true() -> i32:
-    o: O = O_api.none()
-    if O_api.is_none(o):
+    o: O = O.none()
+    if O.is_none(o):
         return 1
     return 0
 
 
 @compile
 def test_is_ok_true() -> i32:
-    r: R = R_api.ok(99)
-    if R_api.is_ok(r):
+    r: R = R.ok(99)
+    if R.is_ok(r):
         return 1
     return 0
 
 
 @compile
 def test_is_err_true() -> i32:
-    r: R = R_api.err(Err(Err.Code, 5))
-    if R_api.is_err(r):
+    r: R = R.err(Err(Err.Code, 5))
+    if R.is_err(r):
         return 1
     return 0
 
@@ -600,25 +598,25 @@ def test_result_direct_match_err() -> i32:
 @compile
 def test_option_unwrap_or_some() -> i32:
     o: O = maybe_add1(5)  # Some(6)
-    return O_api.unwrap_or(o, 99)
+    return O.unwrap_or(o, 99)
 
 
 @compile
 def test_option_unwrap_or_none() -> i32:
     o: O = maybe_add1(0)  # NoneVal
-    return O_api.unwrap_or(o, 99)
+    return O.unwrap_or(o, 99)
 
 
 @compile
 def test_result_unwrap_or_ok() -> i32:
     r: R = checked_add2(5)  # Ok(7)
-    return R_api.unwrap_or(r, 42)
+    return R.unwrap_or(r, 42)
 
 
 @compile
 def test_result_unwrap_or_err() -> i32:
     r: R = checked_add2(-1)  # Err(Code, 7)
-    return R_api.unwrap_or(r, 42)
+    return R.unwrap_or(r, 42)
 
 
 # =============================================================================
@@ -628,7 +626,7 @@ def test_result_unwrap_or_err() -> i32:
 @compile
 def test_option_note_some() -> i32:
     o: O = maybe_add1(5)  # Some(6)
-    r: R = note_O_to_R(o, Err(Err.Code, 77))
+    r: R = R.from_option(o, Err(Err.Code, 77))
     match r:
         case (R.Ok, v):
             return v
@@ -639,7 +637,7 @@ def test_option_note_some() -> i32:
 @compile
 def test_option_note_none() -> i32:
     o: O = maybe_add1(0)  # NoneVal
-    r: R = note_O_to_R(o, Err(Err.Code, 77))
+    r: R = R.from_option(o, Err(Err.Code, 77))
     match r:
         case (R.Ok, _):
             return -1
@@ -654,7 +652,7 @@ def test_option_note_none() -> i32:
 @compile
 def test_result_hush_ok() -> i32:
     r: R = checked_add2(5)  # Ok(7)
-    o: O = hush_R_to_O(r)
+    o: O = O.from_result(r)
     match o:
         case (O.Some, v):
             return v
@@ -665,7 +663,7 @@ def test_result_hush_ok() -> i32:
 @compile
 def test_result_hush_err() -> i32:
     r: R = checked_add2(-1)  # Err(Code, 7)
-    o: O = hush_R_to_O(r)
+    o: O = O.from_result(r)
     match o:
         case (O.Some, _):
             return -2

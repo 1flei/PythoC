@@ -5,13 +5,16 @@ import subprocess
 import sys
 
 from pythoc import compile, compile_to_executable, i32, u64
-from pythoc.std.set import _mix64
+from pythoc.std.hash import key_functions
 from pythoc.utils.link_utils import get_executable_extension
+
+
+hash_key, _ = key_functions(u64)
 
 
 @compile
 def main() -> i32:
-    value: u64 = _mix64(u64(1), u64(2))
+    value: u64 = hash_key(u64(1))
     if value == u64(0):
         return i32(1)
     return i32(0)

@@ -8,6 +8,8 @@ class typeof(BuiltinFunction):
     
     Works in both Python preprocessing and @compile contexts:
     - Python preprocessing: typeof(5) -> pyconst[5], typeof(i32) -> i32
+    - Python preprocessing: typeof(compiled_function) -> its func type
+    - Meta call handlers: typeof(evaluated_argument) -> its PC type
     - In @compile: typeof(x) -> type of x
     
     Returns:
@@ -37,6 +39,13 @@ class typeof(BuiltinFunction):
         - typeof(5)   -> pyconst[5]
         - typeof(T)   -> T        (when T is a PC BuiltinEntity type)
         """
+        from ..valueref import ValueRef
+        from ..type_descriptor import _callable_type
+        if isinstance(value_or_type, ValueRef):
+            return value_or_type.type_hint
+        callable_type = _callable_type(value_or_type)
+        if callable_type is not None:
+            return callable_type
         if isinstance(value_or_type, type) and issubclass(value_or_type, BuiltinEntity):
             # PC type class: typeof(i32) -> i32
             return value_or_type
@@ -62,7 +71,11 @@ class typeof(BuiltinFunction):
         value = args[0]
         if value.is_python_value():
             python_value = value.get_python_value()
-            if (isinstance(python_value, BuiltinEntity)
+            from ..type_descriptor import _callable_type
+            callable_type = _callable_type(python_value)
+            if callable_type is not None:
+                result = callable_type
+            elif (isinstance(python_value, BuiltinEntity)
                     or isinstance(python_value, type)
                     and (getattr(python_value, 'can_be_type', lambda: False)()
                          or getattr(python_value, '_is_struct', False)

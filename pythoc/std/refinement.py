@@ -3,16 +3,14 @@
 Refinement predicate generators.
 
 Provides generic predicate generators for common validation patterns.
-Each generator takes a type T and returns:
-1. A predicate function (T) -> bool
-2. A refined type refined[predicate]
+Each generator returns a refined type exposing its predicate as a method.
 
 Usage:
     from pythoc.std.refinement import nonnull, positive, nonzero
     from pythoc import compile, ptr, i32
 
-    is_valid_ptr, NonNullI32Ptr = nonnull(ptr[i32])
-    is_positive_i32, PositiveI32 = positive(i32)
+    NonNullI32Ptr = nonnull(ptr[i32])
+    PositiveI32 = positive(i32)
 
     @compile
     def process_data(data: NonNullI32Ptr, count: PositiveI32) -> i32:
@@ -26,7 +24,7 @@ from ..builtin_entities import refined, nullptr, bool
 def _refinement_result(predicate, kind, *parameters):
     """Declare a fixed predicate contract on its existing callable object."""
     predicate._pc_refinement_contract = ('pythoc.std.refinement', kind, parameters)
-    return predicate, refined[predicate]
+    return refined[predicate]
 
 
 def nonnull(T):

@@ -216,6 +216,11 @@ def _coerce_value_to_expr(value):
     if isinstance(value, Fragment):
         return value.expr   # may raise TypeError with a clear message
 
+    from ..valueref import ValueRef
+    if isinstance(value, ValueRef):
+        from .._inline.definition_bindings import symbol_expression
+        return symbol_expression('_meta_value', value)
+
     if _is_pythoc_type(value):
         from .._inline.definition_bindings import symbol_expression
         type_name = _get_type_name(value)

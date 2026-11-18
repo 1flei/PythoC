@@ -37,13 +37,20 @@ class CallValueBoundaryTest(unittest.TestCase):
                         violations.append(f'{path.relative_to(ROOT)}:{node.lineno}')
         self.assertEqual(violations, [])
 
-    def test_std_does_not_implement_compiler_handlers(self):
+    def test_std_call_extensions_do_not_drive_the_compiler(self):
         violations = []
         for path in (ROOT / 'std').rglob('*.py'):
             for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
-                if (isinstance(node, ast.FunctionDef)
-                        and node.name.startswith('handle_')):
+                if not isinstance(node, ast.FunctionDef) or not node.name.startswith('handle_'):
+                    continue
+                if node.name != 'handle_call':
                     violations.append(f'{path.relative_to(ROOT)}:{node.lineno}')
+                contexts = {arg.arg for arg in node.args.args[1:3]}
+                for operation in ast.walk(node):
+                    if (isinstance(operation, ast.Attribute)
+                            and isinstance(operation.value, ast.Name)
+                            and operation.value.id in contexts):
+                        violations.append(f'{path.relative_to(ROOT)}:{operation.lineno}')
         self.assertEqual(violations, [])
 
     def test_type_value_resolution_rejects_syntax(self):

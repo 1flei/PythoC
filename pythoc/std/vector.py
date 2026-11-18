@@ -2,6 +2,8 @@ from __future__ import annotations
 from pythoc import *
 from pythoc.libc.string import memset, memcpy
 from pythoc.std.mem import DefaultMem
+from pythoc.std.refinement import nonnull
+from pythoc.schema_protocol import is_linear_schema_type
 
 
 effect.default(mem=DefaultMem)
@@ -41,6 +43,14 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
         raise TypeError(
             f"Vector: size_type must be a PythoC integer type, got {size_type}"
         )
+    if is_linear_schema_type(element_type):
+        raise TypeError('Vector requires copyable elements')
+
+    ElementPointer = nonnull(ptr[element_type])
+
+    @compile(suffix=('vector_index', size_type))
+    def valid_index(index: size_type, length: size_type) -> bool:
+        return index >= 0 and index < length
 
     type_suffix = (element_type, inline_capacity, size_type)
 
@@ -80,6 +90,20 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
                 v.storage.heap_data.heap_buf[index] = value
             else:
                 v.storage.inline_buffer[index] = value
+
+        def at(v: ptr[_Vector], index: size_type) -> ElementPointer:
+            """Yield a checked element pointer; container mutation may invalidate it."""
+            for checked in refine(index, _Vector.size(v), valid_index):
+                p = ptr(_Vector.data(v)[checked[0]])
+                for present in refine(p, ElementPointer.predicate):
+                    yield present
+
+        def values(v: ptr[_Vector]) -> element_type:
+            index: size_type = 0
+            while index < _Vector.size(v):
+                for element in _Vector.at(v, index):
+                    yield element[0]
+                index += 1
 
         def data(v: ptr[_Vector]) -> ptr[element_type]:
             if v.size_or_cap > inline_capacity:
@@ -130,11 +154,14 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
                 if v.size_or_cap > 0:
                     v.size_or_cap = v.size_or_cap - 1
 
-        def set_size(v: ptr[_Vector], new_size: size_type) -> None:
-            """Set the logical element count. Caller must keep it <= capacity."""
+        def truncate(v: ptr[_Vector], new_size: size_type) -> bool:
+            """Shrink initialized contents; growing requires push_back."""
+            if new_size < 0 or new_size > _Vector.size(v):
+                return False
             if v.size_or_cap > inline_capacity:
                 v.storage.heap_data.size = new_size
             else:
                 v.size_or_cap = new_size
+            return True
 
     return _Vector

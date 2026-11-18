@@ -25,8 +25,6 @@ def floating(value: f64) -> i32:
 
 
 dispatch = Poly(integer, floating)
-if '--prepare' in sys.argv:
-    dispatch.prepare_dynamic_dispatch(Input)
 
 
 @compile

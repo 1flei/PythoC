@@ -187,12 +187,8 @@ class Affine:
         self.bias = bias
 
     @inline
-    def __call__(self, value, *, scale=2):
+    def apply(self, value, *, scale=3):
         return self.bias + value * scale
-
-    @inline
-    def apply(self, value):
-        return self(value, scale=3)
 
     @inline(method=True)
     def explicit_apply(self, value):
@@ -204,7 +200,7 @@ affine = Affine(1)
 
 @compile
 def inline_callable() -> i32:
-    return affine(bump(), scale=bump()) + affine.apply(bump())
+    return affine.apply(bump(), scale=bump()) + affine.apply(bump())
 
 
 @compile

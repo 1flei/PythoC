@@ -16,6 +16,7 @@ Public API:
     Const helper:       const                    (only when you need a string *literal*)
     Builders:           func, artifact
     Compilation:        compile_ast, compile_generated, compile_artifact
+    Inline expansion:   inline_generated
     Factories:          factory, compile_factory
     Normalization:      normalize_factory_key
 """
@@ -40,6 +41,8 @@ from .compile_api import (
     compile_generated,
     compile_artifact,
 )
+
+from .inline_api import inline_generated
 
 from .normalize import (
     normalize_factory_key,
@@ -104,6 +107,7 @@ __all__ = [
     'compile_ast',
     'compile_generated',
     'compile_artifact',
+    'inline_generated',
     # Factories
     'factory',
     'compile_factory',

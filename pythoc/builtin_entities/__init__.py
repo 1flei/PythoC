@@ -24,18 +24,14 @@ from .types import (
     i8, i16, i32, i64, i128,
     # Unsigned integer types
     u8, u16, u32, u64, u128,
-    # Floating point types (f32, f64 only; f16/bf16/f128 moved to std)
-    f32, f64,
+    # Floating point types
+    f16, bf16, f32, f64, f128,
     # Special types
     bool, void, ptr,
 )
 
 # Parametric parameter type
 from .param import param
-
-# Extended float types (f16, bf16, f128) are in pythoc.std.float_types
-# Import them here for backward compatibility
-from ..std.float_types import f16, bf16, f128
 
 # Linear token type
 from .linear import linear

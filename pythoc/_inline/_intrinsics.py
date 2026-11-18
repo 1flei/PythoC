@@ -32,11 +32,14 @@ _PC_INTRINSICS = _IntrinsicNamespace()
 
 def _populate_intrinsics():
     """Populate the intrinsic namespace with all compiler intrinsics."""
-    from ..builtin_entities import move, bool as pc_bool, label, goto_begin, goto_end, assume
+    from ..builtin_entities import (
+        move, bool as pc_bool, label, goto_begin, goto_end, assume, void,
+    )
     _PC_INTRINSICS.move = move
     _PC_INTRINSICS.bool = pc_bool
     _PC_INTRINSICS.label = label
     _PC_INTRINSICS.goto_begin = goto_begin
     _PC_INTRINSICS.goto_end = goto_end
     _PC_INTRINSICS.assume = assume
+    _PC_INTRINSICS.void = void
     _IntrinsicNamespace._populated = True

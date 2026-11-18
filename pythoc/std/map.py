@@ -1,64 +1,38 @@
+"""Flat hash maps with a shared probing and slot-state implementation."""
+
 from __future__ import annotations
-from pythoc import *
+
+from pythoc import (
+    compile, effect, ptr, u64, i8, bool, void, nullptr, sizeof, struct, refine,
+)
 from pythoc.libc.string import memset
+from pythoc.schema_protocol import is_linear_schema_type
 from pythoc.std.mem import DefaultMem
+from pythoc.std.hash import key_functions
+from pythoc.std._hash_table import HashTable, EMPTY
+from pythoc.std.refinement import nonnull
 
 
 effect.default(mem=DefaultMem)
 
 
-# Control byte constants (signed i8 representation).
-_CTRL_EMPTY = i8(-128)      # 0x80: never touched
-_CTRL_DELETED = i8(-2)      # 0xFE: tombstone
+def FlatHashMap(key_type, value_type, size_type=u64, *, hash_fn=None, eq_fn=None):
+    """Return a map type with fixed compile-time hash/equality operations.
 
-# Maximum load factor numerator/denominator: 7/8.
-_LOAD_NUM = 7
-_LOAD_DEN = 8
-
-# Minimum non-zero capacity.
-_MIN_CAPACITY = 16
-
-
-# Re-use the identity hash/equality wrappers from std.set so both containers
-# share the same compiled helpers for scalar integer keys.
-from pythoc.std.set import (
-    _DEFAULT_HASH as _DEFAULT_HASH,
-    _DEFAULT_EQ as _DEFAULT_EQ,
-)
-
-
-def FlatHashMap(key_type, value_type, size_type=u64):
-    """Factory producing a flat hash map specialized for ``key_type``.
-
-    The returned object is the compiled ``_FlatHashMap`` class itself, with
-    compiled helper methods declared directly inside the class body.  Callers
-    write::
-
-        IntMap = FlatHashMap(i32, i64)
-        m: IntMap
-        mp = ptr(m)
-        IntMap.init(mp)
-        IntMap.insert(mp, 1, 2)
-
-    Instance-level attribute access resolves struct fields and class-level
-    access resolves class attributes (methods), so a field and a method may
-    share the same name without ambiguity.
+    Elements are copyable values. Returned element pointers are invalidated by
+    rehash, clear and destroy; this interface does not establish a lifetime borrow.
     """
-    if key_type not in _DEFAULT_HASH:
-        raise TypeError(
-            f"FlatHashMap: no default hash for key type {key_type}. "
-            f"Supported: {list(_DEFAULT_HASH.keys())}"
-        )
-    if not (hasattr(size_type, '_is_integer') and size_type._is_integer):
-        raise TypeError(
-            f"FlatHashMap: size_type must be a PythoC integer type, got {size_type}"
-        )
+    hash_fn, eq_fn = key_functions(key_type, hash_fn, eq_fn)
+    if not (getattr(size_type, '_is_integer', False)
+            and not getattr(size_type, '_is_signed', True)):
+        raise TypeError('FlatHashMap size_type must be an unsigned integer type')
+    if is_linear_schema_type(key_type) or is_linear_schema_type(value_type):
+        raise TypeError('FlatHashMap requires copyable keys and values')
+    Table = HashTable(key_type, size_type, hash_fn, eq_fn)
+    Item = struct['key': key_type, 'value': value_type]
+    ValuePointer = nonnull(ptr[value_type])
 
-    hash_fn = _DEFAULT_HASH[key_type]
-    eq_fn = _DEFAULT_EQ[key_type]
-    type_suffix = (key_type, value_type, size_type)
-
-    @compile(suffix=type_suffix)
+    @compile(suffix=(key_type, value_type, size_type, hash_fn, eq_fn))
     class _FlatHashMap:
         size: size_type
         capacity: size_type
@@ -80,12 +54,7 @@ def FlatHashMap(key_type, value_type, size_type=u64):
                 effect.mem.free(ptr[void](m.ctrl))
                 effect.mem.free(ptr[void](m.keys))
                 effect.mem.free(ptr[void](m.values))
-            m.size = 0
-            m.capacity = 0
-            m.growth_left = 0
-            m.ctrl = nullptr
-            m.keys = nullptr
-            m.values = nullptr
+            _FlatHashMap.init(m)
 
         def size(m: ptr[_FlatHashMap]) -> size_type:
             return m.size
@@ -95,118 +64,61 @@ def FlatHashMap(key_type, value_type, size_type=u64):
 
         def clear(m: ptr[_FlatHashMap]) -> None:
             if m.capacity > 0:
-                memset(m.ctrl, -128, m.capacity)
+                memset(m.ctrl, EMPTY, m.capacity)
             m.size = 0
-            m.growth_left = m.capacity * _LOAD_NUM / _LOAD_DEN
+            m.growth_left = Table.growth_limit(m.capacity)
 
         def find(m: ptr[_FlatHashMap], key: key_type) -> ptr[value_type]:
-            if m.capacity == 0:
-                return nullptr
-
-            h: u64 = hash_fn(key)
-            h2: i8 = i8(u8(h & 0x7F))
-            idx: size_type = size_type(h >> 7) % m.capacity
-            cap: size_type = m.capacity
-
-            while True:
-                c: i8 = m.ctrl[idx]
-                if c == _CTRL_EMPTY:
-                    return nullptr
-                if c == h2:
-                    slot_key: ptr[key_type] = ptr(m.keys[idx])
-                    if eq_fn(slot_key[0], key):
-                        return ptr(m.values[idx])
-                idx = (idx + 1) % cap
+            for position in Table.find(m.ctrl, m.keys, m.capacity, key):
+                return ptr(m.values[position[2]])
+            return nullptr
 
         def contains(m: ptr[_FlatHashMap], key: key_type) -> bool:
             return _FlatHashMap.find(m, key) != nullptr
 
+        def at(m: ptr[_FlatHashMap], key: key_type) -> ValuePointer:
+            """Yield a present value pointer, valid until an invalidating mutation."""
+            for present in refine(_FlatHashMap.find(m, key), ValuePointer.predicate):
+                yield present
+
         def _insert_no_grow(m: ptr[_FlatHashMap], key: key_type, value: value_type) -> bool:
-            h: u64 = hash_fn(key)
-            h2: i8 = i8(u8(h & 0x7F))
-            idx: size_type = size_type(h >> 7) % m.capacity
-            cap: size_type = m.capacity
-            first_deleted: size_type = cap
+            position = Table.insert(m.ctrl, m.keys, m.capacity,
+                                    ptr(m.size), ptr(m.growth_left), key)
+            if position.index < m.capacity:
+                m.values[position.index] = value
+            return position.inserted
 
-            while True:
-                c: i8 = m.ctrl[idx]
-                if c == _CTRL_EMPTY:
-                    if first_deleted < cap:
-                        idx = first_deleted
-                    m.ctrl[idx] = h2
-                    m.keys[idx] = key
-                    m.values[idx] = value
-                    m.size += 1
-                    m.growth_left -= 1
-                    return True
-                if c == _CTRL_DELETED:
-                    if first_deleted == cap:
-                        first_deleted = idx
-                elif c == h2:
-                    slot_key: ptr[key_type] = ptr(m.keys[idx])
-                    if eq_fn(slot_key[0], key):
-                        m.values[idx] = value
-                        return False
-                idx = (idx + 1) % cap
-
-        def _rehash(m: ptr[_FlatHashMap], newcapacity: size_type) -> None:
-            old_ctrl: ptr[i8] = m.ctrl
-            old_keys: ptr[key_type] = m.keys
-            old_values: ptr[value_type] = m.values
-            old_cap: size_type = m.capacity
-
-            new_ctrl: ptr[i8] = ptr[i8](effect.mem.malloc(u64(newcapacity)))
-            memset(new_ctrl, -128, newcapacity)
-            new_keys: ptr[key_type] = ptr[key_type](effect.mem.malloc(
-                u64(newcapacity * sizeof(key_type))))
-            new_values: ptr[value_type] = ptr[value_type](effect.mem.malloc(
-                u64(newcapacity * sizeof(value_type))))
-
-            m.ctrl = new_ctrl
-            m.keys = new_keys
-            m.values = new_values
-            m.capacity = newcapacity
+        def _rehash(m: ptr[_FlatHashMap], capacity: size_type) -> None:
+            old_ctrl = m.ctrl
+            old_keys = m.keys
+            old_values = m.values
+            old_capacity = m.capacity
+            m.ctrl = ptr[i8](effect.mem.malloc(u64(capacity)))
+            memset(m.ctrl, EMPTY, capacity)
+            m.keys = ptr[key_type](effect.mem.malloc(u64(capacity * sizeof(key_type))))
+            m.values = ptr[value_type](effect.mem.malloc(u64(capacity * sizeof(value_type))))
+            m.capacity = capacity
             m.size = 0
-            m.growth_left = newcapacity * _LOAD_NUM / _LOAD_DEN
-
-            if old_cap > 0:
-                i: size_type = 0
-                while i < old_cap:
-                    c: i8 = old_ctrl[i]
-                    if c != _CTRL_EMPTY and c != _CTRL_DELETED:
-                        _FlatHashMap._insert_no_grow(m, old_keys[i], old_values[i])
-                    i += 1
+            m.growth_left = Table.growth_limit(capacity)
+            for position in Table.slots(old_ctrl, old_capacity):
+                index: size_type = position[2]
+                _FlatHashMap._insert_no_grow(m, old_keys[index], old_values[index])
+            if old_capacity > 0:
                 effect.mem.free(ptr[void](old_ctrl))
                 effect.mem.free(ptr[void](old_keys))
                 effect.mem.free(ptr[void](old_values))
 
         def insert(m: ptr[_FlatHashMap], key: key_type, value: value_type) -> bool:
             if m.growth_left == 0:
-                new_cap: size_type = _MIN_CAPACITY
-                if m.capacity > 0:
-                    new_cap = m.capacity * 2
-                _FlatHashMap._rehash(m, new_cap)
+                _FlatHashMap._rehash(m, Table.next_capacity(m.capacity))
             return _FlatHashMap._insert_no_grow(m, key, value)
 
         def erase(m: ptr[_FlatHashMap], key: key_type) -> bool:
-            if m.capacity == 0:
-                return False
+            return Table.erase(m.ctrl, m.keys, m.capacity, ptr(m.size), key)
 
-            h: u64 = hash_fn(key)
-            h2: i8 = i8(u8(h & 0x7F))
-            idx: size_type = size_type(h >> 7) % m.capacity
-            cap: size_type = m.capacity
-
-            while True:
-                c: i8 = m.ctrl[idx]
-                if c == _CTRL_EMPTY:
-                    return False
-                if c == h2:
-                    slot_key: ptr[key_type] = ptr(m.keys[idx])
-                    if eq_fn(slot_key[0], key):
-                        m.ctrl[idx] = _CTRL_DELETED
-                        m.size -= 1
-                        return True
-                idx = (idx + 1) % cap
+        def items(m: ptr[_FlatHashMap]) -> Item:
+            for position in Table.slots(m.ctrl, m.capacity):
+                index: size_type = position[2]
+                yield m.keys[index], m.values[index]
 
     return _FlatHashMap

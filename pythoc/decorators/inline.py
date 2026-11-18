@@ -2,13 +2,13 @@ import inspect
 import ast
 import textwrap
 from functools import wraps
-from ..logger import logger, set_source_context
+from ..logger import set_source_context
 
 
 def inline(func=None, *, cls_method=False, method=False):
     """Decorator to mark a function for inline execution
     
-    Can be used on both standalone functions and class methods.
+    Can be used on standalone Python functions and class methods.
     When used on class methods in BuiltinEntity, automatically creates
     the appropriate classmethod handler and attaches it to the enclosing class.
     
@@ -41,27 +41,22 @@ def inline(func=None, *, cls_method=False, method=False):
     def decorator(f):
         try:
             from ..utils.inspect_utils import get_object_source, get_object_sourcelines
-            source = get_object_source(f)
-            source = textwrap.dedent(source)
-            # Get function start line for accurate error messages
+            source = textwrap.dedent(get_object_source(f))
             try:
                 _, start_line = get_object_sourcelines(f)
-                source_file = inspect.getfile(f)
-                set_source_context(source_file, start_line - 1)
+                set_source_context(inspect.getfile(f), start_line - 1)
             except (OSError, TypeError):
                 pass
-            tree = ast.parse(source)
-            func_ast = tree.body[0]
+            func_ast = ast.parse(source).body[0]
             if not isinstance(func_ast, ast.FunctionDef):
-                raise ValueError(f"Expected function definition, got {type(func_ast).__name__}")
-        except (OSError, TypeError) as e:
-            raise RuntimeError(f"Cannot get source code for function {f.__name__}: {e}")
+                raise ValueError(f'Expected function definition, got {type(func_ast).__name__}')
+        except (OSError, TypeError) as error:
+            raise RuntimeError(f'Cannot get source code for function {f.__name__}: {error}')
 
-        from ..call_normalization import (
-            NormalizedCallArgs, bind_call_args, lower_inline_signature,
-        )
         from ..builtin_entities.python_type import PythonType
         from ..valueref import wrap_value
+        from .visible import definition_names, get_all_accessible_symbols
+        from ..type_resolver import TypeResolver
 
         defaults = {
             name: wrap_value(parameter.default, kind='python',
@@ -69,69 +64,20 @@ def inline(func=None, *, cls_method=False, method=False):
             for name, parameter in inspect.signature(f).parameters.items()
             if parameter.default is not inspect.Parameter.empty
         }
-        func_ast, signature = lower_inline_signature(func_ast, defaults)
-        param_names = signature['param_names']
-
-        from .visible import definition_names, get_all_accessible_symbols
-        from ..type_resolver import TypeResolver
         names = definition_names(f, func_ast)
         captured_symbols = TypeResolver.capture_type_namespace(names, definition=f)
         merged_func_globals = get_all_accessible_symbols(
             f, include_builtins=True, captured_symbols=captured_symbols, names=names)
 
-        def create_handler(visitor, args, node):
-            if not isinstance(args, NormalizedCallArgs):
-                args = bind_call_args(
-                    signature, args, {}, node, visitor=visitor)
-            param_bindings = dict(zip(param_names, args))
-            # Execute inline to generate IR using unified kernel
-            # Pass merged globals (module + closure + captured caller locals)
-            from .._inline import InlineAdapter
-            definition_globals = {name: f.__globals__[name] for name in names
-                                  if name in f.__globals__}
-            definition_globals.update(merged_func_globals)
-            adapter = InlineAdapter(
-                visitor, param_bindings, func_globals=definition_globals)
-            result = adapter.execute_inline(func_ast)
-            return result
+        def definition_globals():
+            values = {name: f.__globals__[name] for name in names if name in f.__globals__}
+            values.update(merged_func_globals)
+            return values
 
-        # Create a classmethod handler that ignores the cls parameter
-        def classmethod_handler(cls, visitor, func_ref, args, node):
-            return create_handler(visitor, args, node)
+        return _make_inline_callable(
+            func_ast, definition_globals, defaults=defaults, python_func=f,
+            cls_method=cls_method, method=method)
 
-        # Create handle_call for PythonType interception
-        def handle_call_method(visitor, func_ref, args, node):
-            return create_handler(visitor, args, node)
-
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            return f(*args, **kwargs)
-
-        # Determine handler name from function name if cls_method=True or method=True
-        if cls_method or method:
-            handler_name = f'handle_{f.__name__}'
-            handler_method = classmethod(classmethod_handler)
-            # Attach the classmethod handler to the wrapper
-            setattr(wrapper, handler_name, handler_method)
-            # Store for later registration
-            wrapper._handler_name = handler_name
-            wrapper._handler_method = handler_method
-        
-        # Common metadata
-        wrapper._is_inline = True
-        # Parameter binding in the expanded body performs the ownership move.
-        wrapper.defer_linear_transfer = True
-        wrapper._pc_compile_level_callable = True
-        wrapper._func_ast = func_ast
-        wrapper._param_names = param_names
-        wrapper._pc_call_signature = signature
-        wrapper._original_func = f
-        wrapper._inline_cls_method = cls_method
-        wrapper._inline_method = method
-        wrapper.handle_call = handle_call_method  # For PythonType interception
-        
-        return wrapper
-    
     # Validate parameters
     if cls_method and method:
         raise ValueError("Cannot use both cls_method=True and method=True")
@@ -144,6 +90,60 @@ def inline(func=None, *, cls_method=False, method=False):
         # Called without arguments: @inline
         return decorator(func)
 
+
+def _make_inline_callable(func_ast, definition_globals, *, defaults=None,
+                          python_func=None, cls_method=False, method=False):
+    """Bind Python and generated inline bodies through one call/expansion path."""
+    from ..call_normalization import (
+        NormalizedCallArgs, bind_call_args, lower_inline_signature,
+    )
+
+    func_ast, signature = lower_inline_signature(func_ast, defaults or {})
+    param_names = signature['param_names']
+
+    def create_handler(visitor, args, node):
+        if not isinstance(args, NormalizedCallArgs):
+            args = bind_call_args(
+                signature, args, getattr(args, 'keywords', {}), node, visitor=visitor)
+        from .._inline import InlineAdapter
+        adapter = InlineAdapter(
+            visitor, dict(zip(param_names, args)), func_globals=definition_globals())
+        return adapter.execute_inline(func_ast)
+
+    def classmethod_handler(cls, visitor, func_ref, args, node):
+        return create_handler(visitor, args, node)
+
+    def handle_call_method(visitor, func_ref, args, node):
+        return create_handler(visitor, args, node)
+
+    def wrapper(*args, **kwargs):
+        if python_func is None:
+            raise TypeError('Generated inline functions can only be called in compiled code')
+        return python_func(*args, **kwargs)
+
+    if python_func is None:
+        wrapper.__name__ = func_ast.name
+    else:
+        wrapper = wraps(python_func)(wrapper)
+
+    if cls_method or method:
+        handler_name = f'handle_{wrapper.__name__}'
+        handler_method = classmethod(classmethod_handler)
+        setattr(wrapper, handler_name, handler_method)
+        wrapper._handler_name = handler_name
+        wrapper._handler_method = handler_method
+
+    wrapper._is_inline = True
+    wrapper.defer_linear_transfer = True
+    wrapper._pc_compile_level_callable = True
+    wrapper._func_ast = func_ast
+    wrapper._param_names = param_names
+    wrapper._pc_call_signature = signature
+    wrapper._original_func = python_func
+    wrapper._inline_cls_method = cls_method
+    wrapper._inline_method = method
+    wrapper.handle_call = handle_call_method
+    return wrapper
 
 def register_inline_handlers(cls):
     """Helper to register all @inline(cls_method=True) or @inline(method=True) handlers on a class.

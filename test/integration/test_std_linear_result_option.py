@@ -3,9 +3,7 @@
 import unittest
 
 from pythoc import compile, consume, i32, linear, static
-from pythoc.std.result import (
-    make_hush, make_note, make_note_lazy, option_wrap, result_wrap,
-)
+from pythoc.std.result import Option as OptionType, Result as ResultType
 
 
 @compile
@@ -48,12 +46,12 @@ def drop(resource: Owner) -> None:
     release(resource)
 
 
-Owned, owned = result_wrap(Owner, i32, name='LinearSuccess')
-Both, both = result_wrap(Owner, Owner, name='LinearBoth')
-Optional, optional = option_wrap(Owner, name='LinearOptional')
-Scalar, scalar = result_wrap(i32, i32, name='LinearCompositionValue')
-ErrorOwned, error_owned = result_wrap(i32, Owner, name='LinearErrorOnly')
-PlainOption, plain_option = option_wrap(i32, name='PlainLazyOption')
+Owned = ResultType(Owner, i32, name='LinearSuccess')
+Both = ResultType(Owner, Owner, name='LinearBoth')
+Optional = OptionType(Owner, name='LinearOptional')
+Scalar = ResultType(i32, i32, name='LinearCompositionValue')
+ErrorOwned = ResultType(i32, Owner, name='LinearErrorOnly')
+PlainOption = OptionType(i32, name='PlainLazyOption')
 
 
 @compile
@@ -61,15 +59,11 @@ def make_error() -> Owner:
     return acquire(99)
 
 
-note = make_note_lazy(optional, both, make_error)
-hush = make_hush(both, optional, drop)
-
-
 @compile
 def checked(value: i32) -> Owned:
     if value > 0:
-        return owned.ok(acquire(value))
-    return owned.err(41)
+        return Owned.ok(acquire(value))
+    return Owned.err(41)
 
 
 @compile
@@ -89,8 +83,8 @@ def tag_inspection() -> i32:
 
 @compile
 def composed(value: i32) -> i32:
-    result = scalar.do(release(resource) + 1
-                       for resource in owned.bind(checked(value)))
+    result = Scalar.do(release(resource) + 1
+                       for resource in Owned.bind(checked(value)))
     match result:
         case (Scalar.Ok, value):
             return value
@@ -103,14 +97,14 @@ def option_fallback(present: i32) -> i32:
     reset()
     result: Optional
     if present != 0:
-        result = optional.some(acquire(7))
+        result = Optional.some(acquire(7))
     else:
-        result = optional.none()
+        result = Optional.none()
 
     def fallback() -> Owner:
         return acquire(9)
 
-    resource = optional.unwrap_or_else(result, fallback)
+    resource = Optional.unwrap_or_else(result, fallback)
     value: i32 = release(resource)
     return value * 100 + Counts.made * 10 + Counts.released
 
@@ -118,20 +112,20 @@ def option_fallback(present: i32) -> i32:
 @compile
 def result_fallback(present: i32) -> i32:
     reset()
-    result = both.ok(acquire(7))
+    result = Both.ok(acquire(7))
     if present == 0:
         match result:
             case (Both.Ok, resource):
                 drop(resource)
             case (Both.Err, resource):
                 drop(resource)
-        result = both.err(acquire(3))
+        result = Both.err(acquire(3))
 
     def fallback(error: Owner) -> Owner:
         value: i32 = release(error)
         return acquire(value + 10)
 
-    resource = both.unwrap_or_else(result, fallback)
+    resource = Both.unwrap_or_else(result, fallback)
     value: i32 = release(resource)
     return value * 100 + Counts.made * 10 + Counts.released
 
@@ -141,11 +135,11 @@ def converted(present: i32) -> i32:
     reset()
     result: Optional
     if present != 0:
-        result = optional.some(acquire(7))
+        result = Optional.some(acquire(7))
     else:
-        result = optional.none()
-    converted_result = note(result)
-    final = hush(converted_result)
+        result = Optional.none()
+    converted_result = Both.from_option_else(result, make_error)
+    final = Optional.from_result(converted_result, drop_error=drop)
     value: i32 = 0
     match final:
         case (Optional.Some, resource):
@@ -160,10 +154,10 @@ def option_composed(present: i32) -> i32:
     reset()
     source: Optional
     if present != 0:
-        source = optional.some(acquire(17))
+        source = Optional.some(acquire(17))
     else:
-        source = optional.none()
-    result = optional.do(resource for resource in optional.bind(source))
+        source = Optional.none()
+    result = Optional.do(resource for resource in Optional.bind(source))
     value: i32 = -1
     match result:
         case (Optional.Some, resource):
@@ -178,14 +172,14 @@ def error_only_fallback(success: i32) -> i32:
     reset()
     result: ErrorOwned
     if success != 0:
-        result = error_owned.ok(5)
+        result = ErrorOwned.ok(5)
     else:
-        result = error_owned.err(acquire(9))
+        result = ErrorOwned.err(acquire(9))
 
     def fallback(error: Owner) -> i32:
         return release(error) + 10
 
-    value = error_owned.unwrap_or_else(result, fallback)
+    value = ErrorOwned.unwrap_or_else(result, fallback)
     return value * 100 + Counts.made * 10 + Counts.released
 
 
@@ -204,24 +198,24 @@ def plain_fallbacks(present: i32) -> i32:
     option: PlainOption
     result: Scalar
     if present != 0:
-        option = plain_option.some(3)
-        result = scalar.ok(4)
+        option = PlainOption.some(3)
+        result = Scalar.ok(4)
     else:
-        option = plain_option.none()
-        result = scalar.err(7)
-    a = plain_option.unwrap_or_else(option, option_default)
-    b = scalar.unwrap_or_else(result, result_default)
+        option = PlainOption.none()
+        result = Scalar.err(7)
+    a = PlainOption.unwrap_or_else(option, option_default)
+    b = Scalar.unwrap_or_else(result, result_default)
     return a * 1000 + b * 10 + calls
 
 
 class LinearResultOptionTest(unittest.TestCase):
     def test_factory_does_not_register_invalid_unused_helpers(self):
-        self.assertFalse(hasattr(owned, 'unwrap_or'))
-        self.assertFalse(hasattr(optional, 'unwrap_or'))
-        self.assertFalse(hasattr(owned, 'is_ok'))
-        self.assertFalse(hasattr(both, 'bind'))
-        self.assertFalse(hasattr(both, 'do'))
-        self.assertTrue(hasattr(scalar, 'unwrap_or'))
+        self.assertFalse(hasattr(Owned, 'unwrap_or'))
+        self.assertFalse(hasattr(Optional, 'unwrap_or'))
+        self.assertFalse(hasattr(Owned, 'is_ok'))
+        self.assertFalse(hasattr(Both, 'bind'))
+        self.assertFalse(hasattr(Both, 'do'))
+        self.assertTrue(hasattr(Scalar, 'unwrap_or'))
 
     def test_tag_inspection_retains_the_owner(self):
         self.assertEqual(tag_inspection(), 7211)
@@ -248,7 +242,7 @@ class LinearResultOptionTest(unittest.TestCase):
 
     def test_copyable_success_with_owned_error(self):
         for helper in ('bind', 'do', 'unwrap_or', 'is_ok', 'is_err'):
-            self.assertFalse(hasattr(error_owned, helper), helper)
+            self.assertFalse(hasattr(ErrorOwned, helper), helper)
         self.assertEqual(error_only_fallback(1), 500)
         self.assertEqual(error_only_fallback(0), 1911)
 
@@ -257,10 +251,27 @@ class LinearResultOptionTest(unittest.TestCase):
         self.assertEqual(plain_fallbacks(0), 9172)
 
     def test_implicit_owned_error_loss_is_rejected(self):
-        with self.assertRaisesRegex(TypeError, 'explicit consumer'):
-            make_hush(both, optional)
-        with self.assertRaisesRegex(TypeError, 'make_note_lazy'):
-            make_note(optional, both)
+        from pythoc.build.output_manager import clear_failed_group
+        from pythoc.logger import set_raise_on_error
+        set_raise_on_error(True)
+
+        @compile(suffix='invalid_result_conversion_drop')
+        def lose_error() -> i32:
+            value = Optional.from_result(Both.err(acquire(3)))
+            return 0
+
+        with self.assertRaisesRegex(Exception, 'explicit consumer'):
+            lose_error()
+        clear_failed_group(lose_error._binding.group_key)
+
+        @compile(suffix='invalid_option_conversion_eager_error')
+        def lose_eager_error() -> i32:
+            value = Both.from_option(Optional.some(acquire(3)), acquire(4))
+            return 0
+
+        with self.assertRaisesRegex(Exception, 'from_option_else'):
+            lose_eager_error()
+        clear_failed_group(lose_eager_error._binding.group_key)
 
     def test_z_fallback_cannot_discard_an_owned_error(self):
         from pythoc.logger import set_raise_on_error
@@ -271,7 +282,7 @@ class LinearResultOptionTest(unittest.TestCase):
             def fallback(error: Owner) -> Owner:
                 return acquire(5)
 
-            resource = both.unwrap_or_else(both.err(acquire(3)), fallback)
+            resource = Both.unwrap_or_else(Both.err(acquire(3)), fallback)
             return release(resource)
 
         with self.assertRaisesRegex(Exception, '[Ll]inear'):

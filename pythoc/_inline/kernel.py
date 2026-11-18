@@ -262,6 +262,12 @@ def _result_storage_type(annotation):
     return pyconst[None] if resolved is void else resolved
 
 
+def _is_void_return(annotation):
+    from ..builtin_entities import void
+    from ..type_resolver import TypeResolver
+    return annotation is None or TypeResolver.resolve_type(annotation, freeze=True) is void
+
+
 def _tuple_element_type(annotation, index):
     from ..schema_protocol import get_schema_field_type
     from ..type_resolver import TypeResolver
@@ -575,6 +581,19 @@ def expand_inline(request):
                 "points; add a return type annotation"
             )
 
+    # Resolve annotations in the ordinary visitor after parameter bindings.
+    # A void return evaluates its expression without assigning a result slot.
+    return_annotation = getattr(callee_ast, 'returns', None)
+    result_type = None
+    if return_annotation is not None:
+        from .exit_rules import VariableRenamer
+        annotation = VariableRenamer(rename_map).visit(
+            copy.deepcopy(return_annotation))
+        result_type = _type_expression(_result_storage_type, annotation)
+        if isinstance(request.exit_rule, ReturnExitRule):
+            request.exit_rule.discard_result = _type_expression(
+                _is_void_return, copy.deepcopy(annotation))
+
     # --- Transform body (rename + exit-rule) ---
     body_stmts = _transform_body(callee_body, request.exit_rule, rename_map)
 
@@ -591,15 +610,6 @@ def expand_inline(request):
             ast.Name(id=names.fresh('_inline_return_value'), ctx=ast.Load()),
             renamed_value, ast.Name(id=result_var, ctx=ast.Store()),
         ).stmts
-
-    # Resolve type expressions through normal annotation evaluation.
-    return_annotation = getattr(callee_ast, 'returns', None)
-    result_type = None
-    if return_annotation is not None:
-        from .exit_rules import VariableRenamer
-        annotation = VariableRenamer(rename_map).visit(
-            copy.deepcopy(return_annotation))
-        result_type = _type_expression(_result_storage_type, annotation)
 
     has_label = exit_label is not None
     has_result_decl = result_type is not None and result_var is not None

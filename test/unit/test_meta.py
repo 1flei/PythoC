@@ -486,6 +486,28 @@ class TestMetaInlineRequest(unittest.TestCase):
 # Normalize factory key tests (unchanged)
 # ============================================================================
 
+class TestGeneratedInline(unittest.TestCase):
+    def test_definition_creates_no_compilation_registration(self):
+        import inspect
+        from unittest.mock import patch
+        from pythoc.build.output_manager import get_output_manager
+
+        with CompileSession():
+            manager = get_output_manager()
+            definition = meta.func('inline_only', [('value', i32)], i32,
+                                   ast.parse('return value + 1').body)
+            with patch.object(manager, 'queue_compilation',
+                              side_effect=AssertionError('Unexpected native task')):
+                result = meta.inline_generated(definition)
+            self.assertEqual(manager._all_groups, {})
+            self.assertIs(inspect.signature(result).parameters['value'].annotation, i32)
+            self.assertIs(inspect.signature(result).return_annotation, i32)
+
+    def test_input_must_be_a_generated_function(self):
+        with self.assertRaisesRegex(TypeError, 'expects GeneratedFunction'):
+            meta.inline_generated(ast.parse('def f():\n    return 1').body[0])
+
+
 class TestNormalizeFactoryKey(unittest.TestCase):
 
     def setUp(self):
@@ -530,6 +552,21 @@ class TestNormalizeFactoryKey(unittest.TestCase):
         from pythoc import i32, i64, ptr
         self.assertNotEqual(self.normalize({'value': [ptr[i32]]}),
                             self.normalize({'value': [ptr[i64]]}))
+
+    def test_compiled_callable_inputs_keep_their_bound_declaration_identity(self):
+        from pythoc import compile
+
+        with CompileSession():
+            @compile
+            def first(value: i32) -> i32:
+                return value + 1
+
+            @compile
+            def second(value: i32) -> i32:
+                return value + 2
+
+            self.assertEqual(self.normalize(first), self.normalize(first))
+            self.assertNotEqual(self.normalize(first), self.normalize(second))
 
 
 # ============================================================================

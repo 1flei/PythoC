@@ -4,7 +4,7 @@ import unittest
 
 from pythoc import compile, consume, enum, i32, linear, struct
 from pythoc.std.poly import Poly
-from pythoc.std.result import result_wrap
+from pythoc.std.result import Result as ResultType
 
 
 Array = struct['bound': i32]
@@ -57,7 +57,7 @@ class Owner:
     token: linear
 
 
-Outcome, outcome = result_wrap(Owner, i32, name='PolyOwnedOutcome')
+Outcome = ResultType(Owner, i32, name='PolyOwnedOutcome')
 
 
 @compile
@@ -81,8 +81,8 @@ def dispatch_owned(success: i32) -> i32:
         resource: Owner
         resource.value = 7
         resource.token = linear()
-        return consume_outcome(outcome.ok(resource))
-    return consume_outcome(outcome.err(41))
+        return consume_outcome(Outcome.ok(resource))
+    return consume_outcome(Outcome.err(41))
 
 
 @compile

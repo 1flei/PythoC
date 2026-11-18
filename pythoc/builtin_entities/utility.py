@@ -116,8 +116,7 @@ TYPE_REGISTRY = _build_type_registry()
 # Backward compatibility: PC_TYPE_MAP points to TYPE_REGISTRY
 PC_TYPE_MAP = TYPE_REGISTRY
 
-# Import extended float types from std
-from ..std.float_types import f16, bf16, f128
+from .types import f16, bf16, f128
 
 # Type sets for backward compatibility
 SIGNED_INT_TYPES = {i8, i16, i32, i64}

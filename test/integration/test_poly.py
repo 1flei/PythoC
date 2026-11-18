@@ -25,7 +25,17 @@ def add_fi(a: f64, b: i32) -> i32:
     printf("Adding f64 + i32: %f + %d\n", a, b)
     return i32(a + f64(b))
 
-add = Poly(add_i32, add_f64, add_if, add_fi)
+@compile
+def add_i64(a: i64, b: i64) -> i32:
+    return i32(a + b) + 100
+
+
+@compile
+def add_bool(a: bool, b: bool) -> i32:
+    return i32(a) + i32(b) + 200
+
+
+add = Poly(add_i32, add_f64, add_if, add_fi, add_i64, add_bool)
 
 @compile
 def add_str(a: ptr[i8], b: ptr[i8]) -> i32:
@@ -44,10 +54,23 @@ add.append(add_str)
 def test_static_poly2() -> i32:
     return add("Hello", "World")           # add_str -> 42
 
+
+@compile
+def default_literal_poly(case: i32) -> i32:
+    if case == 0:
+        return add(1, 2)
+    if case == 1:
+        return add(True, False)
+    if case == 2:
+        return add(1.0, 2.0)
+    return add("Hello", "World")
+
+
 @enum(i32)
 class num:
     I32: i32 = 0
     F64: f64
+
 
 @compile
 def mannual_dispatch(n1: num, n2: num) -> i32:
@@ -101,6 +124,11 @@ class TestPoly(unittest.TestCase):
 
     def test_static_poly_str(self):
         self.assertEqual(test_static_poly2(), 42)
+
+    def test_literals_follow_language_defaults(self):
+        for case, expected in ((0, 103), (1, 201), (2, 3), (3, 42)):
+            with self.subTest(case=case):
+                self.assertEqual(default_literal_poly(case), expected)
 
     def test_runtime_poly(self):
         self.assertEqual(test_runtime_poly(), 23323)

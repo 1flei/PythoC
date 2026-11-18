@@ -648,7 +648,7 @@ def test_bad_factory_args():
     try:
         FlatHashMap(i32, i64, size_type="u64")
     except TypeError as e:
-        if "size_type must be a PythoC integer type" not in str(e):
+        if "size_type must be an unsigned integer type" not in str(e):
             raise AssertionError(f"unexpected error message: {e}")
     else:
         raise AssertionError("FlatHashMap(i32, i64, size_type=\"u64\") should raise TypeError")

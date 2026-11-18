@@ -34,12 +34,16 @@ if TYPE_CHECKING:
 # any manual list-splicing on the Python side.
 
 @quote
-def _return_exit_template(has_value, has_label, result_var, value, label):
+def _return_exit_template(has_value, has_label, result_var, value, label,
+                          discard_result):
     # Unified return-exit template.
     # has_value / has_label are meta.const(True/False); the PythoC compiler
     # eliminates the dead ``if False:`` branches at zero cost.
     if has_value:
-        result_var = __pc_intrinsics.move(value)  # noqa: F821
+        if discard_result:
+            __pc_intrinsics.void(value)  # noqa: F821
+        else:
+            result_var = __pc_intrinsics.move(value)  # noqa: F821
     if has_label:
         __pc_intrinsics.goto_end(label)  # noqa: F821
 
@@ -165,6 +169,7 @@ class ReturnExitRule(ExitPointRule):
         """
         self.result_var = result_var
         self.exit_label = exit_label
+        self.discard_result = ast.Constant(False)
 
     def get_exit_node_types(self) -> Tuple[type, ...]:
         return (ast.Return,)
@@ -206,7 +211,7 @@ class ReturnExitRule(ExitPointRule):
 
         return _return_exit_template(
             meta_const(has_value), meta_const(has_label),
-            result_var, value, label,
+            result_var, value, label, copy.deepcopy(self.discard_result),
         ).stmts
 
 

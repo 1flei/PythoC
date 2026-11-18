@@ -79,6 +79,9 @@ def _display_value(value, active):
         from ..type_id import get_type_id
         return "PC({})".format(get_type_id(value))
 
+    if getattr(value, '_is_compiled', False) or getattr(value, '_is_extern', False):
+        return 'Callable({})'.format(getattr(value, '__name__', type(value).__name__))
+
     # PythoC builtin entities (have _name attribute)
     if hasattr(value, '_name') and hasattr(value, '__class__'):
         cls_name = type(value).__name__

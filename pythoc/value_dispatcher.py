@@ -170,7 +170,7 @@ class ValueRefDispatcher:
         *,
         name: Optional[str] = None,
     ) -> ValueRef:
-        """Dispatch a call through the callable protocol."""
+        """Dispatch a call; handlers may return a value or an expression Fragment."""
         func_ref, callable_protocol = self._resolve_callable_protocol(
             func_ref,
             name=name,
@@ -186,7 +186,15 @@ class ValueRefDispatcher:
                     node=node,
                 )
 
-        return callable_protocol.handle_call(self.visitor, func_ref, args, node)
+        result = callable_protocol.handle_call(self.visitor, func_ref, args, node)
+        from .meta import Fragment
+        if isinstance(result, Fragment):
+            import copy
+            expression = copy.deepcopy(result.expr)
+            if node is not None:
+                ast.copy_location(expression, node)
+            return self.visitor.visit_expression(ast.fix_missing_locations(expression))
+        return result
 
     def _evaluate_python_binop(
         self,

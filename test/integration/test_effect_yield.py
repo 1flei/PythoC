@@ -303,28 +303,28 @@ def test_yield_side_channel():
 # ============================================================================
 # Step 3: direct-style do-notation with real Result types + errno override
 # ============================================================================
-from pythoc.std.result import result_wrap
+from pythoc.std.result import Result as ResultType
 
-R_type, R_api = result_wrap(i32, i32, name="Result_i32_i32")
+R_type = ResultType(i32, i32, name="Result_i32_i32")
 
 
 @compile
 def _nonneg(a: i32) -> R_type:
     if a >= 0:
-        return R_api.ok(a)
-    return R_api.err(a * 10)
+        return R_type.ok(a)
+    return R_type.err(a * 10)
 
 
 @compile
 def _sum_oks(a: i32, b: i32) -> i32:
-    for v1 in R_api.bind(_nonneg(a)):
-        for v2 in R_api.bind(_nonneg(b)):
+    for v1 in R_type.bind(_nonneg(a)):
+        for v2 in R_type.bind(_nonneg(b)):
             yield v1 + v2
 
 
 @compile(suffix="result_do_direct")
 def result_do_direct(a: i32, b: i32) -> i32:
-    result = R_api.do(value for value in _sum_oks(a, b))
+    result = R_type.do(value for value in _sum_oks(a, b))
     match result:
         case (R_type.Ok, value):
             return value
@@ -376,14 +376,14 @@ class PyBufferProvider:
 
 _pybuf_provider = PyBufferProvider()
 with effect(errno=_pybuf_provider, suffix="pybuf"):
-    R2_type, R2_api = result_wrap(i32, i32, name="Result_pybuf")
+    R2_type = ResultType(i32, i32, name="Result_pybuf")
 
 
 @compile
 def _nonneg2(a: i32) -> R2_type:
     if a >= 0:
-        return R2_api.ok(a)
-    return R2_api.err(a * 10)
+        return R2_type.ok(a)
+    return R2_type.err(a * 10)
 
 
 # The provider override still applies to direct bind usage (outside do) -
@@ -393,7 +393,7 @@ with effect(errno=_pybuf_provider, suffix="pybuf"):
     @compile(suffix="pybuf_direct_bind")
     def pybuf_direct_bind(a: i32) -> i32:
         hit: i32 = -1
-        for v in R2_api.bind(_nonneg2(a)):
+        for v in R2_type.bind(_nonneg2(a)):
             hit = v
             break
         return hit
@@ -401,14 +401,14 @@ with effect(errno=_pybuf_provider, suffix="pybuf"):
 
 @compile
 def _sum_oks2(a: i32, b: i32) -> i32:
-    for v1 in R2_api.bind(_nonneg2(a)):
-        for v2 in R2_api.bind(_nonneg2(b)):
+    for v1 in R2_type.bind(_nonneg2(a)):
+        for v2 in R2_type.bind(_nonneg2(b)):
             yield v1 + v2
 
 
 @compile(suffix="result_do_pybuf")
 def result_do_pybuf(a: i32, b: i32) -> i32:
-    result = R2_api.do(value for value in _sum_oks2(a, b))
+    result = R2_type.do(value for value in _sum_oks2(a, b))
     match result:
         case (R2_type.Ok, value):
             return value
@@ -477,9 +477,9 @@ def _sum_channel(a: i32, b: i32) -> R_type:
 
     for v1 in bind(a):
         for v2 in bind(b):
-            yield R_api.ok(v1 + v2)
+            yield R_type.ok(v1 + v2)
     if err_set == 1:
-        yield R_api.err(err)
+        yield R_type.err(err)
 
 
 @compile(suffix="channel_unwrap")

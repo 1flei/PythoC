@@ -8,7 +8,7 @@ channel. Standalone bind requires an explicitly selected error-slot policy;
 importing this module never installs a global error channel.
 """
 
-from ..builtin_entities import i8, static, ptr, array
+from ..builtin_entities import i8, static, ptr, array, typeof
 from ..builtin_entities.enum import _create_enum_type
 from ..builtin_entities.types import bool as pc_bool
 from ..effect import effect
@@ -65,14 +65,14 @@ class _LocalSlotProvider:
         return self._slot_fn
 
 
-def option_wrap(value_type, tag_type=i8, name=None):
-    """Create Option enum type and user-space helper namespace.
+def Option(value_type, tag_type=i8, name=None):
+    """Create an Option type carrying its constructors and operations.
 
     Linear payloads support constructors, bind/do and unwrap_or_else.
     Copyable payloads also support is_some/is_none and unwrap_or.
 
     Returns:
-        (OptionType, option_api)
+        OptionType
     """
     option_name = name or f"Option_{getattr(value_type, '__name__', str(value_type))}"
     option_type = _create_enum_type(
@@ -113,13 +113,23 @@ def option_wrap(value_type, tag_type=i8, name=None):
             case option_type.NoneVal:
                 return fallback()
 
-    class option_api:
-        type = option_type
-        some = option_some
-        none = option_none
-        bind = option_bind
-        do = option_do
-        unwrap_or_else = option_unwrap_or_else
+    @inline
+    def option_from_result(r, drop_error=None) -> option_type:
+        source = _conversion_source(typeof(r), 'result', value_type, drop_error)
+        match r:
+            case (source.Ok, value):
+                return option_some(value)
+            case (source.Err, error):
+                if drop_error is not None:
+                    drop_error(error)
+                return option_none()
+
+    option_type.some = option_some
+    option_type.none = option_none
+    option_type.bind = option_bind
+    option_type.do = option_do
+    option_type.unwrap_or_else = option_unwrap_or_else
+    option_type.from_result = option_from_result
 
     if not is_linear_schema_type(option_type):
         @compile(suffix=(suffix_base, "is_some"))
@@ -142,21 +152,21 @@ def option_wrap(value_type, tag_type=i8, name=None):
                 case (option_type.NoneVal):
                     return default
 
-        option_api.is_some = option_is_some
-        option_api.is_none = option_is_none
-        option_api.unwrap_or = option_unwrap_or
+        option_type.is_some = option_is_some
+        option_type.is_none = option_is_none
+        option_type.unwrap_or = option_unwrap_or
 
-    return option_type, option_api
+    return option_type
 
 
-def result_wrap(ok_type, err_type, tag_type=i8, name=None):
-    """Create Result enum type and user-space helper namespace.
+def Result(ok_type, err_type, tag_type=i8, name=None):
+    """Create a Result type carrying its constructors and operations.
 
     All payloads support constructors and unwrap_or_else. Bind/do require
     a copyable error; is_ok/is_err and unwrap_or require a copyable sum.
 
     Returns:
-        (ResultType, result_api)
+        ResultType
     """
     result_name = name or f"Result_{getattr(ok_type, '__name__', str(ok_type))}_{getattr(err_type, '__name__', str(err_type))}"
     result_type = _create_enum_type(
@@ -166,8 +176,6 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
     )
 
     suffix_base = (result_name, ok_type, err_type, tag_type)
-
-    from ..decorators import compile, inline
 
     @compile(suffix=(suffix_base, "ok"))
     def result_ok(x: ok_type) -> result_type:
@@ -215,17 +223,36 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
             case (result_type.Err, error):
                 return fallback(error)
 
-    class result_api:
-        type = result_type
-        ok = result_ok
-        err = result_err
-        unwrap_or_else = result_unwrap_or_else
+    @inline
+    def result_from_option(o, error: err_type) -> result_type:
+        _require_copyable_error(err_type)
+        source = _conversion_source(typeof(o), 'option', ok_type)
+        match o:
+            case (source.Some, value):
+                return result_ok(value)
+            case source.NoneVal:
+                return result_err(error)
+
+    @inline
+    def result_from_option_else(o, make_error) -> result_type:
+        source = _conversion_source(typeof(o), 'option', ok_type)
+        match o:
+            case (source.Some, value):
+                return result_ok(value)
+            case source.NoneVal:
+                return result_err(make_error())
+
+    result_type.ok = result_ok
+    result_type.err = result_err
+    result_type.unwrap_or_else = result_unwrap_or_else
+    result_type.from_option = result_from_option
+    result_type.from_option_else = result_from_option_else
 
     # The local or explicitly selected channel contains copyable errors.
     # Owned errors stay in the sum until a match or fallback consumes them.
     if not is_linear_schema_type(err_type):
-        result_api.bind = result_bind
-        result_api.do = result_do
+        result_type.bind = result_bind
+        result_type.do = result_do
 
     if not is_linear_schema_type(result_type):
         @compile(suffix=(suffix_base, "is_ok"))
@@ -248,110 +275,33 @@ def result_wrap(ok_type, err_type, tag_type=i8, name=None):
                 case (result_type.Err, _):
                     return default
 
-        result_api.is_ok = result_is_ok
-        result_api.is_err = result_is_err
-        result_api.unwrap_or = result_unwrap_or
+        result_type.is_ok = result_is_ok
+        result_type.is_err = result_is_err
+        result_type.unwrap_or = result_unwrap_or
 
-    return result_type, result_api
-
-
-def make_note(option_api, result_api):
-    """Create an Option->Result conversion function (Python meta layer).
-
-    Binds both types at Python level, returns a plain @compile function
-    usable inside @compile code with no phantom arguments.
-
-    Usage (Python meta layer):
-        note_to_R = make_note(O_api, R_api)
-
-    Usage (@compile code):
-        r: R = note_to_R(o, Err(Err.Code, 77))
-    """
-    if is_linear_schema_type(result_api.type._variant_types[1]):
-        raise TypeError("make_note requires a copyable error; use make_note_lazy")
-    opt_type = option_api.type
-    res_type = result_api.type
-    _result_ok = result_api.ok
-    _result_err = result_api.err
-    err_type = res_type._variant_types[1]
-
-    suffix = (
-        getattr(opt_type, '__name__', 'Opt'),
-        getattr(res_type, '__name__', 'Res'),
-        "note",
-    )
-
-    @compile(suffix=suffix)
-    def _note(o: opt_type, err_val: err_type) -> res_type:
-        match o:
-            case (opt_type.Some, v):
-                return _result_ok(v)
-            case (opt_type.NoneVal):
-                return _result_err(err_val)
-
-    return _note
+    return result_type
 
 
-def make_hush(result_api, option_api, drop_error=None):
-    """Create a Result->Option conversion function (Python meta layer).
+def _conversion_source(source, kind, value_type, drop_error=None):
+    """Read conversion metadata from the actual source enum type."""
+    from ..type_descriptor import same_type
 
-    Without a consumer, errors must be copyable and the result is a native
-    compiled function. An explicit drop_error callback is expanded inline
-    only on the error branch and must consume an owned error.
-
-    Usage (Python meta layer):
-        hush_to_O = make_hush(R_api, O_api)
-
-    Usage (@compile code):
-        o: O = hush_to_O(r)
-    """
-    if (is_linear_schema_type(result_api.type._variant_types[1])
+    names = ['Some', 'NoneVal'] if kind == 'option' else ['Ok', 'Err']
+    if not getattr(source, '_is_enum', False) or source._variant_names != names:
+        raise TypeError(f'Expected a {kind} source')
+    if not same_type(source._variant_types[0], value_type):
+        raise TypeError('Sum conversion requires the same value type')
+    if kind == 'option' and source._variant_types[1] is not None:
+        raise TypeError('Option NoneVal must have no payload')
+    if (kind == 'result' and is_linear_schema_type(source._variant_types[1])
             and drop_error is None):
-        raise TypeError("make_hush requires an explicit consumer for an owned error")
-    res_type = result_api.type
-    opt_type = option_api.type
-    _option_some = option_api.some
-    _option_none = option_api.none
-
-    suffix = (
-        getattr(res_type, '__name__', 'Res'),
-        getattr(opt_type, '__name__', 'Opt'),
-        "hush",
-    )
-
-    decorator = compile(suffix=suffix) if drop_error is None else inline
-
-    @decorator
-    def _hush(r: res_type) -> opt_type:
-        match r:
-            case (res_type.Ok, v):
-                return _option_some(v)
-            case (res_type.Err, error):
-                if drop_error is not None:
-                    drop_error(error)
-                return _option_none()
-
-    return _hush
+        raise TypeError('from_result requires an explicit consumer for an owned error')
+    return source
 
 
-def make_note_lazy(option_api, result_api, error_factory):
-    """Convert an option, constructing the error only for the absent branch."""
-    opt_type = option_api.type
-    res_type = result_api.type
-    result_ok = result_api.ok
-    result_err = result_api.err
-
-    @inline
-    def note(o: opt_type) -> res_type:
-        match o:
-            case (opt_type.Some, value):
-                return result_ok(value)
-            case opt_type.NoneVal:
-                return result_err(error_factory())
-
-    return note
+def _require_copyable_error(err_type):
+    if is_linear_schema_type(err_type):
+        raise TypeError('from_option requires a copyable error; use from_option_else')
 
 
-__all__ = [
-    "option_wrap", "result_wrap", "make_note", "make_note_lazy", "make_hush",
-]
+__all__ = ['Option', 'Result', 'ErrnoSlotProvider']

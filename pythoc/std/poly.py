@@ -1,23 +1,18 @@
-"""
-Poly standard library for PC
+"""Exact-type overloading with enum dispatch expanded in the caller.
 
-Provides polymorphism dispatcher for @compile functions.
-
-Usage:
-    add = Poly(add_i32, add_f64)
-    add.append(add_str)
-    add(1, 2)  # static dispatch by type
-    add(my_enum_val, other_enum_val)  # dynamic dispatch by enum tag
-
+    operation = Poly(integer_impl, floating_impl)
+    operation(i32(1))   # direct native target
+    operation(value)    # enum payloads select a target through ordinary match
 """
 from __future__ import annotations
 
 import ast
-from typing import Any, Dict, List, Tuple
+from typing import Any, List
 
-from ..logger import logger
-from ..builtin_entities import i64, f64, ptr, i8, bool as pc_bool
-from .. import inline, typeof
+from pythoc import typeof, inline, meta
+from pythoc.literal_protocol import get_sequence_elements
+from pythoc.type_converter import TypeConverter
+
 
 class Poly:
     """Polymorphism dispatcher for @compile functions.
@@ -29,78 +24,57 @@ class Poly:
     
     def __init__(self, *compiled_funcs):
         self._funcs: List[Any] = list(compiled_funcs)
-        self._sig_map: Dict[Tuple[type, ...], Any] = {}
-        self._dynamic_dispatch_cache = {}
-        self._signature_revision = None
-        self._refresh_signatures()
+        self._signatures()
+
+        @inline
+        def _call(*args):
+            return self._select(args)(*args)
+
+        self._call = _call
+        self.handle_call = _call.handle_call
+        self.defer_linear_transfer = _call.defer_linear_transfer
 
     def append(self, compiled_func):
         """Add an overload; the latest exact signature takes precedence."""
         self._signature(compiled_func)
         self._funcs.append(compiled_func)
-        self._refresh_signatures()
         return self
 
     @staticmethod
     def _signature(function):
-        info = getattr(function, '_func_info', None)
-        if info is None:
-            raise NameError(f"Function '{getattr(function, '__name__', function)}' "
-                            'not found - missing _func_info attribute')
-        return tuple(info.param_type_hints[name] for name in info.param_names), info.return_type_hint
+        function_type = typeof(function)
+        if not hasattr(function_type, 'param_types'):
+            raise TypeError('Poly requires a compiled function with a concrete signature')
+        return tuple(function_type.param_types), function_type.return_type
 
-    def _refresh_signatures(self):
-        """Rebuild derived indexes when authoritative type objects complete."""
-        from ..type_id import get_type_id
+    def _signatures(self):
+        """Project current authoritative type objects without maintaining a second index."""
+        from pythoc.type_id import get_type_id
         signatures = {}
-        revision = []
         for function in self._funcs:
-            parameters, result = self._signature(function)
+            parameters, _ = self._signature(function)
             key = tuple(get_type_id(parameter) for parameter in parameters)
             signatures[key] = (function, parameters)
-            revision.append((id(function), key, get_type_id(result)))
-        revision = tuple(revision)
-        if revision != self._signature_revision:
-            self._sig_map = signatures
-            self._dynamic_dispatch_cache.clear()
-            self._signature_revision = revision
+        return signatures
 
-    def _infer_default_pc_type(self, python_val):
-        if isinstance(python_val, str):
-            return ptr[i8]
-        elif isinstance(python_val, bool):
-            return pc_bool
-        elif isinstance(python_val, int):
-            return i64
-        elif isinstance(python_val, float):
-            return f64
-        else:
-            raise TypeError(
-                f"Poly: unsupported Python type {type(python_val).__name__}"
-            )
+    def _select(self, argument_pack):
+        """Inspect evaluated argument references without transferring their owners."""
+        return self.resolve(*(
+            TypeConverter.infer_default_pc_type_from_python(value.get_python_value())
+            if value.is_python_value() else value.type_hint
+            for value in get_sequence_elements(argument_pack)))
 
-    @inline
-    def __call__(self, *args):
-        return self._resolve_carrier_type(typeof(args))(*args)
-
-    def _resolve_carrier_type(self, carrier_type):
-        """Select using type metadata; native arguments stay in inline code."""
-        carrier = carrier_type.get_python_object()
-        arg_types = []
-        for arg_type in carrier.get_element_types():
-            if getattr(arg_type, 'is_python_type', lambda: False)():
-                arg_type = self._infer_default_pc_type(arg_type.get_python_object())
-            arg_types.append(arg_type)
-        return self.resolve(*arg_types)
+    # The selected ordinary call, rather than this metadata query, moves owners.
+    _select.defer_linear_transfer = True
 
     def resolve(self, *arg_types):
-        """Return an ordinary compiled function for the supplied PC types."""
-        self._refresh_signatures()
+        """Select an existing function or construct a compile-only inline body."""
+        signatures = self._signatures()
         arg_types = tuple(arg_types)
-        from ..type_id import get_type_id
+        from pythoc.type_id import get_type_id
         sig_key = tuple(get_type_id(t) for t in arg_types)
 
-        target_info = self._sig_map.get(sig_key)
+        target_info = signatures.get(sig_key)
         if target_info is not None:
             target_func, _ = target_info
             return target_func
@@ -108,53 +82,20 @@ class Poly:
         # Find all enum arguments
         enum_indices = []
         for i, arg_type in enumerate(arg_types):
-            if isinstance(arg_type, type) and getattr(arg_type, '_is_enum', False):
+            if isinstance(arg_type, type) and getattr(arg_type, 'is_enum_type', lambda: False)():
                 enum_indices.append((i, arg_type))
         
         if not enum_indices:
-            logger.error(
-                f"Poly: no matching signature for {arg_types} "
-                f"and no Enum argument for dynamic dispatch",
-                node=None
-            )
+            raise TypeError(f'Poly: no matching signature for {arg_types} '
+                            'and no Enum argument for dynamic dispatch')
         
-        # Generate or reuse dynamic dispatch for enum arguments.
-        return self._get_dynamic_dispatch_func(arg_types, enum_indices, None)
+        return self._expand_enum(arg_types, enum_indices, signatures)
 
-    def prepare_dynamic_dispatch(self, *arg_types):
-        """Optionally pre-generate a wrapper for an argument-type combination.
-
-        Ordinary calls infer these types and generate the wrapper on demand.
-        Explicit preparation can move generation before object building when
-        the caller enables the guard against build-time compilation queueing.
-        """
-        enum_indices = []
-        for i, arg_type in enumerate(arg_types):
-            if isinstance(arg_type, type) and getattr(arg_type, '_is_enum', False):
-                enum_indices.append((i, arg_type))
-        if not enum_indices:
-            raise TypeError("Poly.prepare_dynamic_dispatch requires at least one enum argument type")
-        return self._get_dynamic_dispatch_func(tuple(arg_types), enum_indices, None)
-    
-    def _get_dynamic_dispatch_func(self, arg_types, enum_indices, node):
-        """Generate dynamic dispatch logic for enum arguments
-        
-        Strategy:
-        1. Validate that ALL variant combinations have matching function overloads
-        2. Validate that ALL overloads have the SAME return type
-        3. Generate and compile a dispatch function using match/case
-        4. Call the compiled dispatch function
-        """
+    def _expand_enum(self, arg_types, enum_indices, signatures):
+        """Build ordinary match/call syntax for expansion in the caller's CFG."""
         import itertools
-        self._refresh_signatures()
+        from pythoc.type_id import get_type_id
 
-        logger.debug(f"Poly _get_dynamic_dispatch_func: arg_types={arg_types}, enum_indices={enum_indices}")
-        from ..type_id import get_type_id
-        cache_key = tuple(get_type_id(t) for t in arg_types)
-        cached = self._dynamic_dispatch_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        
         # Step 1: Validate all combinations are covered
         enum_classes = [enum_cls for _, enum_cls in enum_indices]
         
@@ -162,16 +103,14 @@ class Poly:
         variants_per_enum = []
         for enum_cls in enum_classes:
             variants = []
-            for vname, vtype in zip(enum_cls._variant_names, enum_cls._variant_types):
+            for vname, vtype, _ in enum_cls.get_variants():
                 if vtype is None:
-                    logger.error(
-                        "Poly dynamic dispatch requires a payload for every "
-                        f"variant; {enum_cls.__name__}.{vname} has none",
-                        node, exc_type=TypeError)
+                    raise TypeError('Poly dynamic dispatch requires a payload for every '
+                                    f'variant; {enum_cls.__name__}.{vname} has none')
                 variants.append((vname, vtype))
             variants_per_enum.append(variants)
         
-        # Check all combinations exist in _sig_map and collect return types
+        # Check all combinations and collect their native return types.
         missing_combinations = []
         return_types = []
         variant_combos = []
@@ -184,24 +123,22 @@ class Poly:
                 expected_types[enum_idx] = variant_type
             
             sig_key = tuple(get_type_id(t) for t in expected_types)
-            logger.debug(f"Checking signature: {sig_key}")
-            target_info = self._sig_map.get(sig_key)
+            target_info = signatures.get(sig_key)
             
             if target_info is None:
                 variant_names = [vname for vname, _ in combo]
                 missing_combinations.append((variant_names, expected_types))
             else:
                 variant_combos.append((combo, expected_types, target_info))
-                # Get return type from function info directly from wrapper
+                # Inspect the selected native callable through its public PC type.
                 target_func, _ = target_info
-                func_info = getattr(target_func, '_func_info', None)
-                return_types.append(func_info.return_type_hint)
+                return_types.append(self._signature(target_func)[1])
         
         if missing_combinations:
-            error_msg = "Poly: cannot generate dynamic dispatch - missing function overloads:\n"
+            error_msg = "Poly: cannot expand dynamic dispatch - missing function overloads:\n"
             for variant_names, sig in missing_combinations:
                 error_msg += f"  - Variants {variant_names}: {sig}\n"
-            logger.error(error_msg, node)
+            raise TypeError(error_msg)
         
         # Step 2: Validate all return types are the same
         if return_types:
@@ -209,16 +146,14 @@ class Poly:
             for rt in return_types[1:]:
                 if get_type_id(rt) != get_type_id(first_return_type):
                     error_msg = (
-                        f"Poly: cannot generate dynamic dispatch - inconsistent return types:\n"
+                        f"Poly: cannot expand dynamic dispatch - inconsistent return types:\n"
                         f"  Expected all overloads to return {first_return_type}, "
                         f"but found {rt}\n"
                     )
-                    logger.error(error_msg, node)
+                    raise TypeError(error_msg)
 
         # Specialize ordinary native match code. Pattern extraction transfers
         # linear payloads through the same rules as handwritten ADT consumers.
-        from .. import meta
-
         enum_by_index = dict(enum_indices)
         globals_dict = {}
         cases = []
@@ -266,13 +201,4 @@ class Poly:
             required_globals=globals_dict,
             source_file=__file__,
         )
-        # Two dispatchers over the same input types may select different
-        # overloads. Include native target identities in the specialization.
-        targets = tuple((target[0]._func_info.source_file,
-                         target[0]._func_info.mangled_name
-                         or target[0]._func_info.name)
-                        for _, _, target in variant_combos)
-        dynamic_dispatch = meta.compile_generated(
-            generated, suffix=('poly_match', cache_key, targets))
-        self._dynamic_dispatch_cache[cache_key] = dynamic_dispatch
-        return dynamic_dispatch
+        return meta.inline_generated(generated)

@@ -16,6 +16,7 @@ from pythoc.effect import (
     restore_effect_context,
 )
 from pythoc.session import CompileSession
+from pythoc.context import FunctionBindingState
 
 
 def make_callable(value=0, suffix=None):
@@ -24,7 +25,7 @@ def make_callable(value=0, suffix=None):
         return value
 
     function._is_compiled = True
-    function._binding = SimpleNamespace(
+    function._binding = FunctionBindingState(
         effect_suffix=suffix, group_key=None, original_name='function',
     )
     function._mangled_name = 'function'

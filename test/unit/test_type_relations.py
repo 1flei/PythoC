@@ -23,6 +23,13 @@ from pythoc.utils.naming import normalize_suffix
 
 
 class TypeRelationsTest(unittest.TestCase):
+    def test_extended_floats_share_the_builtin_scalar_home(self):
+        from pythoc import f16, bf16, f32, f64, f128
+        from pythoc.builtin_entities import types
+        for scalar in (f16, bf16, f32, f64, f128):
+            self.assertIs(getattr(types, scalar.__name__), scalar)
+            self.assertEqual(scalar.__module__, types.__name__)
+
     def setUp(self):
         self.session = CompileSession()
         self.session.__enter__()
@@ -169,12 +176,12 @@ class TypeRelationsTest(unittest.TestCase):
                 "from pythoc import array, const, i32, i64, ptr, refined\n"
                 "from pythoc.type_id import get_type_id\n"
                 "from pythoc.std.refinement import nonnull, positive, in_range\n"
-                "from pythoc.std.float_types import f128\n"
+                "from pythoc import f128\n"
                 "from pythoc.builtin_entities.struct import create_struct_type\n"
                 "from pythoc.build.artifact_identity import verify_artifact_identity\n"
                 "record = create_struct_type([ptr[i32]], ['value'])\n"
                 "types = [i32, ptr[const[i32]], array[i32, 3], record, refined[i32, 'checked'], "
-                "nonnull(ptr[i32])[1], positive(i32)[1], in_range(i32, 0, 10)[1], f128]\n"
+                "nonnull(ptr[i32]), positive(i32), in_range(i32, 0, 10), f128]\n"
                 "opaque = refined[i32, lambda value: value > 0]\n"
                 "suffix = ptr[i64] if sys.argv[2] == 'collision' else ptr[i32]\n"
                 "verify_artifact_identity(sys.argv[1] + '/short.o', sys.argv[1] + '/short.so', "
@@ -510,19 +517,30 @@ class TypeRelationsTest(unittest.TestCase):
 
     def test_standard_predicate_identity_uses_family_and_current_type_arguments(self):
         from pythoc.std.refinement import nonnull, positive, nonnegative, in_range
-        first_pred, first = nonnull(ptr[i32])
-        second_pred, second = nonnull(ptr[i32])
+        first = nonnull(ptr[i32])
+        second = nonnull(ptr[i32])
         self.assertTrue(same_type(first, second))
         self.assertEqual(get_type_id(first), get_type_id(second))
         self.assertTrue(can_convert(first, second))
         self.assertTrue(can_convert(second, first))
-        self.assertFalse(same_type(first, nonnull(ptr[i64])[1]))
-        self.assertFalse(same_type(positive(i32)[1], nonnegative(i32)[1]))
-        self.assertTrue(same_type(in_range(i32, 0, 10)[1], in_range(i32, 0, 10)[1]))
-        self.assertFalse(can_convert(in_range(i32, 0, 10)[1], in_range(i32, 1, 10)[1]))
+        self.assertFalse(same_type(first, nonnull(ptr[i64])))
+        self.assertFalse(same_type(positive(i32), nonnegative(i32)))
+        self.assertTrue(same_type(in_range(i32, 0, 10), in_range(i32, 0, 10)))
+        self.assertFalse(can_convert(in_range(i32, 0, 10), in_range(i32, 1, 10)))
         self.assertNotEqual(get_type_id(refined[i32, lambda value: value > 0]),
                             get_type_id(refined[i32, lambda value: value > 0]))
         self.assertNotEqual(get_type_id(refined), get_type_id(ptr[void]))
+
+    def test_resolved_refinement_exposes_its_authoritative_predicate(self):
+        from pythoc import mark_type_defined
+        from pythoc.std.refinement import nonnull
+        from pythoc.type_resolver import TypeResolver
+
+        proof = nonnull(ptr['PredicateMethodTarget'])
+        mark_type_defined('PredicateMethodTarget', i64)
+        resolved = TypeResolver.resolve_type(proof, required=True)
+        self.assertIs(resolved.predicate, proof.predicate)
+        self.assertTrue(same_type(resolved._base_type, ptr[i64]))
 
     def test_standard_predicate_type_edges_close_recursive_records(self):
         from pythoc.std.refinement import nonnull
@@ -531,7 +549,7 @@ class TypeRelationsTest(unittest.TestCase):
             record = create_struct_type([], ['next'],
                                         python_class=type('PredicateNode', (), {}))
             record._field_types = [None]
-            proof = nonnull(ptr[record])[1]
+            proof = nonnull(ptr[record])
             record._field_types = [proof]
             records.append(record)
             proofs.append(proof)

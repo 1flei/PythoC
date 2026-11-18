@@ -225,7 +225,7 @@ class PolyBehaviorBoundariesTest(DeferredTestCase):
             before = {str(path.relative_to(root)): path.stat().st_mtime_ns
                       for path in (root / 'build').rglob('*.o')}
             self.assertTrue(before, 'Cold run produced no object artifacts')
-            self.assertTrue(any('poly' in name for name in before), before)
+            self.assertFalse(any(Path(name).name.startswith('poly.') for name in before), before)
             self.run_script(root / 'probe.py', root)
             after = {str(path.relative_to(root)): path.stat().st_mtime_ns
                      for path in (root / 'build').rglob('*.o')}

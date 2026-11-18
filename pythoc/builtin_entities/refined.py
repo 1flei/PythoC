@@ -107,6 +107,13 @@ def _parse_predicate_signature(predicate, type_resolver=None) -> tuple:
     Returns:
         (param_names, param_types, is_single_param) tuple
     """
+    info = getattr(predicate, '_func_info', None)
+    if info is not None:
+        names = list(info.param_names)
+        if not names:
+            raise TypeError('A refinement predicate must have at least one parameter')
+        parameters = [info.param_type_hints[name] for name in names]
+        return names, parameters, len(names) == 1
     try:
         sig = inspect.signature(predicate)
     except (ValueError, TypeError) as e:
@@ -231,6 +238,16 @@ def _create_from_base_and_constraints_internal(base_type, predicates: List, tags
 # RefinedType class
 # =============================================================================
 
+class _SinglePredicate:
+    """Read the sole predicate from the authoritative constraint list."""
+
+    def __get__(self, instance, owner):
+        predicates = owner._predicates or ()
+        if len(predicates) != 1:
+            raise AttributeError('predicate requires exactly one predicate constraint')
+        return predicates[0]
+
+
 class RefinedType(CompositeType):
     """Refinement type with predicates and/or tags
     
@@ -261,6 +278,7 @@ class RefinedType(CompositeType):
     """
     
     _is_refined = True
+    predicate = _SinglePredicate()
     _base_type: Optional[Any] = None
     _predicates: Optional[List[Any]] = None
     _tags: Optional[List[str]] = None
@@ -540,6 +558,16 @@ class RefinedType(CompositeType):
     def handle_attribute(cls, visitor, base, attr_name, node):
         """Handle attribute access on refined type value"""
         from ..valueref import wrap_value, ensure_ir
+
+        if base.is_python_value() and base.get_python_value() is cls:
+            from ..decorators.class_methods import (
+                lookup_class_method, wrap_class_method_as_python_value,
+            )
+            method = lookup_class_method(cls, attr_name)
+            if method is not None:
+                return wrap_class_method_as_python_value(method, node)
+            logger.error(f"{cls.get_name()} has no class attribute '{attr_name}'",
+                         node=node, exc_type=AttributeError)
         
         # For base + constraints: delegate to base type
         if cls._base_type is not None:

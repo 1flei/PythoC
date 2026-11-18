@@ -193,17 +193,12 @@ def _get_callee_signature(func_ref: ValueRef) -> Optional[Dict[str, Any]]:
 
 
 def prepare_call_target(func_ref):
-    """Resolve inline callable objects and bind ordinary inline methods."""
+    """Bind the explicit receiver of an ordinary inline method."""
     from .valueref import wrap_python_constant
 
     if not func_ref.is_python_value():
         return func_ref, []
     target = func_ref.get_python_value()
-    if not getattr(target, '_is_inline', False):
-        inline_call = getattr(target, '__call__', None)
-        if getattr(inline_call, '_is_inline', False):
-            target = inline_call
-            func_ref = wrap_python_constant(target)
     bound_self = getattr(target, '__self__', None)
     if bound_self is not None and getattr(target, '_is_inline', False):
         return func_ref, [wrap_python_constant(bound_self)]

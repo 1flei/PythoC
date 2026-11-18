@@ -34,11 +34,13 @@ def main():
                  (second, (17,), 17 + offset), (third, (40,), 42)]
     else:
         if library == 'set':
-            from pythoc.std.set import _DEFAULT_HASH, _DEFAULT_EQ
+            from pythoc.std.set import FlatHashSet
+            container = FlatHashSet(i8)
         else:
-            from pythoc.std.map import _DEFAULT_HASH, _DEFAULT_EQ
-        hash_key = _DEFAULT_HASH[i8]
-        same_key = _DEFAULT_EQ[i8]
+            from pythoc.std.map import FlatHashMap
+            container = FlatHashMap(i8, i32)
+        from pythoc.std.hash import key_functions
+        hash_key, same_key = key_functions(i8)
         calls = [(hash_key, (5,), hash_key(5)),
                  (same_key, (5, 5), True), (same_key, (5, 6), False)]
 
