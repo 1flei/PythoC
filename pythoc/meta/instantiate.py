@@ -591,10 +591,11 @@ def _compile_yield_fn_pipeline(
     sfx = "_".join(str(p) for p in suffix)
 
     fields = {"_pc": i32, "_yield_value": yield_type}
-    annotations = _local_annotations(fa)
+    state_names = locals_set - protect_set
+    local_types = _state_local_types(fa, state_names, type_resolver)
     capture_types = {capture.name: capture.pc_type for capture in runtime_captures}
-    for name in sorted(locals_set - protect_set):
-        hint = _annotation_ast_to_type(annotations.get(name), type_resolver)
+    for name in sorted(state_names):
+        hint = local_types.get(name)
         if hint is None:
             hint = capture_types.get(name, (bound_types or {}).get(name))
         if hint is None:
@@ -1023,11 +1024,14 @@ def _typed_zero(ty: type) -> ast.expr:
     )
 
 
-def _local_annotations(fa):
-    """Collect explicit local types once, including expanded compound bodies."""
+def _state_local_types(fa, state_names, type_resolver):
+    """Resolve lifted locals before state-field rewriting erases their declarations."""
     from .._inline.renaming import _parameters
-    annotations = {arg.arg: arg.annotation for arg in _parameters(fa.args)
-                   if arg.annotation is not None}
+    from ..ast_visitor.assignments import admit_uninitialized_local
+
+    types = {arg.arg: _annotation_ast_to_type(arg.annotation, type_resolver)
+             for arg in _parameters(fa.args)
+             if arg.arg in state_names and arg.annotation is not None}
 
     class Collector(ast.NodeVisitor):
         def visit_FunctionDef(self, node):
@@ -1036,13 +1040,20 @@ def _local_annotations(fa):
         visit_AsyncFunctionDef = visit_FunctionDef
 
         def visit_AnnAssign(self, node):
-            if isinstance(node.target, ast.Name):
-                annotations.setdefault(node.target.id, node.annotation)
+            if not isinstance(node.target, ast.Name) or node.target.id not in state_names:
+                return
+            name = node.target.id
+            bare = node.value is None and not hasattr(node, '_inline_slot')
+            if name not in types or bare:
+                hint = _annotation_ast_to_type(node.annotation, type_resolver)
+                if bare:
+                    admit_uninitialized_local(node, hint)
+                types.setdefault(name, hint)
 
     collector = Collector()
     for statement in fa.body:
         collector.visit(statement)
-    return annotations
+    return types
 
 
 def _python_value_to_ast(v: Any) -> ast.expr:

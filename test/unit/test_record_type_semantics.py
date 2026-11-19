@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from pythoc import array, compile, const, func, i32, i64, ptr, refined, u32, union
+from pythoc import array, compile, const, func, i32, i64, ptr, refined, static, u32, union
 from pythoc.builtin_entities.struct import create_struct_type
 from pythoc.forward_ref import mark_type_defined
 from pythoc.session import CompileSession
@@ -29,6 +29,18 @@ class RecordTypeSemanticsTest(unittest.TestCase):
         self.session = CompileSession()
         self.session.__enter__()
         self.addCleanup(self.session.__exit__, None, None, None)
+
+    def test_private_static_keeps_its_declared_initializer(self):
+        from pythoc.decorators.class_statics import lookup_class_static
+
+        @compile(suffix='seed_lookup')
+        class _Record:
+            __value: i32
+            __table: static[array[i32, 2]] = (17, 41)
+
+        self.assertEqual(_Record._field_names, ['__value'])
+        _, initializer, _ = lookup_class_static(_Record, '__table')
+        self.assertEqual(initializer, (17, 41))
 
     def test_recursive_factory_fields_bind_their_own_declaration(self):
         def make_node(value_type):

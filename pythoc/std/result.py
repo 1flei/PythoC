@@ -11,9 +11,12 @@ importing this module never installs a global error channel.
 from ..builtin_entities import i8, static, ptr, array, typeof
 from ..builtin_entities.enum import _create_enum_type
 from ..builtin_entities.types import bool as pc_bool
+from ..builtin_entities.unreachable import _require_unreachable
 from ..effect import effect
 from ..schema_protocol import is_linear_schema_type
-from pythoc import compile, inline
+from ..type_descriptor import same_type
+from ..utils import get_next_id
+from pythoc import compile, inline, label, goto_end
 
 
 class ErrnoSlotProvider:
@@ -58,10 +61,20 @@ class _LocalSlotProvider:
     compile-level closure capturing the channel by reference.
     """
 
-    def __init__(self, slot_fn):
+    def __init__(self, err_type, slot_fn):
+        self.err_type = err_type
+        self.exit_label = f"__result_failure_{get_next_id()}"
         self._slot_fn = slot_fn
 
+    @staticmethod
+    def failure_exit(get_slot):
+        provider = getattr(get_slot, '__self__', None)
+        return provider.exit_label if isinstance(provider, _LocalSlotProvider) else None
+
     def get_slot(self, err_type):
+        if not same_type(err_type, self.err_type):
+            raise TypeError("Result.do requires the same error type in every bind "
+                            f"(expected {self.err_type}, got {err_type})")
         return self._slot_fn
 
 
@@ -163,7 +176,9 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
     """Create a Result type carrying its constructors and operations.
 
     All payloads support constructors and unwrap_or_else. Bind/do require
-    a copyable error; is_ok/is_err and unwrap_or require a copyable sum.
+    a copyable error. Every reachable path through a do producer must yield
+    a value or propagate a bind error of exactly err_type. The first such
+    error exits this do. is_ok/is_err and unwrap_or require a copyable sum.
 
     Returns:
         ResultType
@@ -194,8 +209,14 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
                 # Result.do supplies a local propagation slot. Outside do,
                 # the caller must explicitly bind a slot policy; an unbound
                 # channel is a compile-time error, never a dropped error.
-                ptr[err_type](effect.errno.get_slot(err_type)())[0] = err_value
-                pass
+                get_slot = effect.errno.get_slot
+                slot = get_slot(err_type)
+                failure_exit = _LocalSlotProvider.failure_exit(get_slot)
+                if failure_exit is None:
+                    ptr[err_type](slot())[0] = err_value
+                else:
+                    slot()[0] = err_value
+                    goto_end(failure_exit)
 
     @inline
     def result_do(
@@ -210,9 +231,13 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
         def _slot() -> ptr[err_type]:
             return ptr(err)
 
-        with effect(errno=_LocalSlotProvider(_slot)):
-            for value in genexp:
-                return _result_type(_result_type.Ok, value)
+        channel = _LocalSlotProvider(err_type, _slot)
+        with label(channel.exit_label):
+            with effect(errno=channel):
+                for value in genexp:
+                    return _result_type(_result_type.Ok, value)
+            _require_unreachable("Result.do can finish without yielding a value or propagating an error")
+
         return _result_type(_result_type.Err, err)
 
     @inline
@@ -284,8 +309,6 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
 
 def _conversion_source(source, kind, value_type, drop_error=None):
     """Read conversion metadata from the actual source enum type."""
-    from ..type_descriptor import same_type
-
     names = ['Some', 'NoneVal'] if kind == 'option' else ['Ok', 'Err']
     if not getattr(source, '_is_enum', False) or source._variant_names != names:
         raise TypeError(f'Expected a {kind} source')

@@ -1383,6 +1383,14 @@ class OutputManager:
                     self._pending_groups.setdefault(group_key, group)
 
     def flush_all(self):
+        """Finish pending compilation and report any unhandled build error."""
+        from ..logger import logger
+        try:
+            self._flush_all()
+        except Exception as error:
+            logger.error(error)
+
+    def _flush_all(self):
         """
         Flush all pending output files to disk.
         
@@ -1640,7 +1648,9 @@ def _atexit_flush():
     same exit code via `os._exit()` to keep output clean.
     """
     try:
-        get_output_manager().flush_all()
+        # Shutdown cleanup can run after the interpreter stops accepting new
+        # build tasks. Keep those failures out of normal compile diagnostics.
+        get_output_manager()._flush_all()
     except SystemExit as e:
         # Preserve exit status without triggering atexit traceback printing.
         try:

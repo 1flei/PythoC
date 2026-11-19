@@ -12,13 +12,25 @@ from pythoc.builtin_entities import (
     u8, u16, u32, u64,
     f32, f64,
     ptr, array, thread_local,
-    get_builtin_entity
+    is_signed_int, is_unsigned_int, get_builtin_entity
 )
 
 
 class TestIntegerTypes(unittest.TestCase):
     """Test integer type entities"""
     
+    def test_signedness_of_each_integer_width(self):
+        for width in range(1, 129):
+            for prefix in ('i', 'u'):
+                name = f'{prefix}{width}'
+                with self.subTest(name=name):
+                    integer = get_builtin_entity(name)
+                    self.assertEqual(is_signed_int(integer), prefix == 'i')
+                    self.assertEqual(is_unsigned_int(integer), prefix == 'u')
+        for other in (None, f32, ptr[i32], get_builtin_entity('bool')):
+            self.assertFalse(is_signed_int(other))
+            self.assertFalse(is_unsigned_int(other))
+
     def test_i8_properties(self):
         """Test i8 type properties"""
         self.assertEqual(i8.get_name(), "i8")

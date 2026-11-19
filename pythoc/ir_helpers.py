@@ -220,17 +220,15 @@ def safe_store(builder: ir.IRBuilder, value: ir.Value, ptr: ir.Value,
     Raises:
         RuntimeError: If attempting to modify const-qualified type
     """
-    # Check if trying to modify const
     check_const_store(pc_type, node)
-    
+    return initialize_storage(builder, value, ptr, pc_type, align=align)
+
+
+def initialize_storage(builder, value, ptr, pc_type, align=None):
+    """Write an initial value, including the observable store to volatile storage."""
     if is_volatile(pc_type):
         volatile_store = getattr(builder, 'store_volatile', None)
         if volatile_store is not None:
             return volatile_store(value, ptr, align=align)
-    store_inst = builder.store(value, ptr, align=align)
-    
-    # Check if type is volatile
-    if is_volatile(pc_type):
-        make_store_volatile(store_inst)
-    
-    return store_inst
+        return make_store_volatile(builder.store(value, ptr, align=align))
+    return builder.store(value, ptr, align=align)

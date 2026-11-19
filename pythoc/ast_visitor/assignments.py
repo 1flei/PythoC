@@ -8,7 +8,7 @@ from typing import Optional, Any
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..logger import logger
-from ..ir_helpers import safe_store, safe_load, is_const, is_volatile, is_static
+from ..ir_helpers import initialize_storage, safe_store, safe_load, is_const, is_volatile, is_static
 from ..builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -22,19 +22,35 @@ from ..builtin_entities import (
 from ..builtin_entities import bool as pc_bool
 
 
+def admit_uninitialized_local(node, pc_type):
+    """Return whether a bare local declaration should allocate storage."""
+    from ..type_descriptor import contains_refinement_storage
+    if not contains_refinement_storage(pc_type):
+        return True
+    slot = getattr(node, '_inline_slot', None)
+    if slot == 'yield_target':
+        # Only the yield assignment can introduce a proof-bearing loop binding.
+        return False
+    if slot == 'return':
+        # The inline return checker requires a value on every reachable exit.
+        return True
+    logger.error(f"Local '{node.target.id}' contains a refined value and requires an initializer",
+                 node=node, exc_type=TypeError)
+
+
 class AssignmentsMixin:
     """Mixin containing assignments-related visitor methods"""
     
     def visit_lvalue(self, node: ast.AST) -> ValueRef:
-        """Compute lvalue for assignment target, returns ValueRef with kind='address'
-        
-        Unified implementation: delegates to visit_expression which returns ValueRef
-        with both loaded value and address, then extracts the address for lvalue context.
-        """
+        """Resolve an assignment target, preserving a storage-free local singleton."""
         if isinstance(node, ast.Tuple):
             logger.error("Tuple unpacking should be handled by caller", node=node, exc_type=ValueError)
         
         result = self.visit_expression(node)
+        if isinstance(node, ast.Name) and result.is_python_value():
+            binding = self.scope_manager.lookup_variable(node.id)
+            if binding is not None and binding.is_python_constant:
+                return result
         return result.as_lvalue()
 
     def _check_linear_rvalue_copy(self, rvalue: ValueRef, node) -> None:
@@ -97,7 +113,7 @@ class AssignmentsMixin:
             llvm_type = pc_type.get_llvm_type(self.module.context)
             alloca = self._create_alloca_in_entry(llvm_type, f"{node.id}_addr")
             
-            self.declare_variable(
+            variable = self.declare_variable(
                 name=node.id,
                 type_hint=pc_type,
                 alloca=alloca,
@@ -113,6 +129,7 @@ class AssignmentsMixin:
                 type_hint=pc_type,
                 address=alloca,
                 var_name=node.id,
+                linear_owner_id=variable.var_id,
                 linear_path=()
             )
     
@@ -132,24 +149,11 @@ class AssignmentsMixin:
         """
         target_pc_type = lvalue.get_pc_type()
         
-        # Special case: pyconst target - zero-sized, assignment is a no-op
-        # Must check before convert() since Python values don't have ir_value
+        rvalue = self.implicit_coercer.coerce(rvalue, target_pc_type, node)
         from ..builtin_entities.python_type import PythonType
         if isinstance(target_pc_type, PythonType):
-            # Type check: if target is pyconst[X], rvalue must be X
-            if target_pc_type.is_constant():
-                expected_value = target_pc_type.get_constant_value()
-                if rvalue.is_python_value():
-                    actual_value = rvalue.value
-                else:
-                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node=node, exc_type=TypeError)
-                if actual_value != expected_value:
-                    logger.error(f"Cannot store to pyconst target: {lvalue}={rvalue}", node=node, exc_type=TypeError)
-            # pyconst fields are zero-sized, assignment is a no-op after type check
-            return
-        
-        # Convert value to target type (implicit coercer checks pointer policy)
-        rvalue = self.implicit_coercer.coerce(rvalue, target_pc_type, node)
+            return  # The type already carries the value.
+
         target_type = lvalue.get_storage_type()
         value_ir = self._assignment_ir_value(rvalue, target_type)
         
@@ -208,13 +212,7 @@ class AssignmentsMixin:
                 )
                 self.scope_manager.declare_variable(var_info, allow_shadow=True)
                 return
-            elif existing_in_registry is not None:
-                # Variable exists in var_registry - if it's also a Python value, update it
-                if existing_in_registry.alloca is None:
-                    existing_in_registry.value_ref = rvalue
-                    return
-                # Otherwise fall through to normal assignment (will likely fail)
-        
+
         decayed_rvalue = self.value_dispatcher.prepare_assignment_rvalue(rvalue, node)
         
         # Get or create lvalue
@@ -283,8 +281,9 @@ class AssignmentsMixin:
             # Regular variable: create stack allocation
             var_addr = self._create_alloca_in_entry(llvm_type, f"{var_name}_addr")
             
-            value_ir = self._assignment_ir_value(rvalue, llvm_type)
-            self.builder.store(value_ir, var_addr)
+            if node.value is not None:
+                value_ir = self._assignment_ir_value(rvalue, llvm_type)
+                initialize_storage(self.builder, value_ir, var_addr, pc_type)
         
         # Declare variable (for both static and non-static)
         self.declare_variable(
@@ -346,7 +345,6 @@ class AssignmentsMixin:
             )
         
         # Get PC type from annotation
-        is_static_var = False
         if not hasattr(node, 'annotation'):
             raise RuntimeError("AnnAssign requires annotation")
 
@@ -360,7 +358,9 @@ class AssignmentsMixin:
         from ..type_descriptor import validate_static_storage
         from ..ir_helpers import is_thread_local
         if is_static(pc_type) or is_thread_local(pc_type):
-            validate_static_storage(pc_type, zero_initialized=node.value is None)
+            validate_static_storage(pc_type, node, zero_initialized=node.value is None)
+        elif node.value is None and not admit_uninitialized_local(node, pc_type):
+            return
         ownership_source = None
         # Now parse the RHS
         from ..builtin_entities.python_type import PythonType
@@ -398,6 +398,10 @@ class AssignmentsMixin:
             else:
                 rvalue = self.implicit_coercer.coerce(rvalue, pc_type, node)
             
+        if isinstance(pc_type, PythonType):
+            self.declare_variable(var_name, pc_type, value_ref=rvalue,
+                                  source="annotation", line_number=node.lineno)
+            return
         if ownership_source is not None and self._is_linear_type(pc_type):
             self._transfer_linear_ownership(ownership_source, reason="assignment", node=node)
         # Store the value

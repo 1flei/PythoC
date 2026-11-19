@@ -2,10 +2,10 @@
 
 import unittest
 
-from pythoc import compile, effect, i32, ptr
+from pythoc import compile, effect, i32, i64, ptr, static, u32
 from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
 from pythoc.logger import set_raise_on_error
-from pythoc.std.result import ErrnoSlotProvider, Result as ResultType
+from pythoc.std.result import ErrnoSlotProvider, Option, Result as ResultType
 
 
 set_raise_on_error(True)
@@ -19,6 +19,70 @@ def checked(value: i32) -> Result:
     if value >= 0:
         return Result.ok(value)
     return Result.err(-value * 10)
+
+
+OtherOk = ResultType(i64, i32)
+Maybe = Option(i32)
+bind_other = OtherOk.bind
+
+
+@compile
+class Calls:
+    checked: static[i32]
+
+
+@compile
+def first(value: i32) -> OtherOk:
+    Calls.checked += 1
+    if value < 0:
+        return OtherOk.err(value)
+    return OtherOk.ok(i64(value))
+
+
+@compile
+def counted_second(value: i32) -> Result:
+    Calls.checked += 1
+    return checked(value)
+
+
+@compile
+def counted_chain(a: i32, b: i32) -> i32:
+    Calls.checked = 0
+    composed = Result.do(
+        i32(x) + y for x in bind_other(first(a)) for y in Result.bind(counted_second(b))
+    )
+    match composed:
+        case (Result.Ok, answer):
+            return Calls.checked * 100 + answer
+        case (Result.Err, error):
+            return Calls.checked * 100 + error
+
+
+@compile
+def empty_if_zero(value: i32) -> i32:
+    if value != 0:
+        yield value
+
+
+@compile
+def with_fallback(value: i32) -> i32:
+    for x in Result.bind(checked(value)):
+        yield x
+    Calls.checked += 1
+    yield 99
+
+
+@compile
+def nested_do(value: i32) -> i32:
+    Calls.checked = 0
+    composed = Result.do(
+        x for x in Result.bind(Result.do(y for y in with_fallback(value)))
+    )
+    match composed:
+        case (Result.Ok, answer):
+            return answer + 100 * Calls.checked
+        case (Result.Err, error):
+            return -error + 100 * Calls.checked
 
 
 @compile
@@ -93,6 +157,54 @@ class TestResultFailurePolicy(unittest.TestCase):
         self.assertEqual(propagate(3, -5), -50)
         self.assertEqual(nested(-2), -20)
         self.assertEqual(nested(2), 6)
+
+    def test_mixed_success_types_and_first_failure(self):
+        self.assertEqual(counted_chain(3, 4), 207)
+        self.assertEqual(counted_chain(-2, 4), 98)
+        self.assertEqual(counted_chain(3, -5), 250)
+
+    def test_nested_do_exits_the_current_producer_on_first_failure(self):
+        self.assertEqual(nested_do(3), 3)
+        self.assertEqual(nested_do(-2), -20)
+
+    def test_error_type_must_match_even_at_the_same_width(self):
+        for err_type in (i64, u32):
+            with self.subTest(err_type=err_type):
+                other = ResultType(i32, err_type)
+
+                @compile(suffix=("result_error_mismatch", err_type))
+                def bad() -> Result:
+                    return Result.do(x for x in other.bind(other.err(err_type(7))))
+
+                self.reject(bad, "same error type", ValueError)
+
+    def reject(self, function, message, exception=TypeError):
+        try:
+            with self.assertRaisesRegex(exception, message):
+                flush_all_pending_outputs()
+        finally:
+            clear_failed_group(function._binding.group_key)
+
+    def test_option_exhaustion_requires_an_explicit_error(self):
+        @compile(suffix="result_option_empty")
+        def bad() -> Result:
+            return Result.do(x for x in Maybe.bind(Maybe.none()))
+
+        self.reject(bad, "without yielding a value or propagating an error")
+
+    def test_custom_producer_must_cover_every_reachable_exit(self):
+        @compile(suffix="result_empty_producer")
+        def bad(v: i32) -> Result:
+            return Result.do(x for x in empty_if_zero(v))
+
+        self.reject(bad, "without yielding a value or propagating an error")
+
+    def test_filtered_success_requires_an_explicit_error(self):
+        @compile(suffix="result_filtered_success")
+        def bad(v: i32) -> Result:
+            return Result.do(x for x in Result.bind(checked(v)) if False)
+
+        self.reject(bad, "without yielding a value or propagating an error")
 
     def test_errno_policy_is_explicit(self):
         reset_slot(73)

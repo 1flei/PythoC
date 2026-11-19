@@ -122,6 +122,13 @@ class _InlineReturnValue:
         return value
 
 
+def _expansion_slot(name, annotation, purpose):
+    node = ast.AnnAssign(target=ast.Name(id=name, ctx=ast.Store()),
+                         annotation=annotation, value=None, simple=1)
+    node._inline_slot = purpose
+    return node
+
+
 @quote
 def _terminal_return(label_name, body, has_value, make_capture, capture,
                      value, result_var):
@@ -139,13 +146,9 @@ def _terminal_return(label_name, body, has_value, make_capture, capture,
 # Unified: all branches encoded as const guards.
 # _fold_const_if eliminates dead branches at instantiation.
 @quote
-def _inline_frame(has_label, has_result_decl, has_decls,
-                  bindings, result_var, result_type, label_name, decls, body):
+def _inline_frame(has_label, bindings, label_name, decls, body):
     bindings
-    if has_result_decl:
-        result_var: result_type
-    if has_decls:
-        decls
+    decls
     if has_label:
         with __pc_intrinsics.label(label_name):  # noqa: F821
             body
@@ -288,45 +291,17 @@ def _build_loop_var_declarations(
     call_site,
     visible_names=frozenset(),
 ):
-    """Build loop-variable declaration AST nodes for yield inlining.
-
-    For simple Name: creates single AnnAssign.
-    For Tuple: creates declarations for each element using subscript types.
-
-    Args:
-        loop_var: Loop variable target (Name or Tuple).
-        return_type_annotation: Return type annotation from the yield function.
-        call_site: AST node for copy_location.
-
-    Returns:
-        List of AnnAssign statements.
-    """
+    """Reserve typed consumer bindings before expanding an annotated generator."""
+    targets = loop_var.elts if isinstance(loop_var, ast.Tuple) else [loop_var]
     decls = []
-
-    if isinstance(loop_var, ast.Name) and loop_var.id not in visible_names:
-        decl = ast.AnnAssign(
-            target=ast.Name(id=loop_var.id, ctx=ast.Store()),
-            annotation=copy.deepcopy(return_type_annotation),
-            value=None,
-            simple=1
-        )
-        ast.copy_location(decl, call_site)
-        decls.append(decl)
-    elif isinstance(loop_var, ast.Tuple):
-        for i, elt in enumerate(loop_var.elts):
-            if isinstance(elt, ast.Name) and elt.id not in visible_names:
-                element_type = _type_expression(
-                    _tuple_element_type, copy.deepcopy(return_type_annotation),
-                    ast.Constant(i))
-                decl = ast.AnnAssign(
-                    target=ast.Name(id=elt.id, ctx=ast.Store()),
-                    annotation=element_type,
-                    value=None,
-                    simple=1
-                )
-                ast.copy_location(decl, call_site)
-                decls.append(decl)
-
+    for i, target in enumerate(targets):
+        if not isinstance(target, ast.Name) or target.id in visible_names:
+            continue
+        annotation = copy.deepcopy(return_type_annotation)
+        if isinstance(loop_var, ast.Tuple):
+            annotation = _type_expression(_tuple_element_type, annotation, ast.Constant(i))
+        decl = _expansion_slot(target.id, annotation, 'yield_target')
+        decls.append(ast.copy_location(decl, call_site))
     return decls
 
 
@@ -443,8 +418,7 @@ def expand_inline_or_raise(
         return expand_inline(request)
     except Exception as e:
         from ..logger import logger
-        logger.error(f"{tag}: meta inline expansion failed: {e}")
-        raise
+        logger.error(f"{tag}: meta inline expansion failed: {e}", node=call_site)
 
 
 def try_expand_inline(
@@ -590,12 +564,19 @@ def expand_inline(request):
         annotation = VariableRenamer(rename_map).visit(
             copy.deepcopy(return_annotation))
         result_type = _type_expression(_result_storage_type, annotation)
+        if isinstance(request.exit_rule, YieldExitRule):
+            request.exit_rule.return_type_annotation = result_type
         if isinstance(request.exit_rule, ReturnExitRule):
             request.exit_rule.discard_result = _type_expression(
                 _is_void_return, copy.deepcopy(annotation))
 
     # --- Transform body (rename + exit-rule) ---
     body_stmts = _transform_body(callee_body, request.exit_rule, rename_map)
+    if (isinstance(request.exit_rule, ReturnExitRule) and return_annotation is not None
+            and (not callee_body or not isinstance(callee_body[-1], ast.Return))):
+        # Value returns jump past this point. Its reachability belongs to the
+        # enclosing native CFG, including scoped gotos and infinite loops.
+        body_stmts.extend(request.exit_rule.check_empty_return())
 
     if has_terminal_return:
         from .exit_rules import VariableRenamer
@@ -612,22 +593,19 @@ def expand_inline(request):
         ).stmts
 
     has_label = exit_label is not None
-    has_result_decl = result_type is not None and result_var is not None
     decl_stmts = []
+    if result_type is not None and result_var is not None:
+        # Every reachable value return writes this private slot. Fallthrough
+        # and bare returns are checked by the ordinary return-exit rule.
+        decl_stmts.append(_expansion_slot(result_var, result_type, 'return'))
     if isinstance(request.exit_rule, YieldExitRule) and result_type is not None:
-        decl_stmts = _build_loop_var_declarations(
+        decl_stmts.extend(_build_loop_var_declarations(
             request.exit_rule.loop_var, result_type, request.call_site,
-            request.caller_context.available_vars)
-    has_decls = bool(decl_stmts)
+            request.caller_context.available_vars))
 
-    # --- Single unified frame template call ---
     frame = _inline_frame(
         meta_const(has_label),
-        meta_const(has_result_decl),
-        meta_const(has_decls),
         binding_frags,
-        ast.Name(id=result_var, ctx=ast.Store()) if has_result_decl else "_unused",
-        copy.deepcopy(result_type) if has_result_decl else ast.Constant(value=0),
         ast.Constant(value=exit_label or "_unused"),
         decl_stmts,
         body_stmts,

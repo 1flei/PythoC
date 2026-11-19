@@ -7,10 +7,10 @@ import ast
 from types import SimpleNamespace
 import unittest
 
-from pythoc import CompileSession, compile, f64, i32, i64, ptr
+from pythoc import CompileSession, compile, f64, i32, i64, ptr, refined
 from pythoc.builtin_entities.instantiate import instantiate
 from pythoc.meta.instantiate import _compile_yield_fn_pipeline
-from test.utils.test_utils import expect_error
+from test.utils.test_utils import DeferredTestCase, expect_error
 
 
 # ====================================================================
@@ -466,7 +466,33 @@ def instantiate_computed() -> i32:
     return total
 
 
-class TestIteratorStateValidation(unittest.TestCase):
+StateChecked = refined[i32, 'state_checked']
+
+
+@compile
+def uninitialized_refined_state() -> i32:
+    slot: StateChecked
+    slot = StateChecked(3)
+    yield i32(slot)
+
+
+@compile
+def shadowed_refined_state() -> i32:
+    slot: i32 = 1
+    yield slot
+    if slot:
+        slot: StateChecked
+        slot = StateChecked(3)
+        yield i32(slot)
+
+
+class TestIteratorStateValidation(DeferredTestCase):
+    def test_lifted_refined_declaration_still_requires_initializer(self):
+        for source in (uninitialized_refined_state, shadowed_refined_state):
+            with self.subTest(source=source), self.assertRaisesRegex(
+                    TypeError, "Local 'slot'.*requires an initializer"):
+                instantiate(source)
+
     def test_unknown_state_local_is_rejected_before_evaluation(self):
         events = []
 

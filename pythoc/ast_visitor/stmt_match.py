@@ -239,7 +239,8 @@ class MatchStatementMixin:
                     value, alternative_bindings = self._generate_match_pattern(
                         alternative, subject)
                     if alternative_bindings:
-                        raise TypeError('Captures in OR patterns are unsupported')
+                        logger.error('Captures in OR patterns are unsupported',
+                                     node=alternative.ast_node, exc_type=TypeError)
                     conditions.append(value)
                 condition = self._combine_match_conditions(conditions, 'or_')
             elif pattern.kind == PatternKind.CONSTRUCTOR:
@@ -263,7 +264,8 @@ class MatchStatementMixin:
                         bindings.extend(values)
                 condition = self._combine_match_conditions(conditions)
             else:
-                raise NotImplementedError(f'Unknown normalized pattern: {pattern.kind}')
+                logger.error(f'Unknown normalized pattern: {pattern.kind}',
+                             node=pattern.ast_node, exc_type=NotImplementedError)
         bindings.extend((name, captured) for name in pattern.bindings)
         return condition, bindings
 
@@ -273,7 +275,8 @@ class MatchStatementMixin:
             for alternative in pattern.alternatives:
                 value, bindings = self._generate_multi_subject_pattern(alternative, subjects)
                 if bindings:
-                    raise TypeError('Captures in OR patterns are unsupported')
+                    logger.error('Captures in OR patterns are unsupported',
+                                 node=alternative.ast_node, exc_type=TypeError)
                 conditions.append(value)
             return self._combine_match_conditions(conditions, 'or_'), []
         conditions, bindings = [], []

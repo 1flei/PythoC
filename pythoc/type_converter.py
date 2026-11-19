@@ -199,13 +199,15 @@ class TypeConverter:
         if value.has_place() or value.has_storage():
             from .valueref import read_rvalue
             value = read_rvalue(value, self.builder)
-        if value.is_python_value():
+        from .builtin_entities.python_type import PythonType
+        stripped_target = strip_qualifiers(target_type)
+        if value.is_python_value() and not isinstance(stripped_target, PythonType):
             raise_if_compile_level_callable(value.get_python_value())
         
         # A qualifier can wrap a refinement. Decide the semantic relation
         # before the LLVM fast path or storage qualifier erasure.
         from .type_descriptor import can_convert
-        target_is_refined = getattr(strip_qualifiers(target_type), '_is_refined', False)
+        target_is_refined = getattr(stripped_target, '_is_refined', False)
         if target_is_refined and not can_convert(
                 value.type_hint, target_type, mode='explicit', value=value):
             target_name = target_type.get_name() if hasattr(target_type, 'get_name') else str(target_type)
@@ -227,7 +229,6 @@ class TypeConverter:
                          node, exc_type=TypeError)
         
         # Strip qualifiers for comparison and conversion
-        stripped_target = strip_qualifiers(target_type)
         stripped_source = strip_qualifiers(value.type_hint) if value.type_hint else None
 
         # C-style discard cast: converting any already-evaluated value to void
@@ -255,37 +256,12 @@ class TypeConverter:
                 return value.clone(type_hint=target_type)
         
         # Step 0: Handle PythonType (pyconst) target - type checking only, no IR conversion
-        from .builtin_entities.python_type import PythonType
         if isinstance(stripped_target, PythonType):
-            # Target is pyconst[value] - this is a zero-sized type
-            # Only type checking is needed, no actual conversion
-            if value.is_python_value():
-                assigned_value = value.get_python_value()
-            elif hasattr(value.value, 'constant'):
-                # LLVM constant - extract value
-                assigned_value = value.value.constant
-            else:
-                raise TypeError(
-                    f"Cannot assign runtime value to pyconst field. "
-                    f"pyconst fields require compile-time constant values."
-                )
-            
-            # Type check: value must match exactly
-            expected_value = stripped_target.get_constant_value()
-            if assigned_value != expected_value:
-                raise TypeError(
-                    f"Type mismatch: cannot assign {repr(assigned_value)} to "
-                    f"{stripped_target.get_instance_name()}. "
-                    f"Expected value: {repr(expected_value)}"
-                )
-            
-            # Return a pyconst ValueRef (no actual IR value needed)
-            return wrap_value(
-                assigned_value,
-                kind="python",
-                type_hint=target_type
-            )
-        
+            # can_convert already checked the normalized constant, including
+            # signed integers. The destination type carries the complete value.
+            return wrap_value(stripped_target.get_python_object(), kind="python",
+                              type_hint=target_type)
+
         # Step 1: Handle @compile / @extern wrapper -> func pointer
         # When source is a Python value that is a callable wrapper, lower it
         # to a func pointer.  This path handles wrappers used as *values*
@@ -1379,7 +1355,8 @@ class ImplicitCoercer:
         """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""
         source_type = value.type_hint
         from .type_descriptor import can_convert
-        if value.is_python_value():
+        from .builtin_entities.python_type import PythonType
+        if value.is_python_value() and not isinstance(strip_qualifiers(target_type), PythonType):
             raise_if_compile_level_callable(value.get_python_value())
 
         def check_relation():
@@ -1388,7 +1365,7 @@ class ImplicitCoercer:
                 from .type_descriptor import conversion_failure
                 detail = conversion_failure(source_type, target_type, value)
                 if detail is not None:
-                    raise TypeError(detail)
+                    logger.error(detail, node=node, exc_type=TypeError)
                 source_name = (source_type.get_name() if hasattr(source_type, 'get_name')
                                else str(source_type))
                 target_name = (target_type.get_name() if hasattr(target_type, 'get_name')

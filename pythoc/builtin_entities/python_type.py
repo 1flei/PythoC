@@ -186,50 +186,9 @@ class PythonType(_PythonTypeBase):
         return result
     
     def handle_field_assignment(self, visitor, base, field_index, field_name, value_ref, node):
-        """Handle field assignment for pyconst fields in structs.
-        
-        Type checking rule: Assignment must match exact value
-        - x.field = 5 where field: pyconst[5] -> OK
-        - x.field = 3 where field: pyconst[5] -> ERROR
-        
-        Args:
-            visitor: AST visitor
-            base: Base struct ValueRef
-            field_index: Index of this field in struct
-            field_name: Name of the field
-            value_ref: Value being assigned
-            node: AST node
-        
-        Returns:
-            None (assignment is a no-op for zero-sized fields)
-        """
-        if not self._is_constant:
-            logger.error(f"Cannot assign to non-constant Python field '{field_name}'", node=node, exc_type=TypeError)
-        
-        # Extract the value being assigned
-        if value_ref.is_python_value():
-            assigned_value = value_ref.value
-        elif hasattr(value_ref.value, 'constant'):
-            # LLVM constant
-            assigned_value = value_ref.value.constant
-        else:
-            logger.error(
-                f"Cannot assign runtime value to pyconst field '{field_name}'. "
-                f"pyconst fields require compile-time constant values.",
-                node=node, exc_type=TypeError
-            )
-        
-        # Type check: value must match exactly
-        if assigned_value != self._constant_value:
-            logger.error(
-                f"Type mismatch: cannot assign {repr(assigned_value)} to field '{field_name}' "
-                f"of type pyconst[{repr(self._constant_value)}]. "
-                f"pyconst fields require exact value match.",
-                node=node, exc_type=TypeError
-            )
-        
-        # Assignment is valid but is a no-op (zero-sized field)
-    
+        """A singleton field needs only the ordinary assignment type check."""
+        visitor.implicit_coercer.coerce(value_ref, self, node)
+
     @property
     def defer_linear_transfer(self):
         borrows = getattr(self._python_object, 'borrows_args', None)

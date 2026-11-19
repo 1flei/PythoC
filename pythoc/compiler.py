@@ -14,6 +14,7 @@ from .type_resolver import TypeResolver
 from .logger import logger
 from .config import config
 from .optimization import optimize_ir
+from .ir_helpers import initialize_storage
 from .target_layout import (
     _create_target_machine,
     _target_machine_cache_key,
@@ -236,16 +237,19 @@ class LLVMCompiler:
         resolved_param_type_hints: Dict[str, Any] = {}
         param_names: List[str] = []
 
-        for arg in ast_node.args.args:
+        from .call_normalization import native_positional_parameters
+        for arg in native_positional_parameters(ast_node):
             if param_type_hints and arg.arg in param_type_hints:
                 pc_type = param_type_hints[arg.arg]
             elif arg.annotation:
                 pc_type = type_resolver.parse_annotation(arg.annotation)
             else:
-                raise TypeError(f"Parameter '{arg.arg}' has no type annotation")
+                logger.error(f"Parameter '{arg.arg}' has no type annotation",
+                             node=arg, exc_type=TypeError)
 
             if pc_type is None:
-                raise TypeError(f"Parameter '{arg.arg}' has invalid type annotation")
+                logger.error(f"Parameter '{arg.arg}' has invalid type annotation",
+                             node=arg, exc_type=TypeError)
 
             resolved_param_type_hints[arg.arg] = pc_type
             param_names.append(arg.arg)
@@ -492,16 +496,10 @@ class LLVMCompiler:
             # Get unpacked parameter value (handles ABI coercion transparently)
             param_val, param_type = func_wrapper.get_user_arg_unpacked(i, visitor.builder)
             
-            # Allocate and store parameter
+            type_hint = resolved_decl.param_type_hints.get(param_name)
             alloca = visitor._create_alloca_in_entry(param_type, f"{param_name}_addr")
-            visitor.builder.store(param_val, alloca)
-            
-            # Register parameter in variable registry (always), with best-effort type hint
-            type_hint = None
-            # Use pre-parsed type hints if available (for meta-programming)
-            if param_name in resolved_decl.param_type_hints:
-                type_hint = resolved_decl.param_type_hints[param_name]
-            
+            initialize_storage(visitor.builder, param_val, alloca, type_hint)
+
             value_ref = wrap_value(
                 alloca,
                 kind='address',
@@ -634,7 +632,7 @@ class LLVMCompiler:
 
         # Finalize CFG structure (no IR emission yet).
         # Connects fall-through CFG blocks to exit, computes loop headers.
-        visitor.builder.finalize()
+        visitor.builder.finalize(return_type=resolved_decl.return_type_hint, function_node=ast_node)
         visitor.builder.dump_cfg()  # Uses logger.debug by default
 
         # CFG merge checks (and loop invariants).
@@ -733,10 +731,11 @@ class LLVMCompiler:
                 fd, ir_path = tempfile.mkstemp(suffix='.ll', prefix='pythoc_error_')
                 with os.fdopen(fd, 'w') as f:
                     f.write(ir_str)
-                logger.error(f"Verification failed: {e}\nModule IR written to: {ir_path}")
             except Exception as write_err:
-                logger.error(f"Verification failed: {e}\n(Failed to write IR: {write_err})")
-            raise e
+                detail = f"Failed to write IR: {write_err}"
+            else:
+                detail = f"Module IR written to: {ir_path}"
+            logger.error(f"Verification failed: {e}\n{detail}")
         return True
     
     def optimize_module(self, optimization_level: int = 2):

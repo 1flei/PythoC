@@ -3,6 +3,7 @@
 import unittest
 
 from pythoc import compile, i32, u64, bool, ptr, refine, static, linear
+from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
 from pythoc.std.linearize import linearize
 from pythoc.std.map import FlatHashMap
 from pythoc.std.refinement import positive
@@ -10,6 +11,7 @@ from pythoc.std.result import Option, Result
 from pythoc.std.set import FlatHashSet
 from pythoc.std.vector import Vector
 from pythoc.type_descriptor import same_type
+from test.utils.test_utils import DeferredTestCase
 
 
 Positive = positive(i32)
@@ -64,6 +66,23 @@ def other_release(value: i32) -> None:
 
 Proof = linearize(acquire, release, name='SharedDisplayName')
 OtherProof = linearize(acquire, other_release, name='SharedDisplayName')
+
+
+@compile
+def release_checked(out: ptr[i32], value: Positive) -> None:
+    out[0] = value
+
+
+CheckedRelease = linearize(acquire, release_checked)
+
+
+@compile
+def checked_release_argument(n: i32) -> i32:
+    for checked in refine(n, Positive.predicate):
+        value, proof = CheckedRelease.acquire(0)
+        CheckedRelease.release(ptr(value), checked, proof)
+        return value
+    return -1
 
 
 @compile
@@ -141,6 +160,9 @@ def hash_access() -> i32:
     for value in M.at(mp, replacement):
         value[0] = 11
         total += value[0]
+    total += M.find(mp, replacement)[0]
+    for key_ptr in S.at(sp, replacement):
+        total += key_ptr[0].value
     M.clear(mp)
     S.clear(sp)
     for item in M.items(mp):
@@ -167,7 +189,7 @@ def tombstone_budget() -> i32:
     return before * 100 + after
 
 
-class StdTypeInterfacesTest(unittest.TestCase):
+class StdTypeInterfacesTest(DeferredTestCase):
     def test_factory_returns_the_annotatable_type(self):
         self.assertTrue(O.is_enum_type())
         self.assertTrue(R.is_enum_type())
@@ -182,11 +204,31 @@ class StdTypeInterfacesTest(unittest.TestCase):
         self.assertFalse(same_type(Proof, OtherProof))
         self.assertEqual(proof_methods(), 43)
 
+    def test_resource_release_forwards_refined_arguments(self):
+        self.assertEqual((checked_release_argument(7), checked_release_argument(0)), (7, -1))
+
     def test_checked_vector_access_and_iteration(self):
         self.assertEqual(vector_access(), 132)
 
     def test_custom_keys_rehash_lookup_iteration_and_clear(self):
-        self.assertEqual(hash_access(), (1225 - 17) * 3 + 11)
+        self.assertEqual(hash_access(), (1225 - 17) * 3 + 11 + 11 + 99)
+
+    def test_set_find_and_at_reject_key_mutation(self):
+        for direct in (True, False):
+            with self.subTest(find=direct):
+                @compile(suffix=("set_key_mutation", direct))
+                def bad(s: ptr[S], key: Key) -> None:
+                    if direct:
+                        S.find(s, key)[0] = key
+                    else:
+                        for p in S.at(s, key):
+                            p[0].value = 8
+
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "Cannot reassign to const"):
+                        flush_all_pending_outputs()
+                finally:
+                    clear_failed_group(bad._binding.group_key)
 
     def test_tombstone_reuse_preserves_growth_budget(self):
         self.assertEqual(tombstone_budget(), 1313)

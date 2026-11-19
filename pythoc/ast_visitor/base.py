@@ -6,6 +6,7 @@ import ast
 import builtins
 from typing import Optional, Any, List, Tuple, TYPE_CHECKING
 from llvmlite import ir
+from .._pc_intrinsics import _get_bound_value
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..ir_helpers import safe_load
 from ..type_converter import TypeConverter, ImplicitCoercer
@@ -110,6 +111,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self._current_node = node
         try:
             return super().visit(node)
+        except Exception as error:
+            logger.remember_error_location(error, node)
+            raise
         finally:
             self._current_node = old_node
 
@@ -471,6 +475,11 @@ class LLVMIRVisitor(ast.NodeVisitor):
         """
         from ..valueref import wrap_python_constant
 
+        bound_value = _get_bound_value(expr)
+        if bound_value is not None:
+            # A captured place retains the ownership of the original expression.
+            return bound_value
+
         result = self.visit(expr)
         if result is None:
             logger.error(f"Expression {ast.dump(expr)} returned None", node=expr, exc_type=ValueError)
@@ -482,19 +491,13 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # as compile-time python constants so callers see a uniform type.
         return wrap_python_constant(result)
 
-    def _bind_name_reference(self, value_ref: ValueRef, name: str) -> ValueRef:
+    def _bind_name_reference(self, binding: VariableInfo, name: str) -> ValueRef:
         """Attach top-level variable tracking metadata to a binding reference."""
-        if value_ref.is_python_value():
-            return value_ref
-
-        if value_ref.has_place():
-            place = value_ref.require_place()
-            variable = self.lookup_variable(name)
-            if value_ref.value is place and variable.alloca is not None:
-                return value_ref.clone(
-                    var_name=name, linear_path=(),
-                    linear_owner_id=variable.var_id)
-
+        value_ref = binding.value_ref
+        if (binding.alloca is not None and not value_ref.is_python_value()
+                and value_ref.has_place() and value_ref.value is value_ref.require_place()):
+            return value_ref.clone(var_name=name, linear_path=(),
+                                   linear_owner_id=binding.var_id)
         return value_ref
 
     def read_rvalue(self, value_ref: ValueRef, *, name: Optional[str] = None) -> ValueRef:

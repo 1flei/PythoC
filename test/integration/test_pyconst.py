@@ -4,6 +4,8 @@ Test pyconst and typeof features
 import ast
 from unittest.mock import patch
 from pythoc import CompileSession, LLVMCompiler
+from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
+from test.utils.test_utils import DeferredTestCase
 from pythoc.logger import logger
 import unittest
 from pythoc import *
@@ -84,6 +86,99 @@ MAPPING = {-1: 40, 1: 20}
 @compile
 def typed_constant_indices() -> i32:
     return TABLE[i32(1)] + TABLE[i32(0)] + MAPPING[i32(-1)]
+
+
+@compile
+def singleton_assignments(flag: i32) -> i32:
+    inferred = 1
+    declared: pyconst[1] = inferred
+    implicit_value: pyconst[1]
+    native: i32 = 1
+    if flag:
+        inferred = declared
+        declared = implicit_value
+        inferred += 0
+        native = 2
+    return inferred * 100 + declared * 10 + native
+
+
+class TestPyconstAssignments(DeferredTestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        flush_all_pending_outputs()
+
+    def reject(self, function, diagnostic):
+        try:
+            with self.assertRaisesRegex(TypeError, diagnostic):
+                flush_all_pending_outputs()
+        finally:
+            clear_failed_group(function._binding.group_key)
+
+    def test_same_singleton_and_native_reassignment(self):
+        self.assertEqual(singleton_assignments(0), 111)
+        self.assertEqual(singleton_assignments(1), 112)
+
+    def test_different_value_fails_at_straight_line_assignment(self):
+        @compile(suffix="pyconst_rebind")
+        def bad() -> i32:
+            x = 1
+            x = 2
+            return 0
+
+        self.reject(bad, r"Cannot assign pyconst\[2\] to pyconst\[1\]")
+
+    def test_branch_assignment_preserves_singleton_identity(self):
+        for value in (2, True, 1.0):
+            with self.subTest(value=value):
+                @compile(suffix=("pyconst_branch", repr(value)))
+                def bad(flag: i32) -> i32:
+                    x = 1
+                    if flag:
+                        x = value
+                    return x
+
+                self.reject(bad, r"Cannot assign .* to pyconst\[1\]")
+
+    def test_host_callable_cannot_be_selected_by_reassigning_a_pyconst(self):
+        def first():
+            return 1
+
+        def second():
+            return 2
+
+        @compile(suffix="pyconst_callable_assignment")
+        def bad(flag: i32) -> i32:
+            target = first
+            if flag:
+                target = second
+            return target()
+
+        self.reject(bad, r"Cannot assign pyconst\[.*second.* to pyconst\[.*first")
+
+    def test_native_parameter_cannot_replace_a_pyconst(self):
+        @compile(suffix="pyconst_runtime_assignment")
+        def bad(value: i32) -> i32:
+            x = 1
+            x = value
+            return x
+
+        self.reject(bad, r"Cannot assign i32 to pyconst\[1\]")
+
+    def test_annotated_initializer_and_field_use_the_same_relation(self):
+        Record = struct['tag': pyconst[1]]
+        for field in (True, False):
+            with self.subTest(field=field):
+                @compile(suffix=("pyconst_explicit", field))
+                def bad() -> i32:
+                    if field:
+                        record: Record
+                        record.tag = True
+                    else:
+                        x: pyconst[1] = True
+                    return 0
+
+                self.reject(bad, r"Cannot assign pyconst\[True\] to pyconst\[1\]")
 
 
 class TestPythonConstantIndexing(unittest.TestCase):

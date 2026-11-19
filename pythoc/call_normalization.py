@@ -27,6 +27,20 @@ if TYPE_CHECKING:
     import ast
 
 
+def native_positional_parameters(function):
+    """Return the fixed parameters representable by a native declaration."""
+    args = function.args
+    for kind, parameters in (("positional-only", args.posonlyargs),
+                             ("keyword-only", args.kwonlyargs)):
+        if parameters:
+            names = ", ".join(arg.arg for arg in parameters)
+            logger.error(
+                f"{function.name}: native functions do not support {kind} parameters ({names})",
+                node=parameters[0], exc_type=TypeError,
+            )
+    return args.args
+
+
 class CallArguments(list):
     """Evaluated positional and keyword arguments of an ordinary call."""
 

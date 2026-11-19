@@ -128,16 +128,14 @@ NUMERIC_TYPES = INT_TYPES | FLOAT_TYPES
 
 def is_signed_int(type_hint):
     """Check if type is a signed integer"""
-    if isinstance(type_hint, type) and issubclass(type_hint, BuiltinType):
-        return type_hint.is_signed() and type_hint in SIGNED_INT_TYPES
-    return type_hint in SIGNED_INT_TYPES
+    return (isinstance(type_hint, type) and issubclass(type_hint, BuiltinType)
+            and type_hint.is_integer() and type_hint.is_signed())
 
 
 def is_unsigned_int(type_hint):
     """Check if type is an unsigned integer"""
-    if isinstance(type_hint, type) and issubclass(type_hint, BuiltinType):
-        return not type_hint.is_signed() and type_hint in UNSIGNED_INT_TYPES
-    return type_hint in UNSIGNED_INT_TYPES
+    return (isinstance(type_hint, type) and issubclass(type_hint, BuiltinType)
+            and type_hint.is_integer() and not type_hint.is_signed())
 
 
 # ============================================================================

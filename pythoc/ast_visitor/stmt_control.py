@@ -3,6 +3,7 @@ Control flow statement visitor mixin (return, break, continue)
 """
 
 import ast
+from .._pc_intrinsics import _get_bound_value
 from ..valueref import ensure_ir, ValueRef
 from ..logger import logger
 from ..scope_manager import ScopeType
@@ -87,7 +88,11 @@ class ControlFlowMixin:
                     value_ir = ensure_ir(value)
                     self.builder.ret(value_ir)
             else:
-                self.builder.ret_void()
+                from ..builtin_entities.types import void
+                if expected_pc_type is not None and expected_pc_type is not void:
+                    cf.require_unreachable("Non-void function requires a return value", node)
+                else:
+                    self.builder.ret_void()
 
             # mark_return() is now called by self.builder.ret()/ret_void() automatically
         # else: block already terminated, this is unreachable code, silently ignore
@@ -164,20 +169,20 @@ class ControlFlowMixin:
             logger.error("with statement currently only supports single context manager",
                         node=node, exc_type=SyntaxError)
 
-        item = node.items[0]
+        context = node.items[0].context_expr
 
         # Block-scoped effect binding (checked before evaluating the call,
         # which would fail - the effect proxy is not callable)
-        if isinstance(item.context_expr, ast.Call):
-            func_val = self.visit_expression(item.context_expr.func)
+        if isinstance(context, ast.Call) and _get_bound_value(context) is None:
+            func_val = self.visit_expression(context.func)
             if func_val.is_python_value():
                 from ..effect import effect as _effect_proxy
                 if func_val.get_python_value() is _effect_proxy:
-                    self._visit_with_effect_binding(node, item.context_expr)
+                    self._visit_with_effect_binding(node, context)
                     return
-            ctx_expr = self._visit_call_with_target(item.context_expr, func_val)
+            ctx_expr = self._visit_call_with_target(context, func_val)
         else:
-            ctx_expr = self.visit_expression(item.context_expr)
+            ctx_expr = self.visit_expression(context)
 
         # Check if this is a scoped label
         label_name = self._scoped_label_name(ctx_expr)

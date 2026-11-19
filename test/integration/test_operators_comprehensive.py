@@ -6,7 +6,7 @@ edge cases, operator precedence, and type mixing.
 
 import unittest
 from pythoc import (
-    i8, i16, i32, i64,
+    i3, u3, u17, i8, i16, i32, i64,
     u8, u16, u32, u64,
     f32, f64, bool, ptr, array, compile
 )
@@ -794,7 +794,23 @@ class TestPrecedence(unittest.TestCase):
         self.assertEqual(test_precedence_not(), 1)
 
 
+@compile
+def compare_widths(a: i32, b: i32) -> i32:
+    return (i32(u3(a) <= u3(b))
+            + 2 * i32(i3(a) > i3(b))
+            + 4 * i32(u17(a) < u17(b))
+            + 8 * i32(u17(a) >= u17(b)))
+
+
 class TestComparison(unittest.TestCase):
+    def test_nonstandard_integer_widths(self):
+        for a, b in ((4, 2), (2, 4), (4, 4), (1 << 16, 0), (0, 1 << 16)):
+            signed_a, signed_b = ((n % 8 + 4) % 8 - 4 for n in (a, b))
+            expected = ((a % 8 <= b % 8) + 2 * (signed_a > signed_b)
+                        + 4 * (a < b) + 8 * (a >= b))
+            with self.subTest(a=a, b=b):
+                self.assertEqual(compare_widths(a, b), expected)
+
     def test_equal_values(self):
         self.assertEqual(test_compare_equal_values(), 6)
     

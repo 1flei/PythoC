@@ -35,6 +35,13 @@ from ..logger import logger
 _NO_INIT = object()
 
 
+def _source_field_name(attribute, owner_prefix):
+    if (owner_prefix and attribute.startswith('_' + owner_prefix + '__')
+            and not attribute.endswith('__')):
+        return attribute[len(owner_prefix) + 1:]
+    return attribute
+
+
 def split_static_members(cls, parsed_field_types: List[Any]) -> List[Any]:
     """Project declarations into static and instance storage.
 
@@ -46,8 +53,12 @@ def split_static_members(cls, parsed_field_types: List[Any]) -> List[Any]:
     from ..type_resolver import TypeResolver
 
     if '_type_declaration' not in cls.__dict__:
+        # Keep the original class dictionary key for the initializer. Compiled
+        # struct fields use the spelling from the class body for member access.
+        prefix = cls.__name__.lstrip('_')
         cls._type_declaration = tuple(
-            (name, annotation, pc_type, cls.__dict__.get(name, _NO_INIT))
+            (_source_field_name(name, prefix), annotation, pc_type,
+             cls.__dict__.get(name, _NO_INIT))
             for (name, annotation), pc_type in
             zip(cls._struct_fields, parsed_field_types))
     members = {}
@@ -114,7 +125,7 @@ def get_or_create_static_global(visitor, decorated_cls, attr_name: str, node):
     from ..type_descriptor import validate_static_storage
     is_decl = getattr(owner_cls, '_static_is_decl', False)
     validate_static_storage(
-        pc_type, zero_initialized=not is_decl and init_value is _NO_INIT,
+        pc_type, node, zero_initialized=not is_decl and init_value is _NO_INIT,
     )
 
     name_parts = [owner_cls.__name__]

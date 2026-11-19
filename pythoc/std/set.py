@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pythoc import (
-    compile, effect, ptr, u64, i8, bool, void, nullptr, sizeof, refine,
+    compile, effect, ptr, u64, i8, bool, const, void, nullptr, sizeof, refine,
 )
 from pythoc.libc.string import memset
 from pythoc.schema_protocol import is_linear_schema_type
@@ -25,7 +25,8 @@ def FlatHashSet(key_type, size_type=u64, *, hash_fn=None, eq_fn=None):
     if is_linear_schema_type(key_type):
         raise TypeError('FlatHashSet requires copyable keys')
     Table = HashTable(key_type, size_type, hash_fn, eq_fn)
-    KeyPointer = nonnull(ptr[key_type])
+    KeyPointer = ptr[const[key_type]]
+    PresentKey = nonnull(KeyPointer)
 
     @compile(suffix=(key_type, size_type, hash_fn, eq_fn))
     class _FlatHashSet:
@@ -60,7 +61,7 @@ def FlatHashSet(key_type, size_type=u64, *, hash_fn=None, eq_fn=None):
             s.size = 0
             s.growth_left = Table.growth_limit(s.capacity)
 
-        def find(s: ptr[_FlatHashSet], key: key_type) -> ptr[key_type]:
+        def find(s: ptr[_FlatHashSet], key: key_type) -> KeyPointer:
             for position in Table.find(s.ctrl, s.slots, s.capacity, key):
                 return ptr(s.slots[position[2]])
             return nullptr
@@ -68,9 +69,9 @@ def FlatHashSet(key_type, size_type=u64, *, hash_fn=None, eq_fn=None):
         def contains(s: ptr[_FlatHashSet], key: key_type) -> bool:
             return _FlatHashSet.find(s, key) != nullptr
 
-        def at(s: ptr[_FlatHashSet], key: key_type) -> KeyPointer:
-            """Yield a present key pointer, valid until an invalidating mutation."""
-            for present in refine(_FlatHashSet.find(s, key), KeyPointer.predicate):
+        def at(s: ptr[_FlatHashSet], key: key_type) -> PresentKey:
+            """Yield a read-only key pointer, valid until an invalidating mutation."""
+            for present in refine(_FlatHashSet.find(s, key), PresentKey.predicate):
                 yield present
 
         def _insert_no_grow(s: ptr[_FlatHashSet], key: key_type) -> bool:

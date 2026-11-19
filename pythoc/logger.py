@@ -231,6 +231,11 @@ class Logger:
                            If False, exit with code 1 (default, for production).
         """
         self.raise_on_error = raise_on_error
+
+    def remember_error_location(self, error: Exception, node: ast.AST):
+        """Keep the innermost source location until the compiler reports the error."""
+        if getattr(node, 'lineno', None) is not None and not hasattr(error, '_pc_error_location'):
+            error._pc_error_location = self._get_source_location(node)
     
     def _get_source_location(self, node: Optional[Union[ast.AST, Any]] = None) -> str:
         """Get source code location from AST node or caller info"""
@@ -266,12 +271,13 @@ class Logger:
         return "unknown"
     
     def _format_message(self, level_name: str, msg: str, node: Optional[ast.AST] = None, 
-                       include_location: bool = True, caller_module: Optional[str] = None, 
+                       include_location: bool = True, caller_module: Optional[str] = None,
+                       source_location: Optional[str] = None,
                        **kwargs) -> str:
         """Format log message with optional key-value pairs and location"""
         location = ""
         if include_location:
-            location = f" [{self._get_source_location(node)}]"
+            location = f" [{source_location or self._get_source_location(node)}]"
         
         # Include module in output for DEBUG if available
         module_prefix = f"[{caller_module}] " if caller_module else ""
@@ -288,6 +294,7 @@ class Logger:
         return f"[{level_name}]{location} {module_prefix}{msg}: {details}"
     
     def _log(self, level: LogLevel, level_name: str, msg: str, node: Optional[ast.AST] = None, 
+             source_location: Optional[str] = None,
              **kwargs):
         """Internal logging method"""
         if not self.enabled or level < self.level:
@@ -305,7 +312,8 @@ class Logger:
         include_location = True
         formatted = self._format_message(level_name, msg, node=node, 
                                          include_location=include_location, 
-                                         caller_module=caller_module, **kwargs)
+                                         caller_module=caller_module,
+                                         source_location=source_location, **kwargs)
         
         # Print to stderr for WARNING and ERROR, stdout for DEBUG
         output = sys.stderr if level >= LogLevel.WARNING else sys.stdout
@@ -334,28 +342,35 @@ class Logger:
         """
         self._log(LogLevel.WARNING, "WARNING", msg, node=node, **kwargs)
     
-    def error(self, msg: str, node: Optional[ast.AST] = None, 
+    def error(self, msg: Union[str, Exception], node: Optional[ast.AST] = None,
               exc_type: type = RuntimeError, **kwargs):
         """Log error message and raise exception or exit (compilation failures)
         
         Args:
-            msg: Message to log
+            msg: Message or an exception propagated to the diagnostic boundary.
             node: Optional AST node for source location (recommended for PC code errors)
             exc_type: Exception type to raise (default: RuntimeError)
             **kwargs: Additional key-value pairs to log
         
         Raises:
-            exc_type: The specified exception type with the message (if raise_on_error=True)
+            Exception: In exception mode, re-raise a supplied exception or
+                construct exc_type from the message.
         
         Note:
             By default, exits with code 1 (production mode).
             Set raise_on_error=True or PC_RAISE_ON_ERROR=1 to raise exceptions (for tests).
         """
-        self._log(LogLevel.ERROR, "ERROR", msg, node=node, **kwargs)
-        
+        error = msg if isinstance(msg, Exception) else None
+        if error is None or not getattr(error, '_pc_error_reported', False):
+            source_location = getattr(error, '_pc_error_location', None)
+            self._log(LogLevel.ERROR, "ERROR", str(msg), node=node,
+                      source_location=source_location, **kwargs)
+
         if self.raise_on_error:
-            # Test mode: raise exception with full stack trace
-            raise exc_type(msg)
+            if error is None:
+                error = exc_type(msg)
+            error._pc_error_reported = True
+            raise error
         else:
             # Production mode (default): exit cleanly without stack trace
             sys.exit(1)

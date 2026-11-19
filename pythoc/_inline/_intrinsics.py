@@ -35,6 +35,10 @@ def _populate_intrinsics():
     from ..builtin_entities import (
         move, bool as pc_bool, label, goto_begin, goto_end, assume, void,
     )
+    from ..builtin_entities.unreachable import _require_unreachable
+    from .exit_rules import _YieldTypeCoercion
+    _PC_INTRINSICS.coerce_yield = _YieldTypeCoercion()
+    _PC_INTRINSICS.require_unreachable = _require_unreachable
     _PC_INTRINSICS.move = move
     _PC_INTRINSICS.bool = pc_bool
     _PC_INTRINSICS.label = label

@@ -8,6 +8,8 @@ import ast
 import operator
 from typing import Optional, Sequence
 
+from llvmlite import ir
+
 from .builtin_entities.base import BuiltinType
 from .ir_helpers import safe_load
 from .logger import logger
@@ -420,26 +422,6 @@ class ValueRefDispatcher:
 
         logger.error(f"Cannot convert {llvm_type} to boolean", node=node, exc_type=TypeError)
 
-    def _combine_boolean_and(
-        self,
-        left: ValueRef,
-        right: ValueRef,
-        node: Optional[ast.AST] = None,
-    ) -> ValueRef:
-        """Combine two boolean-like values with logical and."""
-        from .builtin_entities import bool as bool_type
-        from .builtin_entities.python_type import PythonType
-
-        if left.is_python_value() and right.is_python_value():
-            result = bool(left.get_python_value()) and bool(right.get_python_value())
-            python_type_inst = PythonType.wrap(result, is_constant=True)
-            return wrap_value(result, kind="python", type_hint=python_type_inst)
-
-        left_ir = self.to_boolean(left, node=node)
-        right_ir = self.to_boolean(right, node=node)
-        result = self.visitor.builder.and_(left_ir, right_ir)
-        return wrap_value(result, kind="value", type_hint=bool_type)
-
     def handle_compare(
         self,
         op: ast.cmpop,
@@ -610,24 +592,44 @@ class ValueRefDispatcher:
         comparators: Sequence[ast.AST],
         node: ast.Compare,
     ) -> ValueRef:
-        """Evaluate a chained comparison through the unified compare path."""
-        result = None
-        current_left = left
+        """Evaluate each middle operand once, only along the preceding true edge."""
+        from .builtin_entities import bool as bool_type
 
-        for op, comparator in zip(ops, comparators):
-            right = comparator
-            if not isinstance(right, ValueRef):
-                right = self.visitor.visit_rvalue_expression(comparator)
-            cmp_result = self.handle_compare(op, current_left, right, comparator)
-            if result is None:
-                result = cmp_result
-            else:
-                result = self._combine_boolean_and(result, cmp_result, node=node)
-            current_left = right
+        if not ops or len(ops) != len(comparators):
+            logger.error("Invalid comparison chain", node=node, exc_type=ValueError)
+        builder = self.visitor.builder
+        merge = None
+        false_edges = []
+        for index, (op, comparator) in enumerate(zip(ops, comparators)):
+            right = self.visitor.visit_rvalue_expression(comparator)
+            result = self.handle_compare(op, left, right, comparator)
+            if index == len(ops) - 1:
+                break
+            left = right
+            if result.is_python_value():
+                if not result.get_python_value():
+                    break
+                continue
 
-        if result is None:
-            logger.error("Comparison chain is empty", node=node, exc_type=ValueError)
-        return result
+            if merge is None:
+                merge = builder.create_block("compare_end")
+            following = builder.create_block("compare_next")
+            condition = self.to_boolean(result, node)
+            false_edges.append(builder.block)
+            builder.cbranch(condition, following, merge)
+            builder.position_at_end(following)
+
+        if merge is None:
+            return result
+        last_value = self.to_boolean(result, node)
+        last_block = builder.block
+        builder.branch(merge)
+        builder.position_at_end(merge)
+        phi = builder.phi(ir.IntType(1))
+        for block in false_edges:
+            phi.add_incoming(self._bool_constant(False), block)
+        phi.add_incoming(last_value, last_block)
+        return wrap_value(phi, kind="value", type_hint=bool_type)
 
     def _resolve_attribute_protocol(self, base: ValueRef, attr_name: str, node: ast.AST):
         base = self._require_valueref(base, context="attribute base", node=node)

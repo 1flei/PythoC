@@ -3,7 +3,7 @@
 import unittest
 
 from pythoc import (
-    CompileSession, compile, consume, enum, i32, inline, linear, meta, static, typeof,
+    CompileSession, compile, consume, enum, i32, inline, linear, meta, ptr, static, typeof,
 )
 from pythoc.std.poly import Poly
 
@@ -16,6 +16,11 @@ def invoke(target, /, *args):
 @meta.quote
 def invoke_twice(target, value):
     return target(value) + target(value)
+
+
+@meta.quote
+def address_of(value):
+    return ptr(value)
 
 
 @compile
@@ -88,6 +93,18 @@ class DuplicateDispatcher:
 duplicate_dispatch = DuplicateDispatcher()
 
 
+class QuotedAddress:
+    @staticmethod
+    def evaluate_call_argument(visitor, node):
+        return visitor.visit_lvalue(node)
+
+    def handle_call(self, visitor, reference, args, node):
+        return address_of(args[0])
+
+
+quoted_address = QuotedAddress()
+
+
 @compile
 def ordered_call() -> i32:
     State.calls = 0
@@ -103,6 +120,19 @@ def explicit_protocol_wins() -> i32:
 def consume_once() -> i32:
     item: Owner = (42, linear())
     return release_dispatch(item)
+
+
+@compile
+def borrow_indirect(p: ptr[linear]) -> i32:
+    return i32(quoted_address(p[0]) == p)
+
+
+@compile
+def borrow_linear_place() -> i32:
+    token = linear()
+    same_address = borrow_indirect(ptr(token))
+    consume(token)
+    return same_address
 
 
 @compile
@@ -128,6 +158,9 @@ class UserMetaDispatchTest(unittest.TestCase):
 
     def test_quoted_argument_preserves_owner(self):
         self.assertEqual(consume_once(), 42)
+
+    def test_quoted_indirect_place_retains_its_address_without_a_new_owner(self):
+        self.assertEqual(borrow_linear_place(), 1)
 
     def test_function_types_are_public_metadata(self):
         self.assertEqual(tuple(typeof(weighted).param_types), (i32, i32))

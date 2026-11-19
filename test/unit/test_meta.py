@@ -6,6 +6,7 @@ single ``const`` binding helper, and the unified ``@quote`` decorator.
 """
 
 import ast
+import copy
 import gc
 import os
 import sys
@@ -15,6 +16,7 @@ import weakref
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from pythoc import CompileSession, effect, i32, meta
+from pythoc._pc_intrinsics import _get_bound_value
 from pythoc.meta.fragment import Fragment
 from pythoc.meta.generated import GeneratedFunction, MetaArtifact, func, artifact
 from pythoc.meta.template import (
@@ -25,6 +27,7 @@ from pythoc.meta.template import (
     _ParamSubstituter,
     _SpliceMarker,
 )
+from pythoc.valueref import wrap_python_constant
 
 
 # ============================================================================
@@ -208,6 +211,18 @@ class TestCoercionExprPosition(unittest.TestCase):
             right=ast.Constant(value=1),
         )
         self.assertIs(_coerce_to_ast(node, 'expr'), node)
+
+    def test_bound_value_call_keeps_its_reference_when_copied(self):
+        value = wrap_python_constant(42)
+        original = _coerce_to_ast(value, 'expr')
+        copied = copy.deepcopy(original)
+
+        self.assertIsInstance(copied, ast.Call)
+        self.assertIsNot(copied, original)
+        self.assertIs(_get_bound_value(copied), value)
+        source = ast.unparse(copied)
+        self.assertEqual(source, '__pc_intrinsics.bound_value()')
+        self.assertIsNone(_get_bound_value(ast.parse(source, mode='eval').body))
 
     def test_fragment_in_expr_unwraps_return(self):
         inner = ast.Constant(value=7)

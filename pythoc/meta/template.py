@@ -218,8 +218,8 @@ def _coerce_value_to_expr(value):
 
     from ..valueref import ValueRef
     if isinstance(value, ValueRef):
-        from .._inline.definition_bindings import symbol_expression
-        return symbol_expression('_meta_value', value)
+        from .._pc_intrinsics import _bound_value_expression
+        return _bound_value_expression(value)
 
     if _is_pythoc_type(value):
         from .._inline.definition_bindings import symbol_expression

@@ -97,6 +97,30 @@ def test_class_static_zero_init() -> i32:
 # struct: aggregate seed via sequence literal
 # ---------------------------------------------------------------------------
 
+@compile(suffix="private_seed")
+class _PrivateSeeds:
+    __scalar: static[i32] = 19
+    __table: static[array[i32, 3]] = (12288, 65, 12)
+    __unseeded: static[i32]
+
+
+@union
+class _PrivateUnion:
+    payload: i32
+    __seed: static[i32] = 23
+
+
+@compile
+def private_seed_values() -> i32:
+    if _PrivateUnion.__seed != 23:
+        return 3
+    if _PrivateSeeds.__scalar != 19 or _PrivateSeeds.__unseeded != 0:
+        return 1
+    if _PrivateSeeds.__table[0] != 12288 or _PrivateSeeds.__table[2] != 12:
+        return 2
+    return 0
+
+
 @compile
 class WithSeed:
     triple: static[array[i32, 3]] = (10, 20, 30)
@@ -248,6 +272,8 @@ def main() -> i32:
     if test_class_static_persistence() != i32(0):
         return 1
     if test_class_static_zero_init() != i32(0):
+        return 1
+    if private_seed_values() != 0:
         return 1
     if test_class_static_aggregate_seed() != i32(0):
         return 1

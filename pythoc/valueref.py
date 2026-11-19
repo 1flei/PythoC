@@ -411,7 +411,8 @@ class ValueRef:
                 address=None,
                 source_node=self.source_node,
                 var_name=self.var_name,
-                linear_path=self.linear_path
+                linear_path=self.linear_path,
+                linear_owner_id=self.linear_owner_id
             )
         elif self._kind == 'address':
             # Already an lvalue - return as-is

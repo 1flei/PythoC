@@ -105,11 +105,13 @@ def _is_closure_source(obj: Any) -> bool:
 
 def _instantiate_handle_call(visitor, func_ref, args, node):
     """AST-level compile-time handler for ``instantiate(...)`` calls."""
+    from ..logger import logger
     from ..valueref import ValueRef, wrap_value
     from ..builtin_entities.python_type import PythonType
 
     if not args:
-        raise TypeError("instantiate() missing 1 required positional argument")
+        logger.error("instantiate() missing 1 required positional argument",
+                     node=node, exc_type=TypeError)
 
     source = args[0]
 

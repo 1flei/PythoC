@@ -137,6 +137,8 @@ class ControlFlowBuilder:
         # Track if current CFG block is terminated
         self._terminated: Dict[int, bool] = {self._entry_block.id: False}
 
+        self._required_unreachable: Dict[int, Tuple[str, ast.AST]] = {}
+
         # Pending forward gotos (opaque objects with .block, .label_name, etc.)
         self._pending_gotos: List[Any] = []
 
@@ -398,6 +400,11 @@ class ControlFlowBuilder:
             logger.debug(f"CFG: unreachable at CFGBlock({self._current_block_id})")
 
         self._append_pcir(PCIRInst(op='unreachable', args=(), kwargs={}))
+
+    def require_unreachable(self, message: str, node: ast.AST):
+        """Reject a reachable path here after all forward edges are resolved."""
+        self._required_unreachable[self._current_block_id] = (message, node)
+        self.unreachable()
 
     def switch(self, value, default_block):
         """Record a switch instruction (CFG + PCIR).
@@ -713,7 +720,7 @@ class ControlFlowBuilder:
         """Clear pending gotos."""
         self._pending_gotos = []
 
-    def finalize(self):
+    def finalize(self, return_type=None, function_node=None):
         """Finalize CFG construction.
 
         1. Connect fall-through CFG blocks to exit block
@@ -725,7 +732,12 @@ class ControlFlowBuilder:
         # For blocks without explicit terminator, connect to exit block.
         # Terminated blocks (e.g., those ending in unreachable) should not get a
         # fallthrough edge because they have no runtime successor.
+        from ..builtin_entities.types import void
+        needs_value = return_type is not None and return_type is not void
         reachable = self._cfg.get_reachable_blocks()
+        for block_id, (message, node) in self._required_unreachable.items():
+            if block_id in reachable:
+                logger.error(message, node=node, exc_type=TypeError)
         for block_id in reachable:
             if block_id == self._exit_block.id:
                 continue
@@ -733,6 +745,9 @@ class ControlFlowBuilder:
                 continue
             successors = self._cfg.get_successors(block_id)
             if not successors:
+                if needs_value:
+                    logger.error(f"{self._func_name}: reachable exit without a return value",
+                                 node=function_node, exc_type=TypeError)
                 self._cfg.add_edge(block_id, self._exit_block.id, kind='fallthrough')
                 logger.debug(f"CFG: fallthrough at CFGBlock({block_id}) -> exit({self._exit_block.id})")
 
@@ -842,7 +857,7 @@ class ControlFlowBuilder:
                 if isinstance(ret_type, ir.VoidType):
                     raw.ret_void()
                 else:
-                    raw.ret(ir.Constant(ret_type, ir.Undefined))
+                    raw.unreachable()
                 blocks_cleaned += 1
         if blocks_cleaned > 0:
             logger.debug(

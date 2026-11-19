@@ -781,7 +781,9 @@ def compile(func_or_class=None, suffix=None, attrs=None,
     Args:
         func_or_class: Function or class to compile
         suffix: Explicit compile_suffix for function naming (from @compile(suffix=T))
-                This is NOT contagious - each function chooses its own compile_suffix.
+                Each function chooses its own suffix. Include any external Python
+                configuration that selects different generated behavior. Reusing
+                the same specialization for different such behavior is undefined.
         attrs: Set of LLVM function-level attributes (e.g. {'readnone', 'nounwind'}).
                Applied to cross-module `declare` so the optimizer can treat calls
                as pure/no-side-effect, enabling CSE and store forwarding.
@@ -913,10 +915,12 @@ def _compile_impl(func_or_class,
     func_source = source_code
     try:
         func_ast = ast.parse(func_source).body[0]
-        if not isinstance(func_ast, ast.FunctionDef):
-            raise RuntimeError(f"Expected FunctionDef, got {type(func_ast)}")
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse function {func.__name__}: {e}")
+    except (SyntaxError, IndexError) as e:
+        logger.error(f"Failed to parse function {func.__name__}: {e}")
+    if not isinstance(func_ast, ast.FunctionDef):
+        logger.error(f"Expected FunctionDef, got {type(func_ast).__name__}", node=func_ast)
+
+    from ..call_normalization import native_positional_parameters
 
     registry = _get_registry()
     from .visible import definition_names, get_all_accessible_symbols
@@ -938,11 +942,6 @@ def _compile_impl(func_or_class,
     registry.register_function_source(source_file, func.__name__, func_source)
 
     actual_func_name = func.__name__
-
-    # Determine parameter names early; we need them to inject parametric names
-    # into the annotation namespace so that annotations like ``x: T`` can be
-    # resolved when ``T`` itself is a compile-time parameter.
-    param_names = [arg.arg for arg in func_ast.args.args]
 
     # Pre-identify parameters annotated directly with ``param`` so that their
     # names can be made available during annotation resolution without shadowing
@@ -978,6 +977,7 @@ def _compile_impl(func_or_class,
     # at decoration time.  This must happen before the yield check so that
     # parametric generator functions are also handled by the factory path.
     if raw_parametric_names:
+        param_names = [arg.arg for arg in native_positional_parameters(func_ast)]
         # Phase 1 restrictions.
         if func_ast.args.vararg is not None and func_ast.args.vararg.arg in raw_parametric_names:
             logger.error(
@@ -1039,6 +1039,8 @@ def _compile_impl(func_or_class,
         )
         # Keep the placeholder's normalized call signature and AST together.
         return wrapper
+
+    param_names = [arg.arg for arg in native_positional_parameters(func_ast)]
 
     from ..type_resolver import TypeResolver
     from ..registry import FunctionInfo
@@ -1353,6 +1355,9 @@ def _make_compile_callback(wrapper, syntax, source, param_types, return_type, st
                     user_globals=binding.compilation_globals,
                     group_key=binding.group_key, func_state=binding,
                     source_start_line=start_line, original_name=binding.original_name)
+        except Exception as error:
+            logger.remember_error_location(error, syntax)
+            raise
         finally:
             if binding.effect_suffix:
                 pop_compilation_context()

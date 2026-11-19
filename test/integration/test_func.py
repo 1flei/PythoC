@@ -347,13 +347,18 @@ class QuotedFunctionArgumentsTest(unittest.TestCase):
 
     def test_named_return_is_rejected_inside_compiled_code(self):
         import ast
+        from unittest.mock import patch
         from pythoc import CompileSession, flush_all_pending_outputs, meta
+        from pythoc.logger import logger
 
         source = ('def bad(value: i32) -> i32:\n'
                   '    signature = func["i32": i32]\n'
                   '    return value\n')
-        with CompileSession(), self.assertRaisesRegex(
-                TypeError, 'return type cannot have a parameter name'):
+        with (
+            CompileSession(),
+            patch.object(logger, 'raise_on_error', True),
+            self.assertRaisesRegex(TypeError, 'return type cannot have a parameter name'),
+        ):
             meta.compile_ast(
                 ast.parse(source).body[0], source_file=__file__,
                 suffix='named_return_rejected', param_types={'value': i32},

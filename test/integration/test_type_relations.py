@@ -47,6 +47,163 @@ class TypeRelationsTest(unittest.TestCase):
         finally:
             clear_failed_group(wrapper._binding.group_key)
 
+    def test_reachable_exit_requires_a_value_including_indirect_returns(self):
+        Big = pythoc.struct[i64, i64, i64, i64]
+        for result_type, bare in ((i32, False), (i32, True), (Big, False), (Big, True)):
+            with self.subTest(result_type=result_type, bare=bare):
+                @compile(suffix=('missing_result', result_type, bare))
+                def missing(flag: i32, value: result_type) -> result_type:
+                    if flag:
+                        return value
+                    if bare:
+                        return
+
+                self._reject(missing, 'return value')
+
+    def test_expanded_return_must_supply_its_declared_value(self):
+        for bare in (True, False):
+            with self.subTest(bare=bare):
+                @pythoc.inline
+                def helper(flag: i32) -> i32:
+                    if flag:
+                        return 8
+                    if bare:
+                        return
+
+                @compile(suffix=("inlined_missing_return", bare))
+                def caller(flag: i32) -> i32:
+                    return helper(flag)
+
+                self._reject(caller, 'return value')
+
+    def test_nonreturning_path_does_not_need_a_value(self):
+        @compile(suffix='return_or_loop')
+        def checked(flag: i32) -> i32:
+            if flag:
+                return 17
+            while True:
+                pass
+
+        self.assertEqual(checked(1), 17)
+
+    def test_refinement_requires_initializer_at_local_declaration(self):
+        Checked = refined[i32, 'checked']
+        Record = pythoc.struct['payload': Checked]
+        Variant = _create_enum_type([('Empty', None, 0), ('Value', Checked, 1)], i32)
+        for local_type in (Checked, const[Checked], refined[ptr[i32], 'valid'],
+                           Record, array[Record, 2], Variant, pythoc.union[Checked, i32]):
+            with self.subTest(local_type=local_type):
+                @compile(suffix=('bare_refinement', local_type))
+                def unused() -> i32:
+                    slot: local_type
+                    return 0
+
+                self._reject(unused, "Local 'slot'.*requires an initializer")
+
+        @compile(suffix='late_refined_initializer')
+        def late(value: Checked) -> i32:
+            slot: Checked
+            slot = value
+            return ptr(slot)[0]
+
+        self._reject(late, "Local 'slot'.*requires an initializer")
+
+    def test_inline_cannot_declare_an_uninitialized_refined_local(self):
+        Checked = refined[i32, 'checked']
+
+        @pythoc.inline
+        def helper(value: Checked) -> Checked:
+            uninitialized: Checked
+            return value
+
+        @compile(suffix='bare_refinement_in_inline_body')
+        def caller(value: Checked) -> Checked:
+            return helper(value)
+
+        self._reject(caller, "Local 'uninitialized.*requires an initializer")
+
+    def test_refined_initializer_and_pointer_to_checked_stack_value(self):
+        @compile(suffix='checked_stack')
+        def positive(n: i32) -> pythoc.bool:
+            return n > 0
+
+        Positive = refined[positive]
+        Record = pythoc.struct['value': Positive]
+
+        @compile(suffix='checked_stack')
+        def read(p: ptr[Positive]) -> i32:
+            return p[0]
+
+        @compile(suffix='checked_stack')
+        def run(n: i32) -> i32:
+            raw: i32
+            ptr(raw)[0] = n
+            for checked in pythoc.refine(raw, positive):
+                slot: Positive = checked
+                record: Record = (slot,)
+                p: ptr[Positive]
+                p = ptr(record.value)
+                return read(ptr(checked)) + read(p)
+            return -1
+
+        self.assertEqual((run(3), run(-2)), (6, -1))
+
+    def test_refined_inline_result_and_yield_bindings(self):
+        Checked = refined[i32, 'checked']
+        Pair = pythoc.struct[i32, Checked]
+
+        @pythoc.inline
+        def select(n: i32) -> Checked:
+            if n > 0:
+                return Checked(3)
+            return Checked(5)
+
+        @compile(suffix='checked_expansion')
+        def values(n: i32) -> Pair:
+            if n:
+                yield (1, select(n))
+
+        @compile(suffix='checked_expansion')
+        def run(n: i32) -> i32:
+            total: i32 = 0
+            for left, right in values(n):
+                total = left + ptr(right)[0]
+            return total
+
+        self.assertEqual((run(1), run(-1), run(0)), (4, 6, 0))
+
+    def test_empty_generator_does_not_create_a_refined_value(self):
+        Checked = refined[i32, 'checked']
+
+        @compile(suffix='missing_yield')
+        def values(n: i32) -> Checked:
+            if n:
+                yield Checked(n)
+
+        @compile(suffix='missing_yield')
+        def invalid(n: i32) -> i32:
+            for item in values(n):
+                pass
+            return item
+
+        self._reject(invalid, "item.*not defined", NameError)
+
+    def test_yield_requires_a_refined_value_even_with_an_existing_target(self):
+        Checked = refined[i32, 'checked']
+
+        @compile(suffix='missing_yield_proof')
+        def values(n: i32) -> Checked:
+            yield n
+
+        @compile(suffix='missing_yield_proof')
+        def invalid(n: i32) -> i32:
+            item: i32 = 0
+            for item in values(n):
+                pass
+            return item
+
+        self._reject(invalid, 'Cannot implicitly convert to refined type')
+
     def test_same_display_name_different_record_pointer_rejected(self):
         small = create_struct_type([i32], ['value'],
                                    python_class=type('SameRecord', (), {}))
@@ -453,6 +610,18 @@ class TypeRelationsTest(unittest.TestCase):
             return address[0]
 
         self._reject(invalid, 'Cannot implicitly convert')
+
+    def test_initialization_of_volatile_locals_and_parameters_is_observable(self):
+        import subprocess
+        import sys
+
+        # Both the LLVM IR and Python entry objects must be built in this directory.
+        completed = subprocess.run(
+            [sys.executable, str(FIXTURES / 'volatile_initialization.py')],
+            cwd=self.tmp_path, env=_subprocess_environment(),
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_volatile_pointer_accesses_survive_pcir_without_extra_reads(self):
         os.chdir(self.tmp_path)

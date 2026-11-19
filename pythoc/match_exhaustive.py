@@ -497,17 +497,20 @@ class PatternNormalizer:
                 self.normalize_case(item, subject_types) for item in pattern.patterns])
         elif isinstance(pattern, ast.MatchAs) and pattern.pattern is None:
             if pattern.name is not None:
-                raise TypeError('Multi-subject match requires individual captures')
+                logger.error('Multi-subject match requires individual captures',
+                             node=pattern, exc_type=TypeError)
             result = NormalizedPattern.constructor(0, 'subjects', [
                 NormalizedPattern.wildcard(ty) for ty in subject_types])
         elif isinstance(pattern, ast.MatchSequence):
             if len(pattern.patterns) != len(subject_types):
-                raise TypeError('Multi-subject pattern count does not match subjects')
+                logger.error('Multi-subject pattern count does not match subjects',
+                             node=pattern, exc_type=TypeError)
             result = NormalizedPattern.constructor(0, 'subjects', [
                 self.normalize(item, ty)
                 for item, ty in zip(pattern.patterns, subject_types)])
         else:
-            raise TypeError('Multi-subject match requires a sequence pattern')
+            logger.error('Multi-subject match requires a sequence pattern',
+                         node=pattern, exc_type=TypeError)
         result.ast_node = pattern
         return result
 
@@ -521,7 +524,8 @@ class PatternNormalizer:
                 result = replace(result, bindings=result.bindings + (pattern.name,))
         elif isinstance(pattern, ast.MatchSingleton):
             if pattern.value is None:
-                raise TypeError('None singleton patterns are unsupported')
+                logger.error('None singleton patterns are unsupported',
+                             node=pattern, exc_type=TypeError)
             result = self._value(ast.Constant(pattern.value), subject_type)
         elif isinstance(pattern, ast.MatchValue):
             result = self._value(pattern.value, subject_type)
@@ -534,8 +538,8 @@ class PatternNormalizer:
         elif isinstance(pattern, ast.MatchSequence):
             result = self._sequence(pattern, subject_type)
         else:
-            raise NotImplementedError(
-                f'Unsupported match pattern: {type(pattern).__name__}')
+            logger.error(f'Unsupported match pattern: {type(pattern).__name__}',
+                         node=pattern, exc_type=NotImplementedError)
         result.ast_node = pattern
         return result
 
@@ -557,7 +561,8 @@ class PatternNormalizer:
                     result.payload_index = index
                     result.value_ref = value_ref
                     return result
-            raise TypeError(f'{value!r} is not a tag of {subject_type.get_name()}')
+            logger.error(f'{value!r} is not a tag of {subject_type.get_name()}',
+                         node=expression, exc_type=TypeError)
         result = NormalizedPattern.literal(value, subject_type)
         result.value_ref = value_ref
         return result
@@ -570,32 +575,37 @@ class PatternNormalizer:
         _, pattern_type = self._resolve_value(pattern.cls)
         if pattern_type is ptr:
             if pattern.kwd_attrs or len(pattern.patterns) != 1:
-                raise TypeError('ptr pattern requires one capture name')
+                logger.error('ptr pattern requires one capture name',
+                             node=pattern, exc_type=TypeError)
             inner = pattern.patterns[0]
             if not isinstance(inner, ast.MatchAs) or inner.pattern is not None:
-                raise TypeError('ptr pattern requires a capture name')
+                logger.error('ptr pattern requires a capture name',
+                             node=inner, exc_type=TypeError)
             result = NormalizedPattern.wildcard(subject_type)
             result.pointer_capture = True
             result.bindings = (inner.name,) if inner.name is not None else ()
             return result
         pattern_type = TypeResolver._require_type(pattern_type)
         if not same_type(strip_qualifiers(pattern_type), strip_qualifiers(subject_type)):
-            raise TypeError(
+            logger.error(
                 f'Pattern type {pattern_type.get_name()} does not match '
-                f'subject type {subject_type.get_name()}')
+                f'subject type {subject_type.get_name()}',
+                node=pattern, exc_type=TypeError)
         if not is_schema_type(pattern_type) or getattr(pattern_type, '_is_enum', False):
-            raise TypeError('Class patterns require a struct type')
+            logger.error('Class patterns require a struct type',
+                         node=pattern, exc_type=TypeError)
         fields = get_schema_field_types(pattern_type)
         names = get_schema_field_names(pattern_type)
         if len(pattern.patterns) > len(fields):
-            raise TypeError('Too many positional fields in class pattern')
+            logger.error('Too many positional fields in class pattern',
+                         node=pattern, exc_type=TypeError)
         specified = dict(enumerate(pattern.patterns))
         for name, item in zip(pattern.kwd_attrs, pattern.kwd_patterns):
             if name not in names:
-                raise TypeError(f'Unknown pattern field: {name}')
+                logger.error(f'Unknown pattern field: {name}', node=item, exc_type=TypeError)
             index = names.index(name)
             if index in specified:
-                raise TypeError(f'Duplicate pattern field: {name}')
+                logger.error(f'Duplicate pattern field: {name}', node=item, exc_type=TypeError)
             specified[index] = item
         subs = [self.normalize(specified[index], ty) if index in specified
                 else NormalizedPattern.wildcard(ty)
@@ -612,14 +622,16 @@ class PatternNormalizer:
                 if len(pattern.patterns) == 1:
                     return result
                 if len(pattern.patterns) != 2:
-                    raise TypeError('Enum patterns accept a tag and one payload pattern')
+                    logger.error('Enum patterns accept a tag and one payload pattern',
+                                 node=pattern, exc_type=TypeError)
                 fields = get_schema_field_types(subject_type)
                 result = NormalizedPattern.constructor(None, 'enum-fields', [
                     result, self.normalize(pattern.patterns[1], fields[1])], subject_type)
                 result.field_indices = (0, 1)
                 return result
             if len(pattern.patterns) > 2:
-                raise TypeError('Enum patterns accept a tag and one payload pattern')
+                logger.error('Enum patterns accept a tag and one payload pattern',
+                             node=pattern, exc_type=TypeError)
             if len(pattern.patterns) == 2:
                 fields = TypeInfo.get_constructor_sub_types(
                     subject_type, result.constructor_tag)
@@ -629,13 +641,15 @@ class PatternNormalizer:
                     result.field_indices = (0,)
                 elif not (isinstance(item, ast.MatchAs) and item.pattern is None
                           and item.name is None):
-                    raise TypeError('This enum variant has no payload to match')
+                    logger.error('This enum variant has no payload to match',
+                                 node=item, exc_type=TypeError)
             return result
         fields = get_schema_field_types(subject_type)
         if getattr(subject_type, 'dimensions', None) is not None:
             fields = TypeInfo.get_constructor_sub_types(subject_type, 0)
         if len(pattern.patterns) != len(fields):
-            raise TypeError('Sequence pattern length does not match subject fields')
+            logger.error('Sequence pattern length does not match subject fields',
+                         node=pattern, exc_type=TypeError)
         result = NormalizedPattern.constructor(0, 'sequence', [
             self.normalize(item, ty) for item, ty in zip(pattern.patterns, fields)],
             subject_type)

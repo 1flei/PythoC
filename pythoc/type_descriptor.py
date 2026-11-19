@@ -574,15 +574,18 @@ def contains_refinement_storage(source):
     return _contains_storage(source, '_is_refined')
 
 
-def validate_static_storage(pc_type, *, zero_initialized=False):
+def validate_static_storage(pc_type, node, *, zero_initialized=False):
     """Apply the same storage admission to local and class static members."""
     from .builtin_entities.types import void
+    from .logger import logger
     if _unqualified(pc_type) is void:
-        raise TypeError('Static storage requires a value type')
+        logger.error('Static storage requires a value type', node=node, exc_type=TypeError)
     if contains_linear_storage(pc_type):
-        raise TypeError('Static storage of linear values is unsupported')
+        logger.error('Static storage of linear values is unsupported',
+                     node=node, exc_type=TypeError)
     if zero_initialized and not can_zero_initialize(pc_type):
-        raise TypeError('Cannot implicitly zero-initialize proof-bearing static storage')
+        logger.error('Cannot implicitly zero-initialize proof-bearing static storage',
+                     node=node, exc_type=TypeError)
 
 
 def can_zero_initialize(target, _active=None):
@@ -732,8 +735,12 @@ def conversion_failure(source, target, value):
     from .builtin_entities.types import void
     if target is void and contains_linear_storage(source):
         return 'Cannot discard a linear value with a cast; use consume()'
-    if isinstance(target, PythonType) and contains_linear_storage(source):
-        return 'Cannot discard a linear value into a compile-time constant'
+    if isinstance(target, PythonType):
+        if contains_linear_storage(source):
+            return 'Cannot discard a linear value into a compile-time constant'
+        source_name = (source.get_instance_name() if isinstance(source, PythonType)
+                       else getattr(source, '__name__', str(source)))
+        return f"Cannot assign {source_name} to {target.get_instance_name()}"
     if not isinstance(source, PythonType):
         return None
     known, literal = _constant_value(value) if value is not None else (True, source._python_object)

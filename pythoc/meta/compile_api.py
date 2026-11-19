@@ -27,7 +27,7 @@ from ..utils import (
     sanitize_filename,
     get_build_paths,
 )
-from ..logger import logger, set_source_context, set_source_file
+from ..logger import logger, set_source_context
 
 from .generated import GeneratedFunction, MetaArtifact
 
@@ -98,7 +98,6 @@ def compile_ast(
         fn_ast.name = name
 
     func_name = fn_ast.name
-
     from ..ir_helpers import validate_func_linkage
     linkage = validate_func_linkage(linkage, func_name)
 
@@ -149,6 +148,10 @@ def compile_ast(
     if source_file and source_file != "<meta>":
         source_file = os.path.realpath(source_file)
 
+    set_source_context(source_file, start_line - 1)
+    from ..call_normalization import native_positional_parameters
+    param_names = [arg.arg for arg in native_positional_parameters(fn_ast)]
+
     # Synthesize source_code from AST if not provided
     if source_code is None:
         try:
@@ -192,12 +195,6 @@ def compile_ast(
     # Register source
     registry = get_unified_registry()
     registry.register_function_source(source_file, func_name, source_code)
-
-    # Param names from AST
-    param_names = [arg.arg for arg in fn_ast.args.args]
-
-    set_source_file(source_file)
-    set_source_context(source_file, start_line - 1)
 
     # Build group key
     output_manager = get_output_manager()

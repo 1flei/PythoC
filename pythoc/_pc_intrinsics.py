@@ -21,3 +21,27 @@ def _intrinsic_name(attr: str) -> ast.Attribute:
         attr=attr,
         ctx=ast.Load()
     )
+
+
+class _BoundValue:
+    """Preserve one evaluated reference when copying quoted syntax."""
+
+    __slots__ = ('value',)
+
+    def __init__(self, value):
+        self.value = value
+
+    def __deepcopy__(self, memo):
+        return self
+
+
+def _bound_value_expression(value) -> ast.Call:
+    expr = ast.Call(func=_intrinsic_name('bound_value'), args=[], keywords=[])
+    expr._pc_bound_value = _BoundValue(value)
+    return expr
+
+
+def _get_bound_value(expr):
+    """Read the compiler payload attached to a bound value expression."""
+    binding = getattr(expr, '_pc_bound_value', None)
+    return binding.value if binding is not None else None

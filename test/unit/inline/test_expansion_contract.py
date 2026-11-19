@@ -16,7 +16,7 @@ from pythoc._inline.names import ExpansionNames
 from pythoc._inline.renaming import ScopedVariableRenamer
 from pythoc._inline.scope_analyzer import ScopeContext
 from pythoc._inline.yield_state_machine import inline_yield_function_iterators
-from pythoc.ast_visitor.base import LLVMIRVisitor
+from pythoc.ast_visitor import LLVMIRVisitor
 from pythoc.context import VariableInfo
 from pythoc.valueref import wrap_python_constant, wrap_value
 
@@ -72,7 +72,8 @@ class EvaluatedArgumentsTest(unittest.TestCase):
                            address=place, var_name='owner',
                            linear_path=(1, 0), linear_owner_id=41)
         name, = bind_argument_values(self.visitor, [value])
-        actual = self.visitor._bind_name_reference(value, name)
+        actual = self.visitor.visit_expression(ast.Name(id=name, ctx=ast.Load()))
+        self.assertIs(actual, value)
         self.assertEqual(actual.linear_owner_id, 41)
         self.assertEqual(actual.linear_path, (1, 0))
         self.assertIs(actual.require_place(), place)
@@ -83,7 +84,7 @@ class EvaluatedArgumentsTest(unittest.TestCase):
                            address=place)
         variable = VariableInfo(name='local', value_ref=value, alloca=place)
         self.visitor.scope_manager.declare_variable(variable)
-        actual = self.visitor._bind_name_reference(value, 'local')
+        actual = self.visitor.visit_expression(ast.Name(id='local', ctx=ast.Load()))
         self.assertEqual(actual.linear_owner_id, variable.var_id)
         self.assertEqual(actual.linear_path, ())
         self.assertEqual(actual.var_name, 'local')

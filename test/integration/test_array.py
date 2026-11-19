@@ -12,6 +12,7 @@ from pythoc.libc.stdio import printf
 def test_simple() -> i32:
     # Declaration and initialization
     arr: array[i32, 5] = [1, 2, 3, 4, 5]
+    return arr[0]
 
 @compile
 def test_array() -> i32:

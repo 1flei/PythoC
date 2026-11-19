@@ -29,7 +29,7 @@ class offsetof(BuiltinFunction):
                         node=node, exc_type=TypeError)
         field_name = field_arg.get_python_value()
 
-        offset = cls._get_field_offset(pc_type, field_name)
+        offset = cls._get_field_offset(pc_type, field_name, node)
         # offsetof() is a compile-time constant; represent it as a Python value
         # (like sizeof()) so Python-level arithmetic on it remains foldable.
         # Mark the preferred PC type as u64 (size_t) so varargs calls such as
@@ -40,29 +40,30 @@ class offsetof(BuiltinFunction):
         return wrap_value(offset, kind="python", type_hint=python_type)
 
     @classmethod
-    def _get_field_offset(cls, pc_type, field_name: str) -> int:
+    def _get_field_offset(cls, pc_type, field_name: str, node=None) -> int:
         """Get the byte offset of a dot-separated member path."""
         offset = 0
         for member_name in field_name.split("."):
-            member_offset, pc_type = cls._get_member_layout(pc_type, member_name)
+            member_offset, pc_type = cls._get_member_layout(pc_type, member_name, node)
             offset += member_offset
         return offset
 
     @classmethod
-    def _get_member_layout(cls, pc_type, field_name: str):
+    def _get_member_layout(cls, pc_type, field_name: str, node):
         """Resolve a member's local byte offset and type together."""
         from ..type_resolver import TypeResolver
         pc_type = TypeResolver.resolve_type(pc_type, freeze=True)
         pc_type = getattr(pc_type, '_union_type', pc_type)
-        field_names, field_types = cls._get_struct_fields(pc_type)
+        field_names, field_types = cls._get_struct_fields(pc_type, node)
 
         if field_name not in field_names:
             logger.error(f"offsetof(): field '{field_name}' not found in type '{cls._type_name(pc_type)}'",
-                        node=None, exc_type=AttributeError)
+                        node=node, exc_type=AttributeError)
 
         from ..target_layout import NATURAL_LAYOUT
         if not getattr(pc_type, '_layout_config', NATURAL_LAYOUT).is_natural:
-            raise TypeError('offsetof() cannot be applied to a bit field')
+            logger.error('offsetof() cannot be applied to a bit field',
+                         node=node, exc_type=TypeError)
 
         # All fields of a union share offset 0.
         if isinstance(pc_type, type) and issubclass(pc_type, UnionType):
@@ -84,10 +85,10 @@ class offsetof(BuiltinFunction):
             offset += field_size
 
         logger.error(f"offsetof(): field '{field_name}' not found in type '{cls._type_name(pc_type)}'",
-                    node=None, exc_type=AttributeError)
+                    node=node, exc_type=AttributeError)
 
     @classmethod
-    def _get_struct_fields(cls, pc_type):
+    def _get_struct_fields(cls, pc_type, node):
         """Return (field_names, field_types) for a struct-like type."""
         ensure_fields = getattr(pc_type, '_ensure_field_types_resolved', None)
         if callable(ensure_fields):
@@ -103,7 +104,7 @@ class offsetof(BuiltinFunction):
             return [name for name, _ in struct_info.fields], [typ for _, typ in struct_info.fields]
 
         logger.error(f"offsetof(): type '{struct_name}' is not a struct",
-                    node=None, exc_type=TypeError)
+                    node=node, exc_type=TypeError)
 
     @classmethod
     def _type_name(cls, pc_type) -> str:

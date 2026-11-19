@@ -60,6 +60,11 @@ class typeof(BuiltinFunction):
     _borrows_args = True
 
     @classmethod
+    def evaluate_call_argument(cls, visitor, node):
+        """Inspect the type of a place without loading its value."""
+        return visitor.visit_expression(node)
+
+    @classmethod
     def handle_type_call(cls, visitor, func_ref, args, node: ast.Call):
         """Determine the type of an evaluated value without replaying it."""
         from .python_type import PythonType

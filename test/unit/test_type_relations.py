@@ -498,6 +498,7 @@ class TypeRelationsTest(unittest.TestCase):
 
     def test_storage_checks_follow_values_and_stop_at_pointer_edges(self):
         from pythoc import linear
+        from pythoc.logger import logger
         from pythoc.type_descriptor import (
             contains_linear_storage, contains_refinement_storage,
             validate_static_storage,
@@ -509,11 +510,12 @@ class TypeRelationsTest(unittest.TestCase):
         self.assertFalse(contains_refinement_storage(func[checked, i32]))
         self.assertTrue(contains_linear_storage(create_struct_type([linear], ['token'])))
         self.assertFalse(contains_linear_storage(ptr[linear]))
-        with self.assertRaisesRegex(TypeError, 'zero-initialize'):
-            validate_static_storage(record, zero_initialized=True)
-        with self.assertRaisesRegex(TypeError, 'linear'):
-            validate_static_storage(linear)
-        validate_static_storage(ptr[record], zero_initialized=True)
+        with patch.object(logger, 'raise_on_error', True):
+            with self.assertRaisesRegex(TypeError, 'zero-initialize'):
+                validate_static_storage(record, None, zero_initialized=True)
+            with self.assertRaisesRegex(TypeError, 'linear'):
+                validate_static_storage(linear, None)
+        validate_static_storage(ptr[record], None, zero_initialized=True)
 
     def test_standard_predicate_identity_uses_family_and_current_type_arguments(self):
         from pythoc.std.refinement import nonnull, positive, nonnegative, in_range

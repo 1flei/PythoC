@@ -32,23 +32,23 @@ def linearize(acquire_func, release_func, name=None):
 
     @compile(suffix=(suffix, 'acquire'))
     def acquire(*args: AcquireParams) -> ReturnStruct:
-        result: ReturnStruct
-        result[0] = acquire_func(*args)
-        result[1] = make_proof()
-        return result
+        return (acquire_func(*args), make_proof())
 
-    ReleaseParams = struct[tuple(release_param_types)]
     ReleaseWithProof = struct[tuple(release_param_types + [ProofType])]
-    count = len(release_param_types)
+    params = [(f'arg{i}', ty) for i, ty in enumerate(release_param_types)]
+
+    @meta.quote
+    def release_body(proof, /, *values):
+        release_func(*values)
+        consume(proof)
+
+    release_resource = meta.inline_generated(meta.func(
+        'release_resource', [*params, ('proof', ProofType)], None,
+        release_body('proof', *(name for name, _ in params))))
 
     @compile(suffix=(suffix, 'release'))
     def release(*args: ReleaseWithProof):
-        params: ReleaseParams
-        for index in range(count):
-            params[index] = args[index]
-        proof: ProofType = args[count]
-        release_func(*params)
-        consume(proof)
+        release_resource(*args)
 
     ProofType.acquire = acquire
     ProofType.release = release

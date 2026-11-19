@@ -231,7 +231,6 @@ def compiletime_reference() -> i32:
 
     api = instantiate(read)
     state = api.init()
-    value = 7
     return read() * 100 + api.call(ptr(state))
 
 
@@ -279,7 +278,7 @@ def nested_parameter_and_transitive_capture() -> i32:
 
 @compile
 def instantiate_after_binding_update() -> i32:
-    value = 7
+    value: i32 = 7
 
     def work() -> i32:
         return i32(value) + 1
@@ -386,8 +385,8 @@ class DefinitionCaptureTest(DeferredTestCase):
     def test_void_returns_survive_definition_global_aliasing(self):
         self.assertEqual(void_capture(), 2)
 
-    def test_compiletime_binding_updates_remain_visible_to_direct_calls(self):
-        self.assertEqual(compiletime_reference(), 701)
+    def test_direct_and_instantiated_calls_share_a_pyconst_value(self):
+        self.assertEqual(compiletime_reference(), 101)
 
     def test_parameter_shadows_outer_binding_in_both_call_paths(self):
         self.assertEqual(parameter_shadows_capture(), 4242)

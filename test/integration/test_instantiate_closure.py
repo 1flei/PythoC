@@ -466,12 +466,14 @@ def float_lambda() -> i32:
 
 
 @compile
-def constant_capture() -> i32:
+def constant_capture(shadow: i32) -> i32:
     offset = 0.25
     api = instantiate(lambda value: value + offset)
     state = api.init()
-    offset = 99.0
-    return i32(api.call(ptr(state), f64(1.0)) * 100.0)
+    if shadow:
+        offset: f64 = 99.0
+        return i32(api.call(ptr(state), f64(1.0)) * 100.0)
+    return i32(offset * 100.0)
 
 
 @compile
@@ -710,7 +712,8 @@ class TestClosureReturnTypes(unittest.TestCase):
         self.assertEqual(float_lambda(), 125)
 
     def test_compiletime_capture_uses_definition_bindings(self):
-        self.assertEqual(constant_capture(), 125)
+        self.assertEqual(constant_capture(1), 125)
+        self.assertEqual(constant_capture(0), 25)
 
     def test_lambda_wide_return_is_not_truncated(self):
         self.assertEqual(wide_lambda(), 1099511627777)

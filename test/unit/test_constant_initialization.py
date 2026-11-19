@@ -5,7 +5,8 @@ import unittest
 
 from llvmlite import binding, ir
 
-from pythoc import array, bool as pc_bool, f64, i32, ptr, struct, union
+from pythoc import array, bool as pc_bool, const, f64, i32, ptr, struct, union, volatile
+from pythoc.ir_helpers import initialize_storage
 from pythoc.type_converter import TypeConverter
 from pythoc.valueref import ensure_ir
 
@@ -14,6 +15,19 @@ class TestConstantInitialization(unittest.TestCase):
     def setUp(self):
         self.module = ir.Module(context=ir.Context())
         self.converter = TypeConverter(SimpleNamespace(module=self.module))
+
+    def test_raw_builder_preserves_volatile_on_initialization(self):
+        function = ir.Function(self.module, ir.FunctionType(ir.VoidType(), []), 'initialize')
+        builder = ir.IRBuilder(function.append_basic_block('entry'))
+        word = ir.IntType(32)
+        destination = builder.alloca(word)
+        initialize_storage(builder, ir.Constant(word, 7), destination, const[volatile[i32]], align=1)
+        initialize_storage(builder, ir.Constant(word, 9), destination, i32, align=1)
+        builder.ret_void()
+        emitted = str(self.module)
+        self.assertIn('store volatile i32 7,', emitted)
+        self.assertIn('store i32 9,', emitted)
+        binding.parse_assembly(emitted).verify()
 
     def verify(self, value, target):
         module = ir.Module(context=ir.Context())

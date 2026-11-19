@@ -32,8 +32,6 @@ class ExpressionsMixin:
         """Handle variable references, returning ValueRef"""
 
         symbol = getattr(node, '_definition_symbol', None)
-        if symbol is not None and isinstance(symbol.value, ValueRef):
-            return symbol.value
         if symbol is None:
             var_info = self.lookup_variable(node.id)
         else:
@@ -46,7 +44,7 @@ class ExpressionsMixin:
 
             type_hint = var_info.type_hint
             if var_info.value_ref is not None:
-                return self._bind_name_reference(var_info.value_ref, node.id)
+                return self._bind_name_reference(var_info, node.id)
 
             if isinstance(type_hint, PythonType):
                 return wrap_value(

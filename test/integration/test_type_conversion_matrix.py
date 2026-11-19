@@ -217,7 +217,7 @@ def entry_declaration(value: Source, peer: Target, flag: i32) -> Target:
 
 
 def entry_assignment(value: Source, peer: Target, flag: i32) -> Target:
-    result: Target
+    result: Target = peer
     result = value
     return result
 
@@ -263,7 +263,7 @@ def array_declaration(value: Source, peer: Target, flag: i32) -> Target:
 
 
 def array_assignment(value: Source, peer: Target, flag: i32) -> Target:
-    result: Target
+    result: Target = peer
     result = value[0]
     return result
 

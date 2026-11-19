@@ -4,10 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from pythoc import (
-    compile, i32, inline, label, llvm_asm, offsetof, sizeof, static, struct,
+    compile, consume, i32, inline, linear, label, llvm_asm, offsetof, sizeof, static, struct,
     typeof, u64, va_arg, va_end, va_start, void,
 )
-from pythoc.build.output_manager import flush_all_pending_outputs
+from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
 from test.utils.test_utils import DeferredTestCase
 
 
@@ -64,6 +64,27 @@ class EvaluationState:
 def bump() -> i32:
     EvaluationState.calls += 1
     return EvaluationState.calls
+
+
+@compile
+def chained(first: i32, last: i32) -> i32:
+    return i32(first < bump() < bump() < last)
+
+
+@compile
+def constant_prefix() -> i32:
+    return i32(2 < 1 < bump())
+
+
+@compile
+def mixed_chain(first: i32) -> i32:
+    return i32(first < 2 < 1 < bump())
+
+
+@compile
+def consume_for_compare(token: linear) -> i32:
+    consume(token)
+    return 3
 
 
 @compile
@@ -228,6 +249,31 @@ class CallEvaluationTest(DeferredTestCase):
     def observe(self, function, value, calls):
         self.assertEqual(function(), value)
         self.assertEqual(count(), calls)
+
+    def test_chained_comparison_stops_at_first_false_pair(self):
+        for first, last, answer, calls in [(3, 5, 0, 1), (0, 2, 0, 2), (0, 5, 1, 2)]:
+            with self.subTest(first=first, last=last):
+                reset_calls()
+                self.assertEqual(chained(first, last), answer)
+                self.assertEqual(count(), calls)
+
+    def test_false_constant_pair_skips_the_tail(self):
+        self.observe(constant_prefix, 0, 0)
+        self.assertEqual(mixed_chain(0), 0)
+        self.assertEqual(mixed_chain(3), 0)
+        self.assertEqual(count(), 0)
+
+    def test_cfg_rejects_conditionally_consumed_comparison_operand(self):
+        @compile(suffix="comparison_conditional_move")
+        def bad(first: i32) -> i32:
+            token = linear()
+            return i32(first < 2 < consume_for_compare(token))
+
+        try:
+            with self.assertRaisesRegex(RuntimeError, "CFG linear check"):
+                flush_all_pending_outputs()
+        finally:
+            clear_failed_group(bad._binding.group_key)
 
     def test_typeof_evaluates_native_operand_once(self):
         self.observe(typeof_native, 1, 1)

@@ -49,6 +49,30 @@ def _return_exit_template(has_value, has_label, result_var, value, label,
 
 
 @quote
+def _empty_typed_return(is_void):
+    if not is_void:
+        __pc_intrinsics.require_unreachable("Non-void function requires a return value")  # noqa: F821
+
+
+class _YieldTypeCoercion:
+    """Apply the generator's declared type before binding a consumer target."""
+
+    def handle_call(self, visitor, func_ref, args, node):
+        from ..builtin_entities.move import move
+        target = visitor.type_resolver.resolve_type_value(args[0])
+        value = move.handle_type_call(visitor, func_ref, [args[1]], node)
+        return visitor.implicit_coercer.coerce(value, target, node)
+
+
+@quote
+def _yield_value(typed, annotation, value):
+    if typed:
+        return __pc_intrinsics.coerce_yield(annotation, value)  # noqa: F821
+    if not typed:
+        return __pc_intrinsics.move(value)  # noqa: F821
+
+
+@quote
 def _yield_exit_template(has_label, no_label, has_value,
                          label_name, target, value, loop_body):
     # Unified yield-exit template.
@@ -57,11 +81,11 @@ def _yield_exit_template(has_label, no_label, has_value,
     if has_label:
         with __pc_intrinsics.label(label_name):  # noqa: F821
             if has_value:
-                target = __pc_intrinsics.move(value)  # noqa: F821
+                target = value
             loop_body
     if no_label:
         if has_value:
-            target = __pc_intrinsics.move(value)  # noqa: F821
+            target = value
         loop_body
 
 
@@ -169,7 +193,7 @@ class ReturnExitRule(ExitPointRule):
         """
         self.result_var = result_var
         self.exit_label = exit_label
-        self.discard_result = ast.Constant(False)
+        self.discard_result = None
 
     def get_exit_node_types(self) -> Tuple[type, ...]:
         return (ast.Return,)
@@ -209,10 +233,17 @@ class ReturnExitRule(ExitPointRule):
             if has_label else ast.Constant(value="_unused")
         )
 
-        return _return_exit_template(
-            meta_const(has_value), meta_const(has_label),
-            result_var, value, label, copy.deepcopy(self.discard_result),
-        ).stmts
+        statements = [] if has_value else self.check_empty_return()
+        statements.extend(_return_exit_template(
+            meta_const(has_value), meta_const(has_label), result_var, value, label,
+            copy.deepcopy(self.discard_result) if self.discard_result is not None else meta_const(False),
+        ).stmts)
+        return statements
+
+    def check_empty_return(self):
+        if self.discard_result is None:
+            return []
+        return _empty_typed_return(copy.deepcopy(self.discard_result)).stmts
 
 
 # ---------------------------------------------------------------------------
@@ -360,6 +391,12 @@ class YieldExitRule(ExitPointRule):
             ]
         else:
             loop_body = [copy.deepcopy(s) for s in self.loop_body]
+
+        if has_value:
+            annotation = self.return_type_annotation
+            value = _yield_value(meta_const(annotation is not None),
+                                 annotation if annotation is not None else ast.Constant(None),
+                                 value).expr
 
         # Single template call
         result = _yield_exit_template(
