@@ -81,7 +81,7 @@ class InlineAdapter:
     # Public entry points
     # ------------------------------------------------------------------
 
-    def execute_inline(self, func_ast: ast.FunctionDef) -> Optional[ValueRef]:
+    def execute_inline(self, func_ast: ast.FunctionDef, call_site: ast.AST) -> Optional[ValueRef]:
         """Execute callee inline using the universal kernel via meta pipeline.
 
         Returns the ValueRef of the return value, or a void ValueRef for
@@ -113,13 +113,6 @@ class InlineAdapter:
         # Consumer names protect generated bindings; they never select captures.
         caller_context = self._build_caller_context()
 
-        # Dummy call site -- only used for location copying.
-        call_site = ast.Call(
-            func=ast.Name(id=func_ast.name, ctx=ast.Load()),
-            args=arg_exprs,
-            keywords=[],
-        )
-
         from .kernel import (
             expand_inline_or_raise,
             inline_globals_scope,
@@ -144,7 +137,7 @@ class InlineAdapter:
                 self.visitor.visit(stmt)
 
         if self.visitor.scope_manager.lookup_variable(result_var) is not None:
-            return self._lookup_result_var(result_var)
+            return self._lookup_result_var(result_var, call_site)
 
         # Void callee -- return a void ValueRef.
         from ..builtin_entities import void
@@ -182,7 +175,7 @@ class InlineAdapter:
         scope_manager = getattr(self.visitor, 'scope_manager', None)
         return build_caller_context(scope_manager, visibility="all_visible")
 
-    def _lookup_result_var(self, var_name: str) -> Optional[ValueRef]:
+    def _lookup_result_var(self, var_name: str, node) -> Optional[ValueRef]:
         """Resolve the generated result variable and load its value.
 
         For linear types, the result temp is treated like the source of
@@ -199,15 +192,11 @@ class InlineAdapter:
                     logger.warning(f"  Scope {i}: {list(scope.keys())}")
             return None
 
-        # Python-valued results (void callees, compile-time constants):
-        # pass the stored value through instead of loading from an alloca.
-        if var_info.alloca is None or var_info.value_ref.is_python_value():
+        if var_info.alloca is None:
             return var_info.value_ref
 
-        from ..builtin_entities.python_type import PythonType
-        if isinstance(var_info.type_hint, PythonType):
-            from ..valueref import wrap_python_constant
-            return wrap_python_constant(var_info.type_hint.get_python_object())
+        if var_info.value_ref.is_python_value():
+            return var_info.value_ref.clone(address=None)
 
         alloca = var_info.alloca
         loaded_value = self.visitor.builder.load(alloca)
@@ -226,7 +215,7 @@ class InlineAdapter:
             self.visitor._transfer_linear_ownership(
                 temp_ref,
                 reason=f"{self.kind} return",
-                node=None,
+                node=node,
             )
 
         # Return a fresh ValueRef without var_name -- caller should see

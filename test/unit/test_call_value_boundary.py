@@ -55,9 +55,9 @@ class CallValueBoundaryTest(unittest.TestCase):
 
     def test_type_value_resolution_rejects_syntax(self):
         resolver = TypeResolver()
-        self.assertIs(resolver.resolve_type_value(wrap_python_constant(i32)), i32)
+        self.assertIs(resolver.resolve_type_value(wrap_python_constant(i32), None), i32)
         with self.assertRaises(TypeError):
-            resolver.resolve_type_value(ast.parse('i32', mode='eval').body)
+            resolver.resolve_type_value(ast.parse('i32', mode='eval').body, None)
 
     def test_loaded_pointer_cannot_reuse_symbol_identity(self):
         def predicate(value):
@@ -67,15 +67,15 @@ class CallValueBoundaryTest(unittest.TestCase):
         symbol = ir.Function(module, ir.FunctionType(ir.IntType(32), []), 'pred')
         reference = wrap_value(symbol, kind='pointer', type_hint=func[i32])
         symbol._pc_python_callable = predicate
-        self.assertIs(get_compile_time_callable(reference), predicate)
-        self.assertIs(get_compile_time_callable(wrap_python_constant(predicate)),
+        self.assertIs(get_compile_time_callable(reference, None), predicate)
+        self.assertIs(get_compile_time_callable(wrap_python_constant(predicate), None),
                       predicate)
         loaded = reference.clone(value=ir.Constant(symbol.type, None))
         with self.assertRaisesRegex(TypeError, 'no static identity'):
-            get_compile_time_callable(loaded)
+            get_compile_time_callable(loaded, None)
         other = ir.Function(module, symbol.function_type, 'other')
         with self.assertRaisesRegex(TypeError, 'no static identity'):
-            get_compile_time_callable(reference.clone(value=other))
+            get_compile_time_callable(reference.clone(value=other), None)
 
 
 if __name__ == '__main__':

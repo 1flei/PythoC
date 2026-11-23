@@ -75,7 +75,8 @@ def _link_task(plan: ArtifactPlan, dependencies) -> BuildTask:
         tuple(plan.link.link_libraries) + tuple(plan.link_libraries)
     )
     inputs = (
-        plan.object_files
+        plan.link.ordered_inputs
+        + plan.object_files
         + tuple(plan.link_objects)
         + libraries
     )
@@ -111,6 +112,7 @@ def _link_task(plan: ArtifactPlan, dependencies) -> BuildTask:
                 link_objects=list(plan.link_objects),
                 link_libraries=list(libraries),
                 extra_flags=list(plan.extra_link_flags),
+                ordered_inputs=plan.link.ordered_inputs,
             ),
             **common,
         )
@@ -131,6 +133,7 @@ def _link_task(plan: ArtifactPlan, dependencies) -> BuildTask:
                 link_objects=list(plan.link_objects),
                 link_libraries=list(libraries),
                 extra_flags=list(plan.extra_link_flags),
+                ordered_inputs=plan.link.ordered_inputs,
             ),
             **common,
         )

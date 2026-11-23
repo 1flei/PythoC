@@ -1,9 +1,14 @@
 from __future__ import annotations
+
+import sys
+
 from pythoc import *
 from pythoc.libc.string import memset, memcpy
+from pythoc.logger import logger
 from pythoc.std.mem import DefaultMem
 from pythoc.std.refinement import nonnull
 from pythoc.schema_protocol import is_linear_schema_type
+from pythoc.source import SourceLocation
 
 
 effect.default(mem=DefaultMem)
@@ -37,14 +42,14 @@ def Vector(element_type, inline_capacity=0, size_type=u64):
     ``pop_back`` shrinks the element count; the spilled element count lives
     in the heap branch of the union instead.
     """
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
     if not isinstance(inline_capacity, int) or inline_capacity < 0:
-        raise TypeError("inline_capacity must be a non-negative integer")
+        logger.error('inline_capacity must be a non-negative integer', node=node, exc_type=TypeError)
     if not (hasattr(size_type, '_is_integer') and size_type._is_integer):
-        raise TypeError(
-            f"Vector: size_type must be a PythoC integer type, got {size_type}"
-        )
+        logger.error(f'Vector: size_type must be a PythoC integer type, got {size_type}',
+                     node=node, exc_type=TypeError)
     if is_linear_schema_type(element_type):
-        raise TypeError('Vector requires copyable elements')
+        logger.error('Vector requires copyable elements', node=node, exc_type=TypeError)
 
     ElementPointer = nonnull(ptr[element_type])
 

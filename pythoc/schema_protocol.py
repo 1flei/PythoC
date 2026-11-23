@@ -14,24 +14,13 @@ from .logger import logger
 FieldLayoutEntry = Tuple[int, Optional[str], Any]
 
 
-def unwrap_python_object(value: Any) -> Any:
-    if hasattr(value, '_python_object'):
-        return value._python_object
-
-    get_python_object = getattr(value, 'get_python_object', None)
-    if callable(get_python_object):
-        return get_python_object()
-
-    return value
-
-
 def _issubclass_refined(cls) -> bool:
     return getattr(cls, '_is_refined', False)
 
 
 def resolve_schema_type(type_hint: Any) -> Any:
     from .type_resolver import TypeResolver
-    resolved = TypeResolver.resolve_type(unwrap_python_object(type_hint), required=False)
+    resolved = TypeResolver.resolve_type(type_hint, required=False)
     if isinstance(resolved, type) and _issubclass_refined(resolved):
         base_type = getattr(resolved, '_base_type', None)
         if base_type is not None:

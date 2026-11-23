@@ -3,6 +3,9 @@ import inspect
 import os
 import sys
 
+from ..logger import logger
+from ..source import SourceLocation
+
 
 def _load_lib_handle(lib):
     """Resolve a lib spec to a ctypes library handle.
@@ -67,8 +70,6 @@ def _load_lib_handle(lib):
 
 class ExternFunctionWrapper:
     def __init__(self, func, lib, calling_convention, **kwargs):
-        if calling_convention not in ('cdecl', 'stdcall'):
-            raise TypeError(f'Unsupported calling convention: {calling_convention}')
         self.func = func
         self.func_name = func.__name__
         # The C symbol name used for linking and ctypes lookup.  Defaults to
@@ -450,6 +451,11 @@ def extern_global(pc_type, name=None, lib=None):
 
 
 def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):
+    if calling_convention not in ('cdecl', 'stdcall'):
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        logger.error(f'Unsupported calling convention: {calling_convention}. '
+                     'Use cdecl or stdcall.', node=node, exc_type=TypeError)
+
     def decorator(f):
         if inspect.isclass(f):
             return _extern_class(f)

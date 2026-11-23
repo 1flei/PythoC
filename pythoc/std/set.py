@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+
 from pythoc import (
     compile, effect, ptr, u64, i8, bool, const, void, nullptr, sizeof, refine,
 )
 from pythoc.libc.string import memset
+from pythoc.logger import logger
 from pythoc.schema_protocol import is_linear_schema_type
+from pythoc.source import SourceLocation
 from pythoc.std.mem import DefaultMem
-from pythoc.std.hash import key_functions
+from pythoc.std.hash import _key_functions
 from pythoc.std._hash_table import HashTable, EMPTY
 from pythoc.std.refinement import nonnull
 
@@ -18,12 +22,14 @@ effect.default(mem=DefaultMem)
 
 def FlatHashSet(key_type, size_type=u64, *, hash_fn=None, eq_fn=None):
     """Return a set type with fixed compile-time hash/equality operations."""
-    hash_fn, eq_fn = key_functions(key_type, hash_fn, eq_fn)
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    hash_fn, eq_fn = _key_functions(key_type, hash_fn, eq_fn, node)
     if not (getattr(size_type, '_is_integer', False)
             and not getattr(size_type, '_is_signed', True)):
-        raise TypeError('FlatHashSet size_type must be an unsigned integer type')
+        logger.error('FlatHashSet size_type must be an unsigned integer type',
+                     node=node, exc_type=TypeError)
     if is_linear_schema_type(key_type):
-        raise TypeError('FlatHashSet requires copyable keys')
+        logger.error('FlatHashSet requires copyable keys', node=node, exc_type=TypeError)
     Table = HashTable(key_type, size_type, hash_fn, eq_fn)
     KeyPointer = ptr[const[key_type]]
     PresentKey = nonnull(KeyPointer)

@@ -179,7 +179,7 @@ def _fold_static_initializer(visitor, pc_type, llvm_type, init_value,
         return visitor.type_converter.create_zero_constant(llvm_type)
 
     value = wrap_literal_result(init_value)
-    seed = visitor.type_converter.try_const_aggregate(value, pc_type)
+    seed = visitor.type_converter.try_const_aggregate(value, pc_type, node=node)
     if seed is None:
         seed = ensure_ir(visitor.implicit_coercer.coerce(value, pc_type, node))
     if seed is None or not is_link_time_constant(seed):

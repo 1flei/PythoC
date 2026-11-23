@@ -184,15 +184,23 @@ class ControlFlowMixin:
         else:
             ctx_expr = self.visit_expression(context)
 
+        from ..scope_manager import _ScopedBindings
+        if ctx_expr.is_python_value():
+            binding_scope = ctx_expr.get_python_value()
+            if isinstance(binding_scope, _ScopedBindings):
+                with self.scope_manager.scoped_bindings(binding_scope.names):
+                    self._visit_stmt_list(node.body, add_to_cfg=True)
+                return
+
         # Check if this is a scoped label
         label_name = self._scoped_label_name(ctx_expr)
         if label_name is not None:
             self._visit_with_scoped_label(node, label_name)
             return
 
-        # Other with statements not supported yet
-        logger.error("with statement currently only supports 'label' context manager",
-                    node=node, exc_type=NotImplementedError)
+        logger.error(f"Unsupported with context '{ast.unparse(context)}'. "
+                     "Use label(...) or effect(...).",
+                     node=context, exc_type=NotImplementedError)
 
     def _visit_with_effect_binding(self, node: ast.With, call: ast.Call):
         """Handle with effect(x=impl, ...): block-scoped effect binding.

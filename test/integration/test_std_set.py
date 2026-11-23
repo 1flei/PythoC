@@ -23,6 +23,7 @@ from pythoc import (
     bool, ptr, compile, nullptr, array,
 )
 from pythoc.std.set import FlatHashSet
+from pythoc.logger import set_raise_on_error
 
 
 # Factory instances for the scalar key types we support out of the box.
@@ -608,6 +609,7 @@ if __name__ == '__main__':
     test_clear_reuse()
     test_multiple_instances()
     test_stress()
+    set_raise_on_error(True)
     test_unsupported_key_type()
     test_bad_factory_args()
     print("All FlatHashSet tests passed!")

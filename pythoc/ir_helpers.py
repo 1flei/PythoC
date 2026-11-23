@@ -123,7 +123,7 @@ def is_link_time_constant(value: Any) -> bool:
 FUNC_LINKAGE_KINDS = frozenset({'external', 'internal', 'weak_odr', 'linkonce_odr'})
 
 
-def validate_func_linkage(linkage: Optional[str],
+def validate_func_linkage(linkage: Optional[str], node,
                           func_name: Optional[str] = None) -> Optional[str]:
     """Validate a user-requested function linkage kind.
 
@@ -138,7 +138,7 @@ def validate_func_linkage(linkage: Optional[str],
             f"Unsupported linkage '{linkage}'"
             + (f" for function '{func_name}'" if func_name else "")
             + f"; expected one of {sorted(FUNC_LINKAGE_KINDS)}",
-            node=None, exc_type=TypeError)
+            node=node, exc_type=TypeError)
     return None if linkage == 'external' else linkage
 
 

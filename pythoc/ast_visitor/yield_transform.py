@@ -69,6 +69,8 @@ def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
     }
     source_ast = func_ast
     func_ast, signature = lower_inline_signature(source_ast, defaults)
+    func_ast._pc_diagnose_expansion_at_call = getattr(
+        func, '_pc_diagnose_expansion_at_call', False)
 
     def placeholder_wrapper(*args, **kwargs):
         raise RuntimeError(

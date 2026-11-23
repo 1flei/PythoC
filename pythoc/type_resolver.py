@@ -10,6 +10,9 @@ from typing import Any, Optional
 
 from llvmlite import ir
 
+from .logger import logger
+from .source import anchor_generated_ast, copy_ast_location
+
 
 @dataclass(eq=False)
 class _TypeScope:
@@ -134,6 +137,10 @@ class TypeResolver:
 
     def parse_annotation(self, annotation, *, defer_unresolved=False) -> Optional[Any]:
         """Evaluate an annotation, deferring it when dependencies are missing."""
+        return self._parse_annotation(
+            annotation, annotation, defer_unresolved=defer_unresolved)
+
+    def _parse_annotation(self, annotation, node, *, defer_unresolved=False):
         if (defer_unresolved and self.visitor is None
                 and isinstance(annotation, (str, ast.AST))):
             expression = (ast.unparse(annotation)
@@ -144,25 +151,51 @@ class TypeResolver:
                     expression, self.user_globals))
         if annotation is None:
             return None
-        result = self._extract_type_from_valueref(
-            self._evaluate_type_expression(annotation))
-        return TypeResolver.bind_type_references(result, self.user_globals)
+        with logger.at_node(node):
+            result = self._extract_type_from_valueref(
+                self._evaluate_type_expression(annotation, node))
+            return TypeResolver.bind_type_references(result, self.user_globals)
 
-    def resolve_type_value(self, value_ref):
+    def resolve_annotation(self, annotation, node, *, defer_unresolved=False):
+        """Resolve an annotation at a compiler entry with a source node."""
+        try:
+            return self._parse_annotation(
+                annotation, node, defer_unresolved=defer_unresolved)
+        except (SyntaxError, NameError, TypeError) as error:
+            logger.error(error, node=node)
+
+    def resolve_type_value(self, value_ref, node):
         """Validate an evaluated type value without executing syntax."""
-        return self._extract_type_from_valueref(value_ref)
+        try:
+            return self._extract_type_from_valueref(value_ref)
+        except (TypeError, NameError) as error:
+            logger.error(error, node=node)
 
     @staticmethod
     def annotation_expression(annotation):
         """Expose names in quoted annotations before binding or evaluation."""
+        return TypeResolver._annotation_expression(annotation, annotation)
+
+    @staticmethod
+    def _annotation_expression(annotation, node):
+        original = annotation
         while isinstance(annotation, str) or (
                 isinstance(annotation, ast.Constant)
                 and isinstance(annotation.value, str)):
             text = annotation if isinstance(annotation, str) else annotation.value
             annotation = ast.parse(text, mode="eval").body
+        if annotation is not original:
+            if isinstance(node, ast.AST):
+                # Reparsed annotation text has no file coordinates of its own.
+                for child in ast.walk(annotation):
+                    copy_ast_location(child, node)
+            else:
+                location = logger.current_location()
+                if location is not None:
+                    anchor_generated_ast(annotation, location)
         return annotation
 
-    def _evaluate_type_expression(self, node):
+    def _evaluate_type_expression(self, annotation, node):
         """
         Evaluate type annotation AST, returning ValueRef(kind='python').
 
@@ -170,27 +203,28 @@ class TypeResolver:
         otherwise uses constexpr visitor.
 
         Args:
-            node: AST node, string, or Python value
+            annotation: AST node, string, or Python value
+            node: Source of the annotation
 
         Returns:
             ValueRef(kind='python', value=<type>)
         """
-        node = self.annotation_expression(node)
-        if not isinstance(node, ast.AST):
-            return self._wrap_as_python_value(node)
+        annotation = self._annotation_expression(annotation, node)
+        if not isinstance(annotation, ast.AST):
+            return self._wrap_as_python_value(annotation)
 
         # Use provided visitor (for local type variable access) or constexpr visitor
         # The visitor's visit_List will check is_constexpr() or element types
         # to decide whether to return Python list or pc_list
         visitor = self.visitor if self.visitor is not None else self._get_constexpr_visitor()
         if self.visitor is None:
-            expression = ast.unparse(node)
+            expression = ast.unparse(annotation)
             names = TypeResolver.expression_names(expression)
             namespace = TypeResolver._reference_namespace(expression, self.user_globals)
             namespace.update(TypeResolver._resolution_namespace(self.user_globals, names))
             namespace.type_binding_namespace = self.user_globals
             visitor.ctx.user_globals = namespace
-        return visitor.visit_expression(node)
+        return visitor.visit_expression(annotation)
 
     def _wrap_as_python_value(self, value):
         """Wrap Python value as a canonical compile-time Python constant."""
@@ -316,15 +350,23 @@ class TypeResolver:
         namespace = getattr(binding, 'compilation_globals', None)
         from .session import CompileSession
         graph = CompileSession.current().type_graph
+        nodes = info.annotation_nodes()
+        source = info.diagnostic_source
+        parameters = {}
         with graph._lock, graph.binding_transaction():
-            parameters = {name: TypeResolver._resolve_type_components(
-                pc_type, namespace, freeze=True)
-                for name, pc_type in info.param_type_hints.items()}
-            result = (TypeResolver._resolve_type_components(
-                info.return_type_hint, namespace, freeze=True)
-                if info.return_type_hint is not None else None)
-            for pc_type in (*parameters.values(), result):
-                prepare_type(pc_type)
+            for name, pc_type in info.param_type_hints.items():
+                with logger.at_node(nodes.get(name, info.ast_node), source=source):
+                    parameters[name] = TypeResolver._resolve_type_components(
+                        pc_type, namespace, freeze=True)
+            with logger.at_node(nodes.get('return'), source=source):
+                result = (TypeResolver._resolve_type_components(
+                    info.return_type_hint, namespace, freeze=True)
+                    if info.return_type_hint is not None else None)
+            for name, pc_type in parameters.items():
+                with logger.at_node(nodes.get(name, info.ast_node), source=source):
+                    prepare_type(pc_type)
+            with logger.at_node(nodes.get('return'), source=source):
+                prepare_type(result)
         info.param_type_hints.update(parameters)
         info.return_type_hint = result
 

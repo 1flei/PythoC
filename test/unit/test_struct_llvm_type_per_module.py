@@ -201,7 +201,7 @@ class TestStructTypePerModule(unittest.TestCase):
         holder = create_struct_type(
             [ptr[i32]], ['next'], python_class=type('ConstantHolder', (), {}))
         constant = assemble_aggregate_value(
-            SimpleNamespace(module=module), holder, [global_value])
+            SimpleNamespace(module=module), holder, [global_value], None)
         self.assertEqual(constant.constant[0].type, constant.type.elements[0])
         self.assertEqual(constant.constant[0].type,
                          ir.PointerType(ir.IntType(32)))
@@ -216,7 +216,7 @@ class TestStructTypePerModule(unittest.TestCase):
             with self.subTest(field=field):
                 holder = create_struct_type([field], ['value'])
                 with self.assertRaisesRegex(TypeError, 'field 0 type mismatch'):
-                    assemble_aggregate_value(SimpleNamespace(module=module), holder, [value])
+                    assemble_aggregate_value(SimpleNamespace(module=module), holder, [value], None)
 
     def test_aggregate_insertion_cannot_truncate_an_array(self):
         module = _make_module('invalid_storage')

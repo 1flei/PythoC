@@ -11,7 +11,9 @@ from typing import Any, List
 
 from pythoc import typeof, inline, meta
 from pythoc.literal_protocol import get_sequence_elements
+from pythoc.source import _diagnose_expansion_at_call
 from pythoc.type_converter import TypeConverter
+from pythoc.type_descriptor import format_type
 
 
 class Poly:
@@ -27,6 +29,7 @@ class Poly:
         self._signatures()
 
         @inline
+        @_diagnose_expansion_at_call
         def _call(*args):
             return self._select(args)(*args)
 
@@ -86,7 +89,8 @@ class Poly:
                 enum_indices.append((i, arg_type))
         
         if not enum_indices:
-            raise TypeError(f'Poly: no matching signature for {arg_types} '
+            parameters = ', '.join(format_type(arg) for arg in arg_types)
+            raise TypeError(f'Poly: no matching signature for ({parameters}) '
                             'and no Enum argument for dynamic dispatch')
         
         return self._expand_enum(arg_types, enum_indices, signatures)
@@ -137,7 +141,8 @@ class Poly:
         if missing_combinations:
             error_msg = "Poly: cannot expand dynamic dispatch - missing function overloads:\n"
             for variant_names, sig in missing_combinations:
-                error_msg += f"  - Variants {variant_names}: {sig}\n"
+                parameters = ', '.join(format_type(parameter) for parameter in sig)
+                error_msg += f"  - Variants {variant_names}: ({parameters})\n"
             raise TypeError(error_msg)
         
         # Step 2: Validate all return types are the same
@@ -147,8 +152,8 @@ class Poly:
                 if get_type_id(rt) != get_type_id(first_return_type):
                     error_msg = (
                         f"Poly: cannot expand dynamic dispatch - inconsistent return types:\n"
-                        f"  Expected all overloads to return {first_return_type}, "
-                        f"but found {rt}\n"
+                        f"  Expected all overloads to return {format_type(first_return_type)}, "
+                        f"but found {format_type(rt)}\n"
                     )
                     raise TypeError(error_msg)
 

@@ -13,7 +13,9 @@ import copy
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Optional, TYPE_CHECKING
 
-from ..meta.template import quote, const as meta_const
+from ..meta.template import _compiler_quote, const as meta_const
+from ..source import copy_ast_location
+from ..utils.ast_targets import iter_rebinding_names, iter_unpack_leaves
 from .names import ExpansionNames
 from .renaming import ScopedVariableRenamer
 
@@ -33,7 +35,7 @@ if TYPE_CHECKING:
 # branches at the AST-visit stage) produces exactly the right code without
 # any manual list-splicing on the Python side.
 
-@quote
+@_compiler_quote
 def _return_exit_template(has_value, has_label, result_var, value, label,
                           discard_result):
     # Unified return-exit template.
@@ -48,7 +50,7 @@ def _return_exit_template(has_value, has_label, result_var, value, label,
         __pc_intrinsics.goto_end(label)  # noqa: F821
 
 
-@quote
+@_compiler_quote
 def _empty_typed_return(is_void):
     if not is_void:
         __pc_intrinsics.require_unreachable("Non-void function requires a return value")  # noqa: F821
@@ -59,12 +61,12 @@ class _YieldTypeCoercion:
 
     def handle_call(self, visitor, func_ref, args, node):
         from ..builtin_entities.move import move
-        target = visitor.type_resolver.resolve_type_value(args[0])
+        target = visitor.type_resolver.resolve_type_value(args[0], node)
         value = move.handle_type_call(visitor, func_ref, [args[1]], node)
         return visitor.implicit_coercer.coerce(value, target, node)
 
 
-@quote
+@_compiler_quote
 def _yield_value(typed, annotation, value):
     if typed:
         return __pc_intrinsics.coerce_yield(annotation, value)  # noqa: F821
@@ -72,7 +74,7 @@ def _yield_value(typed, annotation, value):
         return __pc_intrinsics.move(value)  # noqa: F821
 
 
-@quote
+@_compiler_quote
 def _yield_exit_template(has_label, no_label, has_value,
                          label_name, target, value, loop_body):
     # Unified yield-exit template.
@@ -89,22 +91,28 @@ def _yield_exit_template(has_label, no_label, has_value,
         loop_body
 
 
-@quote
+@_compiler_quote
+def _yield_binding_scope(bindings, body):
+    with bindings:
+        body
+
+
+@_compiler_quote
 def _macro_expr(value):
     value
 
 
-@quote
+@_compiler_quote
 def _goto_begin(label):
     __pc_intrinsics.goto_begin(label)  # noqa: F821
 
 
-@quote
+@_compiler_quote
 def _goto_end(label):
     __pc_intrinsics.goto_end(label)  # noqa: F821
 
 
-@quote
+@_compiler_quote
 def _empty_label_block(label_name):
     with __pc_intrinsics.label(label_name):  # noqa: F821
         pass
@@ -251,52 +259,20 @@ class ReturnExitRule(ExitPointRule):
 # ---------------------------------------------------------------------------
 
 class YieldExitRule(ExitPointRule):
-    """
-    Transform yield statements for generators using scoped label approach
+    """Run the consumer body at each yield using ordinary target assignment.
 
-    Transformation:
-        yield expr  -->  with label("_yield_{id}"): loop_var = expr; <loop_body>
-
-    With type annotation:
-        def gen() -> i32:
-            yield 1
-
-        Becomes:
-            with label("_yield_0"):
-                loop_var: i32 = i32(1)
-                <loop_body>
-
-    For tuple unpacking:
-        def gen() -> struct[i32, i32]:
-            yield a, b
-
-        for x, y in gen():
-            ...
-
-        Becomes:
-            with label("_yield_0"):
-                _tmp = (a, b)
-                x = _tmp[0]
-                y = _tmp[1]
-                <loop_body>
-
-    When loop_body contains break/continue, transforms them to scoped goto:
-        break    --> goto_begin("_for_after_else_{id}")  (skip all remaining yields and else)
-        continue --> goto_end("_yield_{id}")             (skip to next yield)
-
-    This scoped label approach:
-    - Uses structured control flow
-    - Properly handles defer execution
-    - No unstructured jumps
+    Keep the target tree intact for assignment and expose its leaf paths for
+    typed predeclaration. Consumer break and continue become scoped exits.
     """
 
     def __init__(
         self,
-        loop_var: ast.AST,  # Can be Name or Tuple
+        loop_var: ast.expr,
         loop_body: List[ast.stmt],
         return_type_annotation: Optional[ast.expr] = None,
         after_else_label: Optional[str] = None,
         gen_done_label: Optional[str] = None,
+        *, state_machine: bool = False,
     ):
         """
         Args:
@@ -309,6 +285,12 @@ class YieldExitRule(ExitPointRule):
                 ``return`` in the generator body jumps here.
         """
         self.loop_var = loop_var
+        self.loop_bindings = tuple(iter_unpack_leaves(self.loop_var))
+        for _, target in self.loop_bindings:
+            if not isinstance(target, ast.Name):
+                from ..logger import logger
+                logger.error('A yield loop target must bind a name or unpack a tuple of names',
+                             node=target, exc_type=SyntaxError)
         self.loop_body = loop_body
         self.return_type_annotation = return_type_annotation
         self.after_else_label = after_else_label
@@ -318,6 +300,16 @@ class YieldExitRule(ExitPointRule):
 
         # Check if loop body has break or continue
         self._body_has_break_or_continue = _has_break_or_continue(loop_body)
+        # A suspended consumer uses declared state fields for its readable slots.
+        self.rebinding_names = () if state_machine else self._find_rebindings()
+
+    def _find_rebindings(self):
+        rebindings = dict.fromkeys(iter_rebinding_names(self.loop_var))
+        for node in ast.walk(ast.Module(body=self.loop_body, type_ignores=[])):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    rebindings.update(dict.fromkeys(iter_rebinding_names(target)))
+        return tuple(rebindings)
 
     def get_exit_node_types(self) -> Tuple[type, ...]:
         # Yield expressions, plus Return: a return in the generator body ends
@@ -349,11 +341,13 @@ class YieldExitRule(ExitPointRule):
                 # The return value is not observable through a for loop;
                 # evaluate it for side effects, then discard.
                 value_expr = ast.Expr(value=self._rename(exit_node.value, context))
-                ast.copy_location(value_expr, exit_node)
+                copy_ast_location(value_expr, exit_node)
                 ast.fix_missing_locations(value_expr)
                 stmts.append(value_expr)
             goto = _goto_begin(ast.Constant(value=self.gen_done_label)).stmt
-            ast.copy_location(goto, exit_node)
+            copy_ast_location(goto, exit_node)
+            copy_ast_location(goto.value, exit_node)
+            goto.value._pc_producer_return = True
             ast.fix_missing_locations(goto)
             stmts.append(goto)
             return stmts
@@ -406,8 +400,14 @@ class YieldExitRule(ExitPointRule):
             target, value, loop_body,
         ).stmts
 
+        if self.rebinding_names and not has_label:
+            from ..scope_manager import _ScopedBindings
+            from .definition_bindings import symbol_expression
+            bindings = symbol_expression('_yield_bindings', _ScopedBindings(self.rebinding_names))
+            result = _yield_binding_scope(bindings, result).stmts
+
         for stmt in result:
-            ast.copy_location(stmt, exit_node)
+            copy_ast_location(stmt, exit_node)
             ast.fix_missing_locations(stmt)
         return result
 

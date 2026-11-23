@@ -16,7 +16,7 @@ import subprocess
 import threading
 import time
 from functools import lru_cache
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set
 from contextlib import ExitStack, contextmanager
 from .c_runtime import load_c_runtime
 
@@ -759,6 +759,7 @@ def build_link_command(
     link_objects: Optional[List[str]] = None,
     link_libraries: Optional[List[str]] = None,
     extra_flags: Optional[List[str]] = None,
+    ordered_inputs: Sequence[str] = (),
 ) -> List[str]:
     """Build linker command.
 
@@ -769,6 +770,9 @@ def build_link_command(
         linker: Linker command (e.g., 'gcc', 'clang', 'python-zig cc')
         link_objects: Optional extra object files to link (defaults to registry)
         link_libraries: Optional link libraries to use (defaults to registry)
+        ordered_inputs: Driver arguments inserted verbatim before SDK objects.
+            Supply absolute paths for any files. Archive policy and repeated
+            arguments are preserved.
 
     Returns:
         Link command as list of arguments
@@ -820,7 +824,8 @@ def build_link_command(
         for f in lib_flags
     ]
 
-    command = linker_cmd + platform_flags + all_obj_files + ['-o', output_file] + lib_flags
+    command = (linker_cmd + platform_flags + list(ordered_inputs) + all_obj_files
+               + ['-o', output_file] + lib_flags)
     if extra_flags:
         command.extend(extra_flags)
     return command
@@ -834,6 +839,7 @@ def try_link_with_linkers(
     link_objects: Optional[List[str]] = None,
     link_libraries: Optional[List[str]] = None,
     extra_flags: Optional[List[str]] = None,
+    ordered_inputs: Sequence[str] = (),
 ) -> str:
     """Try linking with multiple linkers.
 
@@ -864,6 +870,7 @@ def try_link_with_linkers(
                 link_objects=link_objects,
                 link_libraries=link_libraries,
                 extra_flags=extra_flags,
+                ordered_inputs=ordered_inputs,
             )
 
 
@@ -942,6 +949,7 @@ def link_files(
     link_libraries: Optional[List[str]] = None,
     lock_policy: str = 'internal',
     extra_flags: Optional[List[str]] = None,
+    ordered_inputs: Sequence[str] = (),
 ) -> str:
     """Link object files to executable or shared library
     
@@ -980,7 +988,7 @@ def link_files(
         # IMPORTANT (Windows): for DLLs we also require the sidecar export
         # definition + import library to exist; otherwise we must relink to
         # get a usable export table and `.lib`.
-        if os.path.exists(output_file):
+        if not ordered_inputs and os.path.exists(output_file):
             output_mtime = os.path.getmtime(output_file)
             obj_mtimes = [os.path.getmtime(obj) for obj in obj_files if os.path.exists(obj)]
             if obj_mtimes and all(output_mtime >= mtime for mtime in obj_mtimes):
@@ -1011,10 +1019,12 @@ def link_files(
                 link_objects=link_objects,
                 link_libraries=link_libraries,
                 extra_flags=extra_flags,
+                ordered_inputs=ordered_inputs,
             )
         except RuntimeError:
             if (
-                sys.platform == 'win32'
+                not ordered_inputs
+                and sys.platform == 'win32'
                 and shared
                 and output_file.lower().endswith('.dll')
                 and _win32_dll_uptodate(output_file, obj_files)

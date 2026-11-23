@@ -1,6 +1,8 @@
 """Poly ownership, real compile failures and stable cross-module dispatch."""
 
 import os
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 import shutil
 import subprocess
@@ -121,7 +123,8 @@ class PolyBehaviorBoundariesTest(DeferredTestCase):
                 self.assertEqual(compute(a, b), expected)
 
     def test_rejects_poly_missing_overload(self):
-        with CompileSession(), self.assertRaisesRegex(
+        output = StringIO()
+        with CompileSession(), redirect_stderr(output), self.assertRaisesRegex(
                 ValueError, 'missing function overloads'):
             @enum(i32)
             class Input:
@@ -139,6 +142,8 @@ class PolyBehaviorBoundariesTest(DeferredTestCase):
                 return operation(Input(Input.Integer, 7))
 
             flush_all_pending_outputs()
+        line = main.__wrapped__.__code__.co_firstlineno + 2
+        self.assertIn(f'[test_poly_behavior_boundaries.py:{line}:11]', output.getvalue())
 
     def test_rejects_poly_inconsistent_returns(self):
         with CompileSession(), self.assertRaisesRegex(

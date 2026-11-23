@@ -89,7 +89,7 @@ class TypeRelationsTest(unittest.TestCase):
     def test_refinement_requires_initializer_at_local_declaration(self):
         Checked = refined[i32, 'checked']
         Record = pythoc.struct['payload': Checked]
-        Variant = _create_enum_type([('Empty', None, 0), ('Value', Checked, 1)], i32)
+        Variant = _create_enum_type([('Empty', None, 0), ('Value', Checked, 1)], i32, node=None)
         for local_type in (Checked, const[Checked], refined[ptr[i32], 'valid'],
                            Record, array[Record, 2], Variant, pythoc.union[Checked, i32]):
             with self.subTest(local_type=local_type):
@@ -344,7 +344,7 @@ class TypeRelationsTest(unittest.TestCase):
                 self.assertEqual(run(), ord('h') + ord('e') + ord('o'))
 
     def test_struct_to_enum_checks_tag_and_payload_before_lowering(self):
-        target = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32)
+        target = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32, node=None)
         invalid = create_struct_type([PythonType.wrap(9), i32],
                                      ['tag', 'payload'])
 
@@ -355,8 +355,8 @@ class TypeRelationsTest(unittest.TestCase):
         self._reject(should_fail, 'Cannot implicitly convert')
 
     def test_identical_enum_layout_does_not_authorize_conversion(self):
-        source = _create_enum_type([('Ok', i32, 0)], i32)
-        target = _create_enum_type([('Ok', i32, 1)], i32)
+        source = _create_enum_type([('Ok', i32, 0)], i32, node=None)
+        target = _create_enum_type([('Ok', i32, 1)], i32, node=None)
 
         @compile(suffix='relation_enum_same_layout')
         def should_fail(value: source) -> target:
@@ -387,7 +387,7 @@ class TypeRelationsTest(unittest.TestCase):
         self.assertEqual(divide(-1, 2), 2147483647)
 
     def test_enum_constructor_rejects_invalid_variant_shapes(self):
-        result = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32)
+        result = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32, node=None)
 
         @compile(suffix='relation_enum_constructor_missing')
         def missing() -> result:
@@ -416,7 +416,7 @@ class TypeRelationsTest(unittest.TestCase):
         self.assertEqual(dynamic(0), 0)
 
     def test_enum_constructor_cannot_discard_payload_const(self):
-        result = _create_enum_type([('Ok', ptr[i32], 0)], i32)
+        result = _create_enum_type([('Ok', ptr[i32], 0)], i32, node=None)
 
         @compile(suffix='relation_enum_constructor_const')
         def invalid(value: ptr[const[i32]]) -> result:
@@ -535,7 +535,7 @@ class TypeRelationsTest(unittest.TestCase):
             values: array[checked, 1] = []
             return i32(values[0])
 
-        self._reject(invalid, 'Cannot implicitly convert')
+        self._reject(invalid, 'Cannot omit initializer for element 1 of type refined')
 
     def test_static_aggregate_default_cannot_forge_refinement(self):
         checked = refined[i32, 'checked']
@@ -890,7 +890,7 @@ class TypeRelationsTest(unittest.TestCase):
 
     def test_poly_replacement_invalidates_dynamic_dispatch(self):
         from pythoc.std.poly import Poly
-        number = _create_enum_type([('Value', i32, 0)], i32)
+        number = _create_enum_type([('Value', i32, 0)], i32, node=None)
 
         @compile(suffix='relation_poly_original')
         def original(value: i32) -> i32:

@@ -38,6 +38,14 @@ def pair_declared(value: Pair) -> Pair:
 
 
 class TestExternDefinition(unittest.TestCase):
+    def test_declaration_attributes_are_lowered(self):
+        @extern(lib="c", name="saved_context", attrs={"returns_twice"})
+        def saved_context() -> i32:
+            pass
+
+        declaration = ensure_ir(lower_extern_wrapper(saved_context, ir.Module()))
+        self.assertIn("returns_twice", declaration.attributes)
+
     def test_matching_local_definition_is_reused(self):
         module = ir.Module()
         local = LLVMBuilder().declare_function(

@@ -65,10 +65,7 @@ class assume(BuiltinFunction):
             if (argument.is_python_value()
                     and isinstance(argument.get_python_value(), str)):
                 return argument.get_python_value()
-            try:
-                return get_compile_time_callable(argument)
-            except TypeError as error:
-                logger.error(str(error), node=node, exc_type=TypeError)
+            return get_compile_time_callable(argument, node)
 
         last = constraint(args[-1])
         arity = len(inspect.signature(last).parameters) if callable(last) else 0

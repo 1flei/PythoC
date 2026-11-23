@@ -8,7 +8,7 @@ from pythoc.builtin_entities.enum import _create_enum_type
 
 
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-Result = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32)
+Result = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32, node=None)
 
 
 @compile

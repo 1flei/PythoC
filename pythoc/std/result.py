@@ -8,13 +8,17 @@ channel. Standalone bind requires an explicitly selected error-slot policy;
 importing this module never installs a global error channel.
 """
 
+import sys
+
 from ..builtin_entities import i8, static, ptr, array, typeof
 from ..builtin_entities.enum import _create_enum_type
 from ..builtin_entities.types import bool as pc_bool
 from ..builtin_entities.unreachable import _require_unreachable
 from ..effect import effect
+from ..logger import logger
 from ..schema_protocol import is_linear_schema_type
-from ..type_descriptor import same_type
+from ..source import SourceLocation, _diagnose_expansion_at_call
+from ..type_descriptor import format_type, same_type
 from ..utils import get_next_id
 from pythoc import compile, inline, label, goto_end
 
@@ -73,8 +77,11 @@ class _LocalSlotProvider:
 
     def get_slot(self, err_type):
         if not same_type(err_type, self.err_type):
-            raise TypeError("Result.do requires the same error type in every bind "
-                            f"(expected {self.err_type}, got {err_type})")
+            logger.error(
+                'Result.do requires the same error type in every bind '
+                f'(expected {format_type(self.err_type)}, got {format_type(err_type)})',
+                node=logger.current_location(), exc_type=TypeError,
+            )
         return self._slot_fn
 
 
@@ -87,11 +94,12 @@ def Option(value_type, tag_type=i8, name=None):
     Returns:
         OptionType
     """
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
     option_name = name or f"Option_{getattr(value_type, '__name__', str(value_type))}"
     option_type = _create_enum_type(
         [("Some", value_type, 0), ("NoneVal", None, 1)],
         tag_type,
-        class_name=option_name,
+        class_name=option_name, node=node,
     )
 
     suffix_base = (option_name, value_type, tag_type)
@@ -127,6 +135,7 @@ def Option(value_type, tag_type=i8, name=None):
                 return fallback()
 
     @inline
+    @_diagnose_expansion_at_call
     def option_from_result(r, drop_error=None) -> option_type:
         source = _conversion_source(typeof(r), 'result', value_type, drop_error)
         match r:
@@ -183,11 +192,12 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
     Returns:
         ResultType
     """
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
     result_name = name or f"Result_{getattr(ok_type, '__name__', str(ok_type))}_{getattr(err_type, '__name__', str(err_type))}"
     result_type = _create_enum_type(
         [("Ok", ok_type, 0), ("Err", err_type, 1)],
         tag_type,
-        class_name=result_name,
+        class_name=result_name, node=node,
     )
 
     suffix_base = (result_name, ok_type, err_type, tag_type)
@@ -201,6 +211,7 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
         return result_type(result_type.Err, e)
 
     @compile(suffix=(suffix_base, "bind"))
+    @_diagnose_expansion_at_call
     def result_bind(r: result_type) -> ok_type:
         match r:
             case (result_type.Ok, value):
@@ -219,6 +230,7 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
                     goto_end(failure_exit)
 
     @inline
+    @_diagnose_expansion_at_call
     def result_do(
         genexp,
         _result_type=result_type,
@@ -249,6 +261,7 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
                 return fallback(error)
 
     @inline
+    @_diagnose_expansion_at_call
     def result_from_option(o, error: err_type) -> result_type:
         _require_copyable_error(err_type)
         source = _conversion_source(typeof(o), 'option', ok_type)
@@ -259,6 +272,7 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
                 return result_err(error)
 
     @inline
+    @_diagnose_expansion_at_call
     def result_from_option_else(o, make_error) -> result_type:
         source = _conversion_source(typeof(o), 'option', ok_type)
         match o:
@@ -309,22 +323,32 @@ def Result(ok_type, err_type, tag_type=i8, name=None):
 
 def _conversion_source(source, kind, value_type, drop_error=None):
     """Read conversion metadata from the actual source enum type."""
+    node = logger.current_location()
     names = ['Some', 'NoneVal'] if kind == 'option' else ['Ok', 'Err']
     if not getattr(source, '_is_enum', False) or source._variant_names != names:
-        raise TypeError(f'Expected a {kind} source')
-    if not same_type(source._variant_types[0], value_type):
-        raise TypeError('Sum conversion requires the same value type')
+        expected = 'an Option' if kind == 'option' else 'a Result'
+        logger.error(f'Expected {expected} source, got {format_type(source)}',
+                     node=node, exc_type=TypeError)
+    source_value_type = source._variant_types[0]
+    if not same_type(source_value_type, value_type):
+        logger.error(
+            'Sum conversion requires the same value type '
+            f'(expected {format_type(value_type)}, got {format_type(source_value_type)})',
+            node=node, exc_type=TypeError,
+        )
     if kind == 'option' and source._variant_types[1] is not None:
-        raise TypeError('Option NoneVal must have no payload')
+        logger.error('Option NoneVal must have no payload', node=node, exc_type=TypeError)
     if (kind == 'result' and is_linear_schema_type(source._variant_types[1])
             and drop_error is None):
-        raise TypeError('from_result requires an explicit consumer for an owned error')
+        logger.error('from_result requires an explicit consumer for an owned error',
+                     node=node, exc_type=TypeError)
     return source
 
 
 def _require_copyable_error(err_type):
     if is_linear_schema_type(err_type):
-        raise TypeError('from_option requires a copyable error; use from_option_else')
+        logger.error('from_option requires a copyable error. Use from_option_else.',
+                     node=logger.current_location(), exc_type=TypeError)
 
 
 __all__ = ['Option', 'Result', 'ErrnoSlotProvider']

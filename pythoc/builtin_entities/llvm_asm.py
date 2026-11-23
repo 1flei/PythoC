@@ -106,7 +106,7 @@ class llvm_asm(BuiltinFunction):
                         )
                     side_effect = se_val
                 elif name == 'ret_type':
-                    ret_type = visitor.type_resolver.resolve_type_value(value)
+                    ret_type = visitor.type_resolver.resolve_type_value(value, node)
                 elif name == 'inputs':
                     from ..literal_protocol import get_unpack_values
                     kw_inputs = get_unpack_values(visitor, value, node)

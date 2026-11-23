@@ -8,7 +8,7 @@ from llvmlite import ir
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from pythoc.builtin_entities import i32, linear
+from pythoc.builtin_entities import array, i32, linear, union
 from pythoc.builtin_entities.consume import consume
 from pythoc.builtin_entities.python_type import PythonType
 from pythoc.builtin_entities.struct import struct
@@ -17,6 +17,7 @@ from pythoc.literal_protocol import (
     get_mapping_entries,
     get_multidim_subscript_indices,
     get_sequence_elements,
+    get_unpack_field_types,
     get_unpack_values,
     is_pc_dict_type,
     is_pc_tuple_type,
@@ -28,6 +29,7 @@ from pythoc.literal_protocol import (
     wrap_literal_result,
 )
 from pythoc.logger import logger
+from pythoc.type_descriptor import same_type
 from pythoc.valueref import wrap_value
 
 
@@ -68,6 +70,21 @@ class TestLiteralProtocol(unittest.TestCase):
         self.assertEqual(unpacked[0].var_name, "first")
         self.assertEqual(unpacked[1].var_name, "second")
 
+    def test_unpack_types_distinguish_products_from_overlays_and_scalars(self):
+        self.assertEqual(get_unpack_field_types(struct[()]), [])
+        self.assertEqual(get_unpack_field_types(array[i32, 0]), [])
+        self.assertEqual(get_unpack_field_types(array[i32, 2]), [i32, i32])
+        self.assertIsNone(get_unpack_field_types(union[i32, i32]))
+        self.assertIsNone(get_unpack_field_types(i32))
+
+    def test_unpack_carrier_types_match_the_values_projected_from_it(self):
+        value = wrap_literal_result(((1, 2), 3))
+        types = get_unpack_field_types(value.get_pc_type())
+        values = get_unpack_values(None, value, None)
+        self.assertEqual(len(types), len(values))
+        for field_type, field in zip(types, values):
+            self.assertTrue(same_type(field_type, field.get_pc_type()))
+
     def test_get_multidim_subscript_indices_normalizes_python_sequence(self):
         index = wrap_literal_result((1, 2, 3))
 
@@ -83,13 +100,13 @@ class TestLiteralProtocol(unittest.TestCase):
     def test_struct_normalize_subscript_items_accepts_slice_pair_carrier(self):
         named_item = wrap_literal_result(("field", i32)).get_python_value()
 
-        self.assertEqual(struct.normalize_subscript_items(named_item), (("field", i32),))
+        self.assertEqual(struct.normalize_subscript_items(named_item, node=None), (("field", i32),))
 
     def test_struct_normalize_subscript_items_accepts_tuple_of_slice_pair_carriers(self):
         named_items = wrap_literal_result((("field", i32), ("flag", linear))).get_python_value()
 
         self.assertEqual(
-            struct.normalize_subscript_items(named_items),
+            struct.normalize_subscript_items(named_items, node=None),
             (("field", i32), ("flag", linear)),
         )
 
@@ -158,11 +175,11 @@ class TestLiteralProtocol(unittest.TestCase):
         value = ExpressionsMixin.visit_Slice(visitor, syntax).get_python_value()
         self.assertIsInstance(value, slice)
         self.assertEqual((value.start, value.stop), ('result', i32))
-        normalized = func.normalize_subscript_items(value)
+        normalized = func.normalize_subscript_items(value, node=None)
         self.assertEqual(normalized, (('result', i32),))
         with self.assertRaisesRegex(
                 TypeError, 'return type cannot have a parameter name'):
-            func.handle_type_subscript(normalized)
+            func.handle_type_subscript(normalized, node=None)
 
 
 if __name__ == "__main__":

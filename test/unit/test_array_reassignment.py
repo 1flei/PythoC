@@ -43,6 +43,7 @@ class TestArrayReassignment(unittest.TestCase):
                 kind="value",
                 type_hint=source_type or self.array_type,
             ),
+            ast.parse('target = source').body[0],
         )
 
     def verify_module(self):

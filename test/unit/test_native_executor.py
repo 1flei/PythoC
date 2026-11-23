@@ -53,8 +53,10 @@ class TestMultiSOExecutor(unittest.TestCase):
         """Re-linking should invalidate every cached function from that .so."""
         executor = MultiSOExecutor()
         wrapper = self._make_wrapper(func_name="fresh_func")
+        extension = get_shared_lib_extension()
+        wrapper._state.so_file = f"/tmp/test_module{extension}_effect{extension}"
         so_file = wrapper._state.so_file
-        obj_file = so_file.replace(get_shared_lib_extension(), ".o")
+        obj_file = os.path.splitext(so_file)[0] + ".o"
 
         executor.loaded_libs[so_file] = object()
         executor.function_cache[f"{so_file}:stale_func"] = "stale_wrapper"

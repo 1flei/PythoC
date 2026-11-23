@@ -35,7 +35,7 @@ def tuple_to_struct_code(comb):
         elem_type = PythonType.wrap(elem, is_constant=True)
         field_specs.append((None, elem_type))
     
-    struct_type = struct.handle_type_subscript(tuple(field_specs))
+    struct_type = struct.handle_type_subscript(tuple(field_specs), node=None)
     return struct_type
 
 

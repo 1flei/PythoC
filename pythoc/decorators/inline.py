@@ -1,8 +1,10 @@
 import inspect
 import ast
+import sys
 import textwrap
 from functools import wraps
-from ..logger import set_source_context
+from ..logger import logger
+from ..source import SourceLocation, set_ast_source
 
 
 def inline(func=None, *, cls_method=False, method=False):
@@ -40,18 +42,23 @@ def inline(func=None, *, cls_method=False, method=False):
     """
     def decorator(f):
         try:
-            from ..utils.inspect_utils import get_object_source, get_object_sourcelines
-            source = textwrap.dedent(get_object_source(f))
-            try:
-                _, start_line = get_object_sourcelines(f)
-                set_source_context(inspect.getfile(f), start_line - 1)
-            except (OSError, TypeError):
-                pass
-            func_ast = ast.parse(source).body[0]
-            if not isinstance(func_ast, ast.FunctionDef):
-                raise ValueError(f'Expected function definition, got {type(func_ast).__name__}')
+            from ..utils.inspect_utils import get_object_sourcelines
+            lines, start_line = get_object_sourcelines(f)
+            filename = inspect.getfile(f)
         except (OSError, TypeError) as error:
-            raise RuntimeError(f'Cannot get source code for function {f.__name__}: {error}')
+            logger.error(f'Cannot get source code for function {f.__name__}: {error}',
+                         node=call_site)
+        source = textwrap.dedent(''.join(lines))
+        try:
+            func_ast = ast.parse(source, filename=filename).body[0]
+        except (SyntaxError, IndexError) as error:
+            logger.error(error, node=SourceLocation(filename, start_line))
+        set_ast_source(func_ast, (filename, start_line - 1))
+        func_ast._pc_diagnose_expansion_at_call = getattr(
+            f, '_pc_diagnose_expansion_at_call', False)
+        if not isinstance(func_ast, ast.FunctionDef):
+            logger.error(f'Expected function definition, got {type(func_ast).__name__}',
+                         node=func_ast, exc_type=ValueError)
 
         from ..builtin_entities.python_type import PythonType
         from ..valueref import wrap_value
@@ -78,9 +85,10 @@ def inline(func=None, *, cls_method=False, method=False):
             func_ast, definition_globals, defaults=defaults, python_func=f,
             cls_method=cls_method, method=method)
 
-    # Validate parameters
+    call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
     if cls_method and method:
-        raise ValueError("Cannot use both cls_method=True and method=True")
+        logger.error("Cannot use both cls_method=True and method=True",
+                     node=call_site, exc_type=ValueError)
     
     # Handle both @inline and @inline(...) usage
     if func is None:
@@ -108,7 +116,7 @@ def _make_inline_callable(func_ast, definition_globals, *, defaults=None,
         from .._inline import InlineAdapter
         adapter = InlineAdapter(
             visitor, dict(zip(param_names, args)), func_globals=definition_globals())
-        return adapter.execute_inline(func_ast)
+        return adapter.execute_inline(func_ast, node)
 
     def classmethod_handler(cls, visitor, func_ref, args, node):
         return create_handler(visitor, args, node)
@@ -118,7 +126,9 @@ def _make_inline_callable(func_ast, definition_globals, *, defaults=None,
 
     def wrapper(*args, **kwargs):
         if python_func is None:
-            raise TypeError('Generated inline functions can only be called in compiled code')
+            node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+            logger.error('Generated inline functions can only be called in compiled code',
+                         node=node, exc_type=TypeError)
         return python_func(*args, **kwargs)
 
     if python_func is None:

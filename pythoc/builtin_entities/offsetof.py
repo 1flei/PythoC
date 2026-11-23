@@ -21,7 +21,7 @@ class offsetof(BuiltinFunction):
             logger.error(f"offsetof() takes exactly 2 arguments ({len(args)} given)",
                         node=node, exc_type=TypeError)
 
-        pc_type = visitor.type_resolver.resolve_type_value(args[0])
+        pc_type = visitor.type_resolver.resolve_type_value(args[0], node)
         field_arg = args[1]
         if not (field_arg.is_python_value()
                 and isinstance(field_arg.get_python_value(), str)):
@@ -75,13 +75,13 @@ class offsetof(BuiltinFunction):
 
         offset = 0
         for name, field_type in zip(field_names, field_types):
-            field_alignment = cls._get_type_alignment(field_type)
+            field_alignment = cls._get_type_alignment(field_type, node)
             offset = cls._align_to(offset, field_alignment)
 
             if name == field_name:
                 return offset, field_type
 
-            field_size = cls._get_type_size(field_type)
+            field_size = cls._get_type_size(field_type, node)
             offset += field_size
 
         logger.error(f"offsetof(): field '{field_name}' not found in type '{cls._type_name(pc_type)}'",
@@ -113,7 +113,7 @@ class offsetof(BuiltinFunction):
         return str(pc_type)
 
     @classmethod
-    def _get_type_size(cls, pc_type) -> int:
+    def _get_type_size(cls, pc_type, node) -> int:
         """Get size of a type in bytes."""
         if hasattr(pc_type, 'get_size_bytes'):
             return pc_type.get_size_bytes()
@@ -129,15 +129,15 @@ class offsetof(BuiltinFunction):
             return entity_cls.get_size_bytes()
 
         logger.error(f"offsetof(): cannot determine size of type '{type_name}'",
-                    node=None, exc_type=TypeError)
+                    node=node, exc_type=TypeError)
 
     @classmethod
-    def _get_type_alignment(cls, pc_type) -> int:
+    def _get_type_alignment(cls, pc_type, node) -> int:
         """Get alignment of a type in bytes."""
         if hasattr(pc_type, 'get_alignment'):
             return pc_type.get_alignment()
 
-        size = cls._get_type_size(pc_type)
+        size = cls._get_type_size(pc_type, node)
         return min(size, 8)
 
     @classmethod

@@ -423,21 +423,21 @@ class TypeRelationsTest(unittest.TestCase):
     def test_enum_tags_are_representable_and_payload_discriminants_unique(self):
         from pythoc import i8, f64
         with self.assertRaisesRegex(TypeError, 'not representable'):
-            _create_enum_type([('Overflow', None, 128)], i8)
+            _create_enum_type([('Overflow', None, 128)], i8, node=None)
         with self.assertRaisesRegex(TypeError, 'distinct tag values'):
-            _create_enum_type([('First', i32, 0), ('Second', f64, 0)], i32)
+            _create_enum_type([('First', i32, 0), ('Second', f64, 0)], i32, node=None)
         with self.assertRaisesRegex(TypeError, 'enum tag type must be an integer'):
-            _create_enum_type([('Value', None, 0)], f64)
-        aliases = _create_enum_type([('First', None, 0), ('Alias', None, 0)], i32)
+            _create_enum_type([('Value', None, 0)], f64, node=None)
+        aliases = _create_enum_type([('First', None, 0), ('Alias', None, 0)], i32, node=None)
         self.assertEqual(aliases.First, aliases.Alias)
-        self.assertTrue(same_type(_create_enum_type([('Empty', None, 0)], i32),
-                                  _create_enum_type([('Empty', void, 0)], i32)))
+        self.assertTrue(same_type(_create_enum_type([('Empty', None, 0)], i32, node=None),
+                                  _create_enum_type([('Empty', void, 0)], i32, node=None)))
 
     def test_provisional_record_method_uses_authoritative_identity(self):
         import importlib
         from pythoc import compile as pc_compile
         decorators = importlib.import_module('pythoc.decorators.structs')
-        original = decorators.create_struct_type
+        original = decorators._create_struct_type
         observed = []
         def capture(*args, **kwargs):
             proxy = kwargs.get('python_class')
@@ -445,7 +445,7 @@ class TypeRelationsTest(unittest.TestCase):
                 observed.append(proxy.get_type_id(set()))
                 self.assertEqual(observed[-1], get_type_id(proxy))
             return original(*args, **kwargs)
-        with patch.object(decorators, 'create_struct_type', side_effect=capture):
+        with patch.object(decorators, '_create_struct_type', side_effect=capture):
             for field in (i32, i64):
                 proxy = type('ProvisionalIdentity', (),
                              {'__annotations__': {'value': field}, '__module__': __name__})
@@ -472,7 +472,7 @@ class TypeRelationsTest(unittest.TestCase):
         from pythoc import mark_type_defined
         from pythoc.builtin_entities.refined import _create_refined_type_class
         mark_type_defined('ReadonlyStorageAlias', const[i32])
-        quoted = _create_refined_type_class('ReadonlyStorageAlias', [], ['quoted_storage'])
+        quoted = _create_refined_type_class('ReadonlyStorageAlias', [], ['quoted_storage'], node=None)
         self.assertTrue(is_const(quoted))
         mixed = volatile[refined[static[const[i32]], 'mixed_storage']]
         self.assertTrue(is_const(mixed))
@@ -634,7 +634,7 @@ class TypeRelationsTest(unittest.TestCase):
                          pointer.get_llvm_type(module.context))
 
     def test_value_dependent_constructors_and_array_decay(self):
-        result = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32)
+        result = _create_enum_type([('Ok', i32, 0), ('Empty', None, 1)], i32, node=None)
         tagged = create_struct_type([PythonType.wrap(0), i64],
                                     ['tag', 'payload'])
         wrong_tag = create_struct_type([PythonType.wrap(9), i64],
@@ -674,8 +674,8 @@ class TypeRelationsTest(unittest.TestCase):
                 self.assertFalse(can_convert(literal, ptr[pointee]))
 
     def test_full_id_tracks_additional_composites(self):
-        result = _create_enum_type([('Ok', i32, 0), ('Err', i64, 1)], i32)
-        near = _create_enum_type([('Ok', i32, 0), ('Err', i64, 2)], i32)
+        result = _create_enum_type([('Ok', i32, 0), ('Err', i64, 1)], i32, node=None)
+        near = _create_enum_type([('Ok', i32, 0), ('Err', i64, 2)], i32, node=None)
         types = (array[i32, 3], array[i32, 4], func[i32, i64],
                  func['x': i32, i64], result, near,
                  create_struct_type([i32, i64], ['x', 'y']),

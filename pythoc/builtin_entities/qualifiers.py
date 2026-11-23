@@ -59,7 +59,7 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         qualified = mapper(cls.qualified_type)
         if qualified is cls.qualified_type:
             return cls
-        return cls.handle_type_subscript(((None, qualified),))
+        return cls.handle_type_subscript(((None, qualified),), node=None)
 
     @classmethod
     def get_qualifier_name(cls) -> str:
@@ -155,7 +155,7 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         return get_type_id(cls)
     
     @classmethod
-    def handle_type_subscript(cls, item):
+    def handle_type_subscript(cls, item, node):
         """Unified type subscript handler for both runtime and compile-time paths
         
         Args:
@@ -167,7 +167,7 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
         """
         if item is None:
             logger.error(f"{cls.get_qualifier_name()} requires a type parameter: {cls.get_qualifier_name()}[T]",
-                        node=None, exc_type=TypeError)
+                        node=node, exc_type=TypeError)
         
         # Unwrap normalized tuple if needed
         import builtins
@@ -175,10 +175,10 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
             # Normalized format: ((None, type),) -> extract type
             name, actual_type = item[0]
             if name is not None:
-                raise TypeError('Type qualifiers do not accept named type arguments')
+                logger.error('Type qualifiers do not accept named type arguments', node=node, exc_type=TypeError)
             item = actual_type
         from ..type_descriptor import validate_type_argument
-        validate_type_argument(item, cls.get_qualifier_name())
+        validate_type_argument(item, cls.get_qualifier_name(), node=node)
 
         # Normalize qualifiers
         base_type, flags = cls._normalize_qualifiers(item)
@@ -222,8 +222,8 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
     
     def __class_getitem__(cls, item):
         """Runtime path: delegate to BuiltinType normalization and handle_type_subscript"""
-        normalized = cls.normalize_subscript_items(item)
-        return cls.handle_type_subscript(normalized)
+        normalized = cls.normalize_subscript_items(item, node=None)
+        return cls.handle_type_subscript(normalized, node=None)
 
 
 class const(TypeQualifier):

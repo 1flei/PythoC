@@ -19,26 +19,23 @@ from . import llvm_extensions as floating
 import ast
 
 
-def raise_if_compile_level_callable(python_val):
-    """Uniform boundary error for compile-level callables.
-
-    Compile-level callables (nested-def closures, lambdas, yield-function
-    placeholders, @inline wrappers) are compile-time-only values: calling
-    one inline-expands it. Using one as a *runtime* value (storing into a
-    PC-typed variable, converting to func[...], returning from a compiled
-    function, arithmetic, ...) is always an error; raise one uniform
-    message for it here. No-op for anything else.
-    """
+def _compile_level_callable_error(python_val):
     if not getattr(python_val, '_pc_compile_level_callable', False):
-        return
+        return None
     name = (getattr(python_val, 'name', None)
             or getattr(python_val, '__name__', None)
             or type(python_val).__name__)
-    raise TypeError(
+    return (
         f"Compile-level callable '{name}' cannot be used as a runtime value; "
         f"it can only be called (which inline-expands it at compile time). "
         f"Convert it explicitly with instantiate(...) where supported"
     )
+
+
+def _reject_compile_level_callable(python_val, node):
+    message = _compile_level_callable_error(python_val)
+    if message is not None:
+        logger.error(message, node=node, exc_type=TypeError)
 
 
 def strip_qualifiers(pc_type):
@@ -202,31 +199,21 @@ class TypeConverter:
         from .builtin_entities.python_type import PythonType
         stripped_target = strip_qualifiers(target_type)
         if value.is_python_value() and not isinstance(stripped_target, PythonType):
-            raise_if_compile_level_callable(value.get_python_value())
+            _reject_compile_level_callable(value.get_python_value(), node)
         
         # A qualifier can wrap a refinement. Decide the semantic relation
         # before the LLVM fast path or storage qualifier erasure.
-        from .type_descriptor import can_convert
+        from .type_descriptor import can_convert, conversion_message, format_type
         target_is_refined = getattr(stripped_target, '_is_refined', False)
         if target_is_refined and not can_convert(
                 value.type_hint, target_type, mode='explicit', value=value):
-            target_name = target_type.get_name() if hasattr(target_type, 'get_name') else str(target_type)
-            source_name = value.type_hint.get_name() if value.type_hint and hasattr(value.type_hint, 'get_name') else str(value.type_hint)
-            logger.error(f"Cannot directly convert from {source_name} to refined type {target_name}. "
+            logger.error(f"Cannot directly convert from {format_type(value.type_hint)} "
+                f"to refined type {format_type(target_type)}. "
                 f"Refined types must be constructed using assume() or refine().",
                 node, exc_type=TypeError)
         if not can_convert(value.type_hint, target_type, mode='explicit', value=value):
-            from .type_descriptor import conversion_failure
-            detail = conversion_failure(value.type_hint, target_type, value)
-            if detail is not None:
-                raise TypeError(detail)
-            source_name = (value.type_hint.get_name()
-                           if value.type_hint is not None and hasattr(value.type_hint, 'get_name')
-                           else str(value.type_hint))
-            target_name = (target_type.get_name() if hasattr(target_type, 'get_name')
-                           else str(target_type))
-            logger.error(f"Cannot convert {source_name} to {target_name}",
-                         node, exc_type=TypeError)
+            logger.error(conversion_message(value.type_hint, target_type, value, mode='explicit'),
+                         node=node, exc_type=TypeError)
         
         # Strip qualifiers for comparison and conversion
         stripped_source = strip_qualifiers(value.type_hint) if value.type_hint else None
@@ -319,7 +306,7 @@ class TypeConverter:
                     )
                 return lowered.clone(type_hint=target_type)
             # Otherwise, auto-promote Python values to PC values
-            value = self._promote_python_to_pc(python_val, stripped_target)
+            value = self._promote_python_to_pc(python_val, stripped_target, node=node)
             return value
         
         # For actual conversion operations, use base types (strip refined types too)
@@ -331,19 +318,19 @@ class TypeConverter:
         # Step 3: Handle struct to enum conversion
         # struct[pyconst[Tag], payload] -> EnumType
         if is_struct_type(base_source) and is_enum_type(base_target):
-            return self._convert_struct_to_enum(value, base_source, base_target, target_type)
+            return self._convert_struct_to_enum(value, base_source, base_target, target_type, node=node)
 
         # Step 4: Handle struct to struct conversion (field-by-field)
         if is_struct_type(base_source) and is_struct_type(base_target):
             if not can_convert(value.type_hint, target_type, mode='explicit', value=value):
-                raise TypeError(
+                logger.error(
                     f'Cannot convert {base_source.get_name()} to '
-                    f'{base_target.get_name()}')
-            return self._convert_struct_to_struct(value, base_source, base_target, target_type)
+                    f'{base_target.get_name()}', node=node, exc_type=TypeError)
+            return self._convert_struct_to_struct(value, base_source, base_target, target_type, node=node)
 
         # Validate target is a PC type (use base version)
         if not isinstance(base_target, type) or not hasattr(base_target, 'get_llvm_type'):
-            raise TypeError(f"Target type {target_type} is not a valid PC builtin type with get_llvm_type()")
+            logger.error(f"Target type {target_type} is not a valid PC builtin type with get_llvm_type()", node=node, exc_type=TypeError)
 
         # Extract LLVM type from pythoc type (use base version)
         # All PC types now accept module_context parameter uniformly
@@ -359,9 +346,9 @@ class TypeConverter:
         if source_type == target_llvm_type:
             if value.type_hint is not None and not can_convert(
                     value.type_hint, target_type, mode='explicit', value=value):
-                raise TypeError(
+                logger.error(
                     f'Cannot convert {value.type_hint.get_name()} to '
-                    f'{target_type.get_name()}')
+                    f'{target_type.get_name()}', node=node, exc_type=TypeError)
             return wrap_value(source_ir, kind="value", type_hint=target_type)
 
         # Infer signedness from pythoc types (use base versions)
@@ -392,7 +379,7 @@ class TypeConverter:
             target_type,
         )
 
-    def _promote_python_to_pc(self, python_val, target_type) -> ValueRef:
+    def _promote_python_to_pc(self, python_val, target_type, node) -> ValueRef:
         """Promote Python primitive or literal carrier value to a PC-typed ValueRef."""
         from .builtin_entities.python_type import PythonType
         from .literal_protocol import get_sequence_elements, is_mapping_carrier, is_sequence_carrier
@@ -402,7 +389,7 @@ class TypeConverter:
         # path rather than primitive promotion.
         if hasattr(python_val, '_is_compiled') or getattr(python_val, '_is_extern', False):
             wrapped = wrap_value(python_val, kind="python", type_hint=PythonType.wrap(python_val))
-            return self.convert(wrapped, target_type)
+            return self.convert(wrapped, target_type, node=node)
 
         if is_sequence_carrier(python_val):
             sequence_items = list(get_sequence_elements(python_val))
@@ -417,28 +404,30 @@ class TypeConverter:
                         item_py_type = PythonType.wrap(item, is_constant=True)
                         arg_refs.append(wrap_value(item, kind="python", type_hint=item_py_type))
                 if len(arg_refs) not in (1, 2):
-                    raise TypeError(f"Enum initialization requires 1 or 2 elements, got {len(arg_refs)}")
-                return self._visitor.value_dispatcher.handle_type_call(target_type_ref, arg_refs, None)
+                    logger.error(f"Enum initialization requires 1 or 2 elements, got {len(arg_refs)}", node=node, exc_type=TypeError)
+                return self._visitor.value_dispatcher.handle_type_call(
+                    target_type_ref, arg_refs, node)
 
             if hasattr(target_type, "is_array") and target_type.is_array():
                 list_carrier = self._sequence_literal_to_pc_list(python_val)
-                return self._convert_pc_list_to_array(list_carrier, target_type)
+                return self._convert_pc_list_to_array(list_carrier, target_type, node)
 
             if is_schema_type(target_type):
-                return self._convert_tuple_to_struct(sequence_items, target_type)
+                return self._convert_tuple_to_struct(sequence_items, target_type, node=node)
 
-            raise TypeError(f"Cannot promote sequence literal {python_val} to PC type {target_type}")
+            logger.error(f"Cannot promote sequence literal {python_val} to PC type {target_type}", node=node, exc_type=TypeError)
 
         if is_mapping_carrier(python_val):
             if is_schema_type(target_type):
-                return self._convert_dict_to_struct(python_val, target_type)
-            raise TypeError(f"Cannot promote mapping literal to PC type {target_type}")
+                return self._convert_dict_to_struct(python_val, target_type, node=node)
+            logger.error(f"Cannot promote mapping literal to PC type {target_type}", node=node, exc_type=TypeError)
 
         if not isinstance(python_val, (int, float, bool, str, type(None))):
-            raise_if_compile_level_callable(python_val)
-            raise TypeError(
+            _reject_compile_level_callable(python_val, node)
+            logger.error(
                 f"Cannot promote Python value of type {type(python_val).__name__} to PC type. "
-                f"Only primitive types and literal carriers are supported. Got: {repr(python_val)}"
+                f"Only primitive types and literal carriers are supported. Got: {repr(python_val)}",
+                node=node, exc_type=TypeError,
             )
 
         if hasattr(target_type, '_is_enum') and target_type._is_enum and isinstance(python_val, int):
@@ -452,7 +441,7 @@ class TypeConverter:
             # array initializer (C semantics: copy characters, append implicit
             # null terminator if there is room, zero-fill the rest).
             if self._is_byte_array_type(target_type):
-                return self._convert_string_to_array_value(python_val, target_type)
+                return self._convert_string_to_array_value(python_val, target_type, node=node)
 
             # Otherwise create global string constant as ptr[i8]
             from .builtin_entities import ptr, i8
@@ -461,7 +450,7 @@ class TypeConverter:
             from .type_descriptor import same_type
             if same_type(ptr[i8], target_type):
                 return string_pointer
-            return self.convert(string_pointer, target_type)
+            return self.convert(string_pointer, target_type, node)
 
         # Get module_context for types that require it (e.g., structs with forward refs)
         module = getattr(self._visitor, 'module', None)
@@ -476,9 +465,10 @@ class TypeConverter:
 
         if isinstance(llvm_type, (ir.ArrayType, ir.BaseStructType)):
             if not isinstance(python_val, (int, float)) or python_val != 0:
-                raise TypeError(
+                logger.error(
                     "Aggregate initialization requires zero or an explicit "
-                    "sequence of field/element values"
+                    "sequence of field/element values",
+                    node=node, exc_type=TypeError,
                 )
             return wrap_value(
                 self.create_zero_constant(llvm_type),
@@ -495,7 +485,7 @@ class TypeConverter:
                 ptr_val = ir.Constant.inttoptr(int_val, llvm_type)
                 return wrap_value(ptr_val, kind="value", type_hint=target_type)
             else:
-                raise TypeError(f"Cannot promote Python {type(python_val).__name__} to pointer type")
+                logger.error(f"Cannot promote Python {type(python_val).__name__} to pointer type", node=node, exc_type=TypeError)
 
         # Handle float -> integer conversion (e.g. pyconst float used in i32 context).
         # Truncate toward zero to match C semantics.
@@ -526,7 +516,7 @@ class TypeConverter:
             return False
         return getattr(elem_type, '_size_bytes', None) == 1
 
-    def _convert_string_to_array_value(self, string_val: str, target_array_type) -> ValueRef:
+    def _convert_string_to_array_value(self, string_val: str, target_array_type, node) -> ValueRef:
         """Convert a Python string literal into a fixed-size byte array value.
 
         Follows C string literal initialization rules for char arrays:
@@ -544,8 +534,9 @@ class TypeConverter:
         from .valueref import wrap_python_constant, wrap_value
 
         if not self._is_byte_array_type(target_array_type):
-            raise TypeError(
-                f"Cannot convert string literal to non-byte-array type {target_array_type}"
+            logger.error(
+                f"Cannot convert string literal to non-byte-array type {target_array_type}",
+                node=node, exc_type=TypeError,
             )
 
         bytes_data = string_val.encode('utf-8')
@@ -559,9 +550,10 @@ class TypeConverter:
         elif len(bytes_data) == total_size:
             byte_values = list(bytes_data)
         else:
-            raise TypeError(
+            logger.error(
                 f"String literal is too long for {target_array_type}: "
-                f"{len(bytes_data)} bytes given, {total_size} bytes available"
+                f"{len(bytes_data)} bytes given, {total_size} bytes available",
+                node=node, exc_type=TypeError,
             )
 
         # Zero-fill any remaining slots.
@@ -571,7 +563,7 @@ class TypeConverter:
         elements = [wrap_python_constant(b) for b in byte_values]
         pc_list_carrier = pc_list.from_elements(elements)
         array_value = materialize_sequence_value(
-            self._visitor, pc_list_carrier, target_array_type)
+            self._visitor, pc_list_carrier, target_array_type, node)
         return wrap_value(
             array_value,
             kind="value",
@@ -602,10 +594,10 @@ class TypeConverter:
         elif isinstance(python_val, str):
             return ptr[i8]
         else:
-            raise_if_compile_level_callable(python_val)
-            raise TypeError(f"Cannot infer PC type from Python type {type(python_val).__name__}")
+            message = _compile_level_callable_error(python_val)
+            raise TypeError(message or f"Cannot infer PC type from Python type {type(python_val).__name__}")
     
-    def promote_to_pc_default(self, python_val) -> ValueRef:
+    def promote_to_pc_default(self, python_val, node) -> ValueRef:
         """Promote Python value to default PC type
         
         Uses infer_default_pc_type_from_python to determine target type,
@@ -626,7 +618,7 @@ class TypeConverter:
             str_const = self._visitor._create_string_constant(python_val)
             return wrap_value(str_const, kind="value", type_hint=pc_type)
         else:
-            raise TypeError(f"Cannot promote Python type {type(python_val).__name__} to PC type")
+            logger.error(f"Cannot promote Python type {type(python_val).__name__} to PC type", node=node, exc_type=TypeError)
 
     def _materialize_store_operand(
         self,
@@ -678,12 +670,12 @@ class TypeConverter:
 
         return pc_list.from_elements(elements)
 
-    def _convert_list_to_array(self, python_list, target_array_type):
+    def _convert_list_to_array(self, python_list, target_array_type, node):
         """Convert a Python list/tuple literal to an array value (pointer)."""
         return self._convert_pc_list_to_array(
-            self._sequence_literal_to_pc_list(python_list), target_array_type)
+            self._sequence_literal_to_pc_list(python_list), target_array_type, node)
 
-    def _convert_pc_list_to_array(self, pc_list_type, target_array_type):
+    def _convert_pc_list_to_array(self, pc_list_type, target_array_type, node):
         """Materialize a sequence-literal carrier into an array value (pointer).
 
         Arrays are lvalues here, so the assembled aggregate (an ir.Constant when
@@ -694,13 +686,13 @@ class TypeConverter:
         from .literal_protocol import materialize_sequence_value
 
         array_value = materialize_sequence_value(
-            self._visitor, pc_list_type, target_array_type)
+            self._visitor, pc_list_type, target_array_type, node)
         array_llvm_type = target_array_type.get_llvm_type(self._visitor.module.context)
         tmp_alloca = self._visitor._create_alloca_in_entry(array_llvm_type, "array_literal")
         self.builder.store(array_value, tmp_alloca)
         return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
 
-    def try_const_aggregate(self, value_ref, target_pc_type):
+    def try_const_aggregate(self, value_ref, target_pc_type, node):
         """Fold a braced aggregate initializer to an ir.Constant, or return None.
 
         Thin entry over the shared carrier lowering: a static/global aggregate
@@ -718,17 +710,18 @@ class TypeConverter:
         carrier = value_ref.get_python_value()
         if not is_sequence_carrier(carrier):
             return None
-        from .type_descriptor import can_convert
+        from .type_descriptor import can_convert, conversion_message
         resolver = getattr(getattr(self._visitor, 'implicit_coercer', None),
                            '_resolve_lazy_type_name', None)
         if not can_convert(value_ref.type_hint, target_pc_type,
                            mode='implicit', value=value_ref, context=resolver):
-            raise TypeError(
-                f'Cannot implicitly convert static aggregate initializer '
-                f'to {target_pc_type.get_name()}')
-        return lower_sequence_to_constant(self._visitor, carrier, target_pc_type)
+            detail = conversion_message(value_ref.type_hint, target_pc_type, value_ref,
+                                        mode='implicit', context=resolver)
+            logger.error(f'Invalid static aggregate initializer: {detail}',
+                         node=node, exc_type=TypeError)
+        return lower_sequence_to_constant(self._visitor, carrier, target_pc_type, node)
 
-    def _convert_tuple_to_struct(self, python_tuple, target_struct_type):
+    def _convert_tuple_to_struct(self, python_tuple, target_struct_type, node):
         """Convert a tuple/list literal to a struct value.
 
         Goes through the same single-pass materializer as arrays: the result is
@@ -739,17 +732,18 @@ class TypeConverter:
 
         field_types = get_schema_field_types(target_struct_type)
         if field_types is None:
-            raise TypeError(f"Cannot get field types from {target_struct_type}")
+            logger.error(f"Cannot get field types from {target_struct_type}", node=node, exc_type=TypeError)
         if len(python_tuple) > len(field_types):
-            raise TypeError(
-                f"Tuple length {len(python_tuple)} exceeds struct field count {len(field_types)}"
+            logger.error(
+                f"Tuple length {len(python_tuple)} exceeds struct field count {len(field_types)}",
+                node=node, exc_type=TypeError,
             )
 
         struct_value = materialize_sequence_value(
-            self._visitor, python_tuple, target_struct_type)
+            self._visitor, python_tuple, target_struct_type, node)
         return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
 
-    def _convert_dict_to_struct(self, mapping_val, target_struct_type):
+    def _convert_dict_to_struct(self, mapping_val, target_struct_type, node):
         """Convert a mapping carrier (pc_dict) to a struct value.
 
         Only accepts keys that are a subset of the struct's field names.
@@ -765,11 +759,12 @@ class TypeConverter:
         field_types = get_schema_field_types(target_struct_type)
 
         if field_types is None:
-            raise TypeError(f"Cannot get field types from {target_struct_type}")
+            logger.error(f"Cannot get field types from {target_struct_type}", node=node, exc_type=TypeError)
         if any(n is None for n in field_names):
-            raise TypeError(
+            logger.error(
                 f"pc_dict -> struct requires all fields to be named, "
-                f"but {target_struct_type} has field_names={field_names}"
+                f"but {target_struct_type} has field_names={field_names}",
+                node=node, exc_type=TypeError,
             )
 
         entries = get_mapping_entries(mapping_val)
@@ -782,11 +777,12 @@ class TypeConverter:
             elif isinstance(key_ref, str):
                 key_str = key_ref
             else:
-                raise TypeError(
-                    f"pc_dict key must be a string, got {type(key_ref)}"
+                logger.error(
+                    f"pc_dict key must be a string, got {type(key_ref)}",
+                    node=node, exc_type=TypeError,
                 )
             if key_str in key_value_map:
-                raise TypeError(f"duplicate key in pc_dict: '{key_str}'")
+                logger.error(f"duplicate key in pc_dict: '{key_str}'", node=node, exc_type=TypeError)
             key_value_map[key_str] = val_ref
 
         # Validate: all dict keys must be valid field names
@@ -796,7 +792,7 @@ class TypeConverter:
                 logger.error(
                     f"pc_dict key '{key_str}' is not a field of "
                     f"{target_struct_type} (valid: {', '.join(field_names)})",
-                    node=None,
+                    node=node,
                     exc_type=TypeError,
                 )
 
@@ -806,7 +802,7 @@ class TypeConverter:
             logger.error(
                 f"pc_dict is missing fields for {target_struct_type}: "
                 f"{', '.join(missing)}",
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
 
@@ -815,21 +811,21 @@ class TypeConverter:
         for fname, ftype in zip(field_names, field_types):
             elem = key_value_map[fname]
             if isinstance(elem, ValueRef):
-                field_val = self.convert(elem, ftype)
+                field_val = self.convert(elem, ftype, node=node)
                 field_values.append(ensure_ir(field_val))
             else:
                 from .builtin_entities import PythonType
                 py_valueref = PythonType.wrap(elem, is_constant=True)
                 py_valueref = wrap_value(elem, kind="python", type_hint=py_valueref)
-                field_val = self.convert(py_valueref, ftype)
+                field_val = self.convert(py_valueref, ftype, node=node)
                 field_values.append(ensure_ir(field_val))
 
         from .literal_protocol import assemble_aggregate_value
         struct_value = assemble_aggregate_value(
-            self._visitor, target_struct_type, field_values)
+            self._visitor, target_struct_type, field_values, node)
         return wrap_value(struct_value, kind="value", type_hint=target_struct_type)
 
-    def _convert_struct_to_struct(self, value, source_struct_type, target_struct_type, original_target_type):
+    def _convert_struct_to_struct(self, value, source_struct_type, target_struct_type, original_target_type, node):
         """Convert struct to struct by field-by-field conversion.
         
         This enables implicit conversion like:
@@ -851,28 +847,29 @@ class TypeConverter:
         
         # Check field count matches
         if len(source_fields) != len(target_fields):
-            raise TypeError(
-                f"Cannot convert struct with {len(source_fields)} fields to struct with {len(target_fields)} fields"
+            logger.error(
+                f"Cannot convert struct with {len(source_fields)} fields to struct with {len(target_fields)} fields",
+                node=node, exc_type=TypeError,
             )
         
         # Get all source field values using get_all_fields
-        source_field_values = source_struct_type.get_all_fields(self._visitor, value, None)
+        source_field_values = source_struct_type.get_all_fields(self._visitor, value, node)
         
         # Convert each field
         converted_fields = []
         for i, (src_field_vref, target_field_type) in enumerate(zip(source_field_values, target_fields)):
             # Convert field to target type
-            converted_field = self.convert(src_field_vref, target_field_type)
+            converted_field = self.convert(src_field_vref, target_field_type, node)
             converted_fields.append(ensure_ir(converted_field))
         
         # Build target struct value
         from .literal_protocol import assemble_aggregate_value
         struct_value = assemble_aggregate_value(
-            self._visitor, target_struct_type, converted_fields)
+            self._visitor, target_struct_type, converted_fields, node)
         
         return wrap_value(struct_value, kind="value", type_hint=original_target_type)
 
-    def _convert_struct_to_enum(self, value, source_struct_type, target_enum_type, original_target_type):
+    def _convert_struct_to_enum(self, value, source_struct_type, target_enum_type, original_target_type, node):
         """Convert struct to enum when first field is pyconst tag.
         
         This enables implicit conversion like:
@@ -896,17 +893,19 @@ class TypeConverter:
         
         # Need at least 1 field (tag), optionally 2 (tag + payload)
         if len(source_fields) < 1 or len(source_fields) > 2:
-            raise TypeError(
+            logger.error(
                 f"Cannot convert struct with {len(source_fields)} fields to enum. "
-                f"Expected struct[pyconst[tag]] or struct[pyconst[tag], payload]"
+                f"Expected struct[pyconst[tag]] or struct[pyconst[tag], payload]",
+                node=node, exc_type=TypeError,
             )
         
         # First field must be pyconst (compile-time constant tag)
         tag_field_type = source_fields[0]
         if not isinstance(tag_field_type, PythonType) or not tag_field_type.is_constant():
-            raise TypeError(
+            logger.error(
                 f"Cannot convert struct to enum: first field must be pyconst[tag], "
-                f"got {tag_field_type}"
+                f"got {tag_field_type}",
+                node=node, exc_type=TypeError,
             )
         
         # Extract tag value from pyconst
@@ -935,12 +934,13 @@ class TypeConverter:
                     break
         
         if variant_idx is None:
-            raise TypeError(
-                f"Tag value {tag_value} does not match any variant of enum {target_enum_type.get_name()}"
+            logger.error(
+                f"Tag value {tag_value} does not match any variant of enum {target_enum_type.get_name()}",
+                node=node, exc_type=TypeError,
             )
         
         # Get source field values
-        source_field_values = source_struct_type.get_all_fields(self._visitor, value, None)
+        source_field_values = source_struct_type.get_all_fields(self._visitor, value, node)
         tag_vref = source_field_values[0]
         
         # Build enum using handle_call
@@ -950,9 +950,10 @@ class TypeConverter:
             # No payload - just tag
             from .type_descriptor import same_type
             if variant_payload_type is not None and not same_type(variant_payload_type, void):
-                raise TypeError(
+                logger.error(
                     f"Variant {variant_names[variant_idx]} requires payload of type {variant_payload_type}, "
-                    f"but struct has no payload field"
+                    f"but struct has no payload field",
+                    node=node, exc_type=TypeError,
                 )
             target_enum_ref = wrap_python_constant(target_enum_type)
             return self._visitor.value_dispatcher.handle_type_call(
@@ -966,13 +967,14 @@ class TypeConverter:
             
             # Check if payload is void variant
             if variant_payload_type is None or same_type(variant_payload_type, void):
-                raise TypeError(
+                logger.error(
                     f"Variant {variant_names[variant_idx]} has no payload, "
-                    f"but struct has payload field"
+                    f"but struct has payload field",
+                    node=node, exc_type=TypeError,
                 )
             
             # Convert payload to variant's payload type if needed
-            payload_vref = self.convert(payload_vref, variant_payload_type)
+            payload_vref = self.convert(payload_vref, variant_payload_type, node)
             
             target_enum_ref = wrap_python_constant(target_enum_type)
             return self._visitor.value_dispatcher.handle_type_call(
@@ -1229,31 +1231,31 @@ class TypeConverter:
         bool_llvm_type = bool_type.get_llvm_type(self._visitor.module.context)
         return self.create_int_constant(bool_llvm_type, int(bool(value)))
 
-    def promote_to_float(self, value: Union[ir.Value, ValueRef], target_pc_type) -> ValueRef:
+    def promote_to_float(self, value: Union[ir.Value, ValueRef], target_pc_type, node) -> ValueRef:
         """Promote integer value to float PC type (f32/f64)."""
         if not isinstance(value, ValueRef) or value.type_hint is None:
-            raise TypeError("promote_to_float requires ValueRef with type_hint")
+            logger.error("promote_to_float requires ValueRef with type_hint", node=node, exc_type=TypeError)
         
         # Strip qualifiers from target type
         target_pc_type = strip_qualifiers(target_pc_type)
         
         if not (hasattr(target_pc_type, '_is_float') and target_pc_type._is_float):
-            raise TypeError(f"promote_to_float target must be float type (f32/f64), got {target_pc_type}")
+            logger.error(f"promote_to_float target must be float type (f32/f64), got {target_pc_type}", node=node, exc_type=TypeError)
         
         # Handle Python values first
         if isinstance(value, ValueRef) and value.is_python_value():
             python_val = value.get_python_value()
-            value = self._promote_python_to_pc(python_val, target_pc_type)
+            value = self._promote_python_to_pc(python_val, target_pc_type, node=node)
         
         # Get base type for source (stripping both qualifiers and refined types)
         source_pc_type = get_base_type(value.type_hint)
         if hasattr(source_pc_type, '_is_float') and source_pc_type._is_float:
             if source_pc_type == target_pc_type:
                 return value
-            return self.convert(value, target_pc_type)
+            return self.convert(value, target_pc_type, node)
         if hasattr(source_pc_type, '_is_integer') and source_pc_type._is_integer:
-            return self.convert(value, target_pc_type)
-        raise TypeError(f"Cannot promote {source_pc_type} to float")
+            return self.convert(value, target_pc_type, node)
+        logger.error(f"Cannot promote {source_pc_type} to float", node=node, exc_type=TypeError)
 
     def unify_integer_types(self, left: Union[ir.Value, ValueRef], right: Union[ir.Value, ValueRef]) -> Tuple[ValueRef, ValueRef]:
         """Unify two integer operands to the same width using PC type hints."""
@@ -1279,12 +1281,12 @@ class TypeConverter:
                          node=node, exc_type=TypeError)
         return ImplicitCoercer(self).coerce(value, i64, node)
 
-    def unify_shift_types(self, left, right):
+    def unify_shift_types(self, left, right, node):
         """Shifts preserve the left operand's PythoC width and signedness."""
         for value in (left, right):
             if (value.is_python_value()
                     and type(value.get_python_value()) not in (int, bool)):
-                raise TypeError('Shift operands must have integer types')
+                logger.error('Shift operands must have integer types', node=node, exc_type=TypeError)
         target = get_base_type(right.type_hint if left.is_python_value()
                                else left.type_hint)
         right_type = get_base_type(right.type_hint)
@@ -1295,29 +1297,31 @@ class TypeConverter:
 
         if not integer(target) or (not right.is_python_value()
                                    and not integer(right_type)):
-            raise TypeError('Shift operands must have integer types')
+            logger.error('Shift operands must have integer types', node=node, exc_type=TypeError)
         coercer = ImplicitCoercer(self)
-        return coercer.coerce(left, target), coercer.coerce(right, target)
+        return coercer.coerce(left, target, node=node), coercer.coerce(right, target, node=node)
 
-    def unify_binop_types(self, left: Union[ir.Value, ValueRef], right: Union[ir.Value, ValueRef]) -> Tuple[ValueRef, ValueRef, bool]:
+    def unify_binop_types(self, left: Union[ir.Value, ValueRef], right: Union[ir.Value, ValueRef], node) -> Tuple[ValueRef, ValueRef, bool]:
         """Unify operands for binary operations via PC types."""
         if left.is_python_value() and right.is_python_value():
             # Both are Python values - return as-is, let caller handle Python-level operations
             return left, right, False
         if not right.is_python_value() and left.is_python_value():
-            left = self._promote_python_to_pc(left.get_python_value(), get_base_type(right.type_hint))
+            left = self._promote_python_to_pc(
+                left.get_python_value(), get_base_type(right.type_hint), node=node)
         if not left.is_python_value() and right.is_python_value():
-            right = self._promote_python_to_pc(right.get_python_value(), get_base_type(left.type_hint))
+            right = self._promote_python_to_pc(
+                right.get_python_value(), get_base_type(left.type_hint), node=node)
         if not isinstance(left, ValueRef) or left.type_hint is None:
-            raise TypeError("unify_binop_types requires ValueRef with type_hint")
+            logger.error("unify_binop_types requires ValueRef with type_hint", node=node, exc_type=TypeError)
         if not isinstance(right, ValueRef) or right.type_hint is None:
-            raise TypeError("unify_binop_types requires ValueRef with type_hint")
+            logger.error("unify_binop_types requires ValueRef with type_hint", node=node, exc_type=TypeError)
         from .type_descriptor import common_numeric_type
         target = common_numeric_type(left.type_hint, right.type_hint)
         if target is None:
             return left, right, False
         coercer = ImplicitCoercer(self)
-        return (coercer.coerce(left, target), coercer.coerce(right, target),
+        return (coercer.coerce(left, target, node=node), coercer.coerce(right, target, node=node),
                 bool(getattr(target, '_is_float', False)))
 
 
@@ -1354,30 +1358,27 @@ class ImplicitCoercer:
     def coerce(self, value: ValueRef, target_type, node=None) -> ValueRef:
         """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""
         source_type = value.type_hint
-        from .type_descriptor import can_convert
+        from .type_descriptor import can_convert, conversion_message, format_type
         from .builtin_entities.python_type import PythonType
         if value.is_python_value() and not isinstance(strip_qualifiers(target_type), PythonType):
-            raise_if_compile_level_callable(value.get_python_value())
+            _reject_compile_level_callable(value.get_python_value(), node)
+
+        def reject_conversion():
+            logger.error(conversion_message(
+                source_type, target_type, value, mode='implicit',
+                context=self._resolve_lazy_type_name), node=node, exc_type=TypeError)
 
         def check_relation():
             if not can_convert(source_type, target_type, mode='implicit',
                                value=value, context=self._resolve_lazy_type_name):
-                from .type_descriptor import conversion_failure
-                detail = conversion_failure(source_type, target_type, value)
-                if detail is not None:
-                    logger.error(detail, node=node, exc_type=TypeError)
-                source_name = (source_type.get_name() if hasattr(source_type, 'get_name')
-                               else str(source_type))
-                target_name = (target_type.get_name() if hasattr(target_type, 'get_name')
-                               else str(target_type))
-                logger.error(f"Cannot implicitly convert '{source_name}' to '{target_name}'",
-                             node, exc_type=TypeError)
+                reject_conversion()
 
         if getattr(strip_qualifiers(target_type), '_is_refined', False) and not can_convert(
                 source_type, target_type, mode='implicit',
                 context=self._resolve_lazy_type_name):
             logger.error(
-                f"Cannot implicitly convert to refined type {target_type.get_name()}; "
+                f"Cannot implicitly convert to refined type {format_type(target_type)} "
+                f"from {format_type(source_type)}; "
                 "use assume() or refine().", node, exc_type=TypeError)
 
         # Early exit: same type after stripping qualifiers
@@ -1401,10 +1402,7 @@ class ImplicitCoercer:
         if (is_struct_type(base_source) and is_struct_type(base_target)
                 and not can_convert(source_type, target_type, mode='implicit',
                                     context=self._resolve_lazy_type_name)):
-            logger.error(
-                f"Cannot implicitly convert '{base_source.get_name()}' to "
-                f"'{base_target.get_name()}': incompatible fields.",
-                node, exc_type=TypeError)
+            reject_conversion()
 
         # --- Pointer policy ---
         source_is_ptr = base_source is not None and hasattr(base_source, '_is_pointer') and base_source._is_pointer
@@ -1414,7 +1412,7 @@ class ImplicitCoercer:
         if target_is_ptr and value.is_python_value():
             py_val = value.get_python_value()
             if isinstance(py_val, int) and not isinstance(py_val, bool):
-                target_name = base_target.get_name() if base_target and hasattr(base_target, 'get_name') else str(base_target)
+                target_name = format_type(base_target)
                 logger.error(
                     f"Cannot implicitly convert Python int constant to pointer type '{target_name}'. "
                     f"Use nullptr or an explicit cast: {target_name}(value)",
@@ -1432,28 +1430,22 @@ class ImplicitCoercer:
                     resolve_name=self._resolve_lazy_type_name):
                 check_relation()
                 return self._tc.convert(value, target_type, node)
-            # Incompatible pointers
-            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
-            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
-            logger.error(
-                f"Cannot implicitly convert '{source_name}' to '{target_name}'. "
-                f"Use explicit cast: {target_name}(value)",
-                node, exc_type=TypeError)
+            reject_conversion()
 
         # int -> ptr: rejected
         if (base_source is not None and hasattr(base_source, '_is_integer') and base_source._is_integer
                 and target_is_ptr):
-            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
-            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
+            source_name = format_type(base_source)
+            target_name = format_type(base_target)
             logger.error(
                 f"Cannot implicitly convert integer '{source_name}' to pointer type '{target_name}'. "
                 f"Use nullptr or an explicit cast: {target_name}(value)",
                 node, exc_type=TypeError)
 
         # enum -> int: rejected (moved from TypeConverter.convert)
-        if is_enum_type(base_source) and base_target is not None and hasattr(base_target, 'is_signed'):
-            source_name = base_source.get_name() if hasattr(base_source, 'get_name') else str(base_source)
-            target_name = base_target.get_name() if hasattr(base_target, 'get_name') else str(base_target)
+        if is_enum_type(base_source) and getattr(base_target, '_is_integer', False):
+            source_name = format_type(base_source)
+            target_name = format_type(base_target)
             logger.error(
                 f"Cannot implicitly convert enum '{source_name}' to integer type '{target_name}'. "
                 f"Use explicit tag extraction: value[0]",

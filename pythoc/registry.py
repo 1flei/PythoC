@@ -137,6 +137,23 @@ class FunctionInfo:
     parametric_indices: Optional[List[int]] = None
     concrete_indices: Optional[List[int]] = None
     parametric_param_names: Optional[List[str]] = None
+    source_start_line: int = 1
+
+    @property
+    def diagnostic_source(self):
+        return self.source_file, self.source_start_line - 1
+
+    def annotation_nodes(self):
+        """Return the source nodes for the signature entries we can locate."""
+        syntax = self.ast_node
+        if syntax is None:
+            return {}
+        args = syntax.args
+        parameters = [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        parameters.extend(arg for arg in (args.vararg, args.kwarg) if arg is not None)
+        nodes = {arg.arg: arg.annotation or arg for arg in parameters}
+        nodes['return'] = syntax.returns or syntax
+        return nodes
 
     @property
     def wrapper(self):
@@ -165,7 +182,7 @@ class FunctionInfo:
         items = tuple(
             (name, self.param_type_hints[name]) for name in self.param_names
         ) + ((None, self.return_type_hint),)
-        result = func_type_cls.handle_type_subscript(items)
+        result = func_type_cls.handle_type_subscript(items, node=None)
         # Propagate collector flags so call sites can detect them
         if self.has_varargs:
             result.has_varargs = True

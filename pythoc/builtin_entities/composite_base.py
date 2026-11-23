@@ -9,11 +9,13 @@ with shared functionality for:
 - Type ID generation
 """
 
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 from llvmlite import ir
 
 from .base import BuiltinType
 from ..logger import logger
+from ..source import SourceLocation
 from ..valueref import ValueRef
 from ..target_layout import NATURAL_LAYOUT
 
@@ -109,7 +111,8 @@ class CompositeType(BuiltinType):
         from ..valueref import wrap_value
         
         if len(args) != 0:
-            logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given)",
+            logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given). "
+                         "Create the value, then assign a member.",
                         node=node, exc_type=TypeError)
         
         from ..type_descriptor import can_zero_initialize
@@ -181,6 +184,11 @@ class CompositeType(BuiltinType):
 
     @classmethod
     def get_field_index(cls, name: str) -> int:
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        return cls._get_field_index(name, node)
+
+    @classmethod
+    def _get_field_index(cls, name: str, node) -> int:
         """Get field index by name
         
         Args:
@@ -193,12 +201,12 @@ class CompositeType(BuiltinType):
             AttributeError: If field name doesn't exist
         """
         if cls._field_names is None:
-            logger.error(f"{cls.get_name()} has no named fields", node=None, exc_type=AttributeError)
+            logger.error(f"{cls.get_name()} has no named fields", node=node, exc_type=AttributeError)
         
         try:
             return cls._field_names.index(name)
         except ValueError:
-            logger.error(f"{cls.get_name()} has no field named '{name}'", node=None, exc_type=AttributeError)
+            logger.error(f"{cls.get_name()} has no field named '{name}'", node=node, exc_type=AttributeError)
     
     @classmethod
     def has_field(cls, name: str) -> bool:
@@ -212,6 +220,11 @@ class CompositeType(BuiltinType):
     
     @classmethod
     def get_field_type(cls, index: int):
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        return cls._get_field_type(index, node)
+
+    @classmethod
+    def _get_field_type(cls, index: int, node):
         """Get field type by index
         
         Args:
@@ -224,7 +237,7 @@ class CompositeType(BuiltinType):
             IndexError: If index is out of range
         """
         if cls._field_types is None or index >= len(cls._field_types):
-            logger.error(f"{cls.get_name()} field index {index} out of range", node=None, exc_type=IndexError)
+            logger.error(f"{cls.get_name()} field index {index} out of range", node=node, exc_type=IndexError)
         from ..type_resolver import TypeResolver
         return TypeResolver.resolve_type(cls._field_types[index], cls._type_namespace, freeze=True)
     

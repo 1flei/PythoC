@@ -5,6 +5,7 @@ import builtins
 import copy
 from dataclasses import dataclass
 
+from ..utils.ast_targets import iter_bound_names
 from .names import ExpansionNames, visitor_expansion_names
 from .renaming import ScopedVariableRenamer, _parameters
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
@@ -70,6 +71,7 @@ def materialize_definition_symbols(syntax, globals_, *, names=None):
                     values[alias] = symbol.value
             result = copy.copy(node)
             result.id = aliases[symbol]
+            result._pc_source_name = symbol.name
             del result._definition_symbol
             return result
 
@@ -166,7 +168,7 @@ def bind_definition(syntax, globals_, references=None, *, names=None):
 def bind_consumer_globals(visitor, body, target):
     """Keep consumer globals independent of the producer's definition scope."""
     scope = set(visitor.scope_manager.get_all_visible())
-    scope.update(node.id for node in ast.walk(target) if isinstance(node, ast.Name))
+    scope.update(iter_bound_names(target))
     _, local, _ = ScopeAnalyzer(ScopeContext(scope)).analyze(body, [])
     scope.update(local)
     globals_ = visitor.ctx.user_globals or {}

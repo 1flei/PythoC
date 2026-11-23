@@ -14,6 +14,8 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 
 from pythoc.decorators.compile import compile
 from pythoc.builtin_entities import linear, consume, void, i32, i8, struct
@@ -533,8 +535,13 @@ class TestLinearLoop(unittest.TestCase):
 
     def test_error_for_consume_in_body(self):
         """Test error: consume in for body"""
-        passed, msg = test_for_consume_in_body_error()
+        output = StringIO()
+        with redirect_stderr(output):
+            passed, msg = test_for_consume_in_body_error()
         self.assertTrue(passed, msg)
+        loop_line = test_for_consume_in_body_error.__code__.co_firstlineno + 8
+        self.assertIn(f'[test_linear_loop.py:{loop_line}:13]', output.getvalue())
+        self.assertIn('t: held at loop entry, unavailable at the end', msg)
 
     def test_error_while_consume_in_body(self):
         """Test error: consume in while body"""

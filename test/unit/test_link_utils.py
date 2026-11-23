@@ -16,6 +16,16 @@ from pythoc.utils.link_utils import (
 
 
 class TestBuildLinkCommandExtraFlags(unittest.TestCase):
+    def test_ordered_inputs_preserve_library_positions_and_archive_policy(self):
+        archive = os.path.abspath('local.a')
+        ordered = ['-lfoo', archive, '-lfoo']
+        cmd = build_link_command(
+            [], 'out.so', shared=True, link_objects=[], link_libraries=[],
+            ordered_inputs=ordered,
+        )
+        output_index = cmd.index('-o')
+        self.assertEqual(cmd[output_index - len(ordered):output_index], ordered)
+
     def test_extra_flags_appended_last(self):
         cmd = build_link_command(
             ['a.o'], 'out', link_libraries=[],

@@ -4,12 +4,13 @@ Integration tests for instantiate() builtin.
 from __future__ import annotations
 
 import ast
+from contextlib import redirect_stderr
+from io import StringIO
 from types import SimpleNamespace
 import unittest
 
-from pythoc import CompileSession, compile, f64, i32, i64, ptr, refined
+from pythoc import CompileSession, array, compile, f64, i32, i64, ptr, refined, struct
 from pythoc.builtin_entities.instantiate import instantiate
-from pythoc.meta.instantiate import _compile_yield_fn_pipeline
 from test.utils.test_utils import DeferredTestCase, expect_error
 
 
@@ -221,7 +222,7 @@ class TestConst(unittest.TestCase):
     def test_all(self): self.assertEqual(run_const_all(), 60)
     def test_init_return(self): self.assertEqual(run_const_init_return(), 60)
 
-class TestEdgeCases(unittest.TestCase):
+class TestEdgeCases(DeferredTestCase):
     def test_typed_empty_source(self):
         self.assertEqual(run_empty(), 0)
 
@@ -261,6 +262,27 @@ def doubled_view() -> i32:
 
 
 @compile
+def underscore_view() -> i32:
+    for _ in view_three():
+        yield _ * 2
+
+
+NestedIteratorValue = struct[struct[i32, f64], i32]
+
+
+@compile
+def nested_iterator_values() -> NestedIteratorValue:
+    yield ((1, 2.5), 3)
+    yield ((4, 5.5), 6)
+
+
+@compile
+def nested_iterator_view() -> i32:
+    for ((a, b), c) in nested_iterator_values():
+        yield a + i32(b * 10.0) + c
+
+
+@compile
 def combined_views() -> i32:
     x: i32
     y: i32
@@ -291,12 +313,64 @@ def run_dynamic_nested() -> i32:
     return total
 
 
+@compile
+def run_underscore_view() -> i32:
+    api = instantiate(underscore_view)
+    it: api.Iter
+    api.init(ptr(it))
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total += api.value(ptr(it))
+    return total
+
+
+@compile
+def run_nested_iterator_view() -> i32:
+    api = instantiate(nested_iterator_view)
+    it: api.Iter
+    api.init(ptr(it))
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total += api.value(ptr(it))
+    return total
+
+
+@compile
+def stateful_row_updates() -> i32:
+    row: array[i32, 2] = [1, 10]
+    index: i32 = 0
+    row[index] += 2
+    yield row[index]
+    index = 1
+    row[index] += 3
+    yield row[index]
+
+
+@compile
+def run_stateful_row_updates() -> i32:
+    api = instantiate(stateful_row_updates)
+    it = api.init()
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total += api.value(ptr(it))
+    return total
+
+
 class TestDynamicIterator(unittest.TestCase):
     def test_simple(self):
         self.assertEqual(run_doubled_view(), 12)
 
     def test_nested(self):
         self.assertEqual(run_dynamic_nested(), 66)
+
+    def test_underscore_can_be_lifted_to_a_typed_state_slot(self):
+        self.assertEqual(run_underscore_view(), 12)
+
+    def test_nested_targets_are_lifted_to_typed_state_slots(self):
+        self.assertEqual(run_nested_iterator_view(), 94)
+
+    def test_augmented_assignment_rewrites_nested_state_references(self):
+        self.assertEqual(run_stateful_row_updates(), 16)
 
     def test_instantiate_resolves_normal_callee_expressions(self):
         self.assertEqual(instantiate_dotted(), 6)
@@ -500,17 +574,17 @@ class TestIteratorStateValidation(DeferredTestCase):
             events.append(1)
             return 1.25
 
-        syntax = ast.parse('''
-def source() -> f64:
-    amount = value()
-    yield amount
-''').body[0]
+        output = StringIO()
         with CompileSession():
-            with self.assertRaisesRegex(TypeError, "state type of 'amount'"):
-                _compile_yield_fn_pipeline(
-                    syntax, capture_bindings=None, source_object_id=1,
-                    func_name_hint='source',
-                    callee_globals={'f64': f64, 'value': value})
+            @compile
+            def source() -> f64:
+                amount = value()
+                yield amount
+
+            with redirect_stderr(output), self.assertRaisesRegex(TypeError, "state type of 'amount'"):
+                instantiate(source)
+        line = source._yield_func_obj.__code__.co_firstlineno + 2
+        self.assertIn(f'[test_instantiate.py:{line}:4]', output.getvalue())
         self.assertEqual(events, [])
 
 

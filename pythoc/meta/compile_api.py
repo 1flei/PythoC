@@ -11,6 +11,7 @@ import ast
 import copy
 import inspect
 import os
+import sys
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from ..compiler import LLVMCompiler
@@ -27,7 +28,8 @@ from ..utils import (
     sanitize_filename,
     get_build_paths,
 )
-from ..logger import logger, set_source_context
+from ..logger import logger
+from ..source import SourceLocation, anchor_generated_ast
 
 from .generated import GeneratedFunction, MetaArtifact
 
@@ -81,16 +83,20 @@ def compile_ast(
         A compiled wrapper function (same shape as @compile produces).
     """
     if not isinstance(fn_ast, ast.FunctionDef):
-        raise TypeError(
-            "compile_ast expects ast.FunctionDef, got {}".format(type(fn_ast).__name__)
-        )
+        call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        with logger.at_node(call_site):
+            logger.error(
+                f'compile_ast expects ast.FunctionDef, got {type(fn_ast).__name__}',
+                exc_type=TypeError,
+            )
 
     # Deep-copy the AST unless the caller guarantees ownership of a fresh node.
     if copy_ast:
         fn_ast = copy.deepcopy(fn_ast)
 
-    # #3: Automatically fix missing locations — always safe, only fills in
-    # missing lineno/col_offset without overwriting existing ones.
+    if source_file is None:
+        origin = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        anchor_generated_ast(fn_ast, origin)
     ast.fix_missing_locations(fn_ast)
 
     # Apply name override
@@ -98,8 +104,20 @@ def compile_ast(
         fn_ast.name = name
 
     func_name = fn_ast.name
+    if source_file is None:
+        frame = inspect.currentframe()
+        try:
+            caller = frame.f_back
+            source_file = caller.f_code.co_filename if caller else "<meta>"
+        finally:
+            del frame
+    if source_file and source_file != "<meta>":
+        source_file = os.path.realpath(source_file)
+    diagnostic_source = (source_file, start_line - 1)
+
     from ..ir_helpers import validate_func_linkage
-    linkage = validate_func_linkage(linkage, func_name)
+    with logger.at_node(fn_ast, source=diagnostic_source):
+        linkage = validate_func_linkage(linkage, fn_ast, func_name)
 
     # #6: Debug dump — print the generated Python-like source for inspection.
     if debug:
@@ -134,23 +152,9 @@ def compile_ast(
     _ast_content_hash = _content.digest
     fn_attrs = set(attrs) if attrs else set()
 
-    # Synthesize source_file from caller's frame if not provided
-    if source_file is None:
-        frame = inspect.currentframe()
-        try:
-            caller = frame.f_back
-            source_file = caller.f_code.co_filename if caller else "<meta>"
-        finally:
-            del frame
-
-    # #1/#9: Always canonicalize source_file to avoid cache collisions
-    # from /../ or symlink differences.
-    if source_file and source_file != "<meta>":
-        source_file = os.path.realpath(source_file)
-
-    set_source_context(source_file, start_line - 1)
     from ..call_normalization import native_positional_parameters
-    param_names = [arg.arg for arg in native_positional_parameters(fn_ast)]
+    with logger.at_node(fn_ast, source=diagnostic_source):
+        param_names = [arg.arg for arg in native_positional_parameters(fn_ast)]
 
     # Synthesize source_code from AST if not provided
     if source_code is None:
@@ -271,6 +275,8 @@ def compile_ast(
     func_info = FunctionInfo(
         name=func_name,
         source_file=source_file,
+        ast_node=fn_ast,
+        source_start_line=start_line,
         source_code=source_code,
         return_type_hint=return_type_hint,
         param_type_hints=param_type_hints,
@@ -287,9 +293,11 @@ def compile_ast(
                      if item._binding.actual_func_name == actual_func_name), None)
     if existing is not None:
         if existing._binding.registration_identity != registration_identity:
-            raise TypeError(
-                f"Function specialization collision for '{func_name}': "
-                'signature, body or compile-time inputs differ; use distinct suffixes')
+            with logger.at_node(fn_ast, source=diagnostic_source):
+                logger.error(
+                    f"Function specialization collision for '{func_name}': "
+                    'signature, body or compile-time inputs differ; use distinct suffixes',
+                    node=fn_ast, exc_type=TypeError)
         return existing
 
     from ..python_call import create_compiled_callable, try_bind_installed_adapter
@@ -340,8 +348,7 @@ def compile_ast(
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
 
-    compile_callback = _make_compile_callback(
-        wrapper, fn_ast, source_code, param_type_hints, return_type_hint, start_line)
+    compile_callback = _make_compile_callback(wrapper, func_info)
 
     def specialize(effect_key, scope, override_names):
         st = wrapper._binding
@@ -418,18 +425,19 @@ def compile_generated(
     Returns:
         A compiled wrapper function.
     """
+    call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
     if not isinstance(fn, GeneratedFunction):
-        raise TypeError(
-            "compile_generated expects GeneratedFunction, got {}".format(
-                type(fn).__name__
+        with logger.at_node(call_site):
+            logger.error(
+                f'compile_generated expects GeneratedFunction, got {type(fn).__name__}',
+                exc_type=TypeError,
             )
-        )
 
     globals_to_use = dict(user_globals) if user_globals else {}
     if fn.required_globals:
         globals_to_use.update(fn.required_globals)
 
-    # Synthesize source_file from caller if not provided
+    # Synthesize source_file from caller if not provided.
     if source_file is None:
         if fn.source_file:
             source_file = fn.source_file
@@ -441,7 +449,7 @@ def compile_generated(
             finally:
                 del frame
 
-    func_def = fn.to_func_def()
+    func_def = fn.to_func_def(call_site=call_site)
     return compile_ast(
         func_def,
         param_types=fn.get_param_type_hints(),
@@ -495,8 +503,9 @@ def compile_artifact(
     if art.required_globals:
         globals_to_use.update(art.required_globals)
 
-    # Synthesize source_file from caller if not provided
+    origin = None
     if source_file is None:
+        origin = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
         frame = inspect.currentframe()
         try:
             caller = frame.f_back
@@ -525,8 +534,12 @@ def compile_artifact(
             )
             globals_to_use[fn.name] = w
         elif isinstance(fn, ast.FunctionDef):
+            syntax = fn
+            if origin is not None:
+                syntax = copy.deepcopy(fn)
+                anchor_generated_ast(syntax, origin)
             w = compile_ast(
-                fn,
+                syntax,
                 user_globals=globals_to_use,
                 suffix=suffix,
                 source_file=source_file,

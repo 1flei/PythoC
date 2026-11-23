@@ -32,7 +32,7 @@ class TestConstantInitialization(unittest.TestCase):
     def verify(self, value, target):
         module = ir.Module(context=ir.Context())
         converter = TypeConverter(SimpleNamespace(module=module))
-        result = ensure_ir(converter._promote_python_to_pc(value, target))
+        result = ensure_ir(converter._promote_python_to_pc(value, target, node=None))
         global_value = ir.GlobalVariable(module, result.type, "value")
         global_value.initializer = result
         binding.parse_assembly(str(module)).verify()
@@ -54,7 +54,7 @@ class TestConstantInitialization(unittest.TestCase):
             for target in (array[i32, 2], struct[i32, i32]):
                 with self.subTest(value=value, target=target):
                     with self.assertRaisesRegex(TypeError, "explicit sequence"):
-                        self.converter._promote_python_to_pc(value, target)
+                        self.converter._promote_python_to_pc(value, target, node=None)
 
     def test_bool_to_wide_integer_is_numeric(self):
         self.assertEqual(self.verify(True, i32).constant, 1)

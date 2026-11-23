@@ -102,15 +102,142 @@ def singleton_assignments(flag: i32) -> i32:
     return inferred * 100 + declared * 10 + native
 
 
+Singleton = pyconst[1]
+SingletonRecord = struct['value': i32, 'tag': Singleton]
+
+
+@compile
+def make_singleton_record() -> SingletonRecord:
+    return (41, 1)
+
+
+@compile
+def pass_singleton(value: Singleton) -> Singleton:
+    address = ptr(value)
+    address[0] = 1
+    return value
+
+
+@compile
+def singleton_places() -> i32:
+    local = 1
+    record: SingletonRecord = (40, 1)
+    local_ptr = ptr(local)
+    field_ptr = ptr(record.tag)
+    if i64(local_ptr) == 0 or i64(field_ptr) == 0:
+        return -1
+    local_ptr[0] = 1
+    field_ptr[0] = 1
+    record[1] += 0
+    qualified: const[Singleton] = 1
+    copied = qualified
+    return (record.value + pass_singleton(local_ptr[0]) + field_ptr[0]
+            + make_singleton_record().tag + copied)
+
+
+@inline
+def rebind_in_inline(_):
+    _, _ = (1, 2)
+    return _
+
+
+@compile
+def rebind_in_unpacking(counter: ptr[i32]) -> i32:
+    def next_value() -> i32:
+        counter[0] += 1
+        return counter[0]
+
+    _ = 7
+    _, (_, kept) = (1, (2, 3))
+    nested = _
+    _, _ = (next_value(), next_value())
+    return rebind_in_inline(_) * 100 + nested * 10 + _ + kept
+
+
+@compile
+def untyped_pairs():
+    yield 1, 2
+    yield 3, 4
+
+
+@compile
+def typed_values() -> struct[pyconst[1], pyconst[2], i32]:
+    yield 1, 2, 3
+    yield 1, 2, 4
+
+
+@compile
+def rebind_in_loops() -> i32:
+    _ = 7
+    total: i32 = 0
+    for _, _ in untyped_pairs():
+        total += _
+    for _, _, kept in typed_values():
+        total += _ + kept
+    for _, _ in ((1, 2), (3, 4)):
+        total += _
+    for value in (_ + item for _, item in ((1, 5), (2, 6))):
+        total += value
+    for item in typed_values():
+        total += _
+        _ = item[2]
+        total += _
+    return total * 10 + _
+
+
+@compile
+def rebind_preserves_other_loop_bindings() -> i32:
+    def values():
+        yield 1, i32(40)
+
+    _ = 7
+    for _, other in values():
+        pass
+    return other + _
+
+
+@compile
+def rebind_with_closure(flag: i32) -> i32:
+    _ = 1
+
+    def read_first() -> i32:
+        return _
+
+    _ = 2
+    inner: i32 = 0
+    if flag:
+        _ = 3
+        inner = _
+    match flag:
+        case _:
+            return read_first() * 100 + inner * 10 + _
+
+
+@compile
+def yield_owned_value() -> linear:
+    token = linear()
+    yield token
+
+
+@compile
+def rebind_after_consume() -> i32:
+    _ = linear()
+    consume(_)
+    for _ in yield_owned_value():
+        consume(_)
+    _ = 7
+    return _
+
+
 class TestPyconstAssignments(DeferredTestCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         flush_all_pending_outputs()
 
-    def reject(self, function, diagnostic):
+    def reject(self, function, diagnostic, exc_type=TypeError):
         try:
-            with self.assertRaisesRegex(TypeError, diagnostic):
+            with self.assertRaisesRegex(exc_type, diagnostic):
                 flush_all_pending_outputs()
         finally:
             clear_failed_group(function._binding.group_key)
@@ -118,6 +245,71 @@ class TestPyconstAssignments(DeferredTestCase):
     def test_same_singleton_and_native_reassignment(self):
         self.assertEqual(singleton_assignments(0), 111)
         self.assertEqual(singleton_assignments(1), 112)
+
+    def test_singleton_places_have_real_addresses(self):
+        self.assertEqual(singleton_places(), 44)
+
+    def test_dereferenced_singleton_preserves_its_type(self):
+        @compile(suffix='pyconst_pointer_assignment')
+        def bad() -> i32:
+            local = 1
+            address = ptr(local)
+            address[0] = 2
+            return local
+
+        self.reject(bad, r'Cannot assign pyconst\[2\] to pyconst\[1\]')
+
+    def test_temporary_singleton_field_has_no_place(self):
+        @compile(suffix='pyconst_temporary_field')
+        def bad() -> i32:
+            make_singleton_record().tag = 1
+            return 0
+
+        self.reject(bad, 'Assignment target is not an addressable value', ValueError)
+
+    def test_const_singleton_obeys_the_same_write_check(self):
+        @compile(suffix='pyconst_const_assignment')
+        def bad() -> i32:
+            local: const[Singleton] = 1
+            local = 1
+            return local
+
+        self.reject(bad, 'Cannot reassign to const', RuntimeError)
+
+    def test_unpacking_rebinds_in_order_and_evaluates_the_rhs_once(self):
+        import ctypes
+
+        counter = ctypes.c_int32()
+        self.assertEqual(rebind_in_unpacking(ctypes.pointer(counter)), 225)
+        self.assertEqual(counter.value, 2)
+
+    def test_loop_rebinding_is_local_to_the_iteration(self):
+        self.assertEqual(rebind_in_loops(), 587)
+        self.assertEqual(rebind_preserves_other_loop_bindings(), 47)
+
+    def test_rebinding_respects_scope_and_definition_site_capture(self):
+        self.assertEqual(rebind_with_closure(0), 102)
+        self.assertEqual(rebind_with_closure(1), 132)
+
+    def test_rebinding_after_explicitly_consuming_the_old_value(self):
+        self.assertEqual(rebind_after_consume(), 7)
+
+    def test_unpacking_keeps_named_pyconst_bindings_strict(self):
+        @compile(suffix="pyconst_named_unpack")
+        def bad() -> i32:
+            x = 1
+            _, x = (0, 2)
+            return x
+
+        self.reject(bad, r"Cannot assign pyconst\[2\] to pyconst\[1\]")
+
+    def test_rebinding_does_not_consume_linear_ownership(self):
+        @compile(suffix="pyconst_rebind_linear")
+        def bad() -> i32:
+            _, _ = (linear(), 0)
+            return 0
+
+        self.reject(bad, "Linear tokens not consumed", RuntimeError)
 
     def test_different_value_fails_at_straight_line_assignment(self):
         @compile(suffix="pyconst_rebind")

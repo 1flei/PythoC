@@ -568,6 +568,7 @@ class OutputManager:
             func_info: FunctionInfo with signature information
         """
         from llvmlite import ir
+        from ..logger import logger
         
         func_name = func_info.mangled_name or func_info.name
         
@@ -581,16 +582,20 @@ class OutputManager:
         # Build LLVM function type from func_info
         module_context = compiler.module.context
         param_llvm_types = []
+        nodes = func_info.annotation_nodes()
+        source = func_info.diagnostic_source
         for param_name in func_info.param_names:
             pc_type = func_info.param_type_hints.get(param_name)
             if pc_type is not None and hasattr(pc_type, 'get_llvm_type'):
-                param_llvm_types.append(pc_type.get_llvm_type(module_context))
+                with logger.at_node(nodes.get(param_name, func_info.ast_node), source=source):
+                    param_llvm_types.append(pc_type.get_llvm_type(module_context))
             else:
                 # Fallback to i32 if type unknown
                 param_llvm_types.append(ir.IntType(32))
         
         if func_info.return_type_hint is not None and hasattr(func_info.return_type_hint, 'get_llvm_type'):
-            return_type = func_info.return_type_hint.get_llvm_type(module_context)
+            with logger.at_node(nodes.get('return'), source=source):
+                return_type = func_info.return_type_hint.get_llvm_type(module_context)
         else:
             return_type = ir.VoidType()
         

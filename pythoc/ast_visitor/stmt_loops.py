@@ -253,7 +253,6 @@ class LoopsMixin:
         from .._inline.yield_adapter import YieldInlineAdapter
         from .._inline.kernel import inline_globals_scope
 
-        cf = self._get_cf_builder()
         adapter = YieldInlineAdapter(self)
         inline_info = iter_val._yield_inline_info
 
@@ -309,9 +308,7 @@ class LoopsMixin:
                 ).stmt
                 ast.copy_location(done_stmt, node)
                 ast.fix_missing_locations(done_stmt)
-                if not cf.is_terminated():
-                    cf.add_stmt(done_stmt)
-                    self.visit(done_stmt)
+                self._visit_stmt_list([done_stmt])
 
             # Execute else clause if present (only reached if no break occurred)
             if node.orelse:
@@ -325,9 +322,7 @@ class LoopsMixin:
                 ).stmt
                 ast.copy_location(label_stmt, node)
                 ast.fix_missing_locations(label_stmt)
-                if not cf.is_terminated():
-                    cf.add_stmt(label_stmt)
-                    self.visit(label_stmt)
+                self._visit_stmt_list([label_stmt])
 
     def _record_inline_source_dependency(self, func_obj):
         """Record a source-embed dependency on an inlined generator's file.

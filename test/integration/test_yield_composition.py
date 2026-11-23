@@ -134,7 +134,7 @@ class TestYieldComposition(DeferredTestCase):
 
         self.assert_compile_error(
             statement_producer, NotImplementedError,
-            "Cannot call Python object 'EffectNamespace' in compiled code",
+            "Cannot call 'effect.perform' in compiled code",
         )
 
 

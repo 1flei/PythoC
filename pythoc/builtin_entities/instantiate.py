@@ -10,8 +10,12 @@ State storage requires known yield and field types; missing types are errors.
 
 from __future__ import annotations
 import ast
+import sys
 from enum import Enum, auto
 from typing import Any
+
+from ..logger import logger
+from ..source import SourceLocation
 
 
 class _SourceKind(Enum):
@@ -24,8 +28,20 @@ class _SourceKind(Enum):
 
 
 def instantiate(source: Any) -> Any:
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
     kind = _classify_source(source)
+    return _instantiate_at(source, kind, node)
 
+
+def _instantiate_at(source, kind, node):
+    with logger.at_node(node):
+        try:
+            return _instantiate_source(source, kind, node)
+        except TypeError as error:
+            logger.error(error, node=node)
+
+
+def _instantiate_source(source, kind, node):
     if kind in (_SourceKind.YIELD_FUNCTION, _SourceKind.YIELD_CALL):
         from ..meta.instantiate import _instantiate_yield
         if kind is _SourceKind.YIELD_FUNCTION:
@@ -33,7 +49,7 @@ def instantiate(source: Any) -> Any:
             fa = getattr(bare_func, '_original_ast', None)
             if fa is None:
                 raise TypeError(
-                    "instantiate: function has no _original_ast – "
+                    "instantiate: function has no _original_ast - "
                     "did you forget @compile?")
             class _SyntheticInfo:
                 pass
@@ -56,11 +72,10 @@ def instantiate(source: Any) -> Any:
 
     if kind is _SourceKind.CONSTANT_ITERABLE:
         from ..meta.instantiate import _instantiate_const_iterable
-        return _instantiate_const_iterable(list(source))
+        return _instantiate_const_iterable(list(source), node)
 
-    raise TypeError(
-        f"instantiate: unsupported source {type(source).__name__}"
-    )
+    logger.error(f'instantiate: unsupported source {type(source).__name__}',
+                 node=node, exc_type=TypeError)
 
 
 def _classify_source(source: Any) -> _SourceKind:
@@ -105,7 +120,6 @@ def _is_closure_source(obj: Any) -> bool:
 
 def _instantiate_handle_call(visitor, func_ref, args, node):
     """AST-level compile-time handler for ``instantiate(...)`` calls."""
-    from ..logger import logger
     from ..valueref import ValueRef, wrap_value
     from ..builtin_entities.python_type import PythonType
 
@@ -116,23 +130,12 @@ def _instantiate_handle_call(visitor, func_ref, args, node):
     source = args[0]
 
     kind = _classify_source(source)
-    if kind is not _SourceKind.UNSUPPORTED:
-        result = instantiate(source)
-        return wrap_value(
-            result,
-            kind="python",
-            type_hint=PythonType(result, is_constant=True),
-        )
+    if (kind is _SourceKind.UNSUPPORTED and isinstance(source, ValueRef)
+            and source.is_python_value()):
+        source = source.value
+        kind = _classify_source(source)
 
-    if isinstance(source, ValueRef) and source.is_python_value():
-        result = instantiate(source.value)
-        return wrap_value(
-            result,
-            kind="python",
-            type_hint=PythonType(result, is_constant=True),
-        )
-
-    result = instantiate(source)
+    result = _instantiate_at(source, kind, node)
     return wrap_value(
         result,
         kind="python",

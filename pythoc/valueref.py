@@ -13,7 +13,8 @@ if TYPE_CHECKING:
 _UNSET = object()
 
 
-def extract_constant_index(index_value: 'ValueRef', context: str = "subscript") -> int:
+def extract_constant_index(index_value: 'ValueRef', node,
+                           context: str = "subscript") -> int:
     """Extract constant integer index from a ValueRef for subscript operations.
     
     This function handles compile-time constant index extraction for operations like:
@@ -23,6 +24,7 @@ def extract_constant_index(index_value: 'ValueRef', context: str = "subscript") 
     Args:
         index_value: ValueRef containing the index value
         context: Description of the subscript context for error messages
+        node: Source subscript expression
     
     Returns:
         int: Python integer constant value
@@ -32,25 +34,30 @@ def extract_constant_index(index_value: 'ValueRef', context: str = "subscript") 
     
     Usage:
         index_value = visitor.visit_expression(node.slice)
-        idx = extract_constant_index(index_value, "struct subscript")
+        idx = extract_constant_index(index_value, node, "struct subscript")
         field = struct._field_types[idx]
     """
     if index_value.is_python_value():
         # PythonType - extract Python object
         py_obj = index_value.type_hint.get_python_object()
         if not isinstance(py_obj, int):
-            raise TypeError(f"{context} index must be an integer, got {type(py_obj).__name__}")
+            logger.error(f"{context} index must be an integer, got {type(py_obj).__name__}",
+                         node=node, exc_type=TypeError)
         return py_obj
     
     # LLVM value - must be ir.Constant
     index_ir = index_value.value
     if not isinstance(index_ir, ir.Constant):
-        raise TypeError(f"{context} index must be a constant, got runtime value")
+        logger.error(f"{context} index must be a constant, got runtime value",
+                     node=node, exc_type=TypeError)
     
     # Extract constant value
     const_val = index_ir.constant
     if not isinstance(const_val, int):
-        raise TypeError(f"{context} index must be an integer constant, got {type(const_val).__name__}")
+        logger.error(
+            f"{context} index must be an integer constant, got {type(const_val).__name__}",
+            node=node, exc_type=TypeError,
+        )
     
     return const_val
 
@@ -110,9 +117,6 @@ class ValueRef:
         # There must be a type hint
         if self.type_hint is None:
             raise ValueError("type_hint must be provided")
-        if self._kind != 'python':
-            from .type_resolver import TypeResolver
-            self.type_hint = TypeResolver.resolve_type(self.type_hint, freeze=True)
         # CRITICAL: Prevent double-wrapping ValueRef
         if isinstance(self.value, ValueRef):
             raise TypeError(
@@ -120,6 +124,14 @@ class ValueRef:
                 f"inner.kind={self.value._kind}, inner.type_hint={self.value.type_hint}, "
                 f"outer.kind={self._kind}, outer.type_hint={self.type_hint}"
             )
+        if self._kind != 'python':
+            from .type_resolver import TypeResolver
+            self.type_hint = TypeResolver.resolve_type(self.type_hint, freeze=True)
+            if self.is_python_value():
+                # The type determines the value. Retain the actual place, if any.
+                self._address = self.get_place()
+                self.value = self.type_hint.get_python_object()
+                self._kind = 'python'
 
     @property
     def kind(self):
@@ -258,22 +270,25 @@ class ValueRef:
 
     def clone(self,
               *,
+              kind=_UNSET,
               value=_UNSET,
               type_hint=_UNSET,
+              address=_UNSET,
               source_node=_UNSET,
               var_name=_UNSET,
               linear_path=_UNSET,
-              linear_owner_id=_UNSET) -> "ValueRef":
-        """Copy this ValueRef while preserving internal storage semantics."""
+              linear_owner_id=_UNSET,
+              storage=_UNSET) -> "ValueRef":
+        """Copy this ValueRef and its attached compiler metadata."""
         cloned = ValueRef(
-            kind=self._kind,
+            kind=self._kind if kind is _UNSET else kind,
             value=self.value if value is _UNSET else value,
             type_hint=self.type_hint if type_hint is _UNSET else type_hint,
-            address=self._address,
+            address=self._address if address is _UNSET else address,
             source_node=self.source_node if source_node is _UNSET else source_node,
             var_name=self.var_name if var_name is _UNSET else var_name,
             linear_path=self.linear_path if linear_path is _UNSET else linear_path,
-            storage=self._storage,
+            storage=self._storage if storage is _UNSET else storage,
             linear_owner_id=(self.linear_owner_id if linear_owner_id is _UNSET
                              else linear_owner_id),
         )
@@ -378,47 +393,18 @@ class ValueRef:
             source_node=self.source_node
         )
     
-    def as_lvalue(self) -> "ValueRef":
-        """Convert to lvalue representation (kind='address').
-        
-        Extracts the address from this ValueRef for use in assignment contexts.
-        Special handling for pyconst_field kind.
-        
-        Returns:
-            ValueRef with kind='address' or 'pyconst_field' and value set to the address
-            
-        Raises:
-            ValueError: If this ValueRef doesn't have an address
-            TypeError: If this is a Python value
-        """
-        # Special case: pyconst_field is already an lvalue (with special semantics)
-        if self._kind == 'pyconst_field':
-            return self
-
+    def as_lvalue(self, node) -> "ValueRef":
+        """Resolve the underlying address or projected storage for a write."""
         if self.has_storage():
             if not self._storage.mutable:
-                raise ValueError('Cannot assign to a temporary bit field')
+                logger.error('Cannot assign to a temporary bit field',
+                             node=node, exc_type=ValueError)
             return self.clone()
-        
-        if self.is_python_value():
-            raise TypeError("Cannot convert Python value to lvalue")
-        if self._address is not None:
-            # Has explicit address field - use it
-            return ValueRef(
-                kind='address',
-                value=self._address,
-                type_hint=self.type_hint,
-                address=None,
-                source_node=self.source_node,
-                var_name=self.var_name,
-                linear_path=self.linear_path,
-                linear_owner_id=self.linear_owner_id
-            )
-        elif self._kind == 'address':
-            # Already an lvalue - return as-is
-            return self
-        else:
-            raise ValueError(f"Cannot convert ValueRef with kind='{self._kind}' and no place to lvalue")
+        place = self.get_place()
+        if place is None:
+            logger.error('Assignment target is not an addressable value',
+                         node=node, exc_type=ValueError)
+        return self.clone(kind='address', value=place, address=place)
     
     def __repr__(self) -> str:
         """String representation with type."""
@@ -448,9 +434,10 @@ class ValueRef:
         )
 
     def get_pc_type(self):
-        from .builtin_entities.python_type import pyconst
-        # Consider different kind
         if self._kind == 'python':
+            if hasattr(self.type_hint, 'is_python_type') and self.type_hint.is_python_type():
+                return self.type_hint
+            from .builtin_entities.python_type import pyconst
             return pyconst[self.value]
         return self.type_hint
 
@@ -468,7 +455,6 @@ def ensure_ir(value: Union[ir.Value, ValueRef], visitor=None) -> ir.Value:
 
     This function is backward compatible and works with both old and new ValueRef.
     Automatically promotes Python values to LLVM constants if possible.
-    Special handling for pyconst_field kind.
     Also handles VReg objects from PCIR (returned as-is since they carry type info).
 
     Args:
@@ -605,16 +591,9 @@ def wrap_value(value: Union[ir.Value, AnyType],
     if kind is None:
         kind = _infer_kind(value, type_hint, address)
 
-    # Valid kinds: address, value, python, pointer, pyconst_field, varargs
-    valid_kinds = {'address', 'value', 'python', 'pointer', 'pyconst_field', 'varargs'}
+    valid_kinds = {'address', 'value', 'python', 'pointer', 'varargs'}
     if kind not in valid_kinds:
         raise ValueError(f"Invalid kind: {kind}, must be one of {valid_kinds}")
-    
-    # Python types can use 'python', 'pyconst_field', or 'address' (for zero-sized alloca)
-    # The 'address' kind is allowed because pyconst has zero-sized LLVM type {}
-    if hasattr(type_hint, 'is_python_type') and type_hint.is_python_type():
-        if kind not in ('python', 'pyconst_field', 'address'):
-            logger.error(f"Python type requires kind='python', 'pyconst_field', or 'address', got '{kind}', type={type_hint}", node)
     
     # address kind requires address field (except for special cases)
     if kind == "address" and address is None:
@@ -622,7 +601,7 @@ def wrap_value(value: Union[ir.Value, AnyType],
 
     if kind == "value" and address is not None:
         raise ValueError("Value kind cannot have address")
-    
+
     return ValueRef(
         kind=kind,
         value=value,

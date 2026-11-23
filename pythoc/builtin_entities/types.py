@@ -335,7 +335,7 @@ class ptr(BuiltinType):
         if right_type and hasattr(right_type, 'is_array') and right_type.is_array():
             from ..type_descriptor import array_decay_type
             ptr_type = array_decay_type(right_type)
-            right = visitor.type_converter.convert(right, ptr_type)
+            right = visitor.type_converter.convert(right, ptr_type, node)
             right_type = ptr_type
         
         # Check if right is a pointer (ptr - ptr case)
@@ -458,10 +458,10 @@ class ptr(BuiltinType):
         pointee = mapper(cls.pointee_type)
         if pointee is cls.pointee_type:
             return cls
-        return cls.handle_type_subscript(((None, pointee),))
+        return cls.handle_type_subscript(((None, pointee),), node=None)
 
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript: ptr[T] or ptr[T, dims...]
         
         Called by PythonType.handle_subscript after normalization.
@@ -478,19 +478,19 @@ class ptr(BuiltinType):
         from .array import array
         
         if not isinstance(items, builtins.tuple) or len(items) == 0:
-            logger.error("ptr requires at least one type argument", node=None, exc_type=TypeError)
+            logger.error("ptr requires at least one type argument", node=node, exc_type=TypeError)
         
         # Extract types from normalized format
         types_and_dims = [item[1] for item in items]
         from ..type_descriptor import validate_type_argument
         if any(name is not None for name, _ in items):
-            raise TypeError('ptr type arguments cannot have member names')
-        validate_type_argument(types_and_dims[0], 'pointer pointee', allow_incomplete=True)
+            logger.error('ptr type arguments cannot have member names', node=node, exc_type=TypeError)
+        validate_type_argument(types_and_dims[0], 'pointer pointee', allow_incomplete=True, node=node)
         for index, dimension in enumerate(types_and_dims[1:]):
             if index == 0 and dimension is None:
                 continue
             if type(dimension) is not int or dimension < 0:
-                raise TypeError('ptr dimensions must be non-negative integers')
+                logger.error('ptr dimensions must be non-negative integers', node=node, exc_type=TypeError)
         
         if len(types_and_dims) == 1:
             # ptr[T] - simple pointer
@@ -554,7 +554,7 @@ class ptr(BuiltinType):
             from ..type_descriptor import array_decay_type
             if getattr(get_base_type(current.type_hint), 'dimensions', None) is not None:
                 ptr_type = array_decay_type(current.type_hint)
-                current = visitor.type_converter.convert(current, ptr_type)
+                current = visitor.type_converter.convert(current, ptr_type, node)
         
         return current
 
@@ -652,7 +652,7 @@ class ptr(BuiltinType):
         value = args[0]
         
         try:
-            result = visitor.type_converter.convert(value, cls)
+            result = visitor.type_converter.convert(value, cls, node)
             return result
         except TypeError as e:
             logger.error(f"Cannot convert to {cls.get_name()}: {e}", node=node, exc_type=TypeError)

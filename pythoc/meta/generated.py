@@ -10,10 +10,14 @@ for meta factories that emit more than one function (e.g., regex, format).
 """
 
 import ast
+import copy
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from .fragment import Fragment
+from ..logger import logger
+from ..source import SourceLocation, anchor_generated_ast, set_ast_source
 
 
 @dataclass
@@ -44,8 +48,9 @@ class GeneratedFunction:
     source_file: Optional[str] = None
     start_line: int = 1
     debug_source: Optional[str] = None
+    _origin: Optional[SourceLocation] = field(default=None, repr=False, compare=False)
 
-    def to_func_def(self) -> ast.FunctionDef:
+    def to_func_def(self, *, call_site=None) -> ast.FunctionDef:
         """Lower to an ast.FunctionDef node.
 
         Type hints are NOT placed in AST annotations. They are passed
@@ -72,13 +77,18 @@ class GeneratedFunction:
                 kwarg=None,
                 defaults=[],
             ),
-            body=body_stmts,
+            body=copy.deepcopy(body_stmts),
             decorator_list=[],
             returns=None,
-            lineno=self.start_line,
+            lineno=1,
             col_offset=0,
         )
+        origin = self._origin or call_site
+        if self.source_file is None and origin is not None:
+            anchor_generated_ast(func_def, origin)
         ast.fix_missing_locations(func_def)
+        if self.source_file is not None:
+            set_ast_source(func_def, (self.source_file, self.start_line - 1))
         return func_def
 
     def get_param_type_hints(self) -> Dict[str, Any]:
@@ -132,6 +142,7 @@ def func(name, params, return_type, body, *,
         source_file=source_file,
         start_line=start_line,
         debug_source=debug_source,
+        _origin=logger.current_location() or SourceLocation.from_frame(sys._getframe(1)),
     )
 
 

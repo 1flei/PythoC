@@ -41,37 +41,31 @@ def _is_class_callable(member) -> bool:
             or getattr(member, "_pc_compile_level_callable", False))
 
 
-def extract_class_method_defs(source_cls) -> List[Tuple[str, ast.FunctionDef]]:
-    """Return ``(name, FunctionDef)`` pairs for plain ``def`` members.
-
-    The class source is parsed once. Async functions, nested classes and any
-    other non-FunctionDef node are ignored. Results are returned in source
-    order so that registration ordering is deterministic.
-    """
+def _read_class_source(source_cls):
     try:
-        from ..utils.inspect_utils import get_object_source
-        raw_source = get_object_source(source_cls)
+        from ..utils.inspect_utils import get_object_sourcelines
+        lines, start_line = get_object_sourcelines(source_cls)
+        filename = inspect.getfile(source_cls)
     except (OSError, TypeError):
-        return []
+        return None, None
 
-    source = textwrap.dedent(raw_source)
+    source = textwrap.dedent(''.join(lines))
     try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        logger.error(
-            f"Failed to parse class body for '{source_cls.__name__}'",
-            node=None,
-            exc_type=SyntaxError,
-        )
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as error:
+        logger.error(error)
 
     if not tree.body or not isinstance(tree.body[0], ast.ClassDef):
-        return []
+        return None, None
+    return tree.body[0], (filename, start_line - 1)
 
-    methods: List[Tuple[str, ast.FunctionDef]] = []
-    for stmt in tree.body[0].body:
-        if isinstance(stmt, ast.FunctionDef):
-            methods.append((stmt.name, stmt))
-    return methods
+
+def extract_class_method_defs(source_cls, *, class_body=None) -> List[Tuple[str, ast.FunctionDef]]:
+    """Return plain function definitions in class source order."""
+    if class_body is None:
+        class_ast, _ = _read_class_source(source_cls)
+        class_body = class_ast.body if class_ast is not None else []
+    return [(stmt.name, stmt) for stmt in class_body if isinstance(stmt, ast.FunctionDef)]
 
 
 def attach_class_methods(
@@ -80,6 +74,8 @@ def attach_class_methods(
     class_compile_suffix: Optional[str] = None,
     captured_symbols: Optional[Dict[str, Any]] = None,
     effect_suffix=_INHERIT_EFFECT_SUFFIX,
+    *,
+    class_body=None,
 ) -> None:
     """Compile each plain-def method of ``source_cls`` and attach to ``target_cls``.
 
@@ -109,7 +105,7 @@ def attach_class_methods(
     if source_cls is None:
         source_cls = target_cls
 
-    methods = extract_class_method_defs(source_cls)
+    methods = extract_class_method_defs(source_cls, class_body=class_body)
     if not methods:
         return
 

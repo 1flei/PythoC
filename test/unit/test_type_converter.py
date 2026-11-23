@@ -172,7 +172,7 @@ class TestTypeConverter(unittest.TestCase):
         from pythoc import i32, f32
         i32_val = wrap_value(ir.Constant(ir.IntType(32), 10), kind="value", type_hint=i32)
         
-        result = self.converter.promote_to_float(i32_val, f32)
+        result = self.converter.promote_to_float(i32_val, f32, node=None)
         
         # Integer should be promoted to float
         self.assertEqual(get_type(result), ir.FloatType())
@@ -183,7 +183,7 @@ class TestTypeConverter(unittest.TestCase):
         from pythoc import i32, f64
         i32_val = wrap_value(ir.Constant(ir.IntType(32), 10), kind="value", type_hint=i32)
         
-        result = self.converter.promote_to_float(i32_val, f64)
+        result = self.converter.promote_to_float(i32_val, f64, node=None)
         
         # Integer should be promoted to double
         self.assertEqual(get_type(result), ir.DoubleType())
@@ -194,7 +194,7 @@ class TestTypeConverter(unittest.TestCase):
         from pythoc import f32, f64
         f32_val = wrap_value(ir.Constant(ir.FloatType(), 10.0), kind="value", type_hint=f32)
         
-        result = self.converter.promote_to_float(f32_val, f64)
+        result = self.converter.promote_to_float(f32_val, f64, node=None)
         
         # Float should be promoted to double
         self.assertEqual(get_type(result), ir.DoubleType())
@@ -271,7 +271,7 @@ class TestTypeConverter(unittest.TestCase):
         i8_val = wrap_value(ir.Constant(ir.IntType(8), 10), kind="value", type_hint=i8)
         i32_val = wrap_value(ir.Constant(ir.IntType(32), 20), kind="value", type_hint=i32)
         
-        left, right, is_float = self.converter.unify_binop_types(i8_val, i32_val)
+        left, right, is_float = self.converter.unify_binop_types(i8_val, i32_val, node=None)
         
         # Both should be promoted to i32
         self.assertEqual(get_type(left), ir.IntType(32))
@@ -284,7 +284,7 @@ class TestTypeConverter(unittest.TestCase):
         i32_val = wrap_value(ir.Constant(ir.IntType(32), 10), kind="value", type_hint=i32)
         f64_val = wrap_value(ir.Constant(ir.DoubleType(), 20.0), kind="value", type_hint=f64)
         
-        left, right, is_float = self.converter.unify_binop_types(i32_val, f64_val)
+        left, right, is_float = self.converter.unify_binop_types(i32_val, f64_val, node=None)
         
         # Both should be promoted to f64
         self.assertEqual(get_type(left), ir.DoubleType())
@@ -297,7 +297,7 @@ class TestTypeConverter(unittest.TestCase):
         f32_val = wrap_value(ir.Constant(ir.FloatType(), 10.0), kind="value", type_hint=f32)
         i32_val = wrap_value(ir.Constant(ir.IntType(32), 20), kind="value", type_hint=i32)
         
-        left, right, is_float = self.converter.unify_binop_types(f32_val, i32_val)
+        left, right, is_float = self.converter.unify_binop_types(f32_val, i32_val, node=None)
         
         # Both should be promoted to f32
         self.assertEqual(get_type(left), ir.FloatType())
@@ -310,7 +310,7 @@ class TestTypeConverter(unittest.TestCase):
         f32_val = wrap_value(ir.Constant(ir.FloatType(), 10.0), kind="value", type_hint=f32)
         f64_val = wrap_value(ir.Constant(ir.DoubleType(), 20.0), kind="value", type_hint=f64)
         
-        left, right, is_float = self.converter.unify_binop_types(f32_val, f64_val)
+        left, right, is_float = self.converter.unify_binop_types(f32_val, f64_val, node=None)
         
         # Both should be promoted to f64 (wider type)
         self.assertEqual(get_type(left), ir.DoubleType())
@@ -323,7 +323,7 @@ class TestTypeConverter(unittest.TestCase):
         i32_val1 = wrap_value(ir.Constant(ir.IntType(32), 10), kind="value", type_hint=i32)
         i32_val2 = wrap_value(ir.Constant(ir.IntType(32), 20), kind="value", type_hint=i32)
         
-        left, right, is_float = self.converter.unify_binop_types(i32_val1, i32_val2)
+        left, right, is_float = self.converter.unify_binop_types(i32_val1, i32_val2, node=None)
         
         # Both should remain i32
         self.assertEqual(get_type(left), ir.IntType(32))

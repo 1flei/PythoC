@@ -37,6 +37,13 @@ class ScopeType(Enum):
     MATCH = auto()      # Match case block
 
 
+@dataclass(frozen=True)
+class _ScopedBindings:
+    """Compiler-only context for bindings local to a spliced body."""
+
+    names: tuple[str, ...]
+
+
 @dataclass
 class LabelContext:
     """Context for a scoped label
@@ -378,6 +385,21 @@ class ScopeManager:
             yield
         finally:
             self._binding_aliases = previous
+
+    @contextmanager
+    def scoped_bindings(self, names):
+        """Restore the selected bindings after an otherwise in-place expansion."""
+        mappings = (self._var_registry.scopes[-1], self.current_scope.variables)
+        saved = [{name: mapping.get(name) for name in names} for mapping in mappings]
+        try:
+            yield
+        finally:
+            for mapping, previous in zip(mappings, saved):
+                for name, binding in previous.items():
+                    if binding is None:
+                        mapping.pop(name, None)
+                    else:
+                        mapping[name] = binding
 
     def is_declared_in_current_scope(self, name: str) -> bool:
         """Check if variable is declared in the current scope"""

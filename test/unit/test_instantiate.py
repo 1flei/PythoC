@@ -238,7 +238,7 @@ class TestInstantiateTypes(unittest.TestCase):
 
     def test_empty_iterable_has_no_implicit_element_type(self):
         with self.assertRaisesRegex(TypeError, 'element type of an empty iterable'):
-            _instantiate_const_iterable([])
+            _instantiate_const_iterable([], ast.parse('instantiate([])', mode='eval').body)
 
     def test_type_expression_preserves_the_actual_object(self):
         with CompileSession():

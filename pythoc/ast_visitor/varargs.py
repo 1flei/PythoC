@@ -94,7 +94,7 @@ def resolve_varargs(func_node: ast.FunctionDef, type_resolver) -> ResolvedVarArg
         return ResolvedVarArgs(param_name=vararg.arg)
 
     annotation = vararg.annotation
-    parsed_type = type_resolver.parse_annotation(annotation)
+    parsed_type = type_resolver.resolve_annotation(annotation, annotation)
 
     element_types = _extract_element_types(parsed_type)
 
@@ -145,7 +145,7 @@ def resolve_kwargs(func_node: ast.FunctionDef, type_resolver) -> ResolvedKwArgs:
             node=func_node, exc_type=TypeError,
         )
 
-    parsed_type = type_resolver.parse_annotation(kwarg.annotation)
+    parsed_type = type_resolver.resolve_annotation(kwarg.annotation, kwarg.annotation)
     if parsed_type is None:
         logger.error(
             f"cannot resolve type annotation for **{kwarg.arg}",

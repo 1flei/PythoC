@@ -141,9 +141,8 @@ class ValueRefDispatcher:
         value = self._require_valueref(value, context="explicit cast input", node=node)
         try:
             return self.visitor.type_converter.convert(value, target_type, node)
-        except TypeError as exc:
-            target_name = target_type.get_name() if hasattr(target_type, "get_name") else str(target_type)
-            logger.error(f"Cannot convert to {target_name}: {exc}", node=node, exc_type=TypeError)
+        except TypeError as error:
+            logger.error(error, node=node)
 
     def _resolve_callable_protocol(
         self,
@@ -477,7 +476,7 @@ class ValueRefDispatcher:
         left = self._decay_array_for_compare(left)
         right = self._decay_array_for_compare(right)
 
-        left, right, is_float_cmp = self.visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float_cmp = self.visitor.type_converter.unify_binop_types(left, right, node=node)
 
         cmp_dispatch = {
             (ast.Lt, False): "<",

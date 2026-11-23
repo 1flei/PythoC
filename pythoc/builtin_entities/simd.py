@@ -24,7 +24,7 @@ def _i32_type():
     return i32
 
 
-def _vector_suffix(vec_type):
+def _vector_suffix(vec_type, node):
     elem = vec_type.element
     from ..llvm_extensions import is_float_type
     if is_float_type(elem):
@@ -34,7 +34,7 @@ def _vector_suffix(vec_type):
     else:
         logger.error(
             "simd intrinsics do not support element type %s" % elem,
-            node=None,
+            node=node,
             exc_type=TypeError,
         )
     return "v%d%s" % (vec_type.count, scalar)
@@ -131,17 +131,17 @@ class simd(BuiltinType):
         return get_target_layout().primitive(cls.get_llvm_type())
 
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         if not isinstance(items, builtins.tuple):
             items = (items,)
         if len(items) != 2:
             logger.error(
                 "simd[T, N] requires an element type and a lane count",
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
         if any(name is not None for name, _ in items):
-            raise TypeError('simd type arguments cannot have member names')
+            logger.error('simd type arguments cannot have member names', node=node, exc_type=TypeError)
         (_, element_type), (_, lanes) = items
         if not (
             isinstance(element_type, type)
@@ -149,7 +149,7 @@ class simd(BuiltinType):
         ):
             logger.error(
                 "simd element must be a PythoC builtin type",
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
         from ..type_converter import strip_qualifiers
@@ -164,13 +164,13 @@ class simd(BuiltinType):
             logger.error(
                 "simd element type %s is not numeric"
                 % element_type.get_name(),
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
         if type(lanes) is not int or lanes <= 0:
             logger.error(
                 "simd lane count must be a positive integer, got %r" % lanes,
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
         name = "simd[%s, %d]" % (element_type.get_name(), lanes)
@@ -188,6 +188,11 @@ class simd(BuiltinType):
         if len(args) != 1:
             logger.error("%s() takes exactly one argument" % cls.get_name(),
                          node=node, exc_type=TypeError)
+        from ..type_descriptor import format_type
+        if getattr(args[0].type_hint, 'lanes', None) is not None:
+            logger.error(f'Cannot convert {format_type(args[0].type_hint)} through '
+                         f'{format_type(cls)}(): its constructor takes one '
+                         f'{format_type(cls.element_type)} lane value', node=node, exc_type=TypeError)
         scalar = visitor.implicit_coercer.coerce(args[0], cls.element_type,
                                                 node)
         result = _splat(visitor, ensure_ir(scalar), cls.get_llvm_type())
@@ -321,7 +326,7 @@ class simd_fma(BuiltinFunction):
         if not simd_type.element_type.is_float():
             logger.error("simd_fma requires a floating point simd type",
                          node=node, exc_type=TypeError)
-        suffix = _vector_suffix(vec_type)
+        suffix = _vector_suffix(vec_type, node)
         fn = _declare(
             visitor.module,
             "llvm.fma." + suffix,
@@ -345,7 +350,7 @@ class simd_reduce_add(BuiltinFunction):
         simd_type = _require_simd(args[0], "simd_reduce_add", node)
         vec_type = simd_type.get_llvm_type(visitor.module.context)
         elem = vec_type.element
-        suffix = _vector_suffix(vec_type)
+        suffix = _vector_suffix(vec_type, node)
         if simd_type.element_type.is_float():
             fn = _declare(
                 visitor.module,
@@ -378,7 +383,7 @@ class simd_reduce_max(BuiltinFunction):
         simd_type = _require_simd(args[0], "simd_reduce_max", node)
         vec_type = simd_type.get_llvm_type(visitor.module.context)
         elem = vec_type.element
-        suffix = _vector_suffix(vec_type)
+        suffix = _vector_suffix(vec_type, node)
         if simd_type.element_type.is_float():
             name = "llvm.vector.reduce.fmax." + suffix
             fn_ty = ir.FunctionType(elem, [vec_type])

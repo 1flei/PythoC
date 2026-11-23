@@ -142,7 +142,9 @@ def _fold_const_if(stmts):
     """
     result = []
     for stmt in stmts:
-        if isinstance(stmt, ast.If):
+        # Generator filters are folded by the CFG visitor, which records the
+        # actual rejected path for diagnostics at the consuming call.
+        if isinstance(stmt, ast.If) and not getattr(stmt.test, '_pc_generator_filter', False):
             truth = _is_const_true(stmt.test)
             if truth is True:
                 result.extend(_fold_const_if(stmt.body))
@@ -500,6 +502,12 @@ class MetaTemplate:
         parameter_aliases = {name: names.fresh('_quote_' + name)
                              for name in self.param_names}
         syntax = copy.deepcopy(self.syntax)
+        if not hasattr(syntax, '_pc_source_location'):
+            from ..logger import logger
+            from ..source import anchor_generated_ast
+            origin = logger.current_location()
+            if origin is not None:
+                anchor_generated_ast(syntax, origin)
         renamer = ScopedVariableRenamer(parameter_aliases)
         syntax.body = [renamer.visit(stmt) for stmt in syntax.body]
         for argument in _parameters(syntax.args):
@@ -575,7 +583,7 @@ def _primary_position_for(param_name: str, body: List[ast.stmt]) -> str:
     return 'expr'
 
 
-def _make_template(func, debug_source=True) -> MetaTemplate:
+def _make_template(func, debug_source=True, *, authored=True) -> MetaTemplate:
     """Create a :class:`MetaTemplate` from a decorated Python function."""
     from ..utils.inspect_utils import get_object_source, get_object_sourcelines
     source = textwrap.dedent(get_object_source(func))
@@ -615,6 +623,9 @@ def _make_template(func, debug_source=True) -> MetaTemplate:
         _, origin_line = get_object_sourcelines(func)
     except (OSError, TypeError):
         pass
+    if authored and origin_file is not None and origin_line is not None:
+        from ..source import set_ast_source
+        set_ast_source(func_def, (origin_file, origin_line - 1))
 
     return MetaTemplate(
         source=source,
@@ -626,6 +637,11 @@ def _make_template(func, debug_source=True) -> MetaTemplate:
         origin_line=origin_line,
         debug_source_enabled=debug_source,
     )
+
+
+def _compiler_quote(func):
+    """Quote compiler-generated syntax at the point of expansion."""
+    return _make_template(func, authored=False)
 
 
 def quote(func=None, *, debug_source=True):

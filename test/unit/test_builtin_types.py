@@ -243,26 +243,26 @@ class TestEnumType(unittest.TestCase):
 class FunctionTypeArgumentsTest(unittest.TestCase):
     def test_two_quoted_types_are_unnamed_parameter_and_return(self):
         self.assertEqual(
-            func.normalize_subscript_items(('Argument', 'Result')),
+            func.normalize_subscript_items(('Argument', 'Result'), node=None),
             ((None, 'Argument'), (None, 'Result')),
         )
 
     def test_quoted_parameter_and_concrete_return_keep_both_positions(self):
         self.assertEqual(
-            func.normalize_subscript_items(('Argument', i32)),
+            func.normalize_subscript_items(('Argument', i32), node=None),
             ((None, 'Argument'), (None, i32)),
         )
 
     def test_sequence_carrier_keeps_function_argument_positions(self):
         carrier = wrap_literal_result(('Argument', 'Result')).get_python_value()
         self.assertEqual(
-            func.normalize_subscript_items(carrier),
+            func.normalize_subscript_items(carrier, node=None),
             ((None, 'Argument'), (None, 'Result')),
         )
 
     def test_nested_parameter_name_is_preserved(self):
         self.assertEqual(
-            func.normalize_subscript_items((('value', 'Argument'), 'Result')),
+            func.normalize_subscript_items((('value', 'Argument'), 'Result'), node=None),
             (('value', 'Argument'), (None, 'Result')),
         )
 

@@ -14,6 +14,9 @@ cannot devirtualize the calls or discard the internal definition.
 """
 
 import re
+from contextlib import redirect_stderr
+from io import StringIO
+import sys
 import unittest
 
 from pythoc import compile, i32, u64, static, array, func
@@ -117,11 +120,14 @@ class TestFuncLinkage(unittest.TestCase):
 
     def test_invalid_linkage_rejected(self):
         set_raise_on_error(True)
-        with self.assertRaises(TypeError) as ctx:
+        output = StringIO()
+        with redirect_stderr(output), self.assertRaises(TypeError) as ctx:
+            decorator_line = sys._getframe().f_lineno + 1
             @compile(linkage='bogus')
             def bad_linkage() -> i32:
                 return 0
         self.assertIn("Unsupported linkage", str(ctx.exception))
+        self.assertIn(f'[test_func_linkage.py:{decorator_line}]', output.getvalue())
 
 
 if __name__ == "__main__":

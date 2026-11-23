@@ -637,8 +637,19 @@ def choose(value):
 
     def test_unknown_pattern_is_not_treated_as_a_wildcard(self):
         from pythoc.match_exhaustive import PatternNormalizer
+        from pythoc.source import set_ast_source
+        from pythoc.utils.inspect_utils import get_function_source_with_inspect
+
+        def with_star(value):
+            match value:
+                case [*rest]:
+                    return rest
+
+        syntax = ast.parse(get_function_source_with_inspect(with_star))
+        set_ast_source(syntax, (__file__, with_star.__code__.co_firstlineno - 1))
+        pattern = next(node for node in ast.walk(syntax) if isinstance(node, ast.MatchStar))
         with self.assertRaises(NotImplementedError):
-            PatternNormalizer(None).normalize(ast.MatchStar(name='rest'), i32)
+            PatternNormalizer(None).normalize(pattern, i32)
 
     def test_class_patterns_preserve_storage_qualifiers(self):
         with CompileSession():

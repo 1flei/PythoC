@@ -27,8 +27,9 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from ..meta.template import quote
+from ..meta.template import _compiler_quote
 from ..meta.compile_api import compile_ast as meta_compile_ast
+from ..logger import logger
 from ..builtin_entities.types import i32, void
 from ..builtin_entities.types import bool as pc_bool
 from ..builtin_entities import ptr as pc_ptr
@@ -269,19 +270,19 @@ def _find_external_names(
     )
 
 
-def _instantiate_const_iterable(values: List[Any]) -> Any:
+def _instantiate_const_iterable(values: List[Any], node) -> Any:
     """Case 3: compile-time constant iterable (e.g. ``[1, 2, 3]``)."""
     if not values:
-        raise TypeError(
+        logger.error(
             "instantiate cannot determine the element type of an empty "
-            "iterable; use an annotated yield function")
+            "iterable; use an annotated yield function", node=node, exc_type=TypeError)
     elem_type = _python_constant_pc_type(values[0])
     for v in values:
         vt = _python_constant_pc_type(v)
         if vt is not elem_type:
-            raise TypeError(
+            logger.error(
                 f"instantiate: heterogeneous element types: "
-                f"{elem_type.__name__} vs {vt.__name__}")
+                f"{elem_type.__name__} vs {vt.__name__}", node=node, exc_type=TypeError)
 
     suffix = ("_c", "const", elem_type, tuple(values))
     _State = _build_state_struct({"_pc": i32}, suffix)
@@ -353,10 +354,10 @@ def _splice_capture_bindings(
 def _require_yield_type(fa: ast.FunctionDef, type_resolver) -> type:
     """State storage requires a declared yield type before lowering."""
     if fa.returns is None:
-        raise TypeError(
+        logger.error(
             "instantiate requires a declared yield type; "
-            "use a yield function with a return annotation")
-    return type_resolver.parse_annotation(fa.returns)
+            "use a yield function with a return annotation", node=fa, exc_type=TypeError)
+    return type_resolver.resolve_annotation(fa.returns, fa.returns)
 
 
 def _compute_instantiate_suffix(
@@ -592,16 +593,16 @@ def _compile_yield_fn_pipeline(
 
     fields = {"_pc": i32, "_yield_value": yield_type}
     state_names = locals_set - protect_set
-    local_types = _state_local_types(fa, state_names, type_resolver)
+    local_types, local_nodes = _state_local_types(fa, state_names, type_resolver)
     capture_types = {capture.name: capture.pc_type for capture in runtime_captures}
     for name in sorted(state_names):
         hint = local_types.get(name)
         if hint is None:
             hint = capture_types.get(name, (bound_types or {}).get(name))
         if hint is None:
-            raise TypeError(
+            logger.error(
                 f"instantiate cannot determine the state type of '{name}'; "
-                "add a type annotation")
+                "add a type annotation", node=local_nodes.get(name, fa), exc_type=TypeError)
         fields[name] = hint
 
     sm_ast = lower_yield_state_machine(YieldStateMachineRequest(
@@ -942,19 +943,19 @@ def _is_array_type(pc_type: type) -> bool:
 # Templates (quote)
 # ---------------------------------------------------------------------------
 
-@quote
+@_compiler_quote
 def _init_tmpl():
     def _init(s):
         s._pc = i32(0)
 
 
-@quote
+@_compiler_quote
 def _yld_value():
     def _value(s):
         return s._yield_value
 
 
-@quote
+@_compiler_quote
 def _next_tmpl(N):
     def _next(s):
         if s._pc >= i32(N):
@@ -963,13 +964,13 @@ def _next_tmpl(N):
         return bool(1)
 
 
-@quote
+@_compiler_quote
 def _value_case(i, converter, v, *, idx):
     if idx == i32(i):
         return converter(v)
 
 
-@quote
+@_compiler_quote
 def _value_tmpl(cases, default_value):
     def _value(s):
         idx: i32 = s._pc - i32(1)
@@ -977,19 +978,19 @@ def _value_tmpl(cases, default_value):
         return default_value
 
 
-@quote
+@_compiler_quote
 def _closure_call_template(body):
     def _call(s):
         body
 
 
-@quote
+@_compiler_quote
 def _closure_init_template(body):
     def _init_into(s) -> None:
         body
 
 
-@quote
+@_compiler_quote
 def _closure_capture_assign(arg_name, *, s):
     s._placeholder = move(arg_name)
 
@@ -1032,6 +1033,7 @@ def _state_local_types(fa, state_names, type_resolver):
     types = {arg.arg: _annotation_ast_to_type(arg.annotation, type_resolver)
              for arg in _parameters(fa.args)
              if arg.arg in state_names and arg.annotation is not None}
+    nodes = {}
 
     class Collector(ast.NodeVisitor):
         def visit_FunctionDef(self, node):
@@ -1039,7 +1041,12 @@ def _state_local_types(fa, state_names, type_resolver):
 
         visit_AsyncFunctionDef = visit_FunctionDef
 
+        def visit_Name(self, node):
+            if isinstance(node.ctx, ast.Store) and node.id in state_names:
+                nodes.setdefault(node.id, node)
+
         def visit_AnnAssign(self, node):
+            self.generic_visit(node)
             if not isinstance(node.target, ast.Name) or node.target.id not in state_names:
                 return
             name = node.target.id
@@ -1053,7 +1060,7 @@ def _state_local_types(fa, state_names, type_resolver):
     collector = Collector()
     for statement in fa.body:
         collector.visit(statement)
-    return types
+    return types, nodes
 
 
 def _python_value_to_ast(v: Any) -> ast.expr:

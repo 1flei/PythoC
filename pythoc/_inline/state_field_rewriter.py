@@ -5,6 +5,7 @@ import copy
 from dataclasses import dataclass
 from typing import Mapping, Optional, Set
 
+from ..source import copy_ast_location
 from .scope_analyzer import AssignmentCollector
 
 
@@ -27,34 +28,21 @@ class StateFieldRewriter(ast.NodeTransformer):
     def visit_Name(self, node: ast.Name) -> ast.AST:
         if not self._should_rewrite(node.id):
             return node
-        return ast.Attribute(
-            value=ast.Name(id=self.state_arg, ctx=ast.Load()),
+        return copy_ast_location(ast.Attribute(
+            value=copy_ast_location(ast.Name(id=self.state_arg, ctx=ast.Load()), node),
             attr=self.fields[node.id],
             ctx=node.ctx,
-        )
-
-    def visit_Assign(self, node: ast.Assign) -> ast.stmt:
-        self.generic_visit(node)
-        node.targets = [self._rewrite_target(t) for t in node.targets]
-        return node
+        ), node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.stmt:
         node = copy.deepcopy(node)
-        if node.value:
-            node.value = self.visit(node.value)
         if isinstance(node.target, ast.Name) and self._should_rewrite(node.target.id):
-            assign = ast.Assign(
-                targets=[self._rewrite_target(node.target)],
-                value=node.value if node.value else ast.Constant(value=0),
-            )
-            ast.copy_location(assign, node)
-            return assign
+            value = node.value
+            if value is None:
+                value = copy_ast_location(ast.Constant(value=0), node)
+            assign = ast.Assign(targets=[node.target], value=value)
+            return self.generic_visit(copy_ast_location(assign, node))
         return self.generic_visit(node)
-
-    def visit_AugAssign(self, node: ast.AugAssign) -> ast.stmt:
-        node.value = self.visit(node.value)
-        node.target = self._rewrite_target(node.target)
-        return node
 
     def visit_Expr(self, node: ast.Expr) -> Optional[ast.stmt]:
         if self.policy.strip_yield_expr and isinstance(node.value, ast.Yield):
@@ -93,15 +81,6 @@ class StateFieldRewriter(ast.NodeTransformer):
             for rewritten in _as_stmt_list(nested_rewriter.visit(stmt))
         ]
         return nested
-
-    def _rewrite_target(self, target: ast.AST) -> ast.AST:
-        if isinstance(target, ast.Name) and self._should_rewrite(target.id):
-            return ast.Attribute(
-                value=ast.Name(id=self.state_arg, ctx=ast.Load()),
-                attr=self.fields[target.id],
-                ctx=ast.Store(),
-            )
-        return target
 
     def _should_rewrite(self, name: str) -> bool:
         return name in self.fields and name not in self.protect_names

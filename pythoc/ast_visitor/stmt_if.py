@@ -12,7 +12,7 @@ from ..scope_manager import ScopeType
 class IfStatementMixin:
     """Mixin for if statement handling"""
 
-    def process_condition(self, condition: ValueRef, then_fn, else_fn=None):
+    def process_condition(self, condition: ValueRef, then_fn, node, else_fn=None):
         """Handle condition with proper control flow
         
         Args:
@@ -28,8 +28,10 @@ class IfStatementMixin:
         """
         # Handle Python constant condition (compile-time evaluation)
         if condition.is_python_value():
-            py_cond = condition.get_python_value()
-            if py_cond:
+            taken = bool(condition.get_python_value())
+            if not taken and getattr(node, '_pc_generator_filter', False):
+                self._get_cf_builder().record_rejected_generator_filter(node)
+            if taken:
                 then_fn()
                 return (True, False)  # Only then branch executed
             else:
@@ -38,10 +40,7 @@ class IfStatementMixin:
                 return (False, True)  # Only else branch executed
 
         condition = self.value_dispatcher.to_boolean(condition)
-        
-        # Use ControlFlowBuilder for block operations
         cf = self._get_cf_builder()
-        
         # Create basic blocks
         then_block = cf.create_block("then")
         
@@ -124,9 +123,9 @@ class IfStatementMixin:
         
         # Execute condition processing
         if else_fn:
-            self.process_condition(condition, then_fn_tracked, else_fn_tracked)
+            self.process_condition(condition, then_fn_tracked, node.test, else_fn_tracked)
             # Linear state validation is done by CFG checker at function end
         else:
             # Simple if without else
-            self.process_condition(condition, then_fn_tracked, None)
+            self.process_condition(condition, then_fn_tracked, node.test)
 

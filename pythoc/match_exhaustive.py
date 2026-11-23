@@ -16,6 +16,7 @@ from typing import List, Optional, Set, Dict, Tuple, Any
 from enum import Enum as PyEnum
 import ast
 
+from .literal_protocol import get_unpack_field_types
 from .logger import logger
 from .schema_protocol import (
     get_schema_field_names, get_schema_field_types, is_schema_type,
@@ -184,16 +185,10 @@ class TypeInfo:
             return True
 
         # Struct types are finite if ALL fields have finite types
-        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
-            field_types = get_schema_field_types(pc_type)
-            if not field_types:
-                # Empty struct is finite (one constructor, no fields)
-                return True
-            # Check if all fields are finite
-            for field_type in field_types:
-                if not TypeInfo.is_finite(field_type, _seen.copy()):
-                    return False
-            return True
+        if getattr(pc_type, '_is_struct', False):
+            field_types = get_unpack_field_types(pc_type)
+            if field_types is not None:
+                return all(TypeInfo.is_finite(field, _seen.copy()) for field in field_types)
 
         # Everything else (int, float, ptr, union, etc.) is not finite
         return False
@@ -232,18 +227,12 @@ class TypeInfo:
                 result.append((tag, name, sub_types))
             return result
 
-        # Struct constructors: single constructor with field types as sub-types
-        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
-            field_types = get_schema_field_types(pc_type)
-            struct_name = getattr(pc_type, '__name__', 'struct')
-            # Struct has exactly one constructor (tag=0) with all fields as sub-patterns
-            return [(0, struct_name, list(field_types))]
+        # Product types have one constructor with their positional fields.
+        field_types = get_unpack_field_types(pc_type)
+        if field_types is not None:
+            return [(0, getattr(pc_type, '__name__', 'sequence'), field_types)]
 
         return []
-
-    @staticmethod
-    def get_constructor_arity(pc_type, tag: int) -> int:
-        return len(TypeInfo.get_constructor_sub_types(pc_type, tag))
 
     @staticmethod
     def get_constructor_sub_types(pc_type, tag: int) -> List[Any]:
@@ -269,16 +258,7 @@ class TypeInfo:
                     return []
             return []
 
-        # Struct: sub-types are the field types
-        if is_schema_type(pc_type) and getattr(pc_type, '_is_struct', False):
-            field_types = get_schema_field_types(pc_type)
-            return list(field_types)
-
-        if getattr(pc_type, 'dimensions', None) is not None:
-            from .type_descriptor import array_decay_type
-            return [array_decay_type(pc_type).pointee_type] * pc_type.dimensions[0]
-
-        return []
+        return get_unpack_field_types(pc_type) or []
 
     @staticmethod
     def describe_constructor(pc_type, tag: int) -> str:
@@ -370,47 +350,12 @@ def is_exhaustive(matrix: PatternMatrix) -> Tuple[bool, List[str]]:
 
         return (len(uncovered) == 0, uncovered)
 
-    # Case 3: Struct type with infinite fields - still has single constructor
-    # We can specialize on the struct constructor and check field patterns
-    if hasattr(col_type, '_is_struct') and col_type._is_struct:
-        # Struct has exactly one constructor (tag=0)
-        # Check if any row has a constructor pattern for structs
-        covered_constructors = matrix.first_column_constructors()
-
-        if 0 in covered_constructors:
-            # Specialize on the struct constructor and check sub-patterns
-            specialized = specialize(matrix, col_type, 0)
-            sub_exhaustive, sub_uncovered = is_exhaustive(specialized)
-            if not sub_exhaustive:
-                struct_name = getattr(col_type, '__name__', 'struct')
-                return (False, [f"({struct_name}, {u})" for u in sub_uncovered])
-            return (True, [])
-        else:
-            # No struct constructor pattern - not exhaustive
-            struct_name = getattr(col_type, '__name__', 'struct')
-            return (False, [f"_ (catch-all required for {struct_name})"])
-
-    # Case 4: Array type - has single constructor, check element patterns
-    if hasattr(col_type, 'is_array') and col_type.is_array():
-        # Array has exactly one constructor (tag=0)
-        covered_constructors = matrix.first_column_constructors()
-
-        if 0 in covered_constructors:
-            # Specialize on the array constructor and check element patterns
-            specialized = specialize(matrix, col_type, 0)
-            sub_exhaustive, sub_uncovered = is_exhaustive(specialized)
-            if not sub_exhaustive:
-                array_name = getattr(col_type, '__name__', 'array')
-                return (False, [f"({array_name}, {u})" for u in sub_uncovered])
-            return (True, [])
-        else:
-            # No array constructor pattern - not exhaustive
-            array_name = getattr(col_type, '__name__', 'array')
-            return (False, [f"_ (catch-all required for {array_name})"])
-
-    # Case 5: First column type is infinite (int, float, etc.)
-    # Must have a wildcard - already checked above, so not exhaustive
     type_name = getattr(col_type, '__name__', str(col_type)) if col_type else 'unknown'
+    # Positional products have one constructor regardless of their field types.
+    if get_unpack_field_types(col_type) is not None and 0 in matrix.first_column_constructors():
+        exhaustive, uncovered = is_exhaustive(specialize(matrix, col_type, 0))
+        return exhaustive, [f"({type_name}, {item})" for item in uncovered]
+
     return (False, [f"_ (catch-all required for {type_name})"])
 
 
@@ -421,8 +366,8 @@ def specialize(matrix: PatternMatrix, col_type: Any, constructor_tag: int) -> Pa
     - Replace first column with constructor's sub-patterns
     """
     new_rows = []
-    arity = TypeInfo.get_constructor_arity(col_type, constructor_tag)
     sub_types = TypeInfo.get_constructor_sub_types(col_type, constructor_tag)
+    arity = len(sub_types)
 
     for row in matrix.rows:
         first = row.patterns[0]
@@ -615,9 +560,11 @@ class PatternNormalizer:
         return result
 
     def _sequence(self, pattern, subject_type):
-        if (getattr(subject_type, '_is_enum', False) and pattern.patterns
+        is_enum = getattr(subject_type, '_is_enum', False)
+        if (is_enum and pattern.patterns
                 and isinstance(pattern.patterns[0], ast.MatchValue)):
             result = self._value(pattern.patterns[0].value, subject_type)
+            result.ast_node = pattern.patterns[0]
             if result.kind == PatternKind.LITERAL:
                 if len(pattern.patterns) == 1:
                     return result
@@ -644,16 +591,22 @@ class PatternNormalizer:
                     logger.error('This enum variant has no payload to match',
                                  node=item, exc_type=TypeError)
             return result
-        fields = get_schema_field_types(subject_type)
-        if getattr(subject_type, 'dimensions', None) is not None:
-            fields = TypeInfo.get_constructor_sub_types(subject_type, 0)
-        if len(pattern.patterns) != len(fields):
-            logger.error('Sequence pattern length does not match subject fields',
+        from .type_descriptor import format_type
+
+        fields = (get_schema_field_types(subject_type) if is_enum
+                  else get_unpack_field_types(subject_type))
+        if fields is None:
+            logger.error(f'Unsupported unpacking type: {format_type(subject_type)}',
                          node=pattern, exc_type=TypeError)
-        result = NormalizedPattern.constructor(0, 'sequence', [
+        if len(pattern.patterns) != len(fields):
+            logger.error(f'Sequence pattern has {len(pattern.patterns)} entries, '
+                         f'but {format_type(subject_type)} has {len(fields)} fields',
+                         node=pattern, exc_type=TypeError)
+        result = NormalizedPattern.constructor(0, 'enum-fields' if is_enum else 'sequence', [
             self.normalize(item, ty) for item, ty in zip(pattern.patterns, fields)],
             subject_type)
-        result.field_indices = tuple(range(len(fields)))
+        if is_enum:
+            result.field_indices = tuple(range(len(fields)))
         return result
 
 

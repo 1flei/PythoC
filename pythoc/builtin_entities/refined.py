@@ -18,7 +18,7 @@ from typing import Optional, List, Any
 from llvmlite import ir
 
 from .composite_base import CompositeType
-from .struct import struct, create_struct_type
+from .struct import struct, _create_struct_type
 from ..logger import logger
 
 
@@ -51,6 +51,7 @@ def _create_refined_type_class(
     base_type,
     predicates: List,
     tags: List[str],
+    node,
     struct_type=None,
     param_types: Optional[List] = None,
     param_names: Optional[List[str]] = None,
@@ -63,10 +64,10 @@ def _create_refined_type_class(
     """
     from ..type_descriptor import validate_type_argument
     if base_type is not None:
-        validate_type_argument(base_type, 'refined base', allow_void=False)
+        validate_type_argument(base_type, 'refined base', allow_void=False, node=node)
     for parameter in param_types or ():
         validate_type_argument(parameter, 'refined parameter',
-                               allow_void=False, allow_incomplete=True)
+                               allow_void=False, allow_incomplete=True, node=node)
     class_name = _generate_refined_class_name(base_type, predicates, tags)
 
     # Determine field info
@@ -97,7 +98,7 @@ def _create_refined_type_class(
     return new_refined_type
 
 
-def _parse_predicate_signature(predicate, type_resolver=None) -> tuple:
+def _parse_predicate_signature(predicate, node, type_resolver=None) -> tuple:
     """Parse predicate function signature to extract parameter types and names
 
     Args:
@@ -111,14 +112,15 @@ def _parse_predicate_signature(predicate, type_resolver=None) -> tuple:
     if info is not None:
         names = list(info.param_names)
         if not names:
-            raise TypeError('A refinement predicate must have at least one parameter')
+            logger.error('A refinement predicate must have at least one parameter', node=node,
+                         exc_type=TypeError)
         parameters = [info.param_type_hints[name] for name in names]
         return names, parameters, len(names) == 1
     try:
         sig = inspect.signature(predicate)
     except (ValueError, TypeError) as e:
         logger.error(f"Cannot inspect predicate function signature: {e}",
-                    node=None, exc_type=TypeError)
+                    node=node, exc_type=TypeError)
 
     param_names = []
     param_types = []
@@ -151,26 +153,27 @@ def _parse_predicate_signature(predicate, type_resolver=None) -> tuple:
 
     if len(param_names) == 0:
         logger.error(f"Predicate function '{predicate.__name__}' must have at least one parameter",
-                    node=None, exc_type=TypeError)
+                    node=node, exc_type=TypeError)
 
     is_single_param = (len(param_names) == 1)
     return param_names, param_types, is_single_param
 
 
-def _create_from_single_predicate_internal(predicate, type_resolver=None):
+def _create_from_single_predicate_internal(predicate, node, type_resolver=None):
     """Create refined type from single predicate (backward compat: refined[pred])
 
     This handles the case where the predicate signature determines the base type.
     For single-param predicates, the first param type becomes the base type.
     For multi-param predicates, a struct is created.
     """
-    param_names, param_types, is_single_param = _parse_predicate_signature(predicate, type_resolver)
+    param_names, param_types, is_single_param = _parse_predicate_signature(
+        predicate, node, type_resolver)
 
     # Validate that we have resolved types for multi-param case
     if not is_single_param and any(t is None for t in param_types):
         logger.error(
             f"Predicate '{predicate.__name__}' parameters must have type annotations",
-            node=None, exc_type=TypeError
+            node=node, exc_type=TypeError
         )
 
     if is_single_param:
@@ -180,9 +183,10 @@ def _create_from_single_predicate_internal(predicate, type_resolver=None):
         base_type = None
         # Create struct for multi-param predicate
         if all(t is not None for t in param_types):
-            struct_type = create_struct_type(
+            struct_type = _create_struct_type(
                 field_types=param_types,
-                field_names=param_names
+                field_names=param_names,
+                node=node,
             )
         else:
             struct_type = None
@@ -195,10 +199,11 @@ def _create_from_single_predicate_internal(predicate, type_resolver=None):
         param_types=param_types,
         param_names=param_names,
         is_single_param=is_single_param,
+        node=node,
     )
 
 
-def _create_from_base_and_constraints_internal(base_type, predicates: List, tags: List[str]):
+def _create_from_base_and_constraints_internal(base_type, predicates: List, tags: List[str], node):
     """Create refined type from base type + predicates + tags
 
     This handles:
@@ -217,11 +222,11 @@ def _create_from_base_and_constraints_internal(base_type, predicates: List, tags
                 logger.error(
                     f"Predicate '{pred.__name__}' for refined[{base_name}, ...] "
                     f"must have exactly one parameter, got {len(params)}",
-                    node=None, exc_type=TypeError
+                    node=node, exc_type=TypeError
                 )
         except (ValueError, TypeError) as e:
             logger.error(f"Cannot inspect predicate function signature: {e}",
-                        node=None, exc_type=TypeError)
+                        node=node, exc_type=TypeError)
 
     return _create_refined_type_class(
         base_type=base_type,
@@ -231,6 +236,7 @@ def _create_from_base_and_constraints_internal(base_type, predicates: List, tags
         param_types=[base_type],
         param_names=['value'],
         is_single_param=True,
+        node=node,
     )
 
 
@@ -293,7 +299,7 @@ class RefinedType(CompositeType):
         if all(a is b for a, b in zip(original, resolved)):
             return cls
         return _create_refined_type_class(
-            resolved[0], cls._predicates, cls._tags, resolved[1],
+            resolved[0], cls._predicates, cls._tags, None, None, resolved[1],
             list(resolved[2:]), cls._param_names, cls._is_single_param)
 
     @classmethod
@@ -485,12 +491,14 @@ class RefinedType(CompositeType):
         # Case 1: Only predicates, no base type (backward compat: refined[pred])
         if base_type is None and len(predicates) == 1 and len(tags) == 0:
             type_resolver = TypeResolver(user_globals=visitor.user_globals if hasattr(visitor, 'user_globals') else {})
-            new_type = _create_from_single_predicate_internal(predicates[0], type_resolver)
+            new_type = _create_from_single_predicate_internal(
+                predicates[0], node, type_resolver)
             return wrap_value(new_type, kind='python', type_hint=PythonType(new_type))
 
         # Case 2: Base type with tags/predicates
         if base_type is not None:
-            new_type = _create_from_base_and_constraints_internal(base_type, predicates, tags)
+            new_type = _create_from_base_and_constraints_internal(
+                base_type, predicates, tags, node=node)
             return wrap_value(new_type, kind='python', type_hint=PythonType(new_type))
 
         # Case 3: Multiple predicates without base type
@@ -526,9 +534,10 @@ class RefinedType(CompositeType):
                 arg = args[0]
                 # If arg is Python value, promote it first
                 if isinstance(arg, ValueRef) and arg.is_python_value():
-                    arg = visitor.type_converter._promote_python_to_pc(arg.get_python_value(), cls._base_type)
+                    arg = visitor.type_converter._promote_python_to_pc(
+                        arg.get_python_value(), cls._base_type, node=node)
                 elif cls._base_type:
-                    arg = visitor.type_converter.convert(arg, cls._base_type)
+                    arg = visitor.type_converter.convert(arg, cls._base_type, node=node)
                 
                 return wrap_value(ensure_ir(arg), kind='value', type_hint=cls)
             else:
@@ -548,7 +557,7 @@ class RefinedType(CompositeType):
         for i, arg in enumerate(args):
             field_type = cls._param_types[i]
             if field_type:
-                arg = visitor.type_converter.convert(arg, field_type)
+                arg = visitor.type_converter.convert(arg, field_type, node)
             arg_ir = ensure_ir(arg)
             struct_value = visitor.builder.insert_value(struct_value, arg_ir, i)
         
@@ -610,29 +619,29 @@ class refined(metaclass=type):
     """
 
     @classmethod
-    def normalize_subscript_items(cls, items):
+    def normalize_subscript_items(cls, items, node):
         """Unify type-subscript item normalization with other builtin types.
 
         This allows `PythonType.handle_subscript` to route `refined[...]` through
         `handle_type_subscript`, instead of falling back to Python runtime indexing.
         """
         from .base import BuiltinType
-        return BuiltinType.normalize_subscript_items(items)
+        return BuiltinType.normalize_subscript_items(items, node=node)
 
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript: refined[...].
 
         Called by `PythonType.handle_subscript` after normalization.
         """
         if any(name is not None for name, _ in items):
-            raise TypeError('refined does not accept named type arguments')
+            logger.error('refined does not accept named type arguments', node=node, exc_type=TypeError)
         # Extract raw arguments from normalized format: ((name?, value), ...)
         args = tuple(item[1] for item in items)
 
         # Backward-compat: refined[pred]
         if len(args) == 1 and callable(args[0]) and not isinstance(args[0], type):
-            return _create_from_single_predicate_internal(args[0], type_resolver=None)
+            return _create_from_single_predicate_internal(args[0], node=node)
 
         base_type = None
         predicates = []
@@ -649,25 +658,26 @@ class refined(metaclass=type):
                 else:
                     logger.error(
                         "refined can only have one base type at position 0",
-                        node=None, exc_type=TypeError,
+                        node=node, exc_type=TypeError,
                     )
             else:
                 logger.error(
                     "refined argument must be a type, callable predicate, or string tag",
-                    node=None, exc_type=TypeError,
+                    node=node, exc_type=TypeError,
                 )
 
         if base_type is None:
             logger.error(
                 "refined[...] requires a base type as first argument",
-                node=None, exc_type=TypeError,
+                node=node, exc_type=TypeError,
             )
 
-        return _create_from_base_and_constraints_internal(base_type, predicates, tags)
+        return _create_from_base_and_constraints_internal(
+            base_type, predicates, tags, node=node)
 
     def __class_getitem__(cls, args):
         """Use the same parser for Python and compiler type construction."""
-        return cls.handle_type_subscript(cls.normalize_subscript_items(args))
+        return cls.handle_type_subscript(cls.normalize_subscript_items(args, node=None), node=None)
 
 
 __all__ = ['refined', 'RefinedType']

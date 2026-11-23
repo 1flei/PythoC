@@ -3,6 +3,7 @@
 import ast
 import copy
 
+from ..utils.ast_targets import is_rebinding_target, iter_bound_names
 from .scope_analyzer import ScopeAnalyzer, ScopeContext
 
 
@@ -25,6 +26,8 @@ class ScopedVariableRenamer(ast.NodeTransformer):
             return node
         result = copy.copy(node)
         result.id = name
+        if is_rebinding_target(node):
+            result._pc_rebind = True
         return result
 
     def visit_MatchAs(self, node):
@@ -98,8 +101,7 @@ class ScopedVariableRenamer(ast.NodeTransformer):
         renamer = self
         for generator in node.generators:
             generator.iter = renamer.visit(generator.iter)
-            bound = {name.id for name in ast.walk(generator.target)
-                     if isinstance(name, ast.Name)}
+            bound = set(iter_bound_names(generator.target))
             renamer = ScopedVariableRenamer(
                 {**renamer.rename_map, **{name: name for name in bound}},
                 renamer.global_renames)

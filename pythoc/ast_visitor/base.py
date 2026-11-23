@@ -109,11 +109,12 @@ class LLVMIRVisitor(ast.NodeVisitor):
         """
         old_node = self._current_node
         self._current_node = node
+        source = None
+        if self.func_state is not None:
+            source = (self.func_state.source_file, self.func_state.line_offset)
         try:
-            return super().visit(node)
-        except Exception as error:
-            logger.remember_error_location(error, node)
-            raise
+            with logger.at_node(node, source=source):
+                return super().visit(node)
         finally:
             self._current_node = old_node
 
@@ -231,31 +232,9 @@ class LLVMIRVisitor(ast.NodeVisitor):
     
     def get_pc_type_from_annotation(self, annotation) -> Optional[Any]:
         """Convert type annotation to builtin type class"""
-        return self.type_resolver.parse_annotation(annotation)
+        return self.type_resolver.resolve_annotation(annotation, annotation)
     
-    def infer_pc_type_from_value(self, value: ValueRef) -> Optional[Any]:
-        """Infer PC type from a ValueRef
-        
-        For Python values, returns the default promote type.
-        For PC values, returns the type_hint if available.
-        """
-        if hasattr(value, 'type_hint') and value.type_hint:
-            return value.type_hint
-        
-        # For Python values without type_hint, infer from Python type
-        if value.is_python_value():
-            try:
-                from ..type_converter import TypeConverter
-                python_val = value.get_python_value()
-                return TypeConverter.infer_default_pc_type_from_python(python_val)
-            except TypeError:
-                # For Python type objects (like i32, ptr[T]), return None
-                return None
-        
-        # Do not infer from LLVM; require explicit type hints
-        return None
-    
-    def declare_variable(self, name: str, type_hint: Any, alloca: Optional[ir.AllocaInstr] = None,
+    def declare_variable(self, name: str, type_hint: Any, node, alloca: Optional[ir.AllocaInstr] = None,
                         source: str = "unknown", line_number: Optional[int] = None,
                         is_parameter: bool = False, allow_redeclare: bool = False,
                         value_ref: Optional[Any] = None) -> VariableInfo:
@@ -264,36 +243,23 @@ class LLVMIRVisitor(ast.NodeVisitor):
         Args:
             name: Variable name
             type_hint: PC type hint
-            alloca: Storage location (None for Python constants)
+            alloca: Storage location, if the binding has a place
             source: Source of declaration
             line_number: Line number for debugging
             is_parameter: Whether this is a function parameter
-            allow_redeclare: Allow redeclaration in same scope
-            value_ref: Optional ValueRef to store directly
+            allow_redeclare: Create a distinct binding even if the name already exists
+            value_ref: Optional initial value carrying compiler metadata
         """
         from ..valueref import wrap_value
 
-        pc_type = type_hint
-        # Create ValueRef if not provided
-        if value_ref is None and alloca is not None:
-            # Check if this is a function pointer type
-            from ..builtin_entities.func import func
-            if isinstance(pc_type, type) and issubclass(pc_type, func):
-                # Store alloca directly, func.handle_call will load it when needed
-                value_ref = wrap_value(
-                    kind='address',
-                    value=alloca,
-                    type_hint=pc_type,
-                    address=alloca
-                )
+        if alloca is not None:
+            if value_ref is None:
+                value_ref = wrap_value(alloca, kind='address', type_hint=type_hint,
+                                       address=alloca)
             else:
-                # For regular PC variables with alloca, create an address ValueRef
-                value_ref = wrap_value(
-                    kind='address',
-                    value=alloca,  # Store alloca as value for now
-                    type_hint=pc_type,
-                    address=alloca
-                )
+                value_ref = value_ref.clone(kind='address', value=alloca,
+                                            type_hint=type_hint, address=alloca, storage=None,
+                                            var_name=None, linear_path=None, linear_owner_id=None)
         
         var_info = VariableInfo(
             name=name,
@@ -304,7 +270,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             is_parameter=is_parameter,
         )
         
-        if self.scope_manager.is_declared_in_current_scope(name):
+        if not allow_redeclare and self.scope_manager.is_declared_in_current_scope(name):
             existing = self.scope_manager.lookup_variable(name)
             if existing:
                 existing.alloca = alloca
@@ -318,7 +284,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # For other variables, initialize as 'consumed' (not yet assigned, no ownership)
         if self._is_linear_type(type_hint):
             initial_state = 'active' if is_parameter else 'consumed'
-            self._init_linear_states(var_info, type_hint, initial_state=initial_state)
+            self._init_linear_states(var_info, type_hint, node, initial_state)
         
         return var_info
 
@@ -326,6 +292,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         self,
         name: str,
         python_obj: Any,
+        node,
         *,
         source: str,
     ) -> Optional[VariableInfo]:
@@ -336,7 +303,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if getattr(python_obj, '_is_extern_global', False):
             # Extern global variable: declare the raw C symbol in the module
             # and bind the name directly to its address (lvalue).
-            value_ref = python_obj.lower_to_module(self, binding_name=name)
+            value_ref = python_obj.lower_to_module(self, binding_name=name, node=node)
             return VariableInfo(
                 name=name,
                 value_ref=value_ref,
@@ -389,7 +356,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             is_mutable=False,
         )
 
-    def _lookup_python_global_binding(self, name: str) -> Optional[VariableInfo]:
+    def _lookup_python_global_binding(self, name: str, node) -> Optional[VariableInfo]:
         """Resolve symbols captured from the Python environment.
 
         Results are cached so repeated lookups of the same global do not
@@ -399,12 +366,12 @@ class LLVMIRVisitor(ast.NodeVisitor):
         if cached is not None:
             return cached
 
-        result = self._resolve_python_global_binding(name)
+        result = self._resolve_python_global_binding(name, node)
         if result is not None:
             self._python_global_cache[name] = result
         return result
 
-    def _resolve_python_global_binding(self, name: str) -> Optional[VariableInfo]:
+    def _resolve_python_global_binding(self, name: str, node) -> Optional[VariableInfo]:
         """Internal resolver for python globals (uncached)."""
         if not self.ctx.user_globals:
             return None
@@ -413,6 +380,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             return self._wrap_python_name_binding(
                 name,
                 self.ctx.user_globals[name],
+                node,
                 source="python_global",
             )
 
@@ -425,6 +393,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 return self._wrap_python_name_binding(
                     name,
                     builtins_val[name],
+                    node,
                     source="python_builtin",
                 )
             return None
@@ -433,12 +402,13 @@ class LLVMIRVisitor(ast.NodeVisitor):
             return self._wrap_python_name_binding(
                 name,
                 getattr(builtins_val, name),
+                node,
                 source="python_builtin",
             )
 
         return None
 
-    def lookup_variable(self, name: str) -> Optional[VariableInfo]:
+    def lookup_variable(self, name: str, node) -> Optional[VariableInfo]:
         """Look up variable or function in context registry (unified)"""
         # 1. First check variable registry
         var_info = self.scope_manager.lookup_variable(name)
@@ -446,7 +416,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             return var_info
 
         # 2. Resolve symbols captured from the Python environment
-        python_global = self._lookup_python_global_binding(name)
+        python_global = self._lookup_python_global_binding(name, node)
         if python_global is not None:
             return python_global
         
@@ -532,7 +502,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
 
         return get_linear_schema_paths(type_hint, prefix)
     
-    def _init_linear_states(self, var_info, type_hint, initial_state: str = 'consumed'):
+    def _init_linear_states(self, var_info, type_hint, node, initial_state):
         """Initialize linear states for all linear paths in a type
         
         Emits LinearRegister events to CFG for path-sensitive analysis.
@@ -546,44 +516,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
             if cf is not None:
                 cf.record_linear_register(
                     var_info.var_id, var_info.name, path, cfg_state,
-                    line_number=var_info.line_number, node=None
+                    node, type_hint,
                 )
         if paths:
             logger.debug(f"Initialized linear states for '{var_info.name}': {paths} -> {initial_state}")
-    
-    def _format_linear_path(self, var_name: str, path: Tuple[int, ...], type_hint) -> str:
-        """Format a linear path as a human-readable string with field names
-        
-        Args:
-            var_name: Variable name
-            path: Index path tuple (e.g., (1,) or (0, 2))
-            type_hint: Type hint of the variable (to get field names)
-            
-        Returns:
-            Human-readable path string like 'var.field' or 'var.field.subfield'
-        """
-        if not path:
-            return var_name
-        
-        parts = [var_name]
-        current_type = type_hint
-        
-        from ..schema_protocol import get_schema_field_name, get_schema_field_type
-
-        for idx in path:
-            field_name = None
-            try:
-                field_name = get_schema_field_name(current_type, idx)
-                current_type = get_schema_field_type(current_type, idx)
-            except Exception:
-                field_name = None
-
-            if field_name:
-                parts.append(f".{field_name}")
-            else:
-                parts.append(f"[{idx}]")
-        
-        return ''.join(parts)
     
     def _get_actual_line_number(self, line_number: Optional[int]) -> Optional[int]:
         """Get actual line number by adding the compile frame's line offset
@@ -614,7 +550,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             path: Index path prefix (for nested assignments)
         """
         if self._is_linear_type(type_hint):
-            var_info = self.lookup_variable(var_name)
+            var_info = self.lookup_variable(var_name, node)
             if var_info:
                 # Get all linear paths in the assigned value
                 linear_paths = self._get_linear_paths(type_hint, path)
@@ -622,10 +558,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
                     # Emit LinearTransition event: invalid -> valid (token created)
                     cf = self._get_cf_builder()
                     if cf is not None:
-                        line_num = node.lineno if node and hasattr(node, 'lineno') else var_info.line_number
                         cf.record_linear_transition(
-                            var_info.var_id, var_name, lin_path, 'invalid', 'valid',
-                            line_number=line_num, node=node
+                            var_info.var_id, var_name, lin_path, 'invalid', 'valid', node
                         )
                 logger.debug(f"Linear token '{var_name}' paths {linear_paths} transitioned to active")
     
@@ -650,7 +584,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 or result.linear_owner_id is not None):
             return result
         if result.var_name:
-            variable = self.lookup_variable(result.var_name)
+            variable = self.lookup_variable(result.var_name, node)
             result.linear_owner_id = variable.var_id
             return result
         # An indirect place is a borrowed view of memory, not a newly
@@ -660,17 +594,15 @@ class LLVMIRVisitor(ast.NodeVisitor):
             return result
         from ..registry import _get_next_var_id
         owner_id = _get_next_var_id()
-        name = f'<temporary {owner_id}>'
+        name = 'temporary value'
         for path in self._get_linear_paths(result.type_hint):
-            cf.record_linear_register(owner_id, name, path, 'invalid',
-                                      line_number=getattr(node, 'lineno', None), node=node)
-            cf.record_linear_transition(owner_id, name, path, 'invalid', 'valid',
-                                        line_number=getattr(node, 'lineno', None), node=node)
+            cf.record_linear_register(owner_id, name, path, 'invalid', node, result.type_hint)
+            cf.record_linear_transition(owner_id, name, path, 'invalid', 'valid', node)
         result.linear_owner_id = owner_id
         result.linear_path = ()
         return result
 
-    def _transfer_linear_ownership(self, value_ref: ValueRef, reason: str = "transfer", node=None):
+    def _transfer_linear_ownership(self, value_ref: ValueRef, node, reason: str = "transfer"):
         """Discharge the source owner when handing a value to its next owner."""
         from ..literal_protocol import iter_value_ref_leaves
         cf = self._get_cf_builder()
@@ -681,16 +613,16 @@ class LLVMIRVisitor(ast.NodeVisitor):
                 continue
             owner_id = value.linear_owner_id
             if owner_id is None and value.var_name:
-                variable = self.lookup_variable(value.var_name)
+                variable = self.lookup_variable(value.var_name, node)
                 owner_id = variable.var_id if variable else None
             if owner_id is None:
                 if value.has_place():
                     # Raw pointer storage has no local binding identity.
                     # Moving out of it produces a tracked call result.
                     continue
-                raise TypeError('Owned value has no CFG ownership identity')
-            name = value.var_name or f'<temporary {owner_id}>'
+                logger.error('Owned value has no CFG ownership identity',
+                             node=node, exc_type=TypeError)
+            name = value.var_name or 'temporary value'
             for path in self._get_linear_paths(value.type_hint, value.linear_path or ()):
                 cf.record_linear_transition(
-                    owner_id, name, path, 'valid', 'invalid',
-                    line_number=getattr(node, 'lineno', None), node=node)
+                    owner_id, name, path, 'valid', 'invalid', node)

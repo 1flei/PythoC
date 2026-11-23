@@ -93,7 +93,7 @@ def lower_compile_wrapper(
     return wrap_value(ir_func, kind='pointer', type_hint=func_info.callable_pc_type)
 
 
-def get_compile_time_callable(value_ref):
+def get_compile_time_callable(value_ref, node):
     """Recover identity only from a Python callable or a direct symbol."""
     if value_ref.is_python_value():
         target = value_ref.get_python_value()
@@ -102,8 +102,9 @@ def get_compile_time_callable(value_ref):
     else:
         target = None
     if not callable(target):
-        raise TypeError('predicate must be a compile-time callable; '
-                        'runtime function pointers have no static identity')
+        logger.error('predicate must be a compile-time callable; '
+                     'runtime function pointers have no static identity',
+                     node=node, exc_type=TypeError)
     return getattr(target, '_original_func', target)
 
 
@@ -252,10 +253,11 @@ def extern_callable_type(extern_wrapper, node=None):
     from .builtin_entities.types import void
     ret_type = extern_wrapper.return_type if extern_wrapper.return_type is not None else void
     callable_items = tuple(fixed_params) + ((None, ret_type),)
-    callable_pc_type = func_type_cls.handle_type_subscript(callable_items)
+    callable_pc_type = func_type_cls.handle_type_subscript(callable_items, node=node)
     callable_pc_type.calling_convention = extern_wrapper.calling_convention
     if varargs_name is not None and callable_pc_type.calling_convention != 'cdecl':
-        raise TypeError('Variadic extern functions require the cdecl calling convention')
+        logger.error('Variadic extern functions require the cdecl calling convention',
+                     node=node, exc_type=TypeError)
     if varargs_name is not None:
         callable_pc_type.has_llvm_varargs = True
         callable_pc_type.param_names = [name for name, _ in fixed_params] + [varargs_name]
@@ -309,9 +311,11 @@ def lower_extern_wrapper(
     existing = module.globals.get(c_name)
     if existing is not None:
         if not isinstance(existing, ir.Function):
-            raise TypeError(f"Extern function '{c_name}' names a data symbol")
+            logger.error(f"Extern function '{c_name}' names a data symbol",
+                         node=node, exc_type=TypeError)
         if (existing.calling_convention or 'ccc') != convention:
-            raise TypeError(f"Conflicting calling convention for '{c_name}'")
+            logger.error(f"Conflicting calling convention for '{c_name}'",
+                         node=node, exc_type=TypeError)
 
     from .builder import LLVMBuilder
 
@@ -321,6 +325,8 @@ def lower_extern_wrapper(
     )
     ir_func = func_wrapper.ir_function
     ir_func.calling_convention = convention
+    for attr in extern_wrapper.config.get('attrs') or ():
+        ir_func.attributes.add(attr)
 
     # --- Record link library dependency ---
     lib = extern_wrapper.lib

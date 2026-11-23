@@ -5,6 +5,7 @@ Enhanced version with modular architecture and comprehensive functionality
 
 import ast
 import copy
+import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List
 from llvmlite import ir, binding
@@ -12,6 +13,7 @@ from .ast_visitor import LLVMIRVisitor
 from .registry import get_unified_registry
 from .type_resolver import TypeResolver
 from .logger import logger
+from .source import SourceLocation
 from .config import config
 from .optimization import optimize_ir
 from .ir_helpers import initialize_storage
@@ -242,7 +244,7 @@ class LLVMCompiler:
             if param_type_hints and arg.arg in param_type_hints:
                 pc_type = param_type_hints[arg.arg]
             elif arg.annotation:
-                pc_type = type_resolver.parse_annotation(arg.annotation)
+                pc_type = type_resolver.resolve_annotation(arg.annotation, arg.annotation)
             else:
                 logger.error(f"Parameter '{arg.arg}' has no type annotation",
                              node=arg, exc_type=TypeError)
@@ -257,7 +259,7 @@ class LLVMCompiler:
         if return_type_hint is not None:
             resolved_return_type = return_type_hint
         elif ast_node.returns:
-            resolved_return_type = type_resolver.parse_annotation(ast_node.returns)
+            resolved_return_type = type_resolver.resolve_annotation(ast_node.returns, ast_node.returns)
         else:
             resolved_return_type = void
 
@@ -306,6 +308,8 @@ class LLVMCompiler:
         func_state = None,
         source_start_line: int = 1,
         original_name: str = None,
+        *,
+        source_file: str = None,
     ) -> ir.Function:
         """
         Compile a function directly from an AST node (meta-programming support)
@@ -319,6 +323,7 @@ class LLVMCompiler:
             reset_module: If True, create a fresh module; if False, add to existing module
             param_type_hints: Optional dict mapping parameter names to PC types (for meta-programming)
             return_type_hint: Optional return type hint (for meta-programming)
+            source_file: File containing the input syntax, when available.
             source_start_line: 1-based line number of the first line of ``source_code``
                 in the original source file.  Used to map AST line numbers to
                 absolute file lines for debug info.
@@ -327,6 +332,22 @@ class LLVMCompiler:
         Returns:
             The compiled LLVM function
         """
+        if source_file is None:
+            source_file = getattr(func_state, 'source_file', None) or (
+                group_key[0] if group_key else None)
+        source = (source_file, source_start_line - 1)
+        location_node = ast_node
+        if source_file is None:
+            location_node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        with logger.at_node(location_node, source=source):
+            return self._lower_function_from_ast(
+                ast_node, reset_module, param_type_hints, return_type_hint,
+                user_globals, group_key, func_state, source, original_name)
+
+    def _lower_function_from_ast(
+        self, ast_node, reset_module, param_type_hints, return_type_hint,
+        user_globals, group_key, func_state, source, original_name,
+    ):
         logger.debug(f"compile_function_from_ast: {ast_node.name}")
 
         # Any new body added to the module invalidates previously cached optimized IR.
@@ -429,8 +450,8 @@ class LLVMCompiler:
             sret_info=sret_info,
             param_coercion_info=func_wrapper.param_coercion_info or {},
             varargs_info=varargs_info,
-            source_file=func_state.source_file or (group_key[0] if group_key else None),
-            line_offset=source_start_line - 1,
+            source_file=source[0],
+            line_offset=source[1],
         )
         visitor.func_state = compile_frame
         visitor.binding_state = func_state
@@ -455,21 +476,16 @@ class LLVMCompiler:
         # Create ControlFlowBuilder wrapping real_builder and set as visitor.builder
         # This must happen before parameter initialization which uses visitor.builder
         from .ast_visitor.control_flow_builder import ControlFlowBuilder
-        visitor.builder = ControlFlowBuilder(real_builder, visitor, ast_node.name)
+        visitor.builder = ControlFlowBuilder(real_builder, visitor, original_name or ast_node.name)
 
         # Attach DWARF debug metadata when requested.
         debug_builder = None
         subprogram = None
         line_offset = 0
         if config.debug_info:
-            source_file = (
-                func_state.source_file
-                if func_state is not None
-                else (group_key[0] if group_key else '<unknown>')
-            )
-            debug_builder = self._get_debug_info(source_file)
+            debug_builder = self._get_debug_info(compile_frame.source_file or '<unknown>')
             if debug_builder is not None:
-                line_offset = source_start_line - 1
+                line_offset = compile_frame.line_offset
                 func_line = line_offset + ast_node.lineno
                 display_name = original_name or ast_node.name
                 subprogram = debug_builder.get_subprogram(
@@ -521,9 +537,6 @@ class LLVMCompiler:
             visitor.scope_manager.declare_variable(var_info, allow_shadow=True)
             param_var_infos.append(var_info)
             
-            # Initialize linear states for parameters (active = ownership transferred)
-            if type_hint and visitor._is_linear_type(type_hint):
-                visitor._init_linear_states(var_info, type_hint, initial_state='active')
         
         # For typed varargs (*args: T), register the args parameter.
         # It is a single LLVM parameter of type T (after normal params).
@@ -607,17 +620,14 @@ class LLVMCompiler:
 
         # Emit LinearRegister events for linear parameters
         # This must happen after ControlFlowBuilder is created (visitor.builder)
-        for var_info in visitor.scope_manager.get_all_in_current_scope():
-            if var_info.is_parameter and var_info.type_hint:
-                # Check if parameter type is linear and get all linear paths
-                if visitor._is_linear_type(var_info.type_hint):
-                    paths = visitor._get_linear_paths(var_info.type_hint)
-                    for path in paths:
-                        # Parameters with linear types start as 'valid' (ownership passed in)
-                        visitor.builder.record_linear_register(
-                            var_info.var_id, var_info.name, path, 'valid',
-                            line_number=var_info.line_number, node=ast_node
-                        )
+        param_nodes = {arg.arg: arg for arg in ast_node.args.args}
+        for arg in (ast_node.args.vararg, ast_node.args.kwarg):
+            if arg is not None:
+                param_nodes[arg.arg] = arg
+        for var_info in param_var_infos:
+            if visitor._is_linear_type(var_info.type_hint):
+                visitor._init_linear_states(
+                    var_info, var_info.type_hint, param_nodes[var_info.name], 'active')
         
         # Enter function-level scope in ScopeManager
         # This is the root scope for all defers in this function
@@ -637,7 +647,7 @@ class LLVMCompiler:
 
         # CFG merge checks (and loop invariants).
         # Must happen before emit_ir() since IR doesn't exist yet.
-        visitor.builder.run_cfg_linear_check()
+        visitor.builder.run_cfg_linear_check(ast_node)
 
         # Check for unresolved scoped goto statements
         visitor.scope_manager.check_goto_consistency(ast_node)

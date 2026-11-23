@@ -62,10 +62,7 @@ class YieldInlineAdapter:
         if not self._is_inlinable(func_ast):
             return (None, None, None)
 
-        # Get loop variable name
-        loop_var = self._extract_loop_var(for_node)
-        if not loop_var:
-            return (None, None, None)
+        loop_var = for_node.target
 
         # Extract call arguments from call node
         call_args = call_node.args if isinstance(call_node, ast.Call) else []
@@ -144,26 +141,6 @@ class YieldInlineAdapter:
 
         # Return InlineResult and labels for caller to own lifecycle
         return (inline_result, after_else_label, gen_done_label)
-    
-    def _extract_loop_var(self, for_node: ast.For) -> Optional[ast.AST]:
-        """Extract loop variable target from for node
-        
-        Returns the target AST node (Name or Tuple), or None if unsupported.
-        Supports:
-        - Simple Name: for x in ...
-        - Tuple unpacking: for a, b in ...
-        """
-        target = for_node.target
-        if isinstance(target, ast.Name):
-            return target
-        if isinstance(target, ast.Tuple):
-            # Verify all elements are Names (no nested tuples for now)
-            for elt in target.elts:
-                if not isinstance(elt, ast.Name):
-                    return None
-            return target
-        # Other complex targets not supported
-        return None
     
     def _build_caller_context(self) -> ScopeContext:
         """

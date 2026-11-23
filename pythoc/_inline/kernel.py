@@ -32,7 +32,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ..meta.template import quote, const as meta_const
+from ..meta.template import _compiler_quote, const as meta_const
+from ..source import copy_ast_location
 from .names import ExpansionNames
 from .scope_analyzer import ScopeContext
 
@@ -93,7 +94,7 @@ class MetaInlineRequest:
 
 # Unified: has_annotation controls whether annotation is emitted.
 # _fold_const_if eliminates the dead branch at instantiation.
-@quote
+@_compiler_quote
 def _param_binding(has_annotation, target, annotation, value):
     if has_annotation:
         target: annotation = __pc_intrinsics.move(value)  # noqa: F821
@@ -129,7 +130,7 @@ def _expansion_slot(name, annotation, purpose):
     return node
 
 
-@quote
+@_compiler_quote
 def _terminal_return(label_name, body, has_value, make_capture, capture,
                      value, result_var):
     if has_value:
@@ -145,7 +146,7 @@ def _terminal_return(label_name, body, has_value, make_capture, capture,
 # -- Frame templates --
 # Unified: all branches encoded as const guards.
 # _fold_const_if eliminates dead branches at instantiation.
-@quote
+@_compiler_quote
 def _inline_frame(has_label, bindings, label_name, decls, body):
     bindings
     decls
@@ -271,12 +272,24 @@ def _is_void_return(annotation):
     return annotation is None or TypeResolver.resolve_type(annotation, freeze=True) is void
 
 
-def _tuple_element_type(annotation, index):
-    from ..schema_protocol import get_schema_field_type
+def _unpack_binding_type(annotation, path):
+    from ..literal_protocol import get_unpack_field_types
+    from ..logger import logger
     from ..type_resolver import TypeResolver
-    from ..type_converter import get_base_type
+    from ..type_descriptor import format_type
+
     resolved = TypeResolver.resolve_type(annotation, freeze=True)
-    return get_schema_field_type(get_base_type(resolved), index)
+    for index in path:
+        fields = get_unpack_field_types(resolved)
+        if fields is None or index >= len(fields):
+            field_path = '.'.join(map(str, path))
+            detail = ('does not support positional unpacking' if fields is None
+                      else f'has {len(fields)} positional fields, so index {index} is out of range')
+            logger.error(f'Cannot bind yield field {field_path}: '
+                         f'{format_type(resolved)} {detail}',
+                         node=logger.current_location(), exc_type=TypeError)
+        resolved = fields[index]
+    return resolved
 
 
 def _type_expression(function, *arguments):
@@ -286,22 +299,25 @@ def _type_expression(function, *arguments):
 
 
 def _build_loop_var_declarations(
-    loop_var,
+    loop_bindings,
     return_type_annotation,
-    call_site,
     visible_names=frozenset(),
+    rebinding_names=(),
 ):
     """Reserve typed consumer bindings before expanding an annotated generator."""
-    targets = loop_var.elts if isinstance(loop_var, ast.Tuple) else [loop_var]
+    declared = set(visible_names).union(rebinding_names)
     decls = []
-    for i, target in enumerate(targets):
-        if not isinstance(target, ast.Name) or target.id in visible_names:
+    for path, target in loop_bindings:
+        if target.id in declared:
             continue
         annotation = copy.deepcopy(return_type_annotation)
-        if isinstance(loop_var, ast.Tuple):
-            annotation = _type_expression(_tuple_element_type, annotation, ast.Constant(i))
+        if path:
+            annotation = _type_expression(_unpack_binding_type, annotation, ast.Constant(path))
+            copy_ast_location(annotation, target)
         decl = _expansion_slot(target.id, annotation, 'yield_target')
-        decls.append(ast.copy_location(decl, call_site))
+        copy_ast_location(decl.target, target)
+        decls.append(copy_ast_location(decl, target))
+        declared.add(target.id)
     return decls
 
 
@@ -513,6 +529,11 @@ def expand_inline(request):
 
     # --- Extract callee body and params ---
     callee_body, callee_params = _extract_callee(callee_ast)
+    if getattr(callee_ast, '_pc_diagnose_expansion_at_call', False):
+        for statement in callee_body:
+            for child in ast.walk(statement):
+                if 'lineno' in child._attributes:
+                    copy_ast_location(child, request.call_site)
 
     # --- Scope analysis ---
     analyzer = ScopeAnalyzer(request.capture_context)
@@ -600,8 +621,8 @@ def expand_inline(request):
         decl_stmts.append(_expansion_slot(result_var, result_type, 'return'))
     if isinstance(request.exit_rule, YieldExitRule) and result_type is not None:
         decl_stmts.extend(_build_loop_var_declarations(
-            request.exit_rule.loop_var, result_type, request.call_site,
-            request.caller_context.available_vars))
+            request.exit_rule.loop_bindings, result_type,
+            request.caller_context.available_vars, request.exit_rule.rebinding_names))
 
     frame = _inline_frame(
         meta_const(has_label),
@@ -615,7 +636,7 @@ def expand_inline(request):
 
     # --- Fix locations from call site ---
     for stmt in result_stmts:
-        ast.copy_location(stmt, request.call_site)
+        copy_ast_location(stmt, request.call_site)
         ast.fix_missing_locations(stmt)
 
     # --- Debug ---

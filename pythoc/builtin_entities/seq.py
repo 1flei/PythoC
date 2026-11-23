@@ -32,23 +32,19 @@ class seq(BuiltinFunction):
         from .python_type import PythonType
         from ..std.seq import counter, counter_range, counter_range_step
 
-        def all_python(args):
-            return all(arg.is_python_value() or arg is None for arg in args)
-
-        if all_python(args):
+        if not 1 <= len(args) <= 3:
+            logger.error('seq() takes 1 to 3 arguments', node=node, exc_type=ValueError)
+        if all(arg.is_python_value() for arg in args):
             vals = [arg.get_python_value() for arg in args]
-            py_range = range(*vals)
+            try:
+                py_range = range(*vals)
+            except (TypeError, ValueError) as error:
+                logger.error(f'seq(): {error}', node=node, exc_type=type(error))
             return wrap_value(
                 py_range,
                 kind="python",
                 type_hint=PythonType.wrap(py_range, is_constant=True)
             )
         
-        if len(args) == 1:
-            return counter.handle_call(visitor, func_ref, args, node)
-        elif len(args) == 2:
-            return counter_range.handle_call(visitor, func_ref, args, node)
-        elif len(args) == 3:
-            return counter_range_step.handle_call(visitor, func_ref, args, node)
-        else:
-            logger.error("seq() takes 1 to 3 arguments", node=node, exc_type=ValueError)
+        counter_fn = (counter, counter_range, counter_range_step)[len(args) - 1]
+        return counter_fn.handle_call(visitor, func_ref, args, node)

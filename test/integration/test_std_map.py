@@ -25,6 +25,7 @@ from pythoc import (
     bool, ptr, compile, nullptr, array,
 )
 from pythoc.std.map import FlatHashMap
+from pythoc.logger import set_raise_on_error
 
 
 I8Map = FlatHashMap(i8, i64)
@@ -669,6 +670,7 @@ if __name__ == '__main__':
     test_clear_reuse()
     test_multiple_instances()
     test_stress()
+    set_raise_on_error(True)
     test_unsupported_key_type()
     test_bad_factory_args()
     print("All FlatHashMap tests passed!")

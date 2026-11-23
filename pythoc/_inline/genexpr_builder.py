@@ -11,8 +11,10 @@ import copy
 from typing import Optional
 
 from ..logger import logger
+from ..source import copy_ast_location
 from .names import ExpansionNames
 from .renaming import ScopedVariableRenamer
+from ..utils.ast_targets import iter_bound_names
 
 
 def build_genexpr_yield_function_ast(
@@ -45,8 +47,7 @@ def build_genexpr_yield_function_ast(
     for original in genexpr_ast.generators:
         comp = copy.deepcopy(original)
         comp.iter = ScopedVariableRenamer(renames).visit(comp.iter)
-        targets = {node.id for node in ast.walk(comp.target)
-                   if isinstance(node, ast.Name)}
+        targets = set(iter_bound_names(comp.target))
         renames.update({name: names.fresh(f'{func_name}_{name}')
                         for name in sorted(targets)})
         renamer = ScopedVariableRenamer(renames)
@@ -59,13 +60,9 @@ def build_genexpr_yield_function_ast(
     for comp in reversed(generators):
         body = current_body
         for cond in reversed(comp.ifs):
-            body = [
-                ast.If(
-                    test=copy.deepcopy(cond),
-                    body=body,
-                    orelse=[],
-                )
-            ]
+            branch = ast.If(test=copy.deepcopy(cond), body=body, orelse=[])
+            branch.test._pc_generator_filter = True
+            body = [copy_ast_location(branch, cond)]
 
         loop_stmt = ast.For(
             target=copy.deepcopy(comp.target),
@@ -74,7 +71,7 @@ def build_genexpr_yield_function_ast(
             orelse=[],
             type_comment=None,
         )
-        current_body = [loop_stmt]
+        current_body = [copy_ast_location(loop_stmt, comp.iter)]
 
     func_ast = ast.FunctionDef(
         name=func_name,

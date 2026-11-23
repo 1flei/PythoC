@@ -284,7 +284,7 @@ class func(BuiltinType):
                         extra_arg.get_python_value(), visitor.module, caller_group_key, node=node)
                     converted_args.append(ensure_ir(lowered))
                 elif extra_arg.is_python_value() and hasattr(hint, 'promote_to_default_pc_type'):
-                    promoted = hint.promote_to_default_pc_type()
+                    promoted = hint.promote_to_default_pc_type(node)
                     converted_args.append(ensure_ir(promoted))
                 else:
                     converted_args.append(ensure_ir(extra_arg))
@@ -316,7 +316,8 @@ class func(BuiltinType):
     def get_function_type(cls, module_context=None):
         """Get the C ABI lowered LLVM function type (not pointer)."""
         if cls.param_types is None:
-            raise TypeError('Function values require a specialized func[...] type')
+            logger.error('Function values require a specialized func[...] type',
+                         exc_type=TypeError)
         param_llvm_types, return_llvm_type = cls._get_user_signature(module_context)
         actual_param_types, actual_return_type = cls._lower_c_abi_signature(
             param_llvm_types, return_llvm_type,
@@ -336,20 +337,20 @@ class func(BuiltinType):
         if all(a is b for a, b in zip(original, resolved)):
             return cls
         names = (*cls._get_parameter_names(), None)
-        return cls.handle_type_subscript(tuple(zip(names, resolved)))
+        return cls.handle_type_subscript(tuple(zip(names, resolved)), node=None)
 
     @classmethod
-    def normalize_subscript_items(cls, items):
+    def normalize_subscript_items(cls, items, node):
         """Read function parameters and the final return type as separate items."""
         from ..literal_protocol import extract_subscript_items
 
         return tuple(
-            cls._normalize_single_item(item)
+            cls._normalize_single_item(item, node=node)
             for item in extract_subscript_items(items)
         )
 
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript with normalized items for func
 
         Args:
@@ -364,7 +365,7 @@ class func(BuiltinType):
         if not isinstance(items, builtins.tuple):
             items = (items,)
         if len(items) == 0:
-            logger.error("func requires at least a return type: func[return_type]", node=None, exc_type=TypeError)
+            logger.error("func requires at least a return type: func[return_type]", node=node, exc_type=TypeError)
 
         # Last item is return type
         *param_items, ret_item = items
@@ -372,13 +373,13 @@ class func(BuiltinType):
         from ..type_descriptor import validate_member_names, validate_type_argument
         from .types import void
         if _ret_name_opt is not None:
-            raise TypeError('func return type cannot have a parameter name')
+            logger.error('func return type cannot have a parameter name', node=node, exc_type=TypeError)
         return_type = void if return_type is None else return_type
-        validate_type_argument(return_type, 'func return')
+        validate_type_argument(return_type, 'func return', node=node)
         if is_sequence_carrier(return_type):
             logger.error(
                 "func return type must be a type, not a sequence literal",
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
 
@@ -390,15 +391,15 @@ class func(BuiltinType):
             if is_sequence_carrier(ptype):
                 logger.error(
                     "func parameter type must be a type, not a sequence literal",
-                    node=None,
+                    node=node,
                     exc_type=TypeError,
                 )
-            validate_type_argument(ptype, 'func parameter', allow_void=False)
+            validate_type_argument(ptype, 'func parameter', allow_void=False, node=node)
             param_types.append(ptype)
             param_names.append(name_opt)
             if name_opt is not None:
                 has_any_name = True
-        validate_member_names(param_names, 'func')
+        validate_member_names(param_names, 'func', node=node)
         if not has_any_name:
             param_names = None
 
@@ -423,9 +424,3 @@ class func(BuiltinType):
                 'return_type': return_type,
             },
         )
-
-    def __class_getitem__(cls, item):
-        """Python runtime entry point using normalization -> handle_type_subscript"""
-        from ..type_resolver import TypeResolver
-        normalized = cls.normalize_subscript_items(item)
-        return TypeResolver.bind_type_references(cls.handle_type_subscript(normalized))

@@ -37,7 +37,8 @@ from ..utils import get_next_id
 from ..logger import logger
 from ..valueref import ValueRef, wrap_value
 from ..context import VariableInfo
-from ..meta.template import quote, const as meta_const
+from ..meta.template import _compiler_quote, const as meta_const
+from ..source import copy_ast_location
 from ._intrinsics import _PC_INTRINSICS
 from .exit_rules import _empty_label_block, _goto_begin, _goto_end
 from .names import visitor_expansion_names
@@ -50,15 +51,15 @@ if TYPE_CHECKING:
 # Templates
 # ---------------------------------------------------------------------------
 
-@quote
-def _const_iter_block(label_name, target, value, body):
+@_compiler_quote
+def _const_iter_block(label_name, binding, body):
     # One unrolled iteration: labeled scope with binding + transformed body.
     with __pc_intrinsics.label(label_name):  # noqa: F821
-        target = value
+        binding
         body
 
 
-@quote
+@_compiler_quote
 def _const_loop(has_else, has_after_else_label,
                 iter_blocks, else_clause,
                 after_else_label_block, exit_label_block):
@@ -117,6 +118,12 @@ class ConstantLoopAdapter:
         are folded away at template instantiation time.
         """
         elements = list(iterable)
+        iterable_syntax = for_node.iter
+        element_nodes = None
+        if (isinstance(iterable_syntax, (ast.List, ast.Tuple))
+                and len(iterable_syntax.elts) == len(elements)
+                and not any(isinstance(element, ast.Starred) for element in iterable_syntax.elts)):
+            element_nodes = iterable_syntax.elts
         required_globals = {'__pc_intrinsics': _PC_INTRINSICS}
         names = visitor_expansion_names(self.visitor)
         names.reserve_ast(for_node)
@@ -147,11 +154,15 @@ class ConstantLoopAdapter:
             transformed_body = self._transform_body(
                 for_node.body, break_target, iter_label,
                 body_has_break, body_has_continue)
+            binding = ast.Assign(
+                targets=[copy.deepcopy(for_node.target)],
+                value=ast.Name(id=iter_value_vars[i], ctx=ast.Load()),
+            )
+            copy_ast_location(binding, element_nodes[i] if element_nodes is not None else for_node)
             iter_block_frags.append(
                 _const_iter_block(
                     ast.Constant(value=iter_label),
-                    copy.deepcopy(for_node.target),
-                    ast.Name(id=iter_value_vars[i], ctx=ast.Load()),
+                    binding,
                     transformed_body,
                 )
             )

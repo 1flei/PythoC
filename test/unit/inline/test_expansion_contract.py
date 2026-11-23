@@ -18,6 +18,7 @@ from pythoc._inline.scope_analyzer import ScopeContext
 from pythoc._inline.yield_state_machine import inline_yield_function_iterators
 from pythoc.ast_visitor import LLVMIRVisitor
 from pythoc.context import VariableInfo
+from pythoc.utils.ast_targets import is_rebinding_target, iter_bound_names
 from pythoc.valueref import wrap_python_constant, wrap_value
 
 
@@ -35,14 +36,14 @@ class EvaluatedArgumentsTest(unittest.TestCase):
     def test_explicit_syntax_carrier_remains_a_compile_time_value(self):
         syntax = ast.parse('effectful()', mode='eval').body
         name, = bind_argument_values(self.visitor, [wrap_python_constant(syntax)])
-        actual = self.visitor.lookup_variable(name).value_ref.get_python_value()
+        actual = self.visitor.lookup_variable(name, None).value_ref.get_python_value()
         self.assertIs(actual, syntax)
 
     def test_linear_alias_preserves_the_original_cfg_owner(self):
         value = wrap_value(None, kind='value', type_hint=linear,
                            var_name='owner', linear_path=(), linear_owner_id=41)
         name, = bind_argument_values(self.visitor, [value])
-        actual = self.visitor.lookup_variable(name).value_ref
+        actual = self.visitor.lookup_variable(name, None).value_ref
         self.assertIs(actual, value)
         self.assertEqual(actual.linear_owner_id, 41)
 
@@ -51,7 +52,7 @@ class EvaluatedArgumentsTest(unittest.TestCase):
                            var_name='owner', linear_path=(1, 0),
                            linear_owner_id=41)
         name, = bind_argument_values(self.visitor, [value])
-        actual = self.visitor.lookup_variable(name).value_ref
+        actual = self.visitor.lookup_variable(name, None).value_ref
         self.assertEqual((actual.var_name, actual.linear_path,
                           actual.linear_owner_id), ('owner', (1, 0), 41))
         self.assertIs(actual, value)
@@ -101,7 +102,7 @@ class EvaluatedArgumentsTest(unittest.TestCase):
         self.visitor.expansion_names.reserve_ast(ast.parse('_arg_inline = 99'))
         name, = bind_argument_values(self.visitor, [wrap_python_constant(4)])
         self.assertNotEqual(name, '_arg_inline')
-        self.assertEqual(self.visitor.lookup_variable(name).value_ref.get_python_value(), 4)
+        self.assertEqual(self.visitor.lookup_variable(name, None).value_ref.get_python_value(), 4)
 
     def test_alias_names_are_local_to_the_visitor(self):
         other = LLVMIRVisitor()
@@ -128,6 +129,17 @@ class EvaluatedArgumentsTest(unittest.TestCase):
 
 
 class ExpansionKernelContractTest(unittest.TestCase):
+    def test_renaming_preserves_underscore_binding_and_read(self):
+        body = ast.parse('_, value = pair\nresult = _')
+        for original, alias in [('_', 'first_alias'), ('first_alias', 'final_alias')]:
+            body = ScopedVariableRenamer({original: alias}).visit(body)
+
+        target = body.body[0].targets[0]
+        self.assertEqual(list(iter_bound_names(target)), ['final_alias', 'value'])
+        self.assertTrue(is_rebinding_target(target.elts[0]))
+        self.assertFalse(is_rebinding_target(target.elts[1]))
+        self.assertEqual(body.body[1].value.id, 'final_alias')
+
     def request(self, args, available=()):
         source = ast.parse('def f(value):\n    return value + 1').body[0]
         return MetaInlineRequest(
@@ -193,7 +205,7 @@ class SyntacticExpansionContractTest(unittest.TestCase):
             result = ConstantLoopAdapter(visitor).transform_constant_loop(source, [1])
         self.assertNotIn('_iter_val_7_0', result.iter_var_names)
         self.assertEqual(len(result.iter_var_names), 1)
-        self.assertIsNotNone(visitor.lookup_variable(result.iter_var_names[0]))
+        self.assertIsNotNone(visitor.lookup_variable(result.iter_var_names[0], None))
 
     def test_offline_expansion_rejects_keywords_instead_of_dropping_them(self):
         source = ast.parse('def source():\n    yield 1').body[0]

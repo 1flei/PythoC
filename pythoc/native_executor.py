@@ -348,8 +348,7 @@ class MultiSOExecutor:
         seen_so_files = set()
         
         # Try to load deps from .deps file first
-        lib_ext = get_shared_lib_extension()
-        obj_file = so_file.replace(lib_ext, '.o')
+        obj_file = os.path.splitext(so_file)[0] + '.o'
         dep_tracker = get_dependency_tracker()
         deps = dep_tracker.load_deps(obj_file)
         
@@ -827,8 +826,7 @@ class MultiSOExecutor:
         flush_all_pending_outputs()
         
         # Check if we need to compile shared library from .o
-        lib_ext = get_shared_lib_extension()
-        obj_file = so_file.replace(lib_ext, '.o')
+        obj_file = os.path.splitext(so_file)[0] + '.o'
 
         # Collect dependencies from persisted deps graph (source of truth)
         dependencies = self._get_dependencies(wrapper._state.compiler, source_file, so_file)
@@ -846,7 +844,7 @@ class MultiSOExecutor:
         # Only check direct inputs: the group's own .o and .deps file.
         # Transitive dependency changes are handled by their own relink cycle.
         relink_inputs = [obj_file]
-        deps_file = obj_file.replace('.o', '.deps')
+        deps_file = os.path.splitext(obj_file)[0] + '.deps'
         if os.path.exists(deps_file):
             relink_inputs.append(deps_file)
 
@@ -888,8 +886,7 @@ class MultiSOExecutor:
         Returns:
             List of .o file paths
         """
-        lib_ext = get_shared_lib_extension()
-        obj_file = so_file.replace(lib_ext, '.o')
+        obj_file = os.path.splitext(so_file)[0] + '.o'
         obj_files = [obj_file]
         
         if so_file in visited:
@@ -899,7 +896,7 @@ class MultiSOExecutor:
         # Get dependencies and add their .o files
         dependencies = self._get_library_dependencies(source_file, so_file)
         for dep_source_file, dep_so_file in dependencies:
-            dep_obj_file = dep_so_file.replace(lib_ext, '.o')
+            dep_obj_file = os.path.splitext(dep_so_file)[0] + '.o'
             if os.path.exists(dep_obj_file) and dep_obj_file not in obj_files:
                 obj_files.append(dep_obj_file)
             # Note: We don't recurse here because check_so_needs_relink only needs
@@ -923,7 +920,6 @@ class MultiSOExecutor:
         if cache_key in self._transitive_obj_cache:
             return self._transitive_obj_cache[cache_key]
 
-        lib_ext = get_shared_lib_extension()
         visited_so: Set[str] = set()
         result: List[str] = []
 
@@ -934,7 +930,7 @@ class MultiSOExecutor:
                     continue
                 visited_so.add(dep_so_file)
 
-                dep_obj_file = dep_so_file.replace(lib_ext, '.o')
+                dep_obj_file = os.path.splitext(dep_so_file)[0] + '.o'
                 if os.path.exists(dep_obj_file) and dep_obj_file not in result:
                     result.append(dep_obj_file)
 
@@ -959,7 +955,6 @@ class MultiSOExecutor:
             dependencies: List of (dep_source_file, dep_so_file) tuples
             visited: Set of already processed so_files to avoid infinite loops
         """
-        lib_ext = get_shared_lib_extension()
 
         # ── Fast path: if ALL direct dependency so_files have already been
         # verified up-to-date in this process, skip the entire DFS.
@@ -984,7 +979,7 @@ class MultiSOExecutor:
                 visited.add(dep_so_file)
 
                 dep_deps = self._get_library_dependencies(dep_source_file, dep_so_file)
-                dep_obj_file = dep_so_file.replace(lib_ext, '.o')
+                dep_obj_file = os.path.splitext(dep_so_file)[0] + '.o'
 
                 # Recursively collect this dependency's dependencies first
                 if dep_deps:
@@ -995,7 +990,7 @@ class MultiSOExecutor:
                 # dependency changes are handled by their own relink cycle.
                 if os.path.exists(dep_obj_file):
                     relink_inputs = [dep_obj_file]
-                    dep_deps_file = dep_obj_file.replace('.o', '.deps')
+                    dep_deps_file = os.path.splitext(dep_obj_file)[0] + '.deps'
                     if os.path.exists(dep_deps_file):
                         relink_inputs.append(dep_deps_file)
 
@@ -1079,7 +1074,6 @@ class MultiSOExecutor:
         """
         from .utils.link_utils import _generate_stub_implib
 
-        lib_ext = get_shared_lib_extension()
 
         # Collect all stub jobs via DFS first, then execute.
         stub_jobs: List[Tuple[str, str, str]] = []  # (obj, dll_name, implib)
@@ -1090,7 +1084,7 @@ class MultiSOExecutor:
                     continue
                 visited.add(dep_so_file)
 
-                dep_obj_file = dep_so_file.replace(lib_ext, '.o')
+                dep_obj_file = os.path.splitext(dep_so_file)[0] + '.o'
                 implib = os.path.splitext(dep_so_file)[0] + '.lib'
 
                 if os.path.exists(dep_obj_file) and not os.path.exists(implib):

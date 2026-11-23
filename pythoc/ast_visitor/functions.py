@@ -6,7 +6,7 @@ import ast
 import builtins
 from typing import Optional, Any
 from llvmlite import ir
-from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
+from ..valueref import ValueRef, ensure_ir, wrap_python_constant, wrap_value, get_type, get_type_hint
 from ..builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -92,7 +92,7 @@ class _ClosureWrapper:
         adapter = ClosureAdapter(
             visitor, param_bindings, func_globals=self.func_globals,
             capture_references=self._capture_references)
-        return adapter.execute_closure(self.func_ast)
+        return adapter.execute_closure(self.func_ast, call_node)
 
 
 def _contains_yield(func_ast: ast.FunctionDef) -> bool:
@@ -184,7 +184,7 @@ class FunctionsMixin:
 
         wrapper = self._make_closure_wrapper(
             func_def, dict(zip(param_names[n_required:], default_vrefs)))
-        return wrap_value(wrapper, kind='python', type_hint=wrapper)
+        return wrap_python_constant(wrapper)
 
     def _register_closure(self, node: ast.FunctionDef):
         """Register a closure function for inline execution
@@ -211,11 +211,7 @@ class FunctionsMixin:
         # Register as a variable in current scope
         var_info = VariableInfo(
             name=node.name,
-            value_ref=wrap_value(
-                wrapper,
-                kind='python',
-                type_hint=wrapper,
-            ),
+            value_ref=wrap_python_constant(wrapper),
             alloca=None,
             source='closure',
             is_mutable=False,

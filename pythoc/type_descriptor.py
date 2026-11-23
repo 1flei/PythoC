@@ -430,6 +430,15 @@ def _flags(pc_type):
     return flags
 
 
+def _dropped_pointee_qualifiers(source, target):
+    source_flags = _flags(source)
+    present = tuple(flag for flag in ('const', 'volatile') if source_flags.get(flag))
+    if not present:
+        return present
+    target_flags = _flags(target)
+    return tuple(flag for flag in present if not target_flags.get(flag))
+
+
 def integer_value(pc_type, raw):
     """Read an integer constant using its PythoC precision and signedness."""
     from .type_converter import get_base_type
@@ -516,20 +525,46 @@ def enum_runtime_variants(target, args, context=None):
     return tuple(variants)
 
 
+def enum_constructor_error(target, args):
+    """Describe a rejected tag or payload after constructor validation."""
+    from .builtin_entities.types import void
+    prefix = f'{target.get_name()} requires a known valid variant tag and its declared payload'
+    if len(args) not in (1, 2):
+        return f'{prefix}. Expected 1 or 2 arguments, got {len(args)}.'
+    if not _literal_item_relation(args[0], target._tag_type, 'implicit', None):
+        return (f'{prefix}. The first argument must have tag type '
+                f'{format_type(target._tag_type)}, got {format_type(args[0].type_hint)}.')
+    known, tag = _constant_value(args[0])
+    if not known:
+        return f'{prefix}. No variant accepts this argument list for a runtime tag.'
+    found, payload = _enum_payload(target, tag)
+    if not found:
+        return f'{prefix}. Tag {tag!r} does not select a declared variant.'
+    if payload in (None, void):
+        return f'{prefix}. Tag {tag} takes no payload.'
+    if len(args) == 1:
+        return f'{prefix}. Tag {tag} requires a payload of type {format_type(payload)}.'
+    detail = conversion_message(args[1].type_hint, payload, args[1], mode='implicit')
+    return f'{prefix}. Payload for tag {tag}: {detail}'
+
+
 def array_decay_type(source):
     """Array storage qualifiers qualify the decayed pointee, not the pointer."""
-    from .builtin_entities.array import array
     from .builtin_entities.types import ptr
     from .ir_helpers import propagate_qualifiers
     from .type_converter import get_base_type
     base = get_base_type(source)
     if getattr(base, 'element_type', None) is None:
         raise TypeError('Cannot decay array without element_type')
-    dimensions = base.dimensions
-    element = (array[(base.element_type,) + tuple(dimensions[1:])]
-               if len(dimensions) > 1 else base.element_type)
-    element = propagate_qualifiers(source, element)
+    element = propagate_qualifiers(source, _array_item_type(base))
     return ptr[element]
+
+
+def _array_item_type(array_type):
+    if len(array_type.dimensions) == 1:
+        return array_type.element_type
+    from .builtin_entities.array import array
+    return array[(array_type.element_type, *array_type.dimensions[1:])]
 
 
 def _contains_storage(source, flag, _seen=None):
@@ -666,10 +701,7 @@ def _literal_relation(literal, target, mode, context):
                     len(items) == 2 and _literal_item_relation(items[1], payload, mode, context))
         if getattr(target, 'dimensions', None) is not None:
             # The materializer permits omitted trailing elements and fills zeroes.
-            element = target.element_type
-            if len(target.dimensions) > 1:
-                from .builtin_entities.array import array
-                element = array[(element,) + tuple(target.dimensions[1:])]
+            element = _array_item_type(target)
             return (len(items) <= target.dimensions[0]
                     and (len(items) == target.dimensions[0] or can_zero_initialize(element))
                     and all(_literal_item_relation(item, element, mode, context)
@@ -725,22 +757,163 @@ def _literal_relation(literal, target, mode, context):
     return False
 
 
-def conversion_failure(source, target, value):
+def format_type(pc_type, parents=()):
+    """Render type components used by conversion diagnostics."""
+    from .builtin_entities.python_type import PythonType
+    from .builtin_entities.types import void
+    from .literal_protocol import is_mapping_carrier, is_sequence_carrier
+    from .schema_protocol import is_schema_type, iter_schema_fields
+
+    if pc_type is None:
+        return 'void'
+    if isinstance(pc_type, PythonType):
+        literal = pc_type.get_python_object()
+        if is_sequence_carrier(literal):
+            return 'sequence literal'
+        if is_mapping_carrier(literal):
+            return 'mapping literal'
+        if pc_type._is_constant and callable(literal):
+            name = getattr(literal, '__name__', type(literal).__name__)
+            return f'pyconst[{name}]'
+        return pc_type.get_instance_name()
+    if not isinstance(pc_type, type):
+        return str(pc_type)
+    if pc_type in parents:
+        return pc_type.__name__
+    chain = (*parents, pc_type)
+    qualified = getattr(pc_type, 'qualified_type', None)
+    if qualified is not None:
+        return f'{pc_type.get_qualifier_name()}[{format_type(qualified, chain)}]'
+    parameters = getattr(pc_type, 'param_types', None)
+    if parameters is not None:
+        items = [format_type(parameter, chain) for parameter in parameters]
+        for flag, label in (('has_varargs', '*args'), ('has_llvm_varargs', '...'),
+                            ('has_kwargs', '**kwargs')):
+            if getattr(pc_type, flag, False):
+                items.append(label)
+        items.append(format_type(pc_type.return_type, chain))
+        return f'func[{", ".join(items)}] ({pc_type.calling_convention})'
+    if getattr(pc_type, '_is_function_type', False):
+        return 'func'
+    if getattr(pc_type, '_is_pointer', False):
+        pointee = getattr(pc_type, 'pointee_type', None) or void
+        return f'ptr[{format_type(pointee, chain)}]'
+    dimensions = getattr(pc_type, 'dimensions', None)
+    if dimensions is not None:
+        items = [format_type(pc_type.element_type, chain), *map(str, dimensions)]
+        return f'array[{", ".join(items)}]'
+    if getattr(pc_type, 'lanes', None) is not None:
+        return f'simd[{format_type(pc_type.element_type, chain)}, {pc_type.lanes}]'
+    if getattr(pc_type, '_is_refined', False):
+        base = pc_type._base_type or pc_type._struct_type
+        if base is not None:
+            items = [format_type(base, chain)]
+            items.extend(getattr(p, '__name__', repr(p)) for p in pc_type._predicates or ())
+            items.extend(map(repr, pc_type._tags or ()))
+            return f'refined[{", ".join(items)}]'
+    if getattr(pc_type, '_variant_names', None) is not None:
+        variants = []
+        for name, payload in zip(pc_type._variant_names, pc_type._variant_types):
+            tag = pc_type._tag_values[name]
+            field = f'{name}: {format_type(payload, chain)}' if payload not in (None, void) else name
+            variants.append(f'{field} = {tag}')
+        return f'{pc_type.get_name()} ({format_type(pc_type._tag_type, chain)}) {{{", ".join(variants)}}}'
+    if is_schema_type(pc_type):
+        from .type_graph import named_record
+        members = []
+        for _, name, member in iter_schema_fields(pc_type):
+            rendered = format_type(member, chain)
+            members.append(f'{name}: {rendered}' if name else rendered)
+        if named_record(pc_type) is not None:
+            return f'{pc_type.get_name()} {{{", ".join(members)}}}'
+        family = 'union' if getattr(pc_type, '_is_union', False) else 'struct'
+        return f'{family}[{", ".join(members)}]'
+    get_name = getattr(pc_type, 'get_name', None)
+    return get_name() if get_name is not None else pc_type.__name__
+
+
+def _record_conversion_detail(source, target, mode, context, seen):
+    """Find the first aggregate field rejected by the normal relation."""
+    from .schema_protocol import get_schema_field_types, is_schema_type, iter_schema_fields
+    source, target = _unqualified(source), _unqualified(target)
+    if not all(is_schema_type(t) and not getattr(t, '_is_enum', False)
+               and not getattr(t, '_is_union', False) for t in (source, target)):
+        return None
+    pair = id(source), id(target)
+    if pair in seen:
+        return None
+    seen.add(pair)
+    source_fields = get_schema_field_types(source)
+    target_fields = iter_schema_fields(target)
+    if len(source_fields) != len(target_fields):
+        return f'field count differs ({len(source_fields)} vs {len(target_fields)})'
+    for first, (index, name, second) in zip(source_fields, target_fields):
+        compatible = (same_type(first, second, resolver=context) if mode == 'identity'
+                      else can_convert(first, second, mode=mode, context=context))
+        if not compatible:
+            field = repr(name) if name is not None else str(index + 1)
+            detail = _record_conversion_detail(first, second, mode, context, seen)
+            mismatch = detail or f'{format_type(first)} vs {format_type(second)}'
+            return f'field {field}: {mismatch}'
+    return None
+
+
+def conversion_message(source, target, value, *, mode, context=None):
+    """Explain a rejected conversion using the same directional relation."""
+    message = conversion_failure(source, target, value, mode, context)
+    if message is not None:
+        return message
+    operation = 'implicitly convert' if mode == 'implicit' else 'convert'
+    message = f"Cannot {operation} '{format_type(source)}' to '{format_type(target)}'"
+    dropped = _implicit_pointer_qualifier_loss(source, target) if mode == 'implicit' else ()
+    if dropped:
+        message += f": would drop pointee {' and '.join(dropped)}"
+    detail = _record_conversion_detail(source, target, mode, context, set())
+    if detail is not None:
+        message += f': incompatible fields, {detail}'
+    elif (getattr(_unqualified(source), 'pointee_type', None) is not None
+          and getattr(_unqualified(target), 'pointee_type', None) is not None):
+        detail = _record_conversion_detail(_unqualified(source).pointee_type,
+                                           _unqualified(target).pointee_type,
+                                           'identity', context, set())
+        if detail is not None:
+            message += f': pointed-to record {detail}'
+    if mode == 'implicit' and can_convert(source, target, mode='explicit',
+                                          value=value, context=context):
+        message += '. An explicit cast is allowed.'
+        if 'const' in dropped:
+            message += ' Writes still require writable storage.'
+        if 'volatile' in dropped:
+            message += ' Keep volatile accesses for storage that requires them.'
+    return message
+
+
+def _implicit_pointer_qualifier_loss(source, target):
+    target = _unqualified(target)
+    if not getattr(target, '_is_pointer', False) or getattr(target, '_is_function_type', False):
+        return ()
+    source_base = _refinement_chain(_unqualified(source))[1]
+    if getattr(source_base, 'dimensions', None) is not None:
+        source_base = array_decay_type(source)
+    if not getattr(source_base, '_is_pointer', False) or getattr(source_base, '_is_function_type', False):
+        return ()
+    return _dropped_pointee_qualifiers(
+        getattr(source_base, 'pointee_type', None), getattr(target, 'pointee_type', None))
+
+
+def conversion_failure(source, target, value, mode, context):
     """Explain common value-dependent rejections at the semantic boundary."""
     from .builtin_entities.python_type import PythonType
-    from .literal_protocol import (get_mapping_entries, is_mapping_carrier,
-                                   is_sequence_carrier)
-    from .schema_protocol import (get_schema_field_names,
-                                  is_schema_type)
+    from .literal_protocol import (get_mapping_entries, get_sequence_elements,
+                                   is_mapping_carrier, is_sequence_carrier)
+    from .schema_protocol import is_schema_type, iter_schema_fields
     from .builtin_entities.types import void
     if target is void and contains_linear_storage(source):
         return 'Cannot discard a linear value with a cast; use consume()'
     if isinstance(target, PythonType):
         if contains_linear_storage(source):
             return 'Cannot discard a linear value into a compile-time constant'
-        source_name = (source.get_instance_name() if isinstance(source, PythonType)
-                       else getattr(source, '__name__', str(source)))
-        return f"Cannot assign {source_name} to {target.get_instance_name()}"
+        return f'Cannot assign {format_type(source)} to {format_type(target)}'
     if not isinstance(source, PythonType):
         return None
     known, literal = _constant_value(value) if value is not None else (True, source._python_object)
@@ -753,26 +926,66 @@ def conversion_failure(source, target, value):
         actual = _callable_type(literal)
         if actual is not None:
             name = getattr(literal, '__name__', getattr(literal, 'func_name', repr(literal)))
-            return (f"Function '{name}' has signature {actual.get_name()}, "
-                    f"but is being used as {target.get_name()}")
+            return (f"Function '{name}' has signature {format_type(actual)}, "
+                    f"but is being used as {format_type(target)}")
+    target = _unqualified(target)
     if is_mapping_carrier(literal) and is_schema_type(target):
-        names = get_schema_field_names(target)
-        keys = []
-        for key, _item in get_mapping_entries(literal):
+        fields = iter_schema_fields(target)
+        names = [name for _, name, _ in fields]
+        if any(name is None for name in names):
+            return f'Cannot initialize {format_type(target)} by name: some fields are unnamed'
+        mapped = {}
+        for key, item in get_mapping_entries(literal):
             key_known, key = _constant_value(key)
-            if key_known:
-                keys.append(key)
-        for key in keys:
+            if not key_known or type(key) is not str:
+                return 'Cannot initialize fields by name: keys must be constant strings'
             if key not in names:
                 return f"pc_dict key '{key}' is not a field of {target}"
-        missing = [name for name in names if name not in keys]
+            if key in mapped:
+                return f"Cannot initialize field {key!r} twice"
+            mapped[key] = item
+        missing = [name for name in names if name not in mapped]
         if missing:
             return f"pc_dict is missing fields for {target}: {', '.join(missing)}"
+        for _, name, field in fields:
+            if not _literal_item_relation(mapped[name], field, mode, context):
+                return _literal_member_error(mapped[name], field, f'field {name!r}', mode, context)
+    if is_sequence_carrier(literal) and not getattr(target, '_is_enum', False):
+        items = get_sequence_elements(literal)
+        if getattr(target, 'dimensions', None) is not None:
+            element = _array_item_type(target)
+            fields = [(index, None, element)
+                      for index in range(min(target.dimensions[0], len(items) + 1))]
+            label = 'element'
+        elif is_schema_type(target):
+            fields = iter_schema_fields(target)
+            label = 'field'
+        else:
+            return None
+        if len(items) > len(fields):
+            return (f'Cannot initialize {format_type(target)} with {len(items)} values. '
+                    f'Expected at most {len(fields)}.')
+        for index, name, field in fields:
+            subject = f'{label} {name!r}' if name is not None else f'{label} {index + 1}'
+            if index < len(items):
+                if not _literal_item_relation(items[index], field, mode, context):
+                    return _literal_member_error(items[index], field, subject, mode, context)
+            elif not can_zero_initialize(field):
+                return f'Cannot omit initializer for {subject} of type {format_type(field)}'
+    if isinstance(literal, type):
+        return f'Cannot promote type {format_type(literal)} to a value of type {format_type(target)}'
     if (not isinstance(literal, (int, float, bool, str, type(None)))
             and not is_mapping_carrier(literal)
             and not is_sequence_carrier(literal)):
         return f"Cannot promote Python value of type {type(literal).__name__} to PC type"
     return None
+
+
+def _literal_member_error(item, field, subject, mode, context):
+    from .builtin_entities.python_type import PythonType
+    from .valueref import ValueRef
+    source = item.type_hint if isinstance(item, ValueRef) else PythonType.wrap(item, is_constant=True)
+    return f'{conversion_message(source, field, item, mode=mode, context=context)} ({subject})'
 
 
 def can_convert(source, target, *, mode='implicit', value=None, context=None, _seen=None):
@@ -887,9 +1100,7 @@ def can_convert(source, target, *, mode='implicit', value=None, context=None, _s
             return True
         source_pointee = getattr(source, 'pointee_type', None)
         target_pointee = getattr(target, 'pointee_type', None)
-        if any(_flags(source_pointee).get(flag)
-               and not _flags(target_pointee).get(flag)
-               for flag in ('const', 'volatile')):
+        if _dropped_pointee_qualifiers(source_pointee, target_pointee):
             return False
         first = _unqualified(source_pointee)
         second = _unqualified(target_pointee)
@@ -1152,24 +1363,29 @@ def specialization_key(value, _active=None):
         active.remove(id(value))
 
 
-def validate_member_names(names, context):
+def validate_member_names(names, context, node):
     """Validate labels without conflating unnamed fields with named members."""
+    from .logger import logger
     present = [name for name in names or () if name is not None]
     if any(not isinstance(name, str) or not name for name in present):
-        raise TypeError(f'{context}: member names must be nonempty strings')
+        logger.error(f'{context}: member names must be nonempty strings',
+                     node=node, exc_type=TypeError)
     if len(set(present)) != len(present):
-        raise TypeError(f'{context}: duplicate member names')
+        logger.error(f'{context}: duplicate member names', node=node, exc_type=TypeError)
 
 
-def validate_type_argument(value, context, *, allow_void=True, allow_incomplete=False):
+def validate_type_argument(value, context, node, *, allow_void=True, allow_incomplete=False):
     """Admit Python objects that actually implement the PythoC type protocol."""
     from .builtin_entities.base import _is_type_like
     from .builtin_entities.types import void
+    from .logger import logger
     if value is None and allow_incomplete:
         return
     if isinstance(value, str) and value:
         return
     if not _is_type_like(value):
-        raise TypeError(f'{context}: expected a PythoC type or quoted forward reference')
+        logger.error(f'{context}: expected a PythoC type or quoted forward reference',
+                     node=node, exc_type=TypeError)
     if not allow_void and _unqualified(value) is void:
-        raise TypeError(f'{context}: void is not a value element or parameter type')
+        logger.error(f'{context}: void is not a value element or parameter type',
+                     node=node, exc_type=TypeError)

@@ -216,6 +216,8 @@ class TestLinearBasic(DeferredTestCase):
         """Test error when consuming undefined linear token"""
         passed, msg = run_error_undefined_consume()
         self.assertTrue(passed, msg)
+        self.assertIn("Linear token 't' is undefined", msg)
+        self.assertRegex(msg, r'test_linear_basic.py:\d+:\d+: declared here without an owned value')
 
 
 if __name__ == "__main__":

@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
-import inspect
-import textwrap
 import ast
 from ..registry import register_struct_from_class
-from ..builtin_entities.struct import create_struct_type
-from ..logger import set_source_context, logger
-from .class_methods import _INHERIT_EFFECT_SUFFIX
+from ..builtin_entities.struct import _create_struct_type
+from ..logger import logger
+from .class_methods import _INHERIT_EFFECT_SUFFIX, _read_class_source
 
 
 def compile_dynamic_class(
@@ -25,8 +23,7 @@ def compile_dynamic_class(
     Args:
         cls: The class to compile
         suffix: If provided, use this as custom suffix for output files (e.g., "int" for Vector(int))
-        type_factory: Optional factory function to create the type (default: create_struct_type)
-                      For union, pass create_union_type
+        type_factory: Optional type constructor receiving field types and source node.
         captured_symbols: Symbols captured at @compile decoration time. Forwarded to
                       attach_class_methods so that class-body ``def`` methods can resolve
                       names visible at the decoration site (closure variables, the class
@@ -39,7 +36,7 @@ def compile_dynamic_class(
     """
     # Default to struct type factory
     if type_factory is None:
-        type_factory = create_struct_type
+        type_factory = _create_struct_type
     from ..utils import normalize_suffix
     
     # Normalize suffix (handle tuple/list of type parameters)
@@ -49,14 +46,10 @@ def compile_dynamic_class(
     original_cls_name = cls.__name__
     cls_name = cls.__name__
     
-    # Set source context for error messages
-    try:
-        from ..utils.inspect_utils import get_object_sourcelines
-        _, start_line = get_object_sourcelines(cls)
-        source_file = inspect.getfile(cls)
-        set_source_context(source_file, start_line - 1)
-    except (OSError, TypeError):
-        pass
+    class_ast, diagnostic_source = _read_class_source(cls)
+    class_body = class_ast.body if class_ast is not None else []
+    field_nodes = {stmt.target.id: stmt.annotation for stmt in class_body
+                   if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)}
     
     # === UNIFIED STRUCT COMPILATION PATH ===
     # This handles ALL cases: overload/non-overload, dynamic/static, with/without source
@@ -113,7 +106,10 @@ def compile_dynamic_class(
     for fname, ftype in cls._struct_fields:
         if isinstance(ftype, str):
             # Delay the whole expression if a dependency is not defined yet.
-            resolved_type = type_resolver.parse_annotation(ftype, defer_unresolved=True)
+            field_node = field_nodes.get(fname)
+            with logger.at_node(field_node, source=diagnostic_source):
+                resolved_type = type_resolver.resolve_annotation(
+                    ftype, field_node, defer_unresolved=True)
         else:
             resolved_type = ftype
         # Formed pointers can still carry a quoted self-reference. Bind it
@@ -135,16 +131,21 @@ def compile_dynamic_class(
         if getattr(ftype, '_is_param', False) or (
             isinstance(ftype, type) and getattr(ftype, '_is_param', False)
         ):
-            logger.error(
-                f"'param' cannot be used as a struct field type ('{fname}')",
-                exc_type=TypeError,
-            )
-    unified_type = type_factory(
-        parsed_field_types,
-        field_names,
-        python_class=cls,
-        layout_config=layout_config,
-    )
+            field_node = field_nodes.get(fname, class_ast)
+            with logger.at_node(field_node, source=diagnostic_source):
+                logger.error(
+                    f"'param' cannot be used as a struct field type ('{fname}')",
+                    node=field_node,
+                    exc_type=TypeError,
+                )
+    with logger.at_node(class_ast, source=diagnostic_source):
+        unified_type = type_factory(
+            parsed_field_types,
+            class_ast,
+            field_names,
+            python_class=cls,
+            layout_config=layout_config,
+        )
     
     # Keep references scoped until their first actual lowering. Name
     # notifications must not freeze an intermediate registry placeholder.
@@ -217,6 +218,7 @@ def compile_dynamic_class(
         class_compile_suffix=suffix,
         captured_symbols=captured_symbols,
         effect_suffix=effect_suffix,
+        class_body=class_body,
     )
 
     return cls

@@ -48,7 +48,8 @@ from ..build import (
     get_output_manager,
     flush_all_pending_outputs,
 )
-from ..logger import logger, set_source_context
+from ..logger import logger
+from ..source import SourceLocation, set_ast_source
 
 
 DEFAULT_EFFECT_KEY = "__default__"
@@ -188,13 +189,14 @@ def _resolve_annotations_with_params(raw_annotations, user_globals, param_values
     for name, ann_node in raw_annotations.items():
         if name in parametric_names:
             continue
-        resolved[name] = resolver.parse_annotation(ann_node)
+        resolved[name] = resolver.resolve_annotation(ann_node, ann_node)
     return resolved
 
 
 def _compile_parametric_specialization(
     factory_wrapper,
     param_values,
+    node,
 ):
     """Compile one specialization of a parametric function.
 
@@ -207,9 +209,8 @@ def _compile_parametric_specialization(
 
     param_names = factory_wrapper._parametric_param_names
     if len(param_names) != len(param_values):
-        raise TypeError(
-            f"expected {len(param_names)} parametric arguments, got {len(param_values)}"
-        )
+        logger.error(f'expected {len(param_names)} parametric arguments, got {len(param_values)}',
+                     node=node, exc_type=TypeError)
 
     param_values_by_name = dict(zip(param_names, param_values))
 
@@ -231,12 +232,14 @@ def _compile_parametric_specialization(
 
     # Resolve annotations with parametric names in scope.
     raw_annotations = factory_wrapper._raw_annotations
-    resolved = _resolve_annotations_with_params(
-        raw_annotations,
-        factory_wrapper._original_user_globals,
-        param_values_by_name,
-        set(param_names),
-    )
+    source = (factory_wrapper._source_file, factory_wrapper._start_line - 1)
+    with logger.at_node(spec_ast, source=source):
+        resolved = _resolve_annotations_with_params(
+            raw_annotations,
+            factory_wrapper._original_user_globals,
+            param_values_by_name,
+            set(param_names),
+        )
     return_type = resolved.get('return')
     param_types = {
         name: resolved[name]
@@ -264,6 +267,7 @@ def _compile_parametric_specialization(
         from ..ast_visitor.yield_transform import create_yield_iterator_wrapper
 
         inlined_ast = _substitute_parametric_names_in_ast(spec_ast, param_values_by_name)
+        set_ast_source(inlined_ast, source)
         try:
             source_code = ast.unparse(inlined_ast)
         except Exception:
@@ -330,19 +334,23 @@ def _create_parametric_factory_wrapper(
 
     @wraps(func)
     def wrapper(*args, **kwargs):
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        if kwargs:
+            logger.error(f'{func.__name__}() expects positional arguments for specialization',
+                         node=node, exc_type=TypeError)
         if len(args) == n_parametric and n_parametric < len(param_names):
             # Partial application: bind compile-time params and return the
             # specialized wrapper; concrete arguments will be supplied later.
-            return wrapper._factory_func(*args)
+            return specialize(args, node)
 
         if len(args) != len(param_names):
-            raise TypeError(
+            logger.error(
                 f"{func.__name__}() takes {len(param_names)} positional arguments "
-                f"but {len(args)} were given"
+                f"but {len(args)} were given", node=node, exc_type=TypeError,
             )
         param_values = [args[i] for i in parametric_indices]
         concrete_args = [args[i] for i in concrete_indices]
-        specialized = wrapper._factory_func(*param_values)
+        specialized = specialize(param_values, node)
         return specialized(*concrete_args)
 
     wrapper._is_compiled = True
@@ -367,25 +375,25 @@ def _create_parametric_factory_wrapper(
     _specialization_cache = {}
     _specialization_cache_lock = threading.RLock()
 
-    def factory(*param_values):
+    def specialize(param_values, node):
         key = tuple(param_values)
         with _specialization_cache_lock:
-            if key in _specialization_cache:
-                return _specialization_cache[key]
+            try:
+                specialized = _specialization_cache.get(key)
+            except TypeError as error:
+                names = ', '.join(parametric_param_names)
+                logger.error(f'{func.__name__}() requires hashable compile-time arguments '
+                             f'for {names}. {error}', node=node, exc_type=TypeError)
+            if specialized is not None:
+                return specialized
 
-            # Validate that parametric arguments are hashable (needed for suffix/cache).
-            for v in param_values:
-                try:
-                    hash(v)
-                except TypeError:
-                    raise TypeError(
-                        f"parametric argument {v!r} is not hashable and cannot be used "
-                        f"as a compile-time parameter"
-                    )
-
-            specialized = _compile_parametric_specialization(wrapper, param_values)
+            specialized = _compile_parametric_specialization(wrapper, param_values, node)
             _specialization_cache[key] = specialized
             return specialized
+
+    def factory(*param_values):
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        return specialize(param_values, node)
 
     wrapper._factory_func = factory
 
@@ -409,7 +417,7 @@ def _create_parametric_factory_wrapper(
                 )
             param_values.append(arg.get_python_value())
 
-        specialized = wrapper._factory_func(*param_values)
+        specialized = specialize(param_values, node)
 
         # Yield placeholders cannot be lowered like normal compiled wrappers;
         # they must return inline-expansion metadata to the for-loop visitor.
@@ -828,7 +836,10 @@ def compile(func_or_class=None, suffix=None, attrs=None,
     # Keep the requested value before validate_func_linkage collapses
     # 'external' to None for functions.
     static_linkage = linkage if linkage else 'weak_odr'
-    linkage = validate_func_linkage(linkage, func_name)
+    if linkage is not None:
+        call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        with logger.at_node(call_site):
+            linkage = validate_func_linkage(linkage, None, func_name)
     
     # Get effect_suffix from context if not explicitly provided
     effect_suffix = resolve_effect_suffix(
@@ -910,15 +921,21 @@ def _compile_impl(func_or_class,
     
     # Get function start line for accurate error messages
     start_line = get_function_start_line(func)
-    set_source_context(source_file, start_line - 1)
+    diagnostic_source = (source_file, start_line - 1)
 
     func_source = source_code
     try:
         func_ast = ast.parse(func_source).body[0]
-    except (SyntaxError, IndexError) as e:
-        logger.error(f"Failed to parse function {func.__name__}: {e}")
+    except SyntaxError as error:
+        node = SourceLocation(source_file, start_line - 1 + error.lineno, error.offset - 1)
+        logger.error(f'Failed to parse function {func.__name__}: {error.msg}',
+                     node=node, exc_type=SyntaxError)
+    except IndexError:
+        logger.error(f'No source found for function {func.__name__}',
+                     node=SourceLocation(source_file, start_line), exc_type=ValueError)
     if not isinstance(func_ast, ast.FunctionDef):
-        logger.error(f"Expected FunctionDef, got {type(func_ast).__name__}", node=func_ast)
+        with logger.at_node(func_ast, source=diagnostic_source):
+            logger.error(f"Expected FunctionDef, got {type(func_ast).__name__}", node=func_ast)
 
     from ..call_normalization import native_positional_parameters
 
@@ -977,53 +994,55 @@ def _compile_impl(func_or_class,
     # at decoration time.  This must happen before the yield check so that
     # parametric generator functions are also handled by the factory path.
     if raw_parametric_names:
-        param_names = [arg.arg for arg in native_positional_parameters(func_ast)]
-        # Phase 1 restrictions.
-        if func_ast.args.vararg is not None and func_ast.args.vararg.arg in raw_parametric_names:
-            logger.error(
-                f"parametric *args is not supported in Phase 1: {func_ast.args.vararg.arg}",
-                node=func_ast, exc_type=NotImplementedError,
-            )
-        if func_ast.args.kwarg is not None and func_ast.args.kwarg.arg in raw_parametric_names:
-            logger.error(
-                f"parametric **kwargs is not supported in Phase 1: {func_ast.args.kwarg.arg}",
-                node=func_ast, exc_type=NotImplementedError,
-            )
-
-        n_args = len(func_ast.args.args)
-        n_defaults = len(func_ast.args.defaults)
-        default_start = n_args - n_defaults
-        for i, arg in enumerate(func_ast.args.args):
-            if arg.arg in raw_parametric_names and i >= default_start:
+        with logger.at_node(func_ast, source=diagnostic_source):
+            param_names = [arg.arg for arg in native_positional_parameters(func_ast)]
+            # Phase 1 restrictions.
+            if func_ast.args.vararg is not None and func_ast.args.vararg.arg in raw_parametric_names:
                 logger.error(
-                    f"parametric parameter '{arg.arg}' cannot have a default value",
-                    node=arg, exc_type=TypeError,
+                    f"parametric *args is not supported in Phase 1: {func_ast.args.vararg.arg}",
+                    node=func_ast.args.vararg, exc_type=NotImplementedError,
+                )
+            if func_ast.args.kwarg is not None and func_ast.args.kwarg.arg in raw_parametric_names:
+                logger.error(
+                    f"parametric **kwargs is not supported in Phase 1: {func_ast.args.kwarg.arg}",
+                    node=func_ast.args.kwarg, exc_type=NotImplementedError,
                 )
 
-        # Preserve the original parameter order; ``list(raw_parametric_names)``
-        # would be unordered because it is a set.
-        parametric_param_names = [name for name in param_names if name in raw_parametric_names]
+            n_args = len(func_ast.args.args)
+            n_defaults = len(func_ast.args.defaults)
+            default_start = n_args - n_defaults
+            for i, arg in enumerate(func_ast.args.args):
+                if arg.arg in raw_parametric_names and i >= default_start:
+                    logger.error(
+                        f"parametric parameter '{arg.arg}' cannot have a default value",
+                        node=arg, exc_type=TypeError,
+                    )
 
-        return _create_parametric_factory_wrapper(
-            func=func,
-            func_ast=func_ast,
-            source_file=source_file,
-            source_code=func_source,
-            start_line=start_line,
-            user_globals=user_globals,
-            param_names=param_names,
-            parametric_param_names=parametric_param_names,
-            fn_attrs=fn_attrs,
-            compile_suffix=compile_suffix,
-            effect_suffix=effect_suffix,
-            linkage=linkage,
-        )
+            # Preserve the original parameter order; ``list(raw_parametric_names)``
+            # would be unordered because it is a set.
+            parametric_param_names = [name for name in param_names if name in raw_parametric_names]
+
+            return _create_parametric_factory_wrapper(
+                func=func,
+                func_ast=func_ast,
+                source_file=source_file,
+                source_code=func_source,
+                start_line=start_line,
+                user_globals=user_globals,
+                param_names=param_names,
+                parametric_param_names=parametric_param_names,
+                fn_attrs=fn_attrs,
+                compile_suffix=compile_suffix,
+                effect_suffix=effect_suffix,
+                linkage=linkage,
+            )
 
     # Check if this is a yield-based generator function
     from ..ast_visitor.yield_transform import analyze_yield_function
     yield_analyzer = analyze_yield_function(func_ast)
 
     if yield_analyzer:
+        set_ast_source(func_ast, diagnostic_source)
         from .visible import get_all_accessible_symbols
         transform_globals = get_all_accessible_symbols(
             func,
@@ -1040,74 +1059,75 @@ def _compile_impl(func_or_class,
         # Keep the placeholder's normalized call signature and AST together.
         return wrapper
 
-    param_names = [arg.arg for arg in native_positional_parameters(func_ast)]
+    with logger.at_node(func_ast, source=diagnostic_source):
+        param_names = [arg.arg for arg in native_positional_parameters(func_ast)]
 
-    from ..type_resolver import TypeResolver
-    from ..registry import FunctionInfo
+        from ..type_resolver import TypeResolver
+        from ..registry import FunctionInfo
 
-    type_resolver = TypeResolver(compiler.module.context, user_globals=user_globals)
-    return_type_hint = None
-    param_type_hints = {}
+        type_resolver = TypeResolver(compiler.module.context, user_globals=user_globals)
+        return_type_hint = None
+        param_type_hints = {}
 
-    if hasattr(func, '__annotations__') and func.__annotations__:
-        from ..builtin_entities import BuiltinEntity
-        from .annotation_resolver import resolve_annotations_dict
+        if hasattr(func, '__annotations__') and func.__annotations__:
+            from ..builtin_entities import BuiltinEntity
+            from .annotation_resolver import resolve_annotations_dict
 
-        resolved_annotations = resolve_annotations_dict(
-            func.__annotations__, type_resolver
-        )
+            resolved_annotations = resolve_annotations_dict(
+                func.__annotations__, type_resolver, _extract_raw_annotations(func_ast)
+            )
         
-        for param_name, resolved_type in resolved_annotations.items():
-            if param_name == 'return':
-                if isinstance(resolved_type, type) and issubclass(resolved_type, BuiltinEntity):
-                    if resolved_type.can_be_type():
+            for param_name, resolved_type in resolved_annotations.items():
+                if param_name == 'return':
+                    if isinstance(resolved_type, type) and issubclass(resolved_type, BuiltinEntity):
+                        if resolved_type.can_be_type():
+                            return_type_hint = resolved_type
+                    elif isinstance(resolved_type, str):
+                        pass
+                    else:
                         return_type_hint = resolved_type
-                elif isinstance(resolved_type, str):
-                    pass
                 else:
-                    return_type_hint = resolved_type
-            else:
-                if isinstance(resolved_type, type) and issubclass(resolved_type, BuiltinEntity):
-                    if resolved_type.can_be_type():
+                    if isinstance(resolved_type, type) and issubclass(resolved_type, BuiltinEntity):
+                        if resolved_type.can_be_type():
+                            param_type_hints[param_name] = resolved_type
+                    elif not isinstance(resolved_type, str):
                         param_type_hints[param_name] = resolved_type
-                elif not isinstance(resolved_type, str):
-                    param_type_hints[param_name] = resolved_type
-        if return_type_hint is None:
-            from ..builtin_entities.types import void
-            return_type_hint = void
-    else:
-        if func_ast.returns:
-            return_type_hint = type_resolver.parse_annotation(func_ast.returns)
+            if return_type_hint is None:
+                from ..builtin_entities.types import void
+                return_type_hint = void
         else:
-            from ..builtin_entities.types import void
-            return_type_hint = void
-        for arg in func_ast.args.args:
-            if arg.annotation:
-                param_type = type_resolver.parse_annotation(arg.annotation)
-                if param_type:
-                    param_type_hints[arg.arg] = param_type
-    from ..ast_visitor.varargs import resolve_varargs, resolve_kwargs
-    resolved_varargs = resolve_varargs(func_ast, type_resolver)
-    varargs_name = resolved_varargs.param_name
-    if resolved_varargs.is_typed and varargs_name in param_type_hints:
-        del param_type_hints[varargs_name]
+            if func_ast.returns:
+                return_type_hint = type_resolver.resolve_annotation(func_ast.returns, func_ast.returns)
+            else:
+                from ..builtin_entities.types import void
+                return_type_hint = void
+            for arg in func_ast.args.args:
+                if arg.annotation:
+                    param_type = type_resolver.resolve_annotation(arg.annotation, arg.annotation)
+                    if param_type:
+                        param_type_hints[arg.arg] = param_type
+        from ..ast_visitor.varargs import resolve_varargs, resolve_kwargs
+        resolved_varargs = resolve_varargs(func_ast, type_resolver)
+        varargs_name = resolved_varargs.param_name
+        if resolved_varargs.is_typed and varargs_name in param_type_hints:
+            del param_type_hints[varargs_name]
 
-    if resolved_varargs.is_typed:
-        # *args: T -> single parameter of type T (symmetric with **kwargs: T)
-        param_names.append(varargs_name)
-        param_type_hints[varargs_name] = resolved_varargs.parsed_type
+        if resolved_varargs.is_typed:
+            # *args: T -> single parameter of type T (symmetric with **kwargs: T)
+            param_names.append(varargs_name)
+            param_type_hints[varargs_name] = resolved_varargs.parsed_type
 
-    # **kwargs: T -> add a single parameter of type T
-    resolved_kwargs = resolve_kwargs(func_ast, type_resolver)
-    if resolved_kwargs.is_typed:
-        param_names.append(resolved_kwargs.param_name)
-        param_type_hints[resolved_kwargs.param_name] = resolved_kwargs.parsed_type
+        # **kwargs: T -> add a single parameter of type T
+        resolved_kwargs = resolve_kwargs(func_ast, type_resolver)
+        if resolved_kwargs.is_typed:
+            param_names.append(resolved_kwargs.param_name)
+            param_type_hints[resolved_kwargs.param_name] = resolved_kwargs.parsed_type
 
-    if _is_parametric_type(return_type_hint):
-        logger.error(
-            "'param' cannot be used as a function return type",
-            node=func_ast.returns, exc_type=TypeError,
-        )
+        if _is_parametric_type(return_type_hint):
+            logger.error(
+                "'param' cannot be used as a function return type",
+                node=func_ast.returns, exc_type=TypeError,
+            )
 
     # Build mangled name: name_{compile_suffix}_{effect_suffix}
     # compile_suffix comes first, then effect_suffix
@@ -1128,9 +1148,6 @@ def _compile_impl(func_or_class,
         func_ast.name = mangled_name
         actual_func_name = mangled_name
 
-    from ..logger import set_source_file
-    set_source_file(source_file)
-    
     # Determine grouping key and output paths
     # Design: group_key = (source_file, scope, compile_suffix, effect_suffix)
     output_manager = session.output_manager
@@ -1199,6 +1216,8 @@ def _compile_impl(func_or_class,
     func_info = FunctionInfo(
         name=func.__name__,
         source_file=source_file,
+        ast_node=func_ast,
+        source_start_line=start_line,
         source_code=func_source,
         return_type_hint=return_type_hint,
         param_type_hints=param_type_hints,
@@ -1220,10 +1239,11 @@ def _compile_impl(func_or_class,
     # --- Registration-phase cache: if the same group was already compiled
     # and its object file is still up-to-date, reuse the existing wrapper
     # instead of rebuilding AST / binding_state / compile_callback.
-    existing_wrapper = _try_reuse_cached_wrapper(
-        output_manager, group_key, func, wrapper,
-        compile_suffix, effect_suffix, registration_identity,
-    )
+    with logger.at_node(func_ast, source=diagnostic_source):
+        existing_wrapper = _try_reuse_cached_wrapper(
+            output_manager, group_key, func, wrapper,
+            compile_suffix, effect_suffix, registration_identity, node=func_ast,
+        )
     if existing_wrapper is not None:
         try_bind_installed_adapter(existing_wrapper)
         return existing_wrapper
@@ -1273,8 +1293,7 @@ def _compile_impl(func_or_class,
     wrapper._binding = binding_state
     wrapper._state = binding_state  # Compatibility alias; `_binding` is canonical.
 
-    compile_callback = _make_compile_callback(
-        wrapper, func_ast, func_source, param_type_hints, return_type_hint, start_line)
+    compile_callback = _make_compile_callback(wrapper, func_info)
 
     def specialize(effect_key, scope, override_names):
         st = wrapper._binding
@@ -1338,7 +1357,7 @@ def _compile_impl(func_or_class,
     return wrapper
 
 
-def _make_compile_callback(wrapper, syntax, source, param_types, return_type, start_line):
+def _make_compile_callback(wrapper, func_info):
     """Run source and generated definitions through one lowering lifecycle."""
     from ..effect import restore_effect_context, push_compilation_context, pop_compilation_context
 
@@ -1348,16 +1367,14 @@ def _make_compile_callback(wrapper, syntax, source, param_types, return_type, st
             push_compilation_context(binding)
         try:
             with restore_effect_context(binding.captured_effect_context):
-                set_source_context(binding.source_file, start_line - 1)
                 compiler.compile_function_from_ast(
-                    syntax, source, reset_module=False,
-                    param_type_hints=param_types, return_type_hint=return_type,
+                    func_info.ast_node, func_info.source_code, reset_module=False,
+                    param_type_hints=func_info.param_type_hints,
+                    return_type_hint=func_info.return_type_hint,
                     user_globals=binding.compilation_globals,
                     group_key=binding.group_key, func_state=binding,
-                    source_start_line=start_line, original_name=binding.original_name)
-        except Exception as error:
-            logger.remember_error_location(error, syntax)
-            raise
+                    source_start_line=func_info.source_start_line,
+                    original_name=binding.original_name)
         finally:
             if binding.effect_suffix:
                 pop_compilation_context()
@@ -1409,7 +1426,7 @@ def _clone_binding_to_wrapper(binding, existing, wrapper):
 
 def _try_reuse_cached_wrapper(
     output_manager, group_key, func, wrapper,
-    compile_suffix, effect_suffix, registration_identity,
+    compile_suffix, effect_suffix, registration_identity, node,
 ):
     """Try to reuse an existing wrapper from a previously-registered group.
 
@@ -1457,9 +1474,10 @@ def _try_reuse_cached_wrapper(
     # for every decorated function.
     existing, binding = _find_match()
     if existing is not None and binding.registration_identity != registration_identity:
-        raise TypeError(
+        logger.error(
             f"Function specialization collision for '{func.__name__}': "
-            'signature, body or compile-time inputs differ; use distinct suffixes')
+            'signature, body or compile-time inputs differ; use distinct suffixes',
+            node=node, exc_type=TypeError)
     if existing is not None and output_manager._group_object_cache_hit(group_key, group):
         _clone_binding_to_wrapper(binding, existing, wrapper)
         # We still record type-layout dependencies from the current globals so

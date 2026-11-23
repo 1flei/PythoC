@@ -12,10 +12,12 @@ Design principles:
 - No methods for anonymous structs (methods only for @compile classes)
 """
 
+import sys
 import threading
 
 from llvmlite import ir
 from ..logger import logger
+from ..source import SourceLocation
 from typing import List, Tuple, Optional, Any, Dict
 from .composite_base import CompositeType
 from .base import BuiltinEntityMeta
@@ -194,12 +196,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     def _build_llvm_field_map(cls, module_context=None) -> Dict[int, int]:
         """Build mapping from PC field index to LLVM field index.
         
-        This is needed because zero-sized fields (like pyconst) could be skipped
-        in LLVM struct layout but still exist in PC field list.
-        
-        Note: Currently all types have LLVM representation (pyconst and linear
-        use empty struct {}), so this is effectively a 1:1 mapping. The logic
-        is kept for future extensibility.
+        Zero-sized types still have LLVM field indices when lowered as
+        empty structs.
         
         Args:
             module_context: Optional module context for types that need it
@@ -207,7 +205,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         Returns:
             Dict[int, int]: PC field index -> LLVM field index
-                            -1 means zero-sized field (no LLVM representation)
+                            -1 means the field has no LLVM representation
         """
         cls._ensure_field_types_resolved()
         
@@ -241,15 +239,14 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     def _get_llvm_field_index(cls, pc_field_index: int, module_context=None) -> int:
         """Get LLVM field index from PC field index.
 
-        The field map only depends on which fields are zero-sized (module
-        independent), so it is materialized once and then frozen.
+        The field map is materialized once and then frozen.
 
         Args:
             pc_field_index: PC field index (0-based)
             module_context: Optional module context for building field map
 
         Returns:
-            LLVM field index, or -1 for zero-sized fields
+            LLVM field index, or -1 for fields without an LLVM representation
         """
         if cls._llvm_field_map is None:
             with _llvm_type_lock:
@@ -307,7 +304,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             logger.error(f"Cannot create LiteralStructType with unresolved field types: {cls._field_types}",
                         node=node, exc_type=TypeError)
         
-        # Build LLVM field types, filtering out zero-sized fields (pyconst)
+        # Keep zero-sized fields in the record so they have ordinary field indices.
         llvm_field_types = []
         for field_type in cls._field_types:
             if hasattr(field_type, 'get_llvm_type'):
@@ -319,7 +316,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                         llvm_type = field_type.get_llvm_type(module_context)
                     else:
                         llvm_type = field_type.get_llvm_type()
-                    # Skip None (zero-sized fields like pyconst)
                     if llvm_type is not None:
                         llvm_field_types.append(llvm_type)
                 except (ValueError, TypeError):
@@ -387,7 +383,8 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             node: Original ast.Call node
         """
         if args:
-            logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given)",
+            logger.error(f"{cls.get_name()}() takes no arguments ({len(args)} given). "
+                         "Use a typed initializer to supply field values.",
                          node=node, exc_type=TypeError)
         from ..type_descriptor import contains_refinement_storage
         if contains_refinement_storage(cls):
@@ -402,7 +399,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         """Handle attribute access on struct instances: point.x
         
         Supports both named field access and methods (for @compile classes).
-        Special handling for zero-sized fields (pyconst).
         
         Args:
             visitor: AST visitor
@@ -449,7 +445,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             logger.error(f"struct '{cls.get_name()}' has no field named '{attr_name}'",
                         node=node, exc_type=AttributeError)
 
-        field_index = cls.get_field_index(attr_name)
+        field_index = cls._get_field_index(attr_name, node)
         field_type = cls._field_types[field_index]
 
         # Propagate qualifiers from struct type to field type
@@ -459,11 +455,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         from ..literal_protocol import project_tracking_metadata
         result_var_name, result_linear_path = project_tracking_metadata(base, field_index)
-
-        # Check if field is zero-sized (pyconst)
-        if hasattr(field_type, 'handle_field_access'):
-            # Delegate to field type's handler (for pyconst)
-            return field_type.handle_field_access(visitor, base, field_index, attr_name, node)
 
         from ..target_layout import NATURAL_LAYOUT
         layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
@@ -479,12 +470,10 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
                 linear_path=result_linear_path,
             )
         
-        # Get LLVM field index (may differ from PC index due to zero-sized fields)
         module_context = visitor.module.context if visitor.module else None
         llvm_field_index = cls._get_llvm_field_index(field_index, module_context)
         if llvm_field_index == -1:
-            # This shouldn't happen if handle_field_access is implemented correctly
-            logger.error(f"Zero-sized field '{attr_name}' has no LLVM representation",
+            logger.error(f"Field '{attr_name}' has no LLVM representation",
                         node=node, exc_type=TypeError)
         
         # Priority 1: Check if base has an address (for lvalue support)
@@ -548,7 +537,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         cls._ensure_field_types_resolved()
         
         # Extract constant index from pre-evaluated index ValueRef
-        index_val = extract_constant_index(index, "struct subscript")
+        index_val = extract_constant_index(index, node, "struct subscript")
         
         if index_val < 0 or index_val >= len(cls._field_types):
             logger.error(f"struct index {index_val} out of range (0-{len(cls._field_types)-1})",
@@ -558,12 +547,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         from ..ir_helpers import propagate_qualifiers
         field_type = propagate_qualifiers(base.type_hint, field_type)
         
-        # Check if field is zero-sized (pyconst)
-        if hasattr(field_type, 'handle_field_access'):
-            # Delegate to field type's handler (for pyconst)
-            field_name = cls._field_names[index_val] if cls._field_names and index_val < len(cls._field_names) else f"[{index_val}]"
-            return field_type.handle_field_access(visitor, base, index_val, field_name, node)
-
         from ..target_layout import NATURAL_LAYOUT
         layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
         if not layout_config.is_natural:
@@ -588,7 +571,7 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         module_context = visitor.module.context if visitor.module else None
         llvm_index_val = cls._get_llvm_field_index(index_val, module_context)
         if llvm_index_val == -1:
-            logger.error(f"Zero-sized field [{index_val}] has no LLVM representation",
+            logger.error(f"Field [{index_val}] has no LLVM representation",
                         node=node, exc_type=TypeError)
         
         # Priority: if base has address, use GEP for lvalue support.
@@ -663,6 +646,16 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
                        python_class: Optional[type] = None,
                        elements: Optional[List[Any]] = None,
                        layout_config=None) -> type:
+    """Build a struct from Python type metadata."""
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    return _create_struct_type(
+        field_types, node, field_names, python_class, elements, layout_config)
+
+
+def _create_struct_type(field_types: List[Any], node, field_names: Optional[List[str]] = None,
+                       python_class: Optional[type] = None,
+                       elements: Optional[List[Any]] = None,
+                       layout_config=None) -> type:
     """Create a struct type without global caching
     
     Args:
@@ -675,9 +668,9 @@ def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] 
         StructType subclass
     """
     from ..type_descriptor import validate_member_names, validate_type_argument
-    validate_member_names(field_names, 'struct')
+    validate_member_names(field_names, 'struct', node=node)
     for field in field_types:
-        validate_type_argument(field, 'struct field', allow_incomplete=True, allow_void=False)
+        validate_type_argument(field, 'struct field', allow_incomplete=True, allow_void=False, node=node)
     from ..target_layout import NATURAL_LAYOUT
     layout_config = layout_config or NATURAL_LAYOUT
 
@@ -760,11 +753,11 @@ class struct(StructType):
     @classmethod
     def __class_getitem__(cls, item):
         """Support struct[...] subscript syntax"""
-        normalized = cls.normalize_subscript_items(item)
-        return cls.handle_type_subscript(normalized)
+        normalized = cls.normalize_subscript_items(item, node=None)
+        return cls.handle_type_subscript(normalized, node=None)
     
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript with normalized items
         
         Items are already normalized to Tuple[Tuple[Optional[str], type], ...] format.
@@ -780,7 +773,7 @@ class struct(StructType):
         import builtins
         
         if not isinstance(items, builtins.tuple):
-            logger.error("struct subscript must be a tuple", node=None, exc_type=TypeError)
+            logger.error("struct subscript must be a tuple", node=node, exc_type=TypeError)
         
         # Extract field types and names from normalized format
         field_types = []
@@ -796,7 +789,7 @@ class struct(StructType):
         if not has_any_name:
             field_names = None
         
-        return create_struct_type(field_types, field_names)
+        return _create_struct_type(field_types, node, field_names)
 
 
 __all__ = ['struct', 'StructType', 'create_struct_type']

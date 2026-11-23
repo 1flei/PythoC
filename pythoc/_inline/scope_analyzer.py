@@ -16,6 +16,8 @@ import ast
 from typing import Set, Tuple, List, Optional, Any, Dict
 from dataclasses import dataclass
 
+from ..utils.ast_targets import iter_bound_names
+
 
 @dataclass
 class ScopeContext:
@@ -262,14 +264,7 @@ class AssignmentCollector(ast.NodeVisitor):
     def _collect_names(self, node: ast.expr, annotated: bool):
         """Recursively collect names from target expression"""
         target_set = self.annotated_assigned if annotated else self.unannotated_assigned
-        if isinstance(node, ast.Name):
-            target_set.add(node.id)
-        elif isinstance(node, (ast.Tuple, ast.List)):
-            for elt in node.elts:
-                self._collect_names(elt, annotated)
-        elif isinstance(node, ast.Starred):
-            self._collect_names(node.value, annotated)
-        # Ignore Subscript, Attribute (not creating new variables)
+        target_set.update(iter_bound_names(node))
 
 
 class ReferenceCollector(ast.NodeVisitor):

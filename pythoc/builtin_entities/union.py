@@ -1,8 +1,11 @@
+import sys
+
 from llvmlite import ir
 from typing import List, Optional, Any
 from .composite_base import CompositeType
 from ..valueref import extract_constant_index
 from ..logger import logger
+from ..source import SourceLocation
 
 
 class UnionType(CompositeType):
@@ -146,7 +149,7 @@ class UnionType(CompositeType):
         
         # VALUE SUBSCRIPT: u[0] - field access by index
         # Extract constant index from pre-evaluated index ValueRef
-        index_val = extract_constant_index(index, "union subscript")
+        index_val = extract_constant_index(index, node, "union subscript")
         
         if index_val < 0 or index_val >= len(cls._field_types):
             logger.error(f"union index {index_val} out of range (0-{len(cls._field_types)-1})",
@@ -234,7 +237,7 @@ class UnionType(CompositeType):
                 return wrap_class_method_as_python_value(method, node)
             logger.error(f"union has no field named '{attr_name}'", node=node, exc_type=AttributeError)
         
-        field_index = cls.get_field_index(attr_name)
+        field_index = cls._get_field_index(attr_name, node)
         field_type = cls._field_types[field_index]
         
         # Propagate qualifiers from union type to field type
@@ -280,6 +283,18 @@ def create_union_type(
     python_class: Optional[type] = None,
     layout_config=None,
 ) -> type:
+    """Build a union from Python type metadata."""
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    return _create_union_type(field_types, node, field_names, python_class, layout_config)
+
+
+def _create_union_type(
+    field_types: List[Any],
+    node,
+    field_names: Optional[List[str]] = None,
+    python_class: Optional[type] = None,
+    layout_config=None,
+) -> type:
     """Create a union type without global caching
     
     Args:
@@ -291,9 +306,9 @@ def create_union_type(
         UnionType subclass
     """
     from ..type_descriptor import validate_member_names, validate_type_argument
-    validate_member_names(field_names, 'union')
+    validate_member_names(field_names, 'union', node=node)
     for field in field_types:
-        validate_type_argument(field, 'union field', allow_incomplete=True)
+        validate_type_argument(field, 'union field', allow_incomplete=True, node=node)
     from ..target_layout import NATURAL_LAYOUT
     layout_config = layout_config or NATURAL_LAYOUT
 
@@ -417,11 +432,11 @@ class union(UnionType):
     @classmethod
     def __class_getitem__(cls, item):
         """Support union[...] subscript syntax"""
-        normalized = cls.normalize_subscript_items(item)
-        return cls.handle_type_subscript(normalized)
+        normalized = cls.normalize_subscript_items(item, node=None)
+        return cls.handle_type_subscript(normalized, node=None)
     
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript with normalized items
         
         Items are normalized to Tuple[Tuple[Optional[str], type], ...]
@@ -438,7 +453,7 @@ class union(UnionType):
             items = (items,)
         
         if len(items) == 0:
-            logger.error("union requires at least one field", node=None, exc_type=TypeError)
+            logger.error("union requires at least one field", node=node, exc_type=TypeError)
         
         field_types = []
         field_names = []
@@ -453,7 +468,7 @@ class union(UnionType):
         if not has_any_name:
             field_names = None
         
-        return create_union_type(field_types, field_names)
+        return _create_union_type(field_types, node, field_names)
 
 
 __all__ = ['union', 'UnionType', 'create_union_type']

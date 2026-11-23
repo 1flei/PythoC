@@ -19,7 +19,10 @@ Design differences from pc_list / pc_tuple / pc_dict:
 from __future__ import annotations
 
 import operator
+import sys
 from typing import Any, Optional, TYPE_CHECKING
+from ..logger import logger
+from ..source import SourceLocation
 
 if TYPE_CHECKING:
     pass
@@ -161,16 +164,8 @@ class pc_literal:
     # ------------------------------------------------------------------
 
     @classmethod
-    def _from_type_call(cls, pc_type, *args, **kwargs):
+    def _from_type_call(cls, pc_type, value):
         """Called by ``BuiltinEntityMeta.__call__`` for scalar types."""
-        if len(args) != 1 or kwargs:
-            from ..logger import logger
-            logger.error(
-                f"{pc_type.get_name()}() takes exactly 1 argument "
-                f"({len(args)} given)",
-                node=None, exc_type=TypeError,
-            )
-        value = args[0]
         if isinstance(value, pc_literal):
             value = value._value
         if _is_integer(pc_type) or _is_bool_type(pc_type):
@@ -304,7 +299,6 @@ class pc_literal:
         if pc_type is None:
             return
         if getattr(pc_type, '_is_pointer', False):
-            from ..logger import logger
             owner_name = '.'.join(_path) if _path else '<value>'
             type_name = (pc_type.get_name()
                          if hasattr(pc_type, 'get_name') else str(pc_type))
@@ -358,6 +352,11 @@ class pc_literal:
         capturing any other Python ``int`` that happens to be a heap
         address).
         """
+        call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        with logger.at_node(call_site):
+            return self._lower_value()
+
+    def _lower_value(self):
         from .python_type import PythonType
         from ..valueref import wrap_value
 
@@ -376,7 +375,6 @@ class pc_literal:
             # Pointer-shaped value: capturing a runtime pointer into a
             # compiled function is intentionally unsupported. Pass it as
             # an explicit argument instead.
-            from ..logger import logger
             type_name = (self._pc_type.get_name()
                          if hasattr(self._pc_type, 'get_name')
                          else str(self._pc_type))

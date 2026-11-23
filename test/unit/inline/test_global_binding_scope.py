@@ -12,7 +12,7 @@ class GlobalBindingScopeTest(unittest.TestCase):
         self.visitor = LLVMIRVisitor(user_globals={'Payload': i32})
 
     def payload(self):
-        binding = self.visitor.lookup_variable('Payload')
+        binding = self.visitor.lookup_variable('Payload', None)
         return binding.value_ref.get_python_value()
 
     def test_nested_factories_restore_their_type_binding(self):

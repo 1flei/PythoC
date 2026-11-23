@@ -346,24 +346,28 @@ class QuotedFunctionArgumentsTest(unittest.TestCase):
         self.assertEqual(call_named_quoted_callback(), 1107)
 
     def test_named_return_is_rejected_inside_compiled_code(self):
-        import ast
+        from contextlib import redirect_stderr
+        from io import StringIO
+        import sys
         from unittest.mock import patch
-        from pythoc import CompileSession, flush_all_pending_outputs, meta
+        from pythoc import CompileSession, flush_all_pending_outputs
         from pythoc.logger import logger
 
-        source = ('def bad(value: i32) -> i32:\n'
-                  '    signature = func["i32": i32]\n'
-                  '    return value\n')
+        output = StringIO()
         with (
+            redirect_stderr(output),
             CompileSession(),
             patch.object(logger, 'raise_on_error', True),
             self.assertRaisesRegex(TypeError, 'return type cannot have a parameter name'),
         ):
-            meta.compile_ast(
-                ast.parse(source).body[0], source_file=__file__,
-                suffix='named_return_rejected', param_types={'value': i32},
-                return_type=i32, user_globals={'i32': i32, 'func': func})
+            annotation_line = sys._getframe().f_lineno + 3
+            @compile(suffix='named_return_rejected')
+            def bad(value: i32) -> i32:
+                signature = func["i32": i32]
+                return value
+
             flush_all_pending_outputs()
+        self.assertRegex(output.getvalue(), rf'\[test_func.py:{annotation_line}:\d+\]')
 
 
 @compile

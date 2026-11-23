@@ -258,7 +258,8 @@ def f():
         loop_body_tree = ast.parse(loop_body_code)
         loop_body = loop_body_tree.body
         
-        rule = YieldExitRule(loop_var='loop_var', loop_body=loop_body)
+        rule = YieldExitRule(loop_var=ast.Name(id='loop_var', ctx=ast.Store()),
+                             loop_body=loop_body)
         
         transformer = InlineBodyTransformer(rule, rename_map)
         new_body = transformer.transform(body)

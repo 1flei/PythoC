@@ -45,8 +45,12 @@ Error handling:
 import sys
 import inspect
 import ast
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import IntEnum
-from typing import Any, Optional, Union
+from typing import NamedTuple, Optional, Union
+
+from .source import SourceLocation, ast_location
 
 
 class LogLevel(IntEnum):
@@ -54,6 +58,11 @@ class LogLevel(IntEnum):
     DEBUG = 0
     WARNING = 1
     ERROR = 2
+
+
+class _SourceContext(NamedTuple):
+    source: tuple[Optional[str], int]
+    location: Optional[SourceLocation]
 
 
 class Logger:
@@ -65,6 +74,7 @@ class Logger:
         self.enabled = True
         self.current_source_file = None  # Track current source file being compiled
         self.current_line_offset = 0  # Line offset for AST nodes (function start line - 1)
+        self._source_context = ContextVar('diagnostic_source_context', default=None)
     
     def reload_config(self):
         """Re-sample knobs from pythoc.config.
@@ -232,26 +242,50 @@ class Logger:
         """
         self.raise_on_error = raise_on_error
 
+    @contextmanager
+    def at_node(self, node: Union[ast.AST, SourceLocation, None], *,
+                source: Optional[tuple[Optional[str], int]] = None):
+        """Use the source supplied by the active compilation or API entry."""
+        active = self._source_context.get()
+        if source is None:
+            source = active.source if active else (self.current_source_file, self.current_line_offset)
+        location = ast_location(node, source)
+        if location is None and active and source == active.source:
+            location = active.location
+        token = self._source_context.set(_SourceContext(source, location))
+        try:
+            yield
+        except Exception as error:
+            self.remember_error_location(error, None)
+            raise
+        finally:
+            self._source_context.reset(token)
+
+    def current_location(self) -> Optional[SourceLocation]:
+        active = self._source_context.get()
+        return active.location if active else None
+
+    def _ast_location(self, node, *, use_current_node=True):
+        active = self._source_context.get()
+        source = active.source if active else (self.current_source_file, self.current_line_offset)
+        location = ast_location(node, source)
+        if location is None and use_current_node and active:
+            location = active.location
+        return location
+
     def remember_error_location(self, error: Exception, node: ast.AST):
         """Keep the innermost source location until the compiler reports the error."""
-        if getattr(node, 'lineno', None) is not None and not hasattr(error, '_pc_error_location'):
-            error._pc_error_location = self._get_source_location(node)
+        if not hasattr(error, '_pc_error_location'):
+            location = self._ast_location(node)
+            if location is not None:
+                error._pc_error_location = location
     
-    def _get_source_location(self, node: Optional[Union[ast.AST, Any]] = None) -> str:
+    def _get_source_location(self, node: Optional[ast.AST] = None, *, use_current_node=True) -> str:
         """Get source code location from AST node or caller info"""
-        # Priority 1: If node is provided and has location info, use it
-        if node is not None and isinstance(node, ast.AST):
-            if hasattr(node, 'lineno') and hasattr(node, 'col_offset'):
-                filename = self.current_source_file or "source"
-                # Shorten path for readability
-                if '/pc/' in filename:
-                    filename = filename.split('/pc/')[-1]
-                elif '/' in filename:
-                    filename = filename.split('/')[-1]
-                # Add line offset to get actual line number in source file
-                actual_lineno = node.lineno + self.current_line_offset
-                return f"{filename}:{actual_lineno}:{node.col_offset}"
-        
+        location = self._ast_location(node, use_current_node=use_current_node)
+        if location is not None:
+            return str(location)
+
         # Priority 2: Fall back to Python caller location
         try:
             frame = inspect.currentframe()
@@ -272,12 +306,16 @@ class Logger:
     
     def _format_message(self, level_name: str, msg: str, node: Optional[ast.AST] = None, 
                        include_location: bool = True, caller_module: Optional[str] = None,
-                       source_location: Optional[str] = None,
+                       source_location: Optional[SourceLocation] = None,
                        **kwargs) -> str:
         """Format log message with optional key-value pairs and location"""
         location = ""
         if include_location:
-            location = f" [{source_location or self._get_source_location(node)}]"
+            if source_location is None:
+                source_location = self._get_source_location(
+                    node, use_current_node=level_name != 'DEBUG',
+                )
+            location = f" [{source_location}]"
         
         # Include module in output for DEBUG if available
         module_prefix = f"[{caller_module}] " if caller_module else ""
@@ -294,7 +332,7 @@ class Logger:
         return f"[{level_name}]{location} {module_prefix}{msg}: {details}"
     
     def _log(self, level: LogLevel, level_name: str, msg: str, node: Optional[ast.AST] = None, 
-             source_location: Optional[str] = None,
+             source_location: Optional[SourceLocation] = None,
              **kwargs):
         """Internal logging method"""
         if not self.enabled or level < self.level:
@@ -341,8 +379,12 @@ class Logger:
             **kwargs: Additional key-value pairs to log
         """
         self._log(LogLevel.WARNING, "WARNING", msg, node=node, **kwargs)
+
+    @staticmethod
+    def is_reported(error: Optional[Exception]) -> bool:
+        return getattr(error, '_pc_error_reported', False)
     
-    def error(self, msg: Union[str, Exception], node: Optional[ast.AST] = None,
+    def error(self, msg: Union[str, Exception], node: Union[ast.AST, SourceLocation, None] = None,
               exc_type: type = RuntimeError, **kwargs):
         """Log error message and raise exception or exit (compilation failures)
         
@@ -361,7 +403,7 @@ class Logger:
             Set raise_on_error=True or PC_RAISE_ON_ERROR=1 to raise exceptions (for tests).
         """
         error = msg if isinstance(msg, Exception) else None
-        if error is None or not getattr(error, '_pc_error_reported', False):
+        if not self.is_reported(error):
             source_location = getattr(error, '_pc_error_location', None)
             self._log(LogLevel.ERROR, "ERROR", str(msg), node=node,
                       source_location=source_location, **kwargs)

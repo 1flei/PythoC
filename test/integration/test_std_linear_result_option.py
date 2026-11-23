@@ -1,6 +1,8 @@
 """Shared sum helpers preserve owners instead of discarding losing values."""
 
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 
 from pythoc import compile, consume, i32, linear, static
 from pythoc.std.result import Option as OptionType, Result as ResultType
@@ -260,8 +262,11 @@ class LinearResultOptionTest(unittest.TestCase):
             value = Optional.from_result(Both.err(acquire(3)))
             return 0
 
-        with self.assertRaisesRegex(Exception, 'explicit consumer'):
+        output = StringIO()
+        with redirect_stderr(output), self.assertRaisesRegex(TypeError, 'explicit consumer'):
             lose_error()
+        line = lose_error.__wrapped__.__code__.co_firstlineno + 2
+        self.assertIn(f'[test_std_linear_result_option.py:{line}:12]', output.getvalue())
         clear_failed_group(lose_error._binding.group_key)
 
         @compile(suffix='invalid_option_conversion_eager_error')
@@ -269,8 +274,11 @@ class LinearResultOptionTest(unittest.TestCase):
             value = Both.from_option(Optional.some(acquire(3)), acquire(4))
             return 0
 
-        with self.assertRaisesRegex(Exception, 'from_option_else'):
+        output = StringIO()
+        with redirect_stderr(output), self.assertRaisesRegex(TypeError, 'from_option_else'):
             lose_eager_error()
+        line = lose_eager_error.__wrapped__.__code__.co_firstlineno + 2
+        self.assertIn(f'[test_std_linear_result_option.py:{line}:12]', output.getvalue())
         clear_failed_group(lose_eager_error._binding.group_key)
 
     def test_z_fallback_cannot_discard_an_owned_error(self):

@@ -23,9 +23,9 @@ class sizeof(BuiltinFunction):
             logger.error(f"sizeof() takes exactly 1 argument ({len(args)} given)",
                         node=node, exc_type=TypeError)
         
-        pc_type = visitor.type_resolver.resolve_type_value(args[0])
+        pc_type = visitor.type_resolver.resolve_type_value(args[0], node)
         
-        size = cls._get_type_size(pc_type, visitor)
+        size = cls._get_type_size(pc_type, node)
         from .python_type import PythonType
         from .types import u64
         # Keep the result foldable as a Python constant, but mark its preferred
@@ -35,12 +35,12 @@ class sizeof(BuiltinFunction):
         return wrap_value(size, kind="python", type_hint=python_type)
     
     @classmethod
-    def _get_type_size(cls, pc_type, visitor) -> int:
+    def _get_type_size(cls, pc_type, node) -> int:
         """Get size of a PC type
         
         Args:
             pc_type: BuiltinEntity type (i32, f64, ptr[T], etc.) or Python struct class
-            visitor: AST visitor for context
+            node: Source call expression
         
         Returns:
             int: Size in bytes
@@ -53,17 +53,17 @@ class sizeof(BuiltinFunction):
             struct_name = pc_type.__name__
             if registry.has_struct(struct_name):
                 struct_info = registry.get_struct(struct_name)
-                return cls._calculate_struct_size(struct_info, registry)
+                return cls._calculate_struct_size(struct_info, registry, node)
             logger.error(f"sizeof(): struct '{struct_name}' not found in registry",
-                        node=None, exc_type=TypeError)
+                        node=node, exc_type=TypeError)
         
         if isinstance(pc_type, ir.Type):
             logger.error(
                 f"sizeof() received ir.Type ({pc_type}). This is a bug - "
                 "use BuiltinEntity (i32, f64, ptr[T], etc.) instead.",
-                node=None, exc_type=TypeError)
+                node=node, exc_type=TypeError)
         
-        logger.error(f"sizeof(): unknown or unsupported type {pc_type}", node=None, exc_type=TypeError)
+        logger.error(f"sizeof(): unknown or unsupported type {pc_type}", node=node, exc_type=TypeError)
     
     @classmethod
     def _align_to(cls, size: int, alignment: int) -> int:
@@ -71,7 +71,7 @@ class sizeof(BuiltinFunction):
         return (size + alignment - 1) & ~(alignment - 1)
     
     @classmethod
-    def _get_field_size(cls, field_type, struct_registry) -> int:
+    def _get_field_size(cls, field_type, struct_registry, node) -> int:
         """Get size of a field type"""
         if isinstance(field_type, type) and issubclass(field_type, BuiltinEntity):
             if field_type.can_be_type():
@@ -84,7 +84,7 @@ class sizeof(BuiltinFunction):
                 return entity_cls.get_size_bytes()
             if struct_registry.has_struct(field_type):
                 struct_info = struct_registry.get_struct(field_type)
-                return cls._calculate_struct_size(struct_info, struct_registry)
+                return cls._calculate_struct_size(struct_info, struct_registry, node)
         
         if hasattr(field_type, '__name__'):
             type_name = field_type.__name__
@@ -94,15 +94,15 @@ class sizeof(BuiltinFunction):
                 return entity_cls.get_size_bytes()
             if struct_registry.has_struct(type_name):
                 struct_info = struct_registry.get_struct(type_name)
-                return cls._calculate_struct_size(struct_info, struct_registry)
+                return cls._calculate_struct_size(struct_info, struct_registry, node)
         
         if hasattr(field_type, 'pointee_type') or (hasattr(field_type, '__name__') and field_type.__name__ == 'ptr'):
             return ctypes.sizeof(ctypes.c_void_p)
         
-        logger.error("sizeof(): unknown field type for size calculation", node=None, exc_type=TypeError)
+        logger.error("sizeof(): unknown field type for size calculation", node=node, exc_type=TypeError)
     
     @classmethod
-    def _get_field_alignment(cls, field_type, struct_registry) -> int:
+    def _get_field_alignment(cls, field_type, struct_registry, node) -> int:
         """Get alignment of a field type"""
         if isinstance(field_type, type) and issubclass(field_type, BuiltinEntity):
             if field_type.can_be_type():
@@ -115,7 +115,7 @@ class sizeof(BuiltinFunction):
                 return min(entity_cls.get_size_bytes(), 8)
             if struct_registry.has_struct(field_type):
                 struct_info = struct_registry.get_struct(field_type)
-                return cls._calculate_struct_alignment(struct_info, struct_registry)
+                return cls._calculate_struct_alignment(struct_info, struct_registry, node)
         
         if hasattr(field_type, '__name__'):
             type_name = field_type.__name__
@@ -125,31 +125,31 @@ class sizeof(BuiltinFunction):
                 return min(entity_cls.get_size_bytes(), 8)
             if struct_registry.has_struct(type_name):
                 struct_info = struct_registry.get_struct(type_name)
-                return cls._calculate_struct_alignment(struct_info, struct_registry)
+                return cls._calculate_struct_alignment(struct_info, struct_registry, node)
         
         if hasattr(field_type, 'pointee_type') or (hasattr(field_type, '__name__') and field_type.__name__ == 'ptr'):
             return ctypes.sizeof(ctypes.c_void_p)
         
-        logger.error("sizeof(): unknown field type for size calculation", node=None, exc_type=TypeError)
+        logger.error("sizeof(): unknown field type for size calculation", node=node, exc_type=TypeError)
     
     @classmethod
-    def _calculate_struct_alignment(cls, struct_info, struct_registry) -> int:
+    def _calculate_struct_alignment(cls, struct_info, struct_registry, node) -> int:
         """Calculate the alignment requirement for a struct"""
         max_alignment = 1
         for field_name, field_type in struct_info.fields:
-            field_alignment = cls._get_field_alignment(field_type, struct_registry)
+            field_alignment = cls._get_field_alignment(field_type, struct_registry, node)
             max_alignment = max(max_alignment, field_alignment)
         return max_alignment
     
     @classmethod
-    def _calculate_struct_size(cls, struct_info, struct_registry) -> int:
+    def _calculate_struct_size(cls, struct_info, struct_registry, node) -> int:
         """Calculate struct size with proper alignment"""
         current_offset = 0
         max_alignment = 1
         
         for field_name, field_type in struct_info.fields:
-            field_size = cls._get_field_size(field_type, struct_registry)
-            field_alignment = cls._get_field_alignment(field_type, struct_registry)
+            field_size = cls._get_field_size(field_type, struct_registry, node)
+            field_alignment = cls._get_field_alignment(field_type, struct_registry, node)
             
             max_alignment = max(max_alignment, field_alignment)
             current_offset = cls._align_to(current_offset, field_alignment)

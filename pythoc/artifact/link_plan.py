@@ -15,6 +15,7 @@ class LinkPlan:
     obj_files: Tuple[str, ...]
     link_libraries: Tuple[str, ...] = ()
     scope: LinkScope = LinkScope.TRANSITIVE
+    ordered_inputs: Tuple[str, ...] = ()
 
     @classmethod
     def from_compiled_symbols(

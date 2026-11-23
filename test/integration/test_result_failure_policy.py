@@ -1,8 +1,10 @@
 """Result propagation is local; a global error slot is an explicit policy."""
 
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 
-from pythoc import compile, effect, i32, i64, ptr, static, u32
+from pythoc import compile, effect, enum, i32, i64, ptr, static, u32
 from pythoc.build.output_manager import clear_failed_group, flush_all_pending_outputs
 from pythoc.logger import set_raise_on_error
 from pythoc.std.result import ErrnoSlotProvider, Option, Result as ResultType
@@ -62,6 +64,13 @@ def counted_chain(a: i32, b: i32) -> i32:
 def empty_if_zero(value: i32) -> i32:
     if value != 0:
         yield value
+
+
+@compile
+def return_if_zero(value: i32) -> i32:
+    if value == 0:
+        return
+    yield value
 
 
 @compile
@@ -174,9 +183,35 @@ class TestResultFailurePolicy(unittest.TestCase):
 
                 @compile(suffix=("result_error_mismatch", err_type))
                 def bad() -> Result:
-                    return Result.do(x for x in other.bind(other.err(err_type(7))))
+                    return Result.do(
+                        x for x in other.bind(other.err(err_type(7)))
+                    )
 
-                self.reject(bad, "same error type", ValueError)
+                output = StringIO()
+                with redirect_stderr(output):
+                    self.reject(bad, rf"same error type.*expected i32, got {err_type.get_name()}")
+                line = bad.__wrapped__.__code__.co_firstlineno + 3
+                self.assertIn(f'[test_result_failure_policy.py:{line}:19] Result.do ',
+                              output.getvalue())
+
+    def test_option_conversion_errors_point_to_the_call(self):
+        malformed = enum['Some': i32, 'NoneVal': i32]
+        cases = (
+            (i32, 'Expected an Option source, got i32'),
+            (Option(i64), 'same value type.*expected i32, got i64'),
+            (malformed, 'Option NoneVal must have no payload'),
+        )
+        for source, message in cases:
+            with self.subTest(message=message):
+                @compile(suffix=('invalid_option_source', source))
+                def bad(value: source) -> Result:
+                    return Result.from_option(value, 1)
+
+                output = StringIO()
+                with redirect_stderr(output):
+                    self.reject(bad, message)
+                line = bad.__wrapped__.__code__.co_firstlineno + 2
+                self.assertIn(f'[test_result_failure_policy.py:{line}:11]', output.getvalue())
 
     def reject(self, function, message, exception=TypeError):
         try:
@@ -197,14 +232,38 @@ class TestResultFailurePolicy(unittest.TestCase):
         def bad(v: i32) -> Result:
             return Result.do(x for x in empty_if_zero(v))
 
-        self.reject(bad, "without yielding a value or propagating an error")
+        output = StringIO()
+        with redirect_stderr(output):
+            self.reject(bad, "without yielding a value or propagating an error")
+        line = bad.__wrapped__.__code__.co_firstlineno + 2
+        self.assertIn(f'[test_result_failure_policy.py:{line}:11]', output.getvalue())
+        branch = empty_if_zero._yield_func_obj.__code__.co_firstlineno + 2
+        self.assertIn(f'test_result_failure_policy.py:{branch}:7: the false branch can reach this point',
+                      output.getvalue())
+
+    def test_reachable_producer_return_is_reported(self):
+        @compile(suffix="result_producer_return")
+        def bad(v: i32) -> Result:
+            return Result.do(x for x in return_if_zero(v))
+
+        output = StringIO()
+        with redirect_stderr(output):
+            self.reject(bad, "without yielding a value or propagating an error")
+        line = return_if_zero._yield_func_obj.__code__.co_firstlineno + 3
+        self.assertIn(f'test_result_failure_policy.py:{line}:8: the producer can return',
+                      output.getvalue())
 
     def test_filtered_success_requires_an_explicit_error(self):
         @compile(suffix="result_filtered_success")
         def bad(v: i32) -> Result:
             return Result.do(x for x in Result.bind(checked(v)) if False)
 
-        self.reject(bad, "without yielding a value or propagating an error")
+        output = StringIO()
+        with redirect_stderr(output):
+            self.reject(bad, "without yielding a value or propagating an error")
+        line = bad.__wrapped__.__code__.co_firstlineno + 2
+        self.assertRegex(output.getvalue(),
+                         rf'test_result_failure_policy.py:{line}:\d+: this generator filter evaluates to false')
 
     def test_errno_policy_is_explicit(self):
         reset_slot(73)

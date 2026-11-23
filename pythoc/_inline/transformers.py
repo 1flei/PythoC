@@ -8,6 +8,7 @@ Transforms callee body by:
 """
 
 import ast
+import copy
 from typing import List, Dict, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 
@@ -101,7 +102,9 @@ class InlineBodyTransformer(ScopedVariableRenamer):
         new_body = self.transform(node.body)
         new_orelse = self.transform(node.orelse) if node.orelse else []
         
-        return ast.While(test=new_test, body=new_body, orelse=new_orelse)
+        result = copy.copy(node)
+        result.test, result.body, result.orelse = new_test, new_body, new_orelse
+        return result
     
     def visit_If(self, node: ast.If) -> ast.If:
         """Transform if statement (recursively transform branches)
@@ -118,7 +121,9 @@ class InlineBodyTransformer(ScopedVariableRenamer):
         new_body = self.transform(node.body)
         new_orelse = self.transform(node.orelse) if node.orelse else []
         
-        return ast.If(test=new_test, body=new_body, orelse=new_orelse)
+        result = copy.copy(node)
+        result.test, result.body, result.orelse = new_test, new_body, new_orelse
+        return result
     
     def visit_For(self, node: ast.For) -> ast.For:
         """Transform for loop (recursively transform body)
@@ -130,12 +135,10 @@ class InlineBodyTransformer(ScopedVariableRenamer):
         new_body = self.transform(node.body)
         new_orelse = self.transform(node.orelse) if node.orelse else []
         
-        return ast.For(
-            target=new_target, 
-            iter=new_iter, 
-            body=new_body, 
-            orelse=new_orelse
-        )
+        result = copy.copy(node)
+        result.target, result.iter = new_target, new_iter
+        result.body, result.orelse = new_body, new_orelse
+        return result
     
     def visit_With(self, node: ast.With) -> ast.With:
         """Transform with statement (rename variables in context)"""
@@ -150,7 +153,9 @@ class InlineBodyTransformer(ScopedVariableRenamer):
         
         new_body = self.transform(node.body)
         
-        return ast.With(items=new_items, body=new_body)
+        result = copy.copy(node)
+        result.items, result.body = new_items, new_body
+        return result
     
     def visit_Try(self, node: ast.Try) -> ast.Try:
         """Transform try statement (recursively transform all blocks)"""
@@ -170,9 +175,7 @@ class InlineBodyTransformer(ScopedVariableRenamer):
         new_orelse = self.transform(node.orelse) if node.orelse else []
         new_finalbody = self.transform(node.finalbody) if node.finalbody else []
         
-        return ast.Try(
-            body=new_body,
-            handlers=new_handlers,
-            orelse=new_orelse,
-            finalbody=new_finalbody
-        )
+        result = copy.copy(node)
+        result.body, result.handlers = new_body, new_handlers
+        result.orelse, result.finalbody = new_orelse, new_finalbody
+        return result

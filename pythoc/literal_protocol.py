@@ -1,4 +1,4 @@
-"""Literal carrier protocols.
+"""Literal carrier protocols and positional unpacking.
 
 This module centralizes tuple/list/dict carrier handling so callers do not
 need to inspect literal wrapper details directly.
@@ -173,26 +173,73 @@ def get_multidim_subscript_indices(visitor, index_ref: ValueRef, node) -> Option
     return None
 
 
+def _literal_unpack_values(value):
+    if is_sequence_carrier(value):
+        return [wrap_literal_result(item) for item in get_sequence_elements(value)]
+    return None
+
+
+def get_unpack_field_types(pc_type) -> Optional[List[Any]]:
+    """Return declared positional field types, or None if unpacking is unsupported."""
+    from .builtin_entities.python_type import PythonType
+    from .schema_protocol import get_schema_field_types, is_schema_type
+    from .type_check import is_struct_type
+    from .type_converter import get_base_type
+    from .type_descriptor import array_decay_type
+
+    base_type = get_base_type(pc_type)
+    if isinstance(base_type, PythonType):
+        fields = _literal_unpack_values(base_type.get_python_object())
+        return None if fields is None else [field.get_pc_type() for field in fields]
+    dimensions = getattr(base_type, 'dimensions', None)
+    if dimensions is not None:
+        return [array_decay_type(base_type).pointee_type] * dimensions[0]
+    if is_struct_type(base_type) and is_schema_type(base_type):
+        return get_schema_field_types(base_type)
+    return None
+
+
+def project_subscript(visitor, value_ref: ValueRef, index: int, node) -> ValueRef:
+    """Read a constant-index field of an already evaluated value."""
+    import ast
+    from .source import copy_ast_location
+    from .valueref import wrap_python_constant
+
+    subscript = copy_ast_location(ast.Subscript(
+        value=copy_ast_location(ast.Name(id='_subject', ctx=ast.Load()), node),
+        slice=copy_ast_location(ast.Constant(value=index), node),
+        ctx=ast.Load(),
+    ), node)
+    dispatcher = visitor.value_dispatcher
+    return dispatcher.read_rvalue(dispatcher.handle_subscript(
+        value_ref, wrap_python_constant(index), subscript))
+
+
 def get_unpack_values(visitor, value_ref: ValueRef, node) -> List[ValueRef]:
-    """Return unpackable children through the shared carrier protocol."""
+    """Project positional fields in order, retaining their type and place."""
+    from .type_converter import get_base_type
+    from .type_descriptor import format_type
+    from .valueref import ensure_ir, wrap_value
+
+    pc_type = value_ref.get_pc_type()
     if value_ref.is_python_value():
-        python_value = value_ref.get_python_value()
-        if not is_sequence_carrier(python_value):
-            logger.error(
-                f"Cannot unpack Python value of type {type(python_value)}",
-                node=node,
-                exc_type=TypeError,
-            )
-        return [wrap_literal_result(item) for item in get_sequence_elements(python_value)]
+        items = _literal_unpack_values(value_ref.get_python_value())
+        if items is not None:
+            return items
+    else:
+        fields = get_unpack_field_types(pc_type)
+        if fields is not None:
+            is_array = getattr(get_base_type(pc_type), 'dimensions', None) is not None
+            if is_array and not value_ref.has_place():
+                aggregate = ensure_ir(value_ref)
+                return [wrap_value(visitor.builder.extract_value(aggregate, index),
+                                   kind='value', type_hint=field, source_node=node)
+                        for index, field in enumerate(fields)]
+            return [project_subscript(visitor, value_ref, index, node)
+                    for index in range(len(fields))]
 
-    type_hint = getattr(value_ref, 'type_hint', None)
-    if type_hint is None:
-        logger.error("Cannot unpack value without type information", node=node, exc_type=TypeError)
-
-    if hasattr(type_hint, 'get_all_fields'):
-        return list(type_hint.get_all_fields(visitor, value_ref, node))
-
-    logger.error(f"Unsupported unpacking type: {type_hint}", node=node, exc_type=TypeError)
+    logger.error(f'Unsupported unpacking type: {format_type(pc_type)}',
+                 node=node, exc_type=TypeError)
 
 
 def rebuild_sequence_carrier(template: Any, elements: List[Any]) -> Any:
@@ -270,11 +317,11 @@ def aggregate_layout(visitor, target_pc_type):
     return None
 
 
-def _lower_aggregate_slots(visitor, carrier, target_pc_type, element_fn):
+def _lower_aggregate_slots(visitor, carrier, target_pc_type, element_fn, node):
     """Lower a sequence literal onto an aggregate's slots, or return None.
 
     Walks the shared :func:`aggregate_layout`, lowering each provided element
-    through ``element_fn(visitor, elem, slot_pc_type)`` and zero-filling any
+    through ``element_fn(visitor, elem, slot_pc_type, node)`` and zero-filling any
     trailing slots. Returns ``(llvm_aggregate_type, [ir_value, ...])``. Returns
     None when the target is not an aggregate, there are too many initializers, or
     ``element_fn`` rejects an element (by returning None).
@@ -294,7 +341,7 @@ def _lower_aggregate_slots(visitor, carrier, target_pc_type, element_fn):
     values = []
     for i, slot_type in enumerate(slot_types):
         if i < len(elements):
-            v = element_fn(visitor, elements[i], slot_type)
+            v = element_fn(visitor, elements[i], slot_type, node)
             if v is None:
                 return None
         else:
@@ -303,7 +350,7 @@ def _lower_aggregate_slots(visitor, carrier, target_pc_type, element_fn):
     return agg_llvm, values
 
 
-def lower_sequence_to_constant(visitor, carrier, target_pc_type):
+def lower_sequence_to_constant(visitor, carrier, target_pc_type, node):
     """Fold a sequence literal carrier to a single ir.Constant, or return None.
 
     The constant-only view of aggregate materialization: every leaf must fold
@@ -316,14 +363,14 @@ def lower_sequence_to_constant(visitor, carrier, target_pc_type):
     from llvmlite import ir
 
     lowered = _lower_aggregate_slots(
-        visitor, carrier, target_pc_type, _lower_element_to_constant)
+        visitor, carrier, target_pc_type, _lower_element_to_constant, node)
     if lowered is None:
         return None
     _, consts = lowered
-    return assemble_aggregate_value(visitor, target_pc_type, consts)
+    return assemble_aggregate_value(visitor, target_pc_type, consts, node)
 
 
-def materialize_sequence_value(visitor, carrier, target_pc_type):
+def materialize_sequence_value(visitor, carrier, target_pc_type, node):
     """Build an aggregate IR *value* from a sequence literal (array or struct).
 
     Single pass for both kinds: each element is lowered once, then the aggregate
@@ -337,16 +384,16 @@ def materialize_sequence_value(visitor, carrier, target_pc_type):
     from .ir_helpers import is_link_time_constant
 
     lowered = _lower_aggregate_slots(
-        visitor, carrier, target_pc_type, _lower_element_value)
+        visitor, carrier, target_pc_type, _lower_element_value, node)
     if lowered is None:
         logger.error(
             f"Cannot materialize sequence literal into {target_pc_type}",
-            node=None, exc_type=TypeError)
+            node=node, exc_type=TypeError)
     _, values = lowered
-    return assemble_aggregate_value(visitor, target_pc_type, values)
+    return assemble_aggregate_value(visitor, target_pc_type, values, node)
 
 
-def assemble_aggregate_value(visitor, target_pc_type, values):
+def assemble_aggregate_value(visitor, target_pc_type, values, node):
     """Assemble fields already lowered to the aggregate's declared types."""
     from llvmlite import ir
     from .ir_helpers import is_link_time_constant
@@ -361,12 +408,14 @@ def assemble_aggregate_value(visitor, target_pc_type, values):
         return assemble_bit_fields(visitor, target_pc_type, values)
     fields = agg_llvm.elements
     if len(values) != len(fields):
-        raise TypeError('Aggregate initializer field count mismatch')
+        logger.error('Aggregate initializer field count mismatch',
+                     node=node, exc_type=TypeError)
     for index, (value, field) in enumerate(zip(values, fields)):
         if value.type != field:
-            raise TypeError(
+            logger.error(
                 f'Aggregate initializer field {index} type mismatch: '
-                f'expected {field}, got {value.type}')
+                f'expected {field}, got {value.type}',
+                node=node, exc_type=TypeError)
     if all(is_link_time_constant(v) for v in values):
         return ir.Constant(agg_llvm, values)
     agg = ir.Constant(agg_llvm, ir.Undefined)
@@ -383,7 +432,7 @@ def _carrier_of(elem):
     return elem if is_sequence_carrier(elem) else None
 
 
-def _lower_element_to_constant(visitor, elem, target_pc_type):
+def _lower_element_to_constant(visitor, elem, target_pc_type, node):
     """Fold one aggregate element to a link-time constant, or return None.
 
     Nested sequence literals recurse through ``lower_sequence_to_constant``;
@@ -395,17 +444,17 @@ def _lower_element_to_constant(visitor, elem, target_pc_type):
 
     nested = _carrier_of(elem)
     if nested is not None:
-        return lower_sequence_to_constant(visitor, nested, target_pc_type)
+        return lower_sequence_to_constant(visitor, nested, target_pc_type, node)
 
     if not isinstance(elem, ValueRef):
         from .builtin_entities.python_type import PythonType
         elem = wrap_value(elem, kind="python",
                           type_hint=PythonType.wrap(elem, is_constant=True))
-    ir_val = ensure_ir(visitor.type_converter.convert(elem, target_pc_type))
+    ir_val = ensure_ir(visitor.type_converter.convert(elem, target_pc_type, node))
     return ir_val if is_link_time_constant(ir_val) else None
 
 
-def _lower_element_value(visitor, elem, target_pc_type):
+def _lower_element_value(visitor, elem, target_pc_type, node):
     """Lower one aggregate element to an ir value (constant or runtime).
 
     Nested sequence literals recurse through ``materialize_sequence_value`` (which
@@ -416,13 +465,13 @@ def _lower_element_value(visitor, elem, target_pc_type):
 
     nested = _carrier_of(elem)
     if nested is not None:
-        return materialize_sequence_value(visitor, nested, target_pc_type)
+        return materialize_sequence_value(visitor, nested, target_pc_type, node)
 
     if not isinstance(elem, ValueRef):
         from .builtin_entities.python_type import PythonType
         elem = wrap_value(elem, kind="python",
                           type_hint=PythonType.wrap(elem, is_constant=True))
-    return ensure_ir(visitor.type_converter.convert(elem, target_pc_type))
+    return ensure_ir(visitor.type_converter.convert(elem, target_pc_type, node))
 
 
 def wrap_literal_result(result: Any):

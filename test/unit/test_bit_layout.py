@@ -205,7 +205,7 @@ class TestBitLayout(unittest.TestCase):
         base = ValueRef('value', ir.Constant(llvm_type, None), ty)
         field = access_bit_field(visitor, base, ty, 0, u3)
         with self.assertRaisesRegex(ValueError, 'temporary'):
-            field.as_lvalue()
+            field.as_lvalue(None)
 
     def test_debug_type_describes_storage_not_fake_byte_fields(self):
         from pythoc.debug_info import DebugInfoBuilder

@@ -11,7 +11,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
-from ..meta.template import quote, const as meta_const
+from ..meta.template import _compiler_quote, const as meta_const
 from .state_field_rewriter import StateFieldRewriter, StateFieldRewritePolicy
 from .names import ExpansionNames
 
@@ -130,11 +130,6 @@ def inline_yield_function_iterators(
         fa = definition.syntax
         callee_globals = definition.globals
 
-        loop_var = for_node.target
-        if not isinstance(loop_var, ast.Name):
-            # Tuple unpacking not supported yet.
-            return None
-
         loop_body = copy.deepcopy(for_node.body)
         return_type_annotation = (
             copy.deepcopy(fa.returns) if hasattr(fa, "returns") and fa.returns
@@ -142,9 +137,10 @@ def inline_yield_function_iterators(
         )
 
         exit_rule = YieldExitRule(
-            loop_var=loop_var,
+            loop_var=for_node.target,
             loop_body=loop_body,
             return_type_annotation=return_type_annotation,
+            state_machine=True,
         )
 
         caller_context = ScopeContext(available_vars=set())
@@ -496,25 +492,25 @@ def _i32_const(value: int) -> ast.Call:
     )
 
 
-@quote
+@_compiler_quote
 def _goto_tmpl(label_name):
     __pc_intrinsics.goto_begin(label_name)  # noqa: F821
 
 
-@quote
+@_compiler_quote
 def _label_block_tmpl(label_name, body):
     with __pc_intrinsics.label(label_name):  # noqa: F821
         body
 
 
-@quote
+@_compiler_quote
 def _yield_state_tmpl(value_expr, resume_pc, *, s):
     s._yield_value = value_expr
     s._pc = resume_pc
     return bool(1)
 
 
-@quote
+@_compiler_quote
 def _yield_next_template(body):
     def _next(s):
         body

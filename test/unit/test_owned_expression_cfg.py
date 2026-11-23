@@ -10,6 +10,22 @@ from pythoc.cfg.linear_checker import (
 
 
 class OwnedExpressionCFGTest(unittest.TestCase):
+    def test_reuse_after_a_join_reports_both_reaching_consumptions(self):
+        cfg = self.make_selection(True)
+        statements = ast.parse('consume(token)\nmove(token)\nconsume(token)').body
+        for block, node in zip((cfg.blocks[1], cfg.blocks[2], cfg.blocks[3]), statements):
+            if block.id == 3:
+                block.linear_events.append(LinearTransition(1, 'token', (), 'valid', 'invalid', node))
+            else:
+                block.linear_events[0].node = node
+        error, = LinearChecker().check(cfg, {})
+        self.assertEqual(error.kind, 'use_after_consume')
+        self.assertEqual(error.format(('ownership.py', 10)).splitlines(), [
+            "Error: Linear token 'token' already consumed",
+            '  ownership.py:11:0: ownership was consumed or transferred here',
+            '  ownership.py:12:0: ownership was consumed or transferred here',
+        ])
+
     def make_selection(self, consume_result):
         cfg = CFG('owned_selection')
         entry, left, right, merge, exit_block = [cfg.add_block() for _ in range(5)]
@@ -56,6 +72,23 @@ class OwnedExpressionCFGTest(unittest.TestCase):
         cfg.add_edge(entry.id, exit_block.id, kind='return')
         self.assertIn('unconsumed_at_exit',
                       {error.kind for error in LinearChecker().check(cfg, {})})
+
+    def test_exit_points_to_the_leaking_return_and_the_acquisition(self):
+        cfg = CFG('owned_exit')
+        entry, clean, leaking, exit_block = [cfg.add_block() for _ in range(4)]
+        cfg.entry_id, cfg.exit_id = entry.id, exit_block.id
+        declaration, clean_return, acquisition, leaking_return = ast.parse(
+            'token: linear\nreturn 0\ntoken = create()\nreturn 1').body
+        entry.linear_events.append(LinearRegister(1, 'token', (), 'invalid', declaration))
+        clean.stmts.append(clean_return)
+        leaking.stmts.append(leaking_return)
+        leaking.linear_events.append(LinearTransition(1, 'token', (), 'invalid', 'valid', acquisition))
+        for block in (clean, leaking):
+            cfg.add_edge(entry.id, block.id)
+            cfg.add_edge(block.id, exit_block.id, kind='return')
+        error, = LinearChecker().check(cfg, {})
+        self.assertIs(error.source_node, leaking_return)
+        self.assertEqual(error.related, ((acquisition, 'ownership of token starts here'),))
 
     def test_second_consumption_of_temporary_is_rejected(self):
         cfg = self.make_selection(True)

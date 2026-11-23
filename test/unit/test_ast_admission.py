@@ -10,8 +10,7 @@ from pythoc.logger import logger
 
 class AstAdmissionVisitorTest(unittest.TestCase):
     def setUp(self):
-        self.visitor = object.__new__(LLVMIRVisitor)
-        self.visitor._current_node = None
+        self.visitor = LLVMIRVisitor()
 
     def test_unknown_statement_is_rejected_before_its_test_runs(self):
         node = ast.Assert(test=ast.Call(

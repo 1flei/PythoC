@@ -20,10 +20,11 @@ Rules:
 3. At function exit: all linear tokens must be consumed
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import deque
 from typing import Dict, List, Optional, Set, Tuple, Any, Union, TYPE_CHECKING
 from ..logger import logger
+from ..source import ast_location
 import ast
 
 from .graph import CFG, CFGBlock, CFGEdge
@@ -47,14 +48,14 @@ class LinearRegister:
     - Assignment to new var: `t = linear()` -> initial_state='invalid' (then LinearTransition)
     
     Uses var_id (unique ID) instead of var_name to distinguish shadowed variables.
-    var_name and line_number are stored for error reporting.
+    The source node and owner type support diagnostic names and locations.
     """
     var_id: int            # Binding or temporary owner ID
     var_name: str          # Variable name for error messages
     path: Tuple[int, ...]  # Index path for composite types, () for simple
     initial_state: str     # 'valid' (function param) or 'invalid' (declaration)
-    line_number: Optional[int] = None  # Source line for error messages
     node: Optional[ast.AST] = None
+    type_hint: Any = None
 
 
 @dataclass
@@ -68,14 +69,13 @@ class LinearTransition:
     - `return t` -> ('valid', 'invalid') - return transfers ownership
     
     Uses var_id (unique ID) instead of var_name to distinguish shadowed variables.
-    var_name and line_number are stored for error reporting.
+    The source node identifies the ownership change.
     """
     var_id: int            # Binding or temporary owner ID
     var_name: str          # Variable name for error messages
     path: Tuple[int, ...]  # Index path for composite types, () for simple
     old_state: str         # 'valid' or 'invalid' - expected current state
     new_state: str         # 'valid' or 'invalid' - new state after transition
-    line_number: Optional[int] = None  # Source line for error messages
     node: Optional[ast.AST] = None
 
 
@@ -85,7 +85,6 @@ class LinearCopy:
     var_id: int
     var_name: str
     path: Tuple[int, ...]
-    line_number: Optional[int] = None
     node: Optional[ast.AST] = None
 
 
@@ -98,8 +97,8 @@ LinearEvent = Union[LinearRegister, LinearTransition, LinearCopy]
 # state is 'valid' (active/usable) or 'invalid' (consumed/undefined)
 LinearSnapshot = Dict[int, Dict[Tuple[int, ...], str]]
 
-# Mapping from var_id to (var_name, line_number) for error reporting
-VarIdInfo = Dict[int, Tuple[str, Optional[int]]]
+# Mapping from var_id to its source name and registration node.
+VarIdInfo = Dict[int, Tuple[str, Optional[ast.AST]]]
 
 
 @dataclass
@@ -111,18 +110,27 @@ class LinearError:
     message: str
     details: Any = None
     source_node: Optional[ast.AST] = None
+    related: Tuple[Tuple[Optional[ast.AST], str], ...] = ()
     
-    def format(self) -> str:
-        """Format error for display"""
+    def format(self, source=(None, 0)) -> str:
+        """Format the failure and its related source locations."""
+        lines = [f"Error: {self.message}"]
         if self.kind == 'merge_inconsistent':
-            lines = [f"Error: {self.message}"]
-            if self.details:
-                for diff in self.details:
-                    lines.append(f"  {diff['path_str']}:")
-                    for block_id, state in diff['states']:
-                        lines.append(f"    - {state} (from block {block_id})")
-            return '\n'.join(lines)
-        return f"Error: {self.message}"
+            for path, branches in self.details or ():
+                lines.append(f"  {path}:")
+                for index, (node, state) in enumerate(branches, 1):
+                    location = ast_location(node, source)
+                    label = str(location) if location else f'incoming path {index}'
+                    lines.append(f'    - {label}: {_ownership_state(state)}')
+        notes = dict.fromkeys((ast_location(node, source), message)
+                              for node, message in self.related)
+        lines.extend(f'  {location}: {message}' for location, message in notes
+                     if location is not None)
+        return '\n'.join(lines)
+
+
+def _ownership_state(state):
+    return 'held' if state in ('valid', 'active') else 'unavailable'
 
 
 def find_snapshot_diffs(
@@ -134,7 +142,7 @@ def find_snapshot_diffs(
     Args:
         s1: First snapshot (typically 'before' or 'expected')
         s2: Second snapshot (typically 'after' or 'actual')
-        var_id_info: Optional mapping from var_id to (var_name, line_number)
+        var_id_info: Optional mapping from var_id to (var_name, origin)
         
     Returns:
         List of diffs, each with 'path_str' and 'states'
@@ -168,34 +176,6 @@ def find_snapshot_diffs(
     return diffs
 
 
-def format_block_info(cfg: CFG, block_id: int) -> str:
-    """Format block ID with line range for error messages
-    
-    Args:
-        cfg: The CFG containing the block
-        block_id: Block ID to format
-        
-    Returns:
-        String like "block 3 (lines 10-15)" or "block 3" if no line info
-    """
-    block = cfg.get_block(block_id)
-    if block is None:
-        return f"block {block_id}"
-    
-    first_line = block.get_first_line()
-    last_line = block.get_last_line()
-    
-    if first_line is not None and last_line is not None:
-        if first_line == last_line:
-            return f"block {block_id} (line {first_line})"
-        else:
-            return f"block {block_id} (lines {first_line}-{last_line})"
-    elif first_line is not None:
-        return f"block {block_id} (line {first_line})"
-    else:
-        return f"block {block_id}"
-
-
 class LinearChecker:
     """Check linear types on CFG using forward dataflow analysis
     
@@ -219,8 +199,8 @@ class LinearChecker:
         """Initialize the linear checker"""
         self.errors: List[LinearError] = []
         
-        # Mapping from var_id to (var_name, line_number) for error reporting
-        self._var_id_info: VarIdInfo = {}
+        self._owners: Dict[int, LinearRegister] = {}
+        self._unavailable_uses = []
         
         # Snapshots at block entry/exit (computed during dataflow analysis)
         self.entry_snapshots: Dict[int, LinearState] = {}
@@ -241,6 +221,19 @@ class LinearChecker:
             var_id, path = self._token_paths[token]
             snapshot.setdefault(var_id, {})[path] = 'valid'
         return snapshot
+
+    def _owner_path(self, var_id, path, fallback='temporary value'):
+        from ..schema_protocol import iter_schema_fields
+
+        owner = self._owners.get(var_id)
+        parts = [owner.var_name if owner is not None else fallback]
+        type_hint = owner.type_hint if owner is not None else None
+        for index in path:
+            name, type_hint = next(
+                ((field_name, field_type) for field_index, field_name, field_type
+                 in iter_schema_fields(type_hint) if field_index == index), (None, None))
+            parts.append(f'.{name}' if name is not None else f'[{index}]')
+        return ''.join(parts)
     
     def check(
         self, 
@@ -257,7 +250,8 @@ class LinearChecker:
             List of LinearError objects describing any violations
         """
         self.errors = []
-        self._var_id_info = {}  # Reset var_id info for each check
+        self._owners = {}
+        self._unavailable_uses = []
         self._token_ids = {}
         self._token_paths = []
         initial = LinearState()
@@ -311,6 +305,7 @@ class LinearChecker:
         
         # After processing all blocks, check merge points for consistency
         self._check_merge_points(cfg)
+        self._explain_unavailable_uses(cfg)
         
         return self.errors
     
@@ -376,42 +371,29 @@ class LinearChecker:
             cfg: The CFG
             block_id: Exit block ID (should be cfg.exit_id)
         """
-        preds = [e for e in cfg.get_predecessors(block_id) if e.kind != 'loop_back']
-        if not preds:
-            return
-
-        # Collect exit snapshots from all predecessors.  A token is unconsumed at
-        # exit if it is valid/active in at least one predecessor's exit snapshot.
-        pred_snapshots: List[LinearState] = []
-        for edge in preds:
-            if edge.source_id in self.exit_snapshots:
-                pred_snapshots.append(self.exit_snapshots[edge.source_id])
-
-        if not pred_snapshots:
-            return
-
-        unconsumed_set: Set[Tuple[int, Tuple[int, ...]]] = set()
-        for snapshot in pred_snapshots:
-            unconsumed_set.update(self._token_paths[token] for token in snapshot)
-
-        if not unconsumed_set:
-            return
-
-        unconsumed = []
-        for var_id, path in sorted(unconsumed_set):
-            var_name, line_number = self._var_id_info.get(var_id, (f"<id={var_id}>", None))
-            path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-            if line_number:
-                path_str = f"{path_str} (line {line_number})"
-            unconsumed.append(path_str)
-
-        self.errors.append(LinearError(
-            kind='unconsumed_at_exit',
-            block_id=block_id,
-            message=f"Linear tokens not consumed before function exit: {', '.join(unconsumed)}",
-            details=unconsumed,
-            source_node=self._get_block_source_node(cfg, block_id)
-        ))
+        for edge in cfg.get_predecessors(block_id):
+            if edge.kind == 'loop_back':
+                continue
+            predecessor = edge.source_id
+            state = self.exit_snapshots.get(predecessor)
+            if not state:
+                continue
+            unconsumed = []
+            related = []
+            for token in sorted(state, key=self._token_paths.__getitem__):
+                path = self._owner_path(*self._token_paths[token])
+                unconsumed.append(path)
+                events, _ = self._reaching_ownership_events(cfg, token, predecessor, None, True)
+                related.extend((event.node, f'ownership of {path} starts here') for event in events)
+            statements = cfg.blocks[predecessor].stmts
+            node = statements[-1] if statements else self._get_block_source_node(cfg, predecessor)
+            self.errors.append(LinearError(
+                kind='unconsumed_at_exit',
+                block_id=block_id,
+                message='Linear tokens not consumed before function exit: ' + ', '.join(unconsumed),
+                source_node=node,
+                related=tuple(related),
+            ))
     
     def _compute_entry_snapshot(
         self, cfg: CFG, block_id: int
@@ -515,7 +497,6 @@ class LinearChecker:
                 
                 queue.append(succ_id)
         
-        logger.error(f"No source node found for block {block_id}")
         return None
     
     def _error_merge_inconsistent(
@@ -532,7 +513,6 @@ class LinearChecker:
         
         diffs = []
         for var_id in sorted(all_var_ids):
-            var_name, line_number = self._var_id_info.get(var_id, (f"<id={var_id}>", None))
             # Collect all paths for this variable
             all_paths: Set[Tuple[int, ...]] = set()
             for _, snapshot in pred_info:
@@ -543,26 +523,33 @@ class LinearChecker:
                 states_for_path = []
                 for edge, snapshot in pred_info:
                     state = snapshot.get(var_id, {}).get(path, 'invalid')
-                    states_for_path.append((edge.source_id, state))
+                    states_for_path.append((edge, state))
                 
                 # Check if valid status differs (handle both old and new naming)
                 valid_values = set(s in ('valid', 'active') for _, s in states_for_path)
                 if len(valid_values) > 1:
-                    path_str = f"{var_name}[{']['.join(map(str, path))}]" if path else var_name
-                    if line_number:
-                        path_str = f"{path_str} (line {line_number})"
-                    diffs.append({
-                        'path_str': path_str,
-                        'states': states_for_path
-                    })
+                    path_str = self._owner_path(var_id, path)
+                    branches = [(self._branch_ownership_source(cfg, edge, var_id, path), state)
+                                for edge, state in states_for_path]
+                    diffs.append((path_str, branches))
         
         self.errors.append(LinearError(
             kind='merge_inconsistent',
             block_id=block_id,
-            message=f"Inconsistent linear states at merge point ({format_block_info(cfg, block_id)})",
+            message='Inconsistent linear states at merge point',
             details=diffs,
             source_node=self._get_block_source_node(cfg, block_id)
         ))
+
+    def _branch_ownership_source(self, cfg, edge, var_id, path):
+        block = cfg.get_block(edge.source_id)
+        for event in reversed(block.linear_events):
+            if (event.var_id == var_id and event.path == path and event.node is not None
+                    and isinstance(event, (LinearRegister, LinearTransition))):
+                return event.node
+        if block.stmts:
+            return block.stmts[-1]
+        return self._get_block_source_node(cfg, edge.source_id)
     
     def _simulate_block(
         self, cfg: CFG, block: CFGBlock, entry_snapshot: LinearState
@@ -583,10 +570,9 @@ class LinearChecker:
         result = entry_snapshot
         
         # Process each linear event in the block
-        for event in block.linear_events:
+        for index, event in enumerate(block.linear_events):
             if isinstance(event, LinearCopy):
-                path_str = (f"{event.var_name}[{']['.join(map(str, event.path))}]"
-                            if event.path else event.var_name)
+                path_str = self._owner_path(event.var_id, event.path, event.var_name)
                 self.errors.append(LinearError(
                     kind='illegal_copy', block_id=block.id,
                     message=f"Cannot assign linear token '{path_str}' "
@@ -599,7 +585,7 @@ class LinearChecker:
                 result = result.with_token(
                     self._token_id(var_id, path), event.initial_state == 'valid')
                 # Store var info for error reporting
-                self._var_id_info[var_id] = (event.var_name, event.line_number)
+                self._owners[var_id] = event
                 logger.debug(f"LinearChecker: Register id={var_id} {event.var_name}{path} = {event.initial_state}")
             
             elif isinstance(event, LinearTransition):
@@ -614,23 +600,24 @@ class LinearChecker:
                 # Validate transition: current state must match expected old_state
                 if current_state != event.old_state:
                     # State mismatch - report error
-                    path_str = f"{event.var_name}[{']['.join(map(str, path))}]" if path else event.var_name
-                    line_info = f" (line {event.line_number})" if event.line_number else ""
+                    path_str = self._owner_path(var_id, path, event.var_name)
                     
                     if event.old_state == 'valid' and current_state == 'invalid':
                         # Expected valid but got invalid -> use after consume or use undefined
-                        self.errors.append(LinearError(
+                        error = LinearError(
                             kind='use_after_consume',
                             block_id=block.id,
-                            message=f"Linear token '{path_str}' already consumed or undefined{line_info}",
+                            message=f"Linear token '{path_str}' already consumed or undefined",
                             source_node=event.node
-                        ))
+                        )
+                        self.errors.append(error)
+                        self._unavailable_uses.append((error, path_str, event, index))
                     elif event.old_state == 'invalid' and current_state == 'valid':
                         # Expected invalid but got valid -> reassigning valid token
                         self.errors.append(LinearError(
                             kind='reassign_valid',
                             block_id=block.id,
-                            message=f"Cannot reassign '{path_str}': linear token not consumed{line_info}",
+                            message=f"Cannot reassign '{path_str}': linear token not consumed",
                             source_node=event.node
                         ))
                 
@@ -639,6 +626,67 @@ class LinearChecker:
                 logger.debug(f"LinearChecker: Transition id={var_id} {event.var_name}{path}: {current_state} -> {event.new_state}")
         
         return result
+
+    def _explain_unavailable_uses(self, cfg):
+        for error, path, event, index in self._unavailable_uses:
+            token = self._token_ids[event.var_id, event.path]
+            events, complete = self._reaching_ownership_events(
+                cfg, token, error.block_id, index, False)
+            reasons = {'undefined' if isinstance(origin, LinearRegister) else 'consumed'
+                       for origin in events}
+            if complete and reasons == {'consumed'}:
+                error.message = f"Linear token '{path}' already consumed"
+            elif complete and reasons == {'undefined'}:
+                error.message = f"Linear token '{path}' is undefined"
+            error.related = tuple(
+                (origin.node, 'declared here without an owned value'
+                 if isinstance(origin, LinearRegister) else 'ownership was consumed or transferred here')
+                for origin in events)
+
+    def _reaching_ownership_events(self, cfg, token, block_id, index, wanted):
+        """Find the events that established the checked state on incoming paths."""
+        owner_path = self._token_paths[token]
+        pending = deque([(block_id, index)])
+        visited = set()
+        origins = []
+        complete = True
+        while pending:
+            source = pending.popleft()
+            if source in visited:
+                continue
+            visited.add(source)
+            block, end = source
+            held = token in self.entry_snapshots[block]
+            origin = None
+            for event in cfg.blocks[block].linear_events[:end]:
+                if (event.var_id, event.path) != owner_path:
+                    continue
+                if isinstance(event, LinearRegister):
+                    held = event.initial_state == 'valid'
+                    origin = event
+                elif isinstance(event, LinearTransition):
+                    new_state = event.new_state == 'valid'
+                    if new_state != held:
+                        origin = event
+                    held = new_state
+            if held != wanted:
+                complete = False
+                continue
+            if origin is not None:
+                origins.append(origin)
+                continue
+
+            predecessors = [edge.source_id for edge in cfg.get_predecessors(block)
+                            if edge.kind != 'loop_back' and edge.source_id in self.exit_snapshots]
+            if not predecessors:
+                complete = False
+                continue
+            for predecessor in predecessors:
+                if (token in self.exit_snapshots[predecessor]) == wanted:
+                    pending.append((predecessor, None))
+                else:
+                    complete = False
+        return origins, complete
     
     def _check_loop_invariant(
         self, cfg: CFG, back_edge: CFGEdge, exit_snapshot: LinearState
@@ -660,18 +708,19 @@ class LinearChecker:
             return
         
         if exit_snapshot != header_entry:
-            diffs = find_snapshot_diffs(
-                self._describe_state(header_entry), self._describe_state(exit_snapshot))
             diff_strs = []
-            for diff in diffs:
-                states_str = ', '.join(f"{s}" for _, s in diff['states'])
-                diff_strs.append(f"{diff['path_str']}: {states_str}")
+            changed = set(header_entry) ^ set(exit_snapshot)
+            for token in sorted(changed, key=self._token_paths.__getitem__):
+                path = self._owner_path(*self._token_paths[token])
+                before = 'valid' if token in header_entry else 'invalid'
+                after = 'valid' if token in exit_snapshot else 'invalid'
+                diff_strs.append(f"{path}: {_ownership_state(before)} at loop entry, "
+                                 f"{_ownership_state(after)} at the end of the iteration")
             
             self.errors.append(LinearError(
                 kind='loop_invariant_violated',
                 block_id=back_edge.source_id,
                 message=f"Loop body changes linear state: {'; '.join(diff_strs)}",
-                details=diffs,
                 source_node=self._get_block_source_node(cfg, back_edge.source_id)
             ))
     

@@ -100,6 +100,23 @@ class TestValueRef(unittest.TestCase):
         self.assertTrue(ref.has_place())
         self.assertIs(ref.require_place(), alloca)
     
+    def test_singleton_value_is_determined_by_type_with_or_without_storage(self):
+        from pythoc import const, pyconst
+
+        singleton = const[pyconst[42]]
+        llvm_type = singleton.get_llvm_type()
+        place = self.builder.alloca(llvm_type)
+        ref = wrap_value(place, kind='address', type_hint=singleton, address=place)
+        temporary = wrap_value(ir.Constant(llvm_type, ir.Undefined), kind='value',
+                               type_hint=singleton)
+        target = ast.parse('value', mode='eval').body
+
+        self.assertEqual(ref.get_python_value(), 42)
+        self.assertIs(ref.get_pc_type(), singleton)
+        self.assertIs(ref.as_lvalue(target).require_place(), place)
+        self.assertEqual(temporary.get_python_value(), 42)
+        self.assertFalse(temporary.has_place())
+
     def test_ensure_ir(self):
         """Test ensure_ir helper function"""
         i32_val = ir.Constant(ir.IntType(32), 42)

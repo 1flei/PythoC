@@ -9,7 +9,9 @@ from llvmlite import ir
 from typing import Any, Optional
 import ast
 import ctypes
+import sys
 from ..logger import logger
+from ..source import SourceLocation
 
 
 class _Int128Struct(ctypes.Structure):
@@ -118,8 +120,18 @@ class BuiltinEntityMeta(ABCMeta):
                       or getattr(cls, '_is_float', False)
                       or getattr(cls, '_is_bool', False))
         if is_numeric:
+            if len(args) != 1 or kwargs:
+                node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+                detail = ('keyword arguments are unsupported' if kwargs
+                          else f'{len(args)} given')
+                logger.error(f'{cls.get_name()}() takes exactly 1 positional argument ({detail})',
+                             node=node, exc_type=TypeError)
             from .pc_literal import pc_literal
-            return pc_literal._from_type_call(cls, *args, **kwargs)
+            try:
+                return pc_literal._from_type_call(cls, args[0])
+            except (TypeError, ValueError, OverflowError) as error:
+                node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+                logger.error(error, node=node)
         return super().__call__(*args, **kwargs)
 
 
@@ -254,7 +266,7 @@ class BuiltinType(BuiltinEntity):
         raise TypeError(f'{cls.get_name()} has no ctypes representation')
     
     @classmethod
-    def normalize_subscript_items(cls, items):
+    def normalize_subscript_items(cls, items, node):
         """Normalize subscript items to standard format: Tuple[Tuple[Optional[str], type], ...]
         
         This method converts various input formats to a completely unified format where
@@ -291,12 +303,12 @@ class BuiltinType(BuiltinEntity):
         
         normalized = []
         for item in items:
-            normalized.append(cls._normalize_single_item(item))
+            normalized.append(cls._normalize_single_item(item, node=node))
         
         return tuple(normalized)
     
     @classmethod
-    def _normalize_single_item(cls, item):
+    def _normalize_single_item(cls, item, node):
         """Normalize a single subscript item to (Optional[str], type) format.
         
         Handles:
@@ -310,10 +322,10 @@ class BuiltinType(BuiltinEntity):
         # Case 1: Python runtime slice object
         if isinstance(item, builtins.slice):
             if item.start is None or item.stop is None:
-                logger.error("Named field requires both name and type", node=None, exc_type=TypeError)
+                logger.error("Named field requires both name and type", node=node, exc_type=TypeError)
             field_name = item.start
             if not isinstance(field_name, str):
-                logger.error(f"Field name must be a string, got {type(field_name)}", node=None, exc_type=TypeError)
+                logger.error(f"Field name must be a string, got {type(field_name)}", node=node, exc_type=TypeError)
             return (field_name, item.stop)
         
         # Case 2: Already normalized ("name", type) tuple
@@ -322,7 +334,7 @@ class BuiltinType(BuiltinEntity):
 
         # Case 3: Named-item literal carrier from visit_Slice
         if cls._is_named_item_carrier(item):
-            return cls._extract_named_item_carrier(item)
+            return cls._extract_named_item_carrier(item, node=node)
 
         # Case 4: Unnamed item
         return (None, item)
@@ -350,20 +362,20 @@ class BuiltinType(BuiltinEntity):
         return True
 
     @classmethod
-    def _extract_named_item_carrier(cls, item):
+    def _extract_named_item_carrier(cls, item, node):
         from ..literal_protocol import get_sequence_elements, unwrap_literal_item
 
         elements = get_sequence_elements(item)
         if len(elements) != 2:
             logger.error(
                 f"Named-item carrier must have exactly 2 elements, got {len(elements)}",
-                node=None,
+                node=node,
                 exc_type=TypeError,
             )
 
         field_name = unwrap_literal_item(elements[0])
         if not isinstance(field_name, str):
-            logger.error(f"Field name must be a string, got {type(field_name)}", node=None, exc_type=TypeError)
+            logger.error(f"Field name must be a string, got {type(field_name)}", node=node, exc_type=TypeError)
 
         field_type = unwrap_literal_item(elements[1])
         return (field_name, field_type)
@@ -374,7 +386,7 @@ class BuiltinType(BuiltinEntity):
         return cls
 
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript with normalized items
         
         This method should be overridden by subclasses that support subscript syntax.
@@ -389,7 +401,7 @@ class BuiltinType(BuiltinEntity):
         Raises:
             TypeError: If the type doesn't support subscript syntax
         """
-        logger.error(f"{cls.get_name()} does not support subscript syntax", node=None, exc_type=TypeError)
+        logger.error(f"{cls.get_name()} does not support subscript syntax", node=node, exc_type=TypeError)
     
     def __class_getitem__(cls, item):
         """Python runtime entry point for type subscript syntax
@@ -401,11 +413,11 @@ class BuiltinType(BuiltinEntity):
         Examples:
             Type[item] -> normalize_subscript_items(item) -> handle_type_subscript(normalized)
         """
-        # Normalize slice objects to standard format
-        normalized = cls.normalize_subscript_items(item)
-        # Bind quoted names visible at the call site (typedef-style aliases)
         from ..type_resolver import TypeResolver
-        return TypeResolver.bind_type_references(cls.handle_type_subscript(normalized))
+        call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        with logger.at_node(call_site):
+            normalized = cls.normalize_subscript_items(item, node=None)
+            return TypeResolver.bind_type_references(cls.handle_type_subscript(normalized, node=None))
     
     @classmethod
     def can_be_type(cls) -> bool:
@@ -540,7 +552,7 @@ class BuiltinType(BuiltinEntity):
         """Handle addition for numeric types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         if is_float:
             result = visitor.builder.fadd(ensure_ir(left), ensure_ir(right))
@@ -553,7 +565,7 @@ class BuiltinType(BuiltinEntity):
         """Handle subtraction for numeric types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         if is_float:
             result = visitor.builder.fsub(ensure_ir(left), ensure_ir(right))
@@ -566,7 +578,7 @@ class BuiltinType(BuiltinEntity):
         """Handle multiplication for numeric types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         if is_float:
             result = visitor.builder.fmul(ensure_ir(left), ensure_ir(right))
@@ -583,7 +595,7 @@ class BuiltinType(BuiltinEntity):
         """
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
 
         if is_float:
             result = visitor.builder.fdiv(ensure_ir(left), ensure_ir(right))
@@ -599,7 +611,7 @@ class BuiltinType(BuiltinEntity):
         from ..valueref import wrap_value, ensure_ir, get_type
         from ..type_converter import forget_refinement
         from llvmlite import ir
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         if is_float:
             result = visitor.builder.fdiv(ensure_ir(left), ensure_ir(right))
@@ -616,7 +628,7 @@ class BuiltinType(BuiltinEntity):
         """Handle modulo for numeric types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         if is_float:
             result = visitor.builder.frem(ensure_ir(left), ensure_ir(right))
@@ -631,7 +643,7 @@ class BuiltinType(BuiltinEntity):
         """Handle power for numeric types"""
         from ..valueref import wrap_value, ensure_ir, get_type
         from ..type_converter import forget_refinement
-        left, right, is_float = visitor.type_converter.unify_binop_types(left, right)
+        left, right, is_float = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         # Choose pow intrinsic by PC hint: floats use f64 pow, integers promoted already
         float_llvm = ir.DoubleType()
@@ -646,7 +658,7 @@ class BuiltinType(BuiltinEntity):
         """Handle left shift for integer types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right = visitor.type_converter.unify_shift_types(left, right)
+        left, right = visitor.type_converter.unify_shift_types(left, right, node=node)
         
         result = visitor.builder.shl(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
@@ -660,7 +672,7 @@ class BuiltinType(BuiltinEntity):
         """
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right = visitor.type_converter.unify_shift_types(left, right)
+        left, right = visitor.type_converter.unify_shift_types(left, right, node=node)
         
         # Check if the type is signed or unsigned
         type_hint = left.type_hint
@@ -679,7 +691,7 @@ class BuiltinType(BuiltinEntity):
         """Handle bitwise or for integer types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, _ = visitor.type_converter.unify_binop_types(left, right)
+        left, right, _ = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         result = visitor.builder.or_(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
@@ -689,7 +701,7 @@ class BuiltinType(BuiltinEntity):
         """Handle bitwise xor for integer types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, _ = visitor.type_converter.unify_binop_types(left, right)
+        left, right, _ = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         result = visitor.builder.xor(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))
@@ -699,7 +711,7 @@ class BuiltinType(BuiltinEntity):
         """Handle bitwise and for integer types"""
         from ..valueref import wrap_value, ensure_ir
         from ..type_converter import forget_refinement
-        left, right, _ = visitor.type_converter.unify_binop_types(left, right)
+        left, right, _ = visitor.type_converter.unify_binop_types(left, right, node=node)
         
         result = visitor.builder.and_(ensure_ir(left), ensure_ir(right))
         return wrap_value(result, kind="value", type_hint=forget_refinement(left.type_hint))

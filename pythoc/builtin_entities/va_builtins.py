@@ -67,7 +67,7 @@ class va_arg(BuiltinFunction):
         from ..valueref import ensure_ir
         ap_val = ensure_ir(args[0])
 
-        target_pc_type = visitor.type_resolver.resolve_type_value(args[1])
+        target_pc_type = visitor.type_resolver.resolve_type_value(args[1], node)
 
         target_llvm_type = target_pc_type.get_llvm_type(visitor.module.context)
         value = visitor.builder.va_arg(ap_val, target_llvm_type, name="va.arg")

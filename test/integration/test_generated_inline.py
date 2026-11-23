@@ -1,7 +1,10 @@
 """Generated bodies use ordinary inline binding, control flow and ownership."""
 
 import ast
+from contextlib import redirect_stderr
 import inspect
+from io import StringIO
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -118,16 +121,28 @@ class GeneratedInlineTest(unittest.TestCase):
         self.assertEqual(default_void_returns(), 0)
 
     def test_generated_inline_is_not_a_python_or_native_function(self):
+        from pythoc.logger import logger
+
         self.assertTrue(choose._pc_compile_level_callable)
         self.assertFalse(getattr(choose, '_is_compiled', False))
-        with self.assertRaisesRegex(TypeError, 'only be called in compiled code'):
+        output = StringIO()
+        with (redirect_stderr(output), patch.object(logger, 'raise_on_error', True),
+              self.assertRaisesRegex(TypeError, 'only be called in compiled code')):
+            line = sys._getframe().f_lineno + 1
             choose(3)
+        self.assertIn(f'[test_generated_inline.py:{line}]', output.getvalue())
 
     def test_native_attributes_are_rejected(self):
-        with self.assertRaisesRegex(TypeError, 'Native function attributes'):
+        from pythoc.logger import logger
+
+        output = StringIO()
+        with (redirect_stderr(output), patch.object(logger, 'raise_on_error', True),
+              self.assertRaisesRegex(TypeError, 'Native function attributes')):
+            call_line = sys._getframe().f_lineno + 1
             meta.inline_generated(meta.func(
                 'invalid_attrs', [('value', i32)], i32,
                 choose_body('value'), attrs={'noinline'}))
+        self.assertIn(f'[test_generated_inline.py:{call_line}]', output.getvalue())
 
     def test_inline_body_cannot_be_stored_as_a_native_function(self):
         from pythoc.logger import set_raise_on_error
@@ -146,7 +161,10 @@ class GeneratedInlineTest(unittest.TestCase):
         discard = meta.inline_generated(meta.func(
             'invalid_void_owner', [('resource', Owner)], void,
             ast.parse('return resource').body))
-        with CompileSession(), self.assertRaisesRegex(TypeError, 'Cannot discard a linear'):
+        output = StringIO()
+        with redirect_stderr(output), CompileSession(), self.assertRaisesRegex(
+                TypeError, 'Cannot discard a linear'):
+            call_line = sys._getframe().f_lineno + 4
             @compile(suffix='invalid_generated_void_discard')
             def invalid() -> i32:
                 resource: Owner = (7, linear())
@@ -154,6 +172,7 @@ class GeneratedInlineTest(unittest.TestCase):
                 return 0
 
             flush_all_pending_outputs()
+        self.assertRegex(output.getvalue(), rf'\[test_generated_inline.py:{call_line}:\d+\]')
 
 
 if __name__ == '__main__':

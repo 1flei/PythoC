@@ -86,7 +86,7 @@ class typeof(BuiltinFunction):
                          or getattr(python_value, '_is_struct', False)
                          or getattr(python_value, '_is_enum', False)
                          or getattr(python_value, '_is_union', False))):
-                result = visitor.type_resolver.resolve_type_value(value)
+                result = visitor.type_resolver.resolve_type_value(value, node)
             else:
                 result = PythonType.wrap(python_value, is_constant=True)
         else:

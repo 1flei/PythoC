@@ -17,7 +17,7 @@ class array(BuiltinType):
         if element is cls.element_type:
             return cls
         return cls.handle_type_subscript(((None, element),) + tuple(
-            (None, dim) for dim in cls.dimensions))
+            (None, dim) for dim in cls.dimensions), node=None)
 
     @classmethod
     def is_array(cls) -> bool:
@@ -69,7 +69,8 @@ class array(BuiltinType):
         from ..type_descriptor import contains_linear_storage
         if (cls.dimensions and all(cls.dimensions)
                 and contains_linear_storage(element_type)):
-            raise TypeError('Arrays of linear values are unsupported; use a struct for ownership tracking')
+            logger.error('Arrays of linear values are unsupported; use a struct for ownership tracking',
+                         exc_type=TypeError)
         return element_type
 
     @classmethod
@@ -147,10 +148,12 @@ class array(BuiltinType):
             node: Original ast.Call node
         """
         if cls.element_type is None or cls.dimensions is None:
-            logger.error("array type requires element type and dimensions", node=None, exc_type=TypeError)
+            logger.error("array type requires element type and dimensions", node=node, exc_type=TypeError)
         
         if len(args) != 0:
-            logger.error(f"array[T, N]() takes no arguments ({len(args)} given)", node=node, exc_type=TypeError)
+            from ..type_descriptor import format_type
+            logger.error(f"{format_type(cls)}() takes no arguments ({len(args)} given). "
+                         "Use a typed initializer to supply elements.", node=node, exc_type=TypeError)
         from ..type_descriptor import can_zero_initialize
         if not can_zero_initialize(cls):
             logger.error('Cannot zero-initialize an array with proof-bearing elements',
@@ -219,7 +222,7 @@ class array(BuiltinType):
         """
         from ..type_descriptor import array_decay_type
         ptr_type = array_decay_type(base.type_hint)
-        ptr_base = visitor.type_converter.convert(base, ptr_type)
+        ptr_base = visitor.type_converter.convert(base, ptr_type, node)
         return ptr_type.handle_subscript(visitor, ptr_base, index, node)
 
     @classmethod
@@ -228,7 +231,7 @@ class array(BuiltinType):
         from ..type_descriptor import array_decay_type
         ptr_type = array_decay_type(left.type_hint)
 
-        ptr_left = visitor.type_converter.convert(left, ptr_type)
+        ptr_left = visitor.type_converter.convert(left, ptr_type, node)
         return ptr_type.handle_add(visitor, ptr_left, right, node)
 
     @classmethod
@@ -237,7 +240,7 @@ class array(BuiltinType):
         from ..type_descriptor import array_decay_type
         ptr_type = array_decay_type(right.type_hint)
 
-        ptr_right = visitor.type_converter.convert(right, ptr_type)
+        ptr_right = visitor.type_converter.convert(right, ptr_type, node)
         return ptr_type.handle_radd(visitor, left, ptr_right, node)
 
     @classmethod
@@ -246,11 +249,11 @@ class array(BuiltinType):
         from ..type_descriptor import array_decay_type
         ptr_type = array_decay_type(left.type_hint)
 
-        ptr_left = visitor.type_converter.convert(left, ptr_type)
+        ptr_left = visitor.type_converter.convert(left, ptr_type, node)
         return ptr_type.handle_sub(visitor, ptr_left, right, node)
     
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript with normalized items for array
         
         Args:
@@ -263,7 +266,7 @@ class array(BuiltinType):
         if not isinstance(items, builtins.tuple):
             items = (items,)
         if len(items) < 2:
-            logger.error("array requires at least element type and one dimension", node=None, exc_type=TypeError)
+            logger.error("array requires at least element type and one dimension", node=node, exc_type=TypeError)
         # First item is element type.  A quoted element type name
         # (``array["T", 8]``) stays a lazy string here and is resolved at
         # IR materialization, mirroring ptr's string pointee; binding via
@@ -272,8 +275,8 @@ class array(BuiltinType):
         elem_name_opt, element_type = items[0]
         from ..type_descriptor import validate_type_argument
         if any(name is not None for name, _ in items):
-            raise TypeError('array type arguments cannot have member names')
-        validate_type_argument(element_type, 'array element', allow_void=False)
+            logger.error('array type arguments cannot have member names', node=node, exc_type=TypeError)
+        validate_type_argument(element_type, 'array element', allow_void=False, node=node)
         # Remaining items are dimensions
         dimensions = []
         for name_opt, dim in items[1:]:
@@ -282,7 +285,7 @@ class array(BuiltinType):
             # negative dimension is malformed.
             if type(dim) is not int or dim < 0:
                 logger.error(f"array dimensions must be non-negative integers, got {dim}",
-                            node=None, exc_type=TypeError)
+                            node=node, exc_type=TypeError)
             dimensions.append(dim)
         elem_name = getattr(element_type, 'get_name', lambda: str(element_type))()
         dims_str = ', '.join(str(d) for d in dimensions)

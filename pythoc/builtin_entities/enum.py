@@ -21,9 +21,11 @@ Generates:
 from __future__ import annotations
 
 import ast
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .composite_base import CompositeType
+from ..source import SourceLocation
 from .types import i8, i32, i64, void
 from .union import union as union_type
 from ..valueref import ValueRef, wrap_value, extract_constant_index
@@ -55,7 +57,7 @@ def _enum_declarations(cls, annotations):
                 yield stmt.value.id, None, None
 
 
-def _create_enum_type(variants, tag_type, class_name=None):
+def _create_enum_type(variants, tag_type, node, class_name=None):
     """Unified factory function to create enum types
 
     Args:
@@ -70,27 +72,30 @@ def _create_enum_type(variants, tag_type, class_name=None):
     """
     from ..type_descriptor import validate_member_names, validate_type_argument, _unqualified
     from ..type_converter import get_base_type
-    validate_type_argument(tag_type, 'enum tag')
+    validate_type_argument(tag_type, 'enum tag', node=node)
     plain_tag = _unqualified(tag_type)
     if (getattr(plain_tag, '_is_refined', False)
             or not getattr(plain_tag, '_is_integer', False)):
-        raise TypeError('enum tag type must be an integer without refinement')
+        logger.error('enum tag type must be an integer without refinement',
+                     node=node, exc_type=TypeError)
     base_tag = get_base_type(tag_type)
     width = base_tag._bit_width
     lower = -(1 << (width - 1)) if base_tag._is_signed else 0
     upper = (1 << (width - int(base_tag._is_signed))) - 1
     variants = [(name, None if payload is void else payload, tag)
                 for name, payload, tag in variants]
-    validate_member_names([name for name, _, _ in variants], 'enum')
+    validate_member_names([name for name, _, _ in variants], 'enum', node=node)
     seen_tags = {}
     for name, payload, tag in variants:
         if type(tag) is not int or not lower <= tag <= upper:
-            raise TypeError(f'enum tag {tag!r} is not representable by {tag_type.get_name()}')
+            logger.error(f'enum tag {tag!r} is not representable by {tag_type.get_name()}',
+                         node=node, exc_type=TypeError)
         if tag in seen_tags and (payload is not None or seen_tags[tag] is not None):
-            raise TypeError('enum payload variants require distinct tag values')
+            logger.error('enum payload variants require distinct tag values',
+                         node=node, exc_type=TypeError)
         seen_tags[tag] = payload
         if payload is not None:
-            validate_type_argument(payload, 'enum payload')
+            validate_type_argument(payload, 'enum payload', node=node)
 
     # Build union for payloads (use variant names as field names)
     payload_items = []
@@ -101,7 +106,7 @@ def _create_enum_type(variants, tag_type, class_name=None):
             payload_items.append((var_name, void))
 
     # Create union with all payload types using variant names as field names
-    union_payload = union_type.handle_type_subscript(tuple(payload_items))
+    union_payload = union_type.handle_type_subscript(tuple(payload_items), node=node)
 
     # Build tag constants dict and collect valid tags
     tag_values = {}
@@ -197,7 +202,7 @@ class EnumType(CompositeType):
             return cls
         variants = [(name, payload, cls._tag_values[name])
                     for name, payload in zip(cls._variant_names, payloads)]
-        return _create_enum_type(variants, tag_type, cls.__name__)
+        return _create_enum_type(variants, tag_type, node=None, class_name=cls.__name__)
 
     @classmethod
     def is_enum_type(cls) -> bool:
@@ -312,7 +317,7 @@ class EnumType(CompositeType):
             node: ast.Call node
         """
         from ..valueref import wrap_value, ensure_ir
-        from ..type_descriptor import (enum_constructor_payload,
+        from ..type_descriptor import (enum_constructor_error, enum_constructor_payload,
                                        enum_runtime_variants, _constant_value)
         from .types import void
         from llvmlite import ir
@@ -322,10 +327,7 @@ class EnumType(CompositeType):
         runtime_variants = (() if known_tag or admitted else
                             enum_runtime_variants(cls, args))
         if not admitted and not runtime_variants:
-            logger.error(
-                f"{cls.get_name()} requires a known valid variant tag and its "
-                "declared payload; payload conversion must be implicit",
-                node=node, exc_type=TypeError)
+            logger.error(enum_constructor_error(cls, args), node=node, exc_type=TypeError)
         tag_value = visitor.implicit_coercer.coerce(args[0], cls._tag_type, node)
         enum_llvm = cls.get_llvm_type(visitor.module.context)
         allocation = visitor.builder.alloca(enum_llvm, name="enum.value")
@@ -435,12 +437,12 @@ class EnumType(CompositeType):
         if index is not None:
             cls._setup_field_types()
             # Extract constant index from pre-evaluated index ValueRef
-            index_val = extract_constant_index(index, "enum subscript")
+            index_val = extract_constant_index(index, node, "enum subscript")
             return cls._gep_and_load(
                 visitor,
                 cls._get_value_address(visitor, base),
                 index_val,
-                cls.get_field_type(index_val)
+                cls._get_field_type(index_val, node)
             )
         
         # Type subscript: enum[Variant1, Variant2: Type2, ...]
@@ -474,7 +476,7 @@ class EnumType(CompositeType):
                                     node=node, exc_type=TypeError)
                     
                     # Parse payload type
-                    var_type = visitor.type_resolver.parse_annotation(item.upper)
+                    var_type = visitor.type_resolver.resolve_annotation(item.upper, item.upper)
                     variants.append((var_name, var_type))
                 else:
                     logger.error(f"Invalid enum variant syntax: {ast.dump(item)}",
@@ -488,7 +490,7 @@ class EnumType(CompositeType):
                 next_tag += 1
             
             # Use unified factory to create enum type
-            enum_cls = _create_enum_type(resolved_variants, i8)
+            enum_cls = _create_enum_type(resolved_variants, i8, node=node)
             
             # Return as ValueRef with type as value (for callable protocol)
             return wrap_value(enum_cls, kind="python", type_hint=enum_cls)
@@ -497,7 +499,7 @@ class EnumType(CompositeType):
             logger.error("Enum types do not support value subscripting", node=node, exc_type=TypeError)
     
     @classmethod
-    def handle_type_subscript(cls, items):
+    def handle_type_subscript(cls, items, node):
         """Handle type subscript with normalized items (for type resolver)
         
         Items are normalized to Tuple[Tuple[Optional[str], type], ...].
@@ -508,14 +510,14 @@ class EnumType(CompositeType):
             items = (items,)
         
         if len(items) == 0:
-            logger.error("enum requires at least one variant", node=None, exc_type=TypeError)
+            logger.error("enum requires at least one variant", node=node, exc_type=TypeError)
         
         # Parse variants
         variants = []
         for name, var_type in items:
             if name is None:
                 logger.error(f"Enum variants must have names, got unnamed type {var_type}",
-                            node=None, exc_type=TypeError)
+                            node=node, exc_type=TypeError)
             variants.append((name, var_type))
         
         # Assign auto tags and build variant list for factory
@@ -526,13 +528,13 @@ class EnumType(CompositeType):
             next_tag += 1
         
         # Use unified factory to create enum type
-        return _create_enum_type(resolved_variants, i8)
+        return _create_enum_type(resolved_variants, i8, node=node)
     
     @classmethod
     def __class_getitem__(cls, item):
         """Python runtime entry point using normalization -> handle_type_subscript"""
-        normalized = cls.normalize_subscript_items(item)
-        return cls.handle_type_subscript(normalized)
+        normalized = cls.normalize_subscript_items(item, node=None)
+        return cls.handle_type_subscript(normalized, node=None)
 
 
 # Make enum support subscript syntax
@@ -545,6 +547,7 @@ class enum_meta(type):
         Creates an anonymous enum type with default tag type (i8).
         """
         import builtins
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
         
         # Parse subscript items
         if not isinstance(item, builtins.tuple):
@@ -563,7 +566,7 @@ class enum_meta(type):
             elif isinstance(it, builtins.slice):
                 # Name: Type syntax comes as a slice
                 if it.step is not None:
-                    logger.error(f"Invalid enum variant syntax: {it}", node=None, exc_type=TypeError)
+                    logger.error(f"Invalid enum variant syntax: {it}", node=node, exc_type=TypeError)
                 
                 # Get variant name
                 if isinstance(it.start, str):
@@ -577,10 +580,10 @@ class enum_meta(type):
                 next_tag += 1
             else:
                 # Unknown format
-                logger.error(f"Invalid enum variant: {it}", node=None, exc_type=TypeError)
+                logger.error(f"Invalid enum variant: {it}", node=node, exc_type=TypeError)
         
         # Use unified factory to create enum type
-        return _create_enum_type(variants, i8)
+        return _create_enum_type(variants, i8, node=node)
 
 
 # Replace the enum function with a class that has the metaclass
@@ -705,7 +708,7 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
         resolved_variants.append((var_name, payload_type, tag))
     
     # Use unified factory to create enum type
-    enum_cls = _create_enum_type(resolved_variants, tag_type, cls.__name__)
+    enum_cls = _create_enum_type(resolved_variants, tag_type, node=None, class_name=cls.__name__)
 
     # The decorator replaces the original class. Bind self references to the
     # resulting enum, using the same rule as struct and union declarations.

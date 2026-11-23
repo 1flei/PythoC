@@ -1,5 +1,7 @@
 """Expansion aliases retain the ownership path of projected values."""
 
+from contextlib import redirect_stderr
+from io import StringIO
 import unittest
 
 from pythoc import compile, consume, i32, inline, linear, struct
@@ -161,16 +163,21 @@ class InlineOwnershipTest(DeferredTestCase):
             flush_all_pending_outputs()
 
     def test_consumed_source_field_cannot_be_reused(self):
-        with CompileSession(), self.assertRaisesRegex(RuntimeError, 'already consumed'):
+        with CompileSession(), self.assertRaisesRegex(
+                RuntimeError, r"Linear token 'owner\.pair\.first' already consumed") as caught:
             @compile(suffix='inline_owned_field_reuse')
             def reused_field() -> i32:
-                owner: Pair = (linear(), linear())
-                result = take_inline(owner.first)
-                consume(owner.first)
-                consume(owner.second)
+                owner: Nested = ((linear(), linear()), linear())
+                result = take_inline(owner.pair.first)
+                consume(owner.pair.first)
+                consume(owner.pair.second)
+                consume(owner.tail)
                 return result
 
             flush_all_pending_outputs()
+        transfer_line = reused_field.__wrapped__.__code__.co_firstlineno + 3
+        self.assertRegex(str(caught.exception),
+                         rf'test_inline_ownership.py:{transfer_line}:\d+: ownership was consumed or transferred here')
 
     def test_returned_field_cannot_be_consumed_twice(self):
         with CompileSession(), self.assertRaisesRegex(RuntimeError, 'already consumed'):
@@ -186,7 +193,9 @@ class InlineOwnershipTest(DeferredTestCase):
             flush_all_pending_outputs()
 
     def test_iteration_cannot_transfer_the_same_field_twice(self):
-        with CompileSession(), self.assertRaisesRegex(RuntimeError, 'already consumed'):
+        output = StringIO()
+        with CompileSession(), redirect_stderr(output), self.assertRaisesRegex(
+                RuntimeError, "Linear token 'owner.first' already consumed"):
             @compile(suffix='iteration_owned_field_reuse')
             def repeated_field() -> i32:
                 owner: Pair = (linear(), linear())
@@ -196,6 +205,10 @@ class InlineOwnershipTest(DeferredTestCase):
                 return 7
 
             flush_all_pending_outputs()
+        loop = repeated_field.__wrapped__.__code__.co_firstlineno + 3
+        self.assertIn(f'[test_inline_ownership.py:{loop}:31]', output.getvalue())
+        self.assertIn(f'test_inline_ownership.py:{loop}:18: ownership was consumed or transferred here',
+                      output.getvalue())
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ from typing import Optional, Any
 from llvmlite import ir
 from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
 from ..logger import logger
+from ..utils.ast_targets import is_rebinding_target, unpack_target_items
 from ..ir_helpers import initialize_storage, safe_store, safe_load, is_const, is_volatile, is_static
 from ..builtin_entities import (
     i8, i16, i32, i64,
@@ -42,16 +43,11 @@ class AssignmentsMixin:
     """Mixin containing assignments-related visitor methods"""
     
     def visit_lvalue(self, node: ast.AST) -> ValueRef:
-        """Resolve an assignment target, preserving a storage-free local singleton."""
-        if isinstance(node, ast.Tuple):
+        """Resolve an expression that denotes writable storage."""
+        if unpack_target_items(node) is not None:
             logger.error("Tuple unpacking should be handled by caller", node=node, exc_type=ValueError)
-        
-        result = self.visit_expression(node)
-        if isinstance(node, ast.Name) and result.is_python_value():
-            binding = self.scope_manager.lookup_variable(node.id)
-            if binding is not None and binding.is_python_constant:
-                return result
-        return result.as_lvalue()
+
+        return self.visit_expression(node).as_lvalue(node)
 
     def _check_linear_rvalue_copy(self, rvalue: ValueRef, node) -> None:
         """Check if rvalue is a linear token or embeds one in a carrier."""
@@ -74,65 +70,39 @@ class AssignmentsMixin:
 
             owner_id = candidate.linear_owner_id
             if owner_id is None:
-                owner_id = self.lookup_variable(candidate_var_name).var_id
+                owner_id = self.lookup_variable(candidate_var_name, node).var_id
             self._get_cf_builder().record_linear_copy(
                 owner_id, candidate_var_name, candidate_linear_path, node)
 
-    def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef, pc_type=None, source="inference") -> ValueRef:
-        """Visit lvalue or define new variable if it doesn't exist
-        
-        Args:
-            node: AST node (usually ast.Name)
-            value_ref: ValueRef to infer type from (optional)
-            pc_type: Explicit PC type (optional, overrides inference)
-            source: Source for variable declaration
-            
-        Returns:
-            ValueRef with kind='address' (lvalue)
-        """
+    def visit_lvalue_or_define(self, node: ast.AST, value_ref: ValueRef,
+                               pc_type=None) -> tuple[ValueRef, bool]:
+        """Return the target and whether this assignment initializes a new local."""
         if not isinstance(node, ast.Name):
-            # For complex expressions, just return lvalue
-            return self.visit_lvalue(node)
-        
-        var_info = self.lookup_variable(node.id)
-        if var_info:
-            # Variable exists, return lvalue
-            return self.visit_lvalue(node)
-        else:
-            # Variable doesn't exist, create it
-            # Infer pc_type from value_ref if not provided
-            # For Python values, this returns PythonType which has zero-sized LLVM type {}
-            if pc_type is None and value_ref is not None:
-                pc_type = self.infer_pc_type_from_value(value_ref)
-            
-            if pc_type is None:
-                logger.error(f"Cannot determine type for new variable '{node.id}'", node=node, exc_type=TypeError)
-            
-            # Create alloca and declare variable
-            # For pyconst/PythonType, this creates a zero-sized alloca {}
-            llvm_type = pc_type.get_llvm_type(self.module.context)
-            alloca = self._create_alloca_in_entry(llvm_type, f"{node.id}_addr")
-            
-            variable = self.declare_variable(
-                name=node.id,
-                type_hint=pc_type,
-                alloca=alloca,
-                source=source,
-                line_number=getattr(node, 'lineno', 0)
-            )
-            
-            # Return lvalue for the new variable with linear tracking info
-            from ..valueref import wrap_value
-            return wrap_value(
-                alloca,
-                kind='address',
-                type_hint=pc_type,
-                address=alloca,
-                var_name=node.id,
-                linear_owner_id=variable.var_id,
-                linear_path=()
-            )
-    
+            return self.visit_lvalue(node), False
+
+        rebind = is_rebinding_target(node)
+        binding = None if rebind else self.lookup_variable(node.id, node)
+        # A surrounding Python name can be shadowed. A compiled global with
+        # storage has a place of its own and is assigned through that place.
+        if binding is not None and (not binding.is_global or binding.value_ref.has_place()):
+            return self._bind_name_reference(binding, node.id).as_lvalue(node), False
+
+        if pc_type is None:
+            pc_type = value_ref.get_pc_type()
+        llvm_type = pc_type.get_llvm_type(self.module.context)
+        alloca = self._create_alloca_in_entry(llvm_type, f"{node.id}_addr")
+        binding = self.declare_variable(
+            name=node.id,
+            type_hint=pc_type,
+            node=node,
+            alloca=alloca,
+            value_ref=value_ref,
+            source="inference",
+            line_number=node.lineno,
+            allow_redeclare=rebind,
+        )
+        return self._bind_name_reference(binding, node.id), True
+
     def _assignment_ir_value(self, rvalue: ValueRef, target_type: ir.Type):
         """Read pointer-backed array values when storing an array object."""
         value = ensure_ir(rvalue)
@@ -142,97 +112,53 @@ class AssignmentsMixin:
             return safe_load(self.builder, value, rvalue.get_pc_type())
         return value
 
-    def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef, node: ast.AST = None):
-        """Store value to lvalue with type conversion and qualifier checks
-        
-        Special handling for pyconst fields (zero-sized, no actual store).
-        """
+    def _store_to_lvalue(self, lvalue: ValueRef, rvalue: ValueRef, node: ast.AST,
+                         *, initializing=False):
+        """Store a value with type conversion and qualifier checks."""
         target_pc_type = lvalue.get_pc_type()
-        
         rvalue = self.implicit_coercer.coerce(rvalue, target_pc_type, node)
-        from ..builtin_entities.python_type import PythonType
-        if isinstance(target_pc_type, PythonType):
-            return  # The type already carries the value.
-
         target_type = lvalue.get_storage_type()
         value_ir = self._assignment_ir_value(rvalue, target_type)
         
-        # Use safe_store for qualifier-aware storage (handles const check + volatile)
-        lvalue.store(self.builder, value_ir, node=node)
+        if initializing:
+            initialize_storage(self.builder, value_ir, lvalue.require_place(), target_pc_type)
+        else:
+            lvalue.store(self.builder, value_ir, node=node)
 
-    def _assign_to_target(self, target: ast.AST, rvalue: ValueRef, node, pc_type=None) -> None:
+    def _assign_to_target(self, target: ast.AST, rvalue: ValueRef, node,
+                          value_node, pc_type=None) -> None:
         """Unified single-target assignment: lvalue resolution, linear checks, store, and linear registration.
         
         Args:
             target: AST node for assignment target (ast.Name, ast.Attribute, ast.Subscript, ast.Tuple)
             rvalue: Value to assign
             node: AST node for error reporting
+            value_node: Original right-hand expression
             pc_type: Explicit PC type (optional, overrides inference)
         """
         # Handle nested tuple unpacking recursively
-        if isinstance(target, ast.Tuple):
-            self._handle_tuple_unpacking(target, node, rvalue, node)
+        items = unpack_target_items(target)
+        if items is not None:
+            self._handle_tuple_unpacking(target, items, rvalue, value_node)
             return
         
-        # Special case: Python value assigned to a simple Name
-        # Python values don't have addresses, so we directly bind them to var_registry
-        # without creating an alloca
-        if isinstance(target, ast.Name) and rvalue.is_python_value():
-            from ..context import VariableInfo
-            from ..builtin_entities.python_type import PythonType
-            
-            var_name = target.id
-            
-            # Check if variable exists in var_registry (not user_globals)
-            existing_in_registry = self.scope_manager.lookup_variable(var_name)
-            
-            # An extern global is a mutable lvalue: `g = 5` must store through
-            # the global's address, not bind a local Python value.
-            user_globals = self.ctx.user_globals or {}
-            is_extern_global = getattr(
-                user_globals.get(var_name), '_is_extern_global', False)
+        # An unpacked field supplies its own type, including an array field.
+        assigned_value = (self.value_dispatcher.prepare_assignment_rvalue(rvalue, node)
+                          if pc_type is None else rvalue)
+        lvalue, initializing = self.visit_lvalue_or_define(target, assigned_value, pc_type)
+        self._store_to_lvalue(lvalue, assigned_value, node, initializing=initializing)
 
-            if existing_in_registry is None and not is_extern_global:
-                # New variable OR shadowing a user_globals variable
-                # Either way, declare it in var_registry
-                pc_type = pc_type or rvalue.get_pc_type()
-                if pc_type is None:
-                    pc_type = PythonType.wrap(rvalue.get_python_value(), is_constant=True)
-                
-                # Set type_hint on the value_ref
-                rvalue_copy = rvalue
-                if rvalue_copy.type_hint is None:
-                    rvalue_copy = rvalue.clone(type_hint=pc_type)
-                
-                var_info = VariableInfo(
-                    name=var_name,
-                    value_ref=rvalue_copy,
-                    alloca=None,  # No alloca for Python values
-                    source="python_value_assign"
-                )
-                self.scope_manager.declare_variable(var_info, allow_shadow=True)
-                return
-
-        decayed_rvalue = self.value_dispatcher.prepare_assignment_rvalue(rvalue, node)
-        
-        # Get or create lvalue
-        lvalue = self.visit_lvalue_or_define(target, value_ref=decayed_rvalue, pc_type=pc_type, source="inference")
-        
-        # Store value to lvalue
-        self._store_to_lvalue(lvalue, decayed_rvalue, node)
-        
         # Every successful owned store hands responsibility to its destination,
         # including raw pointer storage outside the local CFG binding set.
         if self._is_linear_type(lvalue.type_hint) and not rvalue.is_undefined_pcvalue():
             owner_id = lvalue.linear_owner_id
             if owner_id is None and lvalue.var_name:
-                owner_id = self.lookup_variable(lvalue.var_name).var_id
+                owner_id = self.lookup_variable(lvalue.var_name, target).var_id
             if owner_id is not None:
-                name = lvalue.var_name or f'<temporary {owner_id}>'
+                name = lvalue.var_name or 'temporary value'
                 for path in self._get_linear_paths(lvalue.type_hint, lvalue.linear_path or ()):
                     self._get_cf_builder().record_linear_transition(
-                        owner_id, name, path, 'invalid', 'valid',
-                        line_number=getattr(node, 'lineno', None), node=node)
+                        owner_id, name, path, 'invalid', 'valid', node)
             self._transfer_linear_ownership(rvalue, reason='assignment', node=node)
 
     def _store_to_new_lvalue(self, node, var_name, pc_type, rvalue: ValueRef):
@@ -289,7 +215,9 @@ class AssignmentsMixin:
         self.declare_variable(
             name=var_name,
             type_hint=pc_type,
+            node=node,
             alloca=var_addr,
+            value_ref=rvalue,
             source="annotation",
             line_number=node.lineno
         )
@@ -304,25 +232,23 @@ class AssignmentsMixin:
         
         # Handle multiple targets
         for target in node.targets:
-            if isinstance(target, ast.Tuple):
-                self._handle_tuple_unpacking(target, node.value, rvalue, node)
-            else:
-                self._assign_to_target(target, rvalue, node)
+            self._assign_to_target(target, rvalue, node, node.value)
     
-    def _handle_tuple_unpacking(self, target: ast.Tuple, value_node: ast.AST, rvalue: ValueRef, node: ast.AST):
+    def _handle_tuple_unpacking(self, target, items, rvalue: ValueRef, value_node):
         """Handle tuple unpacking assignment through the literal protocol."""
         from ..literal_protocol import get_unpack_values
 
         unpack_values = get_unpack_values(self, rvalue, value_node)
-        if len(unpack_values) != len(target.elts):
+        if len(unpack_values) != len(items):
             logger.error(
-                f"Unpacking mismatch: {len(target.elts)} variables, {len(unpack_values)} values",
+                f"Unpacking mismatch: {len(items)} variables, {len(unpack_values)} values",
                 node=target,
                 exc_type=TypeError,
             )
 
-        for unpack_value, elt in zip(unpack_values, target.elts):
-            self._assign_to_target(elt, unpack_value, target, pc_type=unpack_value.get_pc_type())
+        for unpack_value, elt in zip(unpack_values, items):
+            self._assign_to_target(elt, unpack_value, elt, value_node,
+                                   pc_type=unpack_value.get_pc_type())
 
     def visit_AnnAssign(self, node: ast.AnnAssign):
         """Handle annotated assignment statements (variable declarations with types)
@@ -346,7 +272,7 @@ class AssignmentsMixin:
         
         # Get PC type from annotation
         if not hasattr(node, 'annotation'):
-            raise RuntimeError("AnnAssign requires annotation")
+            logger.error("AnnAssign requires annotation", node=node)
 
         pc_type = self.get_pc_type_from_annotation(node.annotation)
         if pc_type is None:
@@ -363,11 +289,7 @@ class AssignmentsMixin:
             return
         ownership_source = None
         # Now parse the RHS
-        from ..builtin_entities.python_type import PythonType
-        if node.value is None and isinstance(pc_type, PythonType):
-            rvalue = wrap_value(pc_type.get_python_object(), kind="python",
-                                type_hint=pc_type)
-        elif node.value is None:
+        if node.value is None:
             llvm_type = pc_type.get_llvm_type(self.module.context)
             from ..ir_helpers import is_thread_local
             if is_static(pc_type) or is_thread_local(pc_type):
@@ -390,7 +312,7 @@ class AssignmentsMixin:
             from ..ir_helpers import is_thread_local
             const_seed = None
             if is_static(pc_type) or is_thread_local(pc_type):
-                const_seed = self.type_converter.try_const_aggregate(rvalue, pc_type)
+                const_seed = self.type_converter.try_const_aggregate(rvalue, pc_type, node=node)
             if const_seed is not None:
                 rvalue = wrap_value(const_seed, kind="value", type_hint=pc_type)
             # Always validate the semantic relation, including qualifiers and
@@ -398,10 +320,6 @@ class AssignmentsMixin:
             else:
                 rvalue = self.implicit_coercer.coerce(rvalue, pc_type, node)
             
-        if isinstance(pc_type, PythonType):
-            self.declare_variable(var_name, pc_type, value_ref=rvalue,
-                                  source="annotation", line_number=node.lineno)
-            return
         if ownership_source is not None and self._is_linear_type(pc_type):
             self._transfer_linear_ownership(ownership_source, reason="assignment", node=node)
         # Store the value

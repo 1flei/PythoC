@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import sys
+
 from pythoc import (
     compile, param, i8, i16, i32, i64, u8, u16, u32, u64, typeof, bool,
 )
-from pythoc.type_descriptor import same_type
+from pythoc.logger import logger
+from pythoc.source import SourceLocation
+from pythoc.type_descriptor import format_type, same_type
 
 
 # Constants from Abseil's MixingHashState.  kStaticRandomData[0] is used as a
@@ -64,18 +68,28 @@ _SCALAR_INTEGER_TYPES = [i8, i16, i32, i64, u8, u16, u32, u64]
 
 def key_functions(key_type, hash_fn=None, eq_fn=None):
     """Resolve one fixed pair; equivalent keys must have identical hashes."""
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    return _key_functions(key_type, hash_fn, eq_fn, node)
+
+
+def _key_functions(key_type, hash_fn, eq_fn, node):
     if hash_fn is None and eq_fn is None:
         if key_type not in _SCALAR_INTEGER_TYPES:
-            raise TypeError(f'no default hash for key type {key_type}')
+            logger.error(f'no default hash for key type {format_type(key_type)}',
+                         node=node, exc_type=TypeError)
         return _scalar_hash(key_type), _identity_eq(key_type)
     if hash_fn is None or eq_fn is None:
-        raise TypeError('Custom hash_fn and eq_fn must be supplied together')
-    for function, parameters, result in (
-            (hash_fn, (key_type,), u64), (eq_fn, (key_type, key_type), bool)):
+        logger.error('Custom hash_fn and eq_fn must be supplied together',
+                     node=node, exc_type=TypeError)
+    for name, function, parameters, result in (
+            ('hash_fn', hash_fn, (key_type,), u64), ('eq_fn', eq_fn, (key_type, key_type), bool)):
         signature = typeof(function)
-        actual = getattr(signature, 'param_types', ())
+        actual = getattr(signature, 'param_types', None) or ()
         if (len(actual) != len(parameters)
                 or not all(same_type(a, b) for a, b in zip(actual, parameters))
                 or not same_type(getattr(signature, 'return_type', None), result)):
-            raise TypeError('Hash/equality functions have incompatible signatures')
+            expected = ', '.join(format_type(t) for t in (*parameters, result))
+            logger.error('Hash/equality functions have incompatible signatures. '
+                         f'{name} expects func[{expected}], got {format_type(signature)}',
+                         node=node, exc_type=TypeError)
     return hash_fn, eq_fn

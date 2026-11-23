@@ -1,7 +1,10 @@
 """Turn generated function definitions into compile-only inline callables."""
 
 import inspect
+import sys
 
+from ..logger import logger
+from ..source import SourceLocation
 from .generated import GeneratedFunction
 
 
@@ -14,16 +17,19 @@ def inline_generated(fn, *, user_globals=None):
     must already be declared through the ordinary initialization path.
     A None return type denotes void, as it does in compile_generated.
     """
-    if not isinstance(fn, GeneratedFunction):
-        raise TypeError('inline_generated expects GeneratedFunction')
-    if fn.attrs:
-        raise TypeError('Native function attributes do not apply to inline bodies')
+    call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    with logger.at_node(call_site):
+        if not isinstance(fn, GeneratedFunction):
+            logger.error('inline_generated expects GeneratedFunction', exc_type=TypeError)
+        if fn.attrs:
+            logger.error('Native function attributes do not apply to inline bodies',
+                         exc_type=TypeError)
 
     from .._inline.definition_bindings import symbol_expression
     from ..builtin_entities.types import void
     from ..decorators.inline import _make_inline_callable
 
-    syntax = fn.to_func_def()
+    syntax = fn.to_func_def(call_site=call_site)
     hints = fn.get_param_type_hints()
     for argument in syntax.args.args:
         hint = hints[argument.arg]

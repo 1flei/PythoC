@@ -43,19 +43,21 @@ def build_annotation_namespace(user_globals: dict, is_dynamic: bool = False,
     return eval_namespace
 
 
-def resolve_annotations_dict(annotations: dict, type_resolver) -> dict:
+def resolve_annotations_dict(annotations: dict, type_resolver, source_nodes: dict) -> dict:
     """
     Resolve all annotations in a __annotations__ dictionary.
 
     Args:
         annotations: The __annotations__ dictionary from a function or class
         type_resolver: TypeResolver instance used for string annotation resolution
+        source_nodes: Original annotation expressions keyed by name
     
     Returns:
         Dictionary mapping annotation names to resolved types
     """
     return {
-        name: (type_resolver.parse_annotation(value, defer_unresolved=True)
+        name: (type_resolver.resolve_annotation(
+                   value, source_nodes.get(name), defer_unresolved=True)
                if isinstance(value, str) else value)
         for name, value in annotations.items()
     }

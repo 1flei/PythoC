@@ -61,7 +61,7 @@ Record = struct['value': i32]
 PointerRecord = struct['value': ptr[i32]]
 ConstPointerRecord = struct['value': ptr[const[i32]]]
 CheckedRecord = struct['value': Checked]
-Enum = _create_enum_type([('Value', i32, 0), ('Empty', None, 1)], i32)
+Enum = _create_enum_type([('Value', i32, 0), ('Empty', None, 1)], i32, node=None)
 AlternateConvention = func[i32, i32]
 AlternateConvention.calling_convention = 'stdcall'
 VariadicCallback = func[i32, i32]
@@ -180,13 +180,13 @@ CASES = (
                  'callback', False, False),
     RelationCase('enum_identity', Enum, Enum, 'enum', True, False),
     RelationCase('enum_variant_tags', Enum,
-                 _create_enum_type([('Value', i32, 2), ('Empty', None, 1)], i32),
+                 _create_enum_type([('Value', i32, 2), ('Empty', None, 1)], i32, node=None),
                  'enum', False, False),
     RelationCase('enum_variant_names', Enum,
-                 _create_enum_type([('Other', i32, 0), ('Empty', None, 1)], i32),
+                 _create_enum_type([('Other', i32, 0), ('Empty', None, 1)], i32, node=None),
                  'enum', False, False),
     RelationCase('enum_payload', Enum,
-                 _create_enum_type([('Value', u32, 0), ('Empty', None, 1)], i32),
+                 _create_enum_type([('Value', u32, 0), ('Empty', None, 1)], i32, node=None),
                  'enum', False, False),
     RelationCase('union_identity', union['value': i32], union['value': i32],
                  'union', True, False),
@@ -453,6 +453,12 @@ PROBE_FORMS = {
 
 ACCEPT_FORM = function_ast(accept)
 ARRAY_FAMILIES = ('decay', 'decay_2d')
+DIAGNOSTIC_TYPES = {
+    'array_pointer_element': ('ptr[array[i32, 2]]', 'ptr[array[u32, 2]]'),
+    'array_pointer_extent': ('ptr[array[i32, 2]]', 'ptr[array[i32, 3]]'),
+    'callback_convention': ('cdecl', 'stdcall'),
+    'callback_varargs': ('func[i32, i32]', 'func[i32, ..., i32]'),
+}
 
 
 def conversion_context(case):
@@ -489,12 +495,24 @@ class TypeConversionMatrixTest(DeferredTestCase):
                     compiler = LLVMCompiler(user_globals=namespace)
                     form = copy.deepcopy(forms[entry])
                     if case.allowed(entry):
-                        compiler.compile_function_from_ast(form)
+                        compiler.compile_function_from_ast(form, source_file=__file__)
                         binding.parse_assembly(compiler.get_ir()).verify()
                         accepted += 1
                     else:
-                        with self.assertRaisesRegex(TypeError, case.rejection(entry)):
-                            compiler.compile_function_from_ast(form)
+                        with self.assertRaisesRegex(TypeError, case.rejection(entry)) as caught:
+                            compiler.compile_function_from_ast(form, source_file=__file__)
+                        message = str(caught.exception)
+                        for component in DIAGNOSTIC_TYPES.get(case.name, ()):
+                            self.assertIn(component, message)
+                        if case.name in DIAGNOSTIC_TYPES and entry in ('sequence', 'mapping'):
+                            field = "field 'value'" if entry == 'mapping' else 'field 1'
+                            self.assertIn(field, message)
+                            self.assertNotIn('t2_', message)
+                        if case.name in DIAGNOSTIC_TYPES and not case.constructor:
+                            self.assertNotIn('explicit cast is allowed', message)
+                        if entry in ('assignment', 'mapping') and case.name in ('drop_const', 'drop_volatile'):
+                            qualifier = case.name.removeprefix('drop_')
+                            self.assertIn(f'would drop pointee {qualifier}', message)
                         rejected += 1
         self.assertEqual((accepted, rejected), (420, 330))
 

@@ -15,6 +15,7 @@ Key benefits:
 - Dead block elimination can happen before IR emission
 """
 
+from collections import deque
 from typing import Optional, Dict, List, Tuple, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from llvmlite import ir
@@ -28,6 +29,7 @@ from ..cfg.linear_checker import (
     LinearEvent,
 )
 from ..logger import logger
+from ..source import ast_location
 from .pcir import (
     VReg, VRegPhi, VRegSwitch, SentinelBlock, PCIRInst,
     infer_result_type, resolve_arg,
@@ -138,6 +140,7 @@ class ControlFlowBuilder:
         self._terminated: Dict[int, bool] = {self._entry_block.id: False}
 
         self._required_unreachable: Dict[int, Tuple[str, ast.AST]] = {}
+        self._rejected_generator_filters: Dict[int, ast.AST] = {}
 
         # Pending forward gotos (opaque objects with .block, .label_name, etc.)
         self._pending_gotos: List[Any] = []
@@ -365,6 +368,9 @@ class ControlFlowBuilder:
             target: Target block (SentinelBlock or ir.Block)
             kind: Edge kind for CFG ('sequential', 'break', 'continue', 'goto', 'goto_end')
         """
+        self._record_branch(target, kind, None)
+
+    def _record_branch(self, target, kind, node):
         src_id = self._current_block_id
         dst_id = self._get_cfg_block_id(target)
 
@@ -373,7 +379,7 @@ class ControlFlowBuilder:
         self._terminated[src_id] = True
 
         # Record PCIR
-        self._append_pcir(PCIRInst(op='branch', args=(target,), kwargs={}))
+        self._append_pcir(PCIRInst(op='branch', args=(target,), kwargs={}, node=node))
 
         logger.debug(f"CFG: branch {src_id} -> {dst_id} [{kind}]")
 
@@ -405,6 +411,46 @@ class ControlFlowBuilder:
         """Reject a reachable path here after all forward edges are resolved."""
         self._required_unreachable[self._current_block_id] = (message, node)
         self.unreachable()
+
+    def record_rejected_generator_filter(self, node):
+        self._rejected_generator_filters[self._current_block_id] = node
+
+    def _reachable_path_note(self, block_id, reachable, node):
+        """Find a source decision on an entry-to-rejection CFG path."""
+        frame = self._visitor.func_state
+        source = (frame.source_file, frame.line_offset)
+        primary = ast_location(node, source)
+        pending = deque([block_id])
+        seen = {block_id}
+        nearest_branch = None
+        while pending:
+            current = pending.popleft()
+            folded = self._rejected_generator_filters.get(current)
+            location = ast_location(folded, source)
+            if location is not None and location != primary:
+                return f'{location}: this generator filter evaluates to false'
+            for edge in self._cfg.get_predecessors(current):
+                predecessor = edge.source_id
+                if predecessor not in reachable:
+                    continue
+                instructions = self._cfg.blocks[predecessor].pcir
+                if instructions:
+                    origin = instructions[-1].node
+                    if isinstance(origin, (ast.If, ast.While, ast.IfExp)):
+                        origin = origin.test
+                    location = ast_location(origin, source)
+                    if location is not None and location != primary:
+                        if getattr(origin, '_pc_producer_return', False):
+                            return f'{location}: the producer can return on a path to this point'
+                        if edge.kind == 'branch_false' and getattr(origin, '_pc_generator_filter', False):
+                            return f'{location}: this generator filter can reject a value on a path to this point'
+                        if nearest_branch is None and edge.kind in ('branch_true', 'branch_false'):
+                            taken = 'true' if edge.kind == 'branch_true' else 'false'
+                            nearest_branch = f'{location}: the {taken} branch can reach this point'
+                if predecessor not in seen:
+                    seen.add(predecessor)
+                    pending.append(predecessor)
+        return nearest_branch
 
     def switch(self, value, default_block):
         """Record a switch instruction (CFG + PCIR).
@@ -499,16 +545,14 @@ class ControlFlowBuilder:
     # ========== Linear Event Recording Methods ==========
 
     def record_linear_register(self, var_id: int, var_name: str, path: Tuple[int, ...],
-                               initial_state: str, line_number: int = None,
-                               node: ast.AST = None):
-        event = LinearRegister(var_id, var_name, path, initial_state, line_number, node)
+                               initial_state: str, node, type_hint):
+        event = LinearRegister(var_id, var_name, path, initial_state, node, type_hint)
         self._add_linear_event(event)
         logger.debug(f"CFG: LinearRegister(id={var_id}, {var_name}, path={path}, initial={initial_state})")
 
     def record_linear_transition(self, var_id: int, var_name: str, path: Tuple[int, ...],
-                                  old_state: str, new_state: str, line_number: int = None,
-                                  node: ast.AST = None):
-        event = LinearTransition(var_id, var_name, path, old_state, new_state, line_number, node)
+                                  old_state: str, new_state: str, node):
+        event = LinearTransition(var_id, var_name, path, old_state, new_state, node)
         self._add_linear_event(event)
         logger.debug(f"CFG: LinearTransition(id={var_id}, {var_name}, path={path}, {old_state}->{new_state})")
 
@@ -518,8 +562,7 @@ class ControlFlowBuilder:
 
     def record_linear_copy(self, var_id, var_name, path, node):
         from ..cfg.linear_checker import LinearCopy
-        self._add_linear_event(LinearCopy(
-            var_id, var_name, path, getattr(node, 'lineno', None), node))
+        self._add_linear_event(LinearCopy(var_id, var_name, path, node))
 
     def mark_return(self):
         """Mark current block as containing a return statement."""
@@ -698,7 +741,7 @@ class ControlFlowBuilder:
                 defer_executor(callable_obj, func_ref, args, defer_node)
 
             # Emit branch to target
-            self.branch(target_block, kind='goto')
+            self._record_branch(target_block, 'goto', pending.node)
 
             # Restore recording position
             self.restore_recording(saved)
@@ -737,6 +780,9 @@ class ControlFlowBuilder:
         reachable = self._cfg.get_reachable_blocks()
         for block_id, (message, node) in self._required_unreachable.items():
             if block_id in reachable:
+                note = self._reachable_path_note(block_id, reachable, node)
+                if note is not None:
+                    message += f'\n  {note}'
                 logger.error(message, node=node, exc_type=TypeError)
         for block_id in reachable:
             if block_id == self._exit_block.id:
@@ -746,8 +792,11 @@ class ControlFlowBuilder:
             successors = self._cfg.get_successors(block_id)
             if not successors:
                 if needs_value:
-                    logger.error(f"{self._func_name}: reachable exit without a return value",
-                                 node=function_node, exc_type=TypeError)
+                    from ..type_descriptor import format_type
+                    block = self._cfg.get_block(block_id)
+                    node = block.stmts[-1] if block.stmts else function_node
+                    logger.error(f"{self._func_name}: reachable exit without a return value "
+                                 f"of type {format_type(return_type)}", node=node, exc_type=TypeError)
                 self._cfg.add_edge(block_id, self._exit_block.id, kind='fallthrough')
                 logger.debug(f"CFG: fallthrough at CFGBlock({block_id}) -> exit({self._exit_block.id})")
 
@@ -897,7 +946,7 @@ class ControlFlowBuilder:
             elif isinstance(inst.result, VReg):
                 inst.result.set_resolved(result)
 
-    def run_cfg_linear_check(self, initial_snapshot: LinearSnapshot = None) -> bool:
+    def run_cfg_linear_check(self, function_node, initial_snapshot: LinearSnapshot = None) -> bool:
         from ..cfg.linear_checker import LinearChecker
 
         if initial_snapshot is None:
@@ -907,8 +956,11 @@ class ControlFlowBuilder:
         errors = checker.check(self._cfg, initial_snapshot)
 
         if errors:
+            frame = self._visitor.func_state
+            source = (frame.source_file, frame.line_offset)
             for err in errors:
-                logger.error(f"CFG linear check: {err.format()}", node=err.source_node)
+                logger.error(f"CFG linear check: {err.format(source)}",
+                             node=err.source_node or function_node)
             return False
 
         logger.debug(f"CFG linear check passed for {self._func_name}")

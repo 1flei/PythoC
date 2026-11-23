@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import sys
+
 from pythoc import (
     compile, effect, ptr, u64, i8, bool, void, nullptr, sizeof, struct, refine,
 )
 from pythoc.libc.string import memset
+from pythoc.logger import logger
 from pythoc.schema_protocol import is_linear_schema_type
+from pythoc.source import SourceLocation
 from pythoc.std.mem import DefaultMem
-from pythoc.std.hash import key_functions
+from pythoc.std.hash import _key_functions
 from pythoc.std._hash_table import HashTable, EMPTY
 from pythoc.std.refinement import nonnull
 
@@ -22,12 +26,14 @@ def FlatHashMap(key_type, value_type, size_type=u64, *, hash_fn=None, eq_fn=None
     Elements are copyable values. Returned element pointers are invalidated by
     rehash, clear and destroy; this interface does not establish a lifetime borrow.
     """
-    hash_fn, eq_fn = key_functions(key_type, hash_fn, eq_fn)
+    node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    hash_fn, eq_fn = _key_functions(key_type, hash_fn, eq_fn, node)
     if not (getattr(size_type, '_is_integer', False)
             and not getattr(size_type, '_is_signed', True)):
-        raise TypeError('FlatHashMap size_type must be an unsigned integer type')
+        logger.error('FlatHashMap size_type must be an unsigned integer type',
+                     node=node, exc_type=TypeError)
     if is_linear_schema_type(key_type) or is_linear_schema_type(value_type):
-        raise TypeError('FlatHashMap requires copyable keys and values')
+        logger.error('FlatHashMap requires copyable keys and values', node=node, exc_type=TypeError)
     Table = HashTable(key_type, size_type, hash_fn, eq_fn)
     Item = struct['key': key_type, 'value': value_type]
     ValuePointer = nonnull(ptr[value_type])

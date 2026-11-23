@@ -33,12 +33,12 @@ class ExpressionsMixin:
 
         symbol = getattr(node, '_definition_symbol', None)
         if symbol is None:
-            var_info = self.lookup_variable(node.id)
+            var_info = self.lookup_variable(node.id, node)
         else:
             from .._inline.definition_bindings import _UNBOUND
             var_info = (None if symbol.value is _UNBOUND else
                         self._wrap_python_name_binding(
-                            symbol.name, symbol.value, source='definition_symbol'))
+                            symbol.name, symbol.value, node, source='definition_symbol'))
         if var_info:
             from ..builtin_entities.python_type import PythonType
 
@@ -67,9 +67,10 @@ class ExpressionsMixin:
                 var_name=node.id,
                 linear_path=(),
             )
+        name = symbol.name if symbol is not None else getattr(node, '_pc_source_name', node.id)
         if self.is_constexpr():
-            raise NameError(f"Variable '{node.id}' not defined")
-        logger.error(f"Variable '{node.id}' not defined", node=node, exc_type=NameError)
+            raise NameError(f"Variable '{name}' not defined")
+        logger.error(f"Variable '{name}' not defined", node=node, exc_type=NameError)
     
 
     def visit_Constant(self, node: ast.Constant):
@@ -235,8 +236,10 @@ class ExpressionsMixin:
 
         result_type = self._resolve_ternary_result_type(then_val, else_val)
         if result_type is None:
+            from ..type_descriptor import format_type
             logger.error(
-                "No common type for ternary branches",
+                f'No common type for ternary branches: {format_type(then_val.type_hint)} '
+                f'and {format_type(else_val.type_hint)}',
                 node=node, exc_type=TypeError,
             )
 
@@ -356,6 +359,7 @@ class ExpressionsMixin:
         """
         import copy
         from ..builtin_entities.python_type import PythonType
+        from ..utils.ast_targets import iter_bound_names
 
         class _GeneratorExprPlaceholder:
             pass
@@ -370,8 +374,7 @@ class ExpressionsMixin:
             free.update(name.id for name in ast.walk(generator.iter)
                         if isinstance(name, ast.Name)
                         and isinstance(name.ctx, ast.Load) and name.id not in bound)
-            bound.update(name.id for name in ast.walk(generator.target)
-                         if isinstance(name, ast.Name))
+            bound.update(iter_bound_names(generator.target))
             for condition in generator.ifs:
                 free.update(name.id for name in ast.walk(condition)
                             if isinstance(name, ast.Name)
@@ -445,9 +448,9 @@ class ExpressionsMixin:
         logger.error("F-string expressions not implemented", node=node, exc_type=NotImplementedError)
     
 
-    def _promote_to_float(self, value, target_type):
+    def _promote_to_float(self, value, target_type, node):
         """Promote integer value to floating point"""
-        return self.type_converter.promote_to_float(value, target_type)
+        return self.type_converter.promote_to_float(value, target_type, node=node)
     
 
     
@@ -514,10 +517,10 @@ class ExpressionsMixin:
         # Unified type promotion for numeric operations
         # (Python values are auto-promoted by TypeConverter)
         if isinstance(op, (ast.LShift, ast.RShift)):
-            left, right = self.type_converter.unify_shift_types(left, right)
+            left, right = self.type_converter.unify_shift_types(left, right, node=node)
             is_float_op = False
         else:
-            left, right, is_float_op = self.type_converter.unify_binop_types(left, right)
+            left, right, is_float_op = self.type_converter.unify_binop_types(left, right, node=node)
 
         # Operation dispatch table: maps (op_type, is_float) to builder method
         # This eliminates the long isinstance chain
