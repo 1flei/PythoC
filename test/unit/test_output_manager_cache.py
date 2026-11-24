@@ -192,6 +192,15 @@ class TestFunctionContentHash(unittest.TestCase):
         self.assertIsNotNone(h1)
         self.assertNotEqual(h1, h2)
 
+    def test_bound_compile_time_value_counts_as_the_same_constant(self):
+        from pythoc.valueref import wrap_python_constant
+
+        src = 'def f():\n    return value[1]\n'
+        self.assertEqual(self._hash(src, {'value': wrap_python_constant((4, 8))}),
+                         self._hash(src, {'value': (4, 8)}))
+        self.assertNotEqual(self._hash(src, {'value': wrap_python_constant((4, 16))}),
+                            self._hash(src, {'value': (4, 8)}))
+
     def test_captured_dict_constant_is_order_insensitive(self):
         src = "def f():\n    return table[1]\n"
         h1 = self._hash(src, {'table': {'a': 1, 'b': 2}})

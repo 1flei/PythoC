@@ -1063,20 +1063,6 @@ def _state_local_types(fa, state_names, type_resolver):
     return types, nodes
 
 
-def _python_value_to_ast(v: Any) -> ast.expr:
-    """Convert a Python compile-time value into an AST expression node."""
-    if isinstance(v, ast.AST):
-        return v
-    if isinstance(v, (int, bool, float, str, type(None))):
-        return ast.Constant(value=v)
-    # ValueRef – try to unwrap
-    th = getattr(v, 'type_hint', None)
-    if th is not None and hasattr(th, 'is_constant') and th.is_constant():
-        return ast.Constant(value=th.get_constant_value())
-    raise TypeError(
-        f"instantiate: cannot convert {type(v).__name__} to AST expression")
-
-
 # ---------------------------------------------------------------------------
 # Misc helpers
 # ---------------------------------------------------------------------------

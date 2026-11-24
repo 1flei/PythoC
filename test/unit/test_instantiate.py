@@ -4,18 +4,25 @@ import ast
 from collections.abc import Mapping
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from llvmlite import ir
 
 from pythoc import CompileSession, array, f64, i32, struct
 from pythoc._inline.closure_capture import snapshot_closure_captures
+from pythoc._inline.definition_bindings import materialize_definition_symbols
 from pythoc._inline.state_field_rewriter import (
     StateFieldRewriter,
     StateFieldRewritePolicy,
 )
-from pythoc._inline.yield_state_machine import inline_yield_function_iterators
+from pythoc._inline.yield_state_machine import (
+    YieldStateMachineRequest,
+    inline_yield_function_iterators,
+    lower_yield_state_machine,
+)
 from pythoc.ast_visitor.functions import FunctionsMixin
 from pythoc.context import VariableInfo
+from pythoc.logger import logger
 from pythoc.meta.instantiate import (
     _build_callee_globals,
     _compile_closure_fn_pipeline,
@@ -183,6 +190,44 @@ def outer(x: i32) -> i32:
         self.assertIn("def inner", src)
         self.assertIn("s.offset", src)
         self.assertIn("local", src)
+
+
+class TestConstantLoopBinding(unittest.TestCase):
+    def test_ast_element_keeps_its_identity_as_data(self):
+        source = ast.parse('''
+def source():
+    for _for_element in ITEMS:
+        yield 1
+''').body[0]
+        element = ast.parse('unbound()', mode='eval').body
+        generated = lower_yield_state_machine(YieldStateMachineRequest(
+            func_ast=source,
+            locals_set={'_for_element'},
+            protect_set=set(),
+            compiletime_globals={'ITEMS': (element,)},
+        ))
+        generated, bindings = materialize_definition_symbols(generated, {})
+        assignment = next(node for node in ast.walk(generated)
+                          if isinstance(node, ast.Assign)
+                          and isinstance(node.targets[0], ast.Attribute)
+                          and node.targets[0].attr == '_for_element')
+        self.assertIsInstance(assignment.value, ast.Name)
+        self.assertIs(bindings[assignment.value.id].get_python_value(), element)
+
+    def test_rejects_a_foreign_runtime_operand_inside_an_element(self):
+        source = ast.parse('def source():\n    for item in ITEMS:\n        yield 1').body[0]
+        function = ir.Function(ir.Module(), ir.FunctionType(ir.VoidType(), [ir.IntType(32)]),
+                               name='caller')
+        value = ValueRef('value', function.args[0], i32)
+        request = YieldStateMachineRequest(
+            func_ast=source,
+            locals_set=set(),
+            protect_set=set(),
+            compiletime_globals={'ITEMS': ((value,),)},
+        )
+        with patch.object(logger, 'raise_on_error', True):
+            with self.assertRaisesRegex(TypeError, 'cannot capture a runtime value'):
+                lower_yield_state_machine(request)
 
 
 class TestClosureGeneratorBoundary(unittest.TestCase):

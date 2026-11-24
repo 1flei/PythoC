@@ -11,7 +11,12 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
+from ..literal_protocol import iter_literal_value_refs
+from ..logger import logger
 from ..meta.template import _compiler_quote, const as meta_const
+from ..source import copy_ast_location
+from ..valueref import ValueRef, wrap_python_constant
+from .definition_bindings import symbol_expression
 from .state_field_rewriter import StateFieldRewriter, StateFieldRewritePolicy
 from .names import ExpansionNames
 
@@ -407,12 +412,16 @@ def _expand_compiletime_for(
 
     expanded: List[ast.stmt] = []
     for element in elements:
+        if any(iter_literal_value_refs(element)):
+            logger.error('A compile-time loop in instantiate cannot capture a runtime value',
+                         node=stmt.iter, exc_type=TypeError)
+        value = element if isinstance(element, ValueRef) else wrap_python_constant(element)
+        expression = copy_ast_location(symbol_expression('_for_element', value), stmt.iter)
         assign = ast.Assign(
             targets=[copy.deepcopy(stmt.target)],
-            value=_python_value_to_ast(element),
+            value=expression,
         )
-        ast.copy_location(assign, stmt)
-        expanded.append(assign)
+        expanded.append(copy_ast_location(assign, stmt))
         expanded.extend(_expand_compiletime_fors(stmt.body, constexpr))
     expanded.extend(_expand_compiletime_fors(stmt.orelse, constexpr))
     return expanded
@@ -449,15 +458,6 @@ class _ConstexprEvaluator:
         if not value_ref.is_python_value():
             raise TypeError("expected compile-time Python value")
         return value_ref.get_python_value()
-
-
-def _python_value_to_ast(value: Any) -> ast.expr:
-    if isinstance(value, ast.AST):
-        return value
-    if isinstance(value, (int, bool, float, str, type(None))):
-        return ast.Constant(value=value)
-    raise TypeError(
-        f"cannot embed {type(value).__name__} as compile-time for value")
 
 
 def _dispatch_cases(ordered_labels: List[str], state_arg: str) -> List[ast.stmt]:

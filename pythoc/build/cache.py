@@ -100,6 +100,8 @@ def fingerprint_function_content(
     nested .so, and a parent cache hit would skip re-decoration of the
     nested function entirely.
     """
+    from ..valueref import ValueRef
+
     user_globals = user_globals or {}
     if include_ast:
         try:
@@ -128,6 +130,8 @@ def fingerprint_function_content(
         value = user_globals.get(node.id, _MISSING)
         if value is _MISSING:
             continue
+        if isinstance(value, ValueRef) and value.is_python_value():
+            value = value.get_python_value()
         value_repr = _stable_capture_repr(value)
         if value_repr is not None:
             captured.append(f"{node.id}={value_repr}")

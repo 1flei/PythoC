@@ -26,7 +26,7 @@ class StateFieldRewriter(ast.NodeTransformer):
         self.state_arg = policy.state_arg
 
     def visit_Name(self, node: ast.Name) -> ast.AST:
-        if not self._should_rewrite(node.id):
+        if hasattr(node, '_definition_symbol') or not self._should_rewrite(node.id):
             return node
         return copy_ast_location(ast.Attribute(
             value=copy_ast_location(ast.Name(id=self.state_arg, ctx=ast.Load()), node),

@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from ..utils import get_next_id
 from ..logger import logger
-from ..valueref import ValueRef, wrap_value
+from ..valueref import ValueRef, wrap_python_constant
 from ..context import VariableInfo
 from ..meta.template import _compiler_quote, const as meta_const
 from ..source import copy_ast_location
@@ -225,13 +225,7 @@ class ConstantLoopAdapter:
         if isinstance(element, ValueRef):
             return element.clone(var_name=None)
         
-        # Wrap Python value
-        from ..builtin_entities.python_type import PythonType
-        return wrap_value(
-            element,
-            kind="python",
-            type_hint=PythonType.wrap(element, is_constant=True)
-        )
+        return wrap_python_constant(element)
     
     def _transform_body(
         self,

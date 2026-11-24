@@ -157,6 +157,52 @@ def run_doubled_range_partial() -> i32:
     return api.value(ptr(it))  # 2
 
 
+NESTED_CONSTANT_ROWS = (((1, 2), 3), ((4, 5), 6))
+
+
+@compile
+def nested_constant_sums() -> i32:
+    a: i32
+    b: i32
+    c: i32
+    for ((a, b), c) in NESTED_CONSTANT_ROWS:
+        yield a + b + c
+    for ((a, b), c) in (((7, 8), 9),):
+        yield a + b + c
+
+
+@compile
+def run_nested_constant_sums() -> i32:
+    api = instantiate(nested_constant_sums)
+    it = api.init()
+    total: i32 = 0
+    while api.next(ptr(it)):
+        total = total * 100 + api.value(ptr(it))
+    return total
+
+
+class CompileTimeData:
+    def get_value(self):
+        raise AssertionError('Iteration data must not be resolved as a global value provider')
+
+
+CONSTANT_OBJECTS = (CompileTimeData(),)
+
+
+@compile
+def yield_for_constant_object() -> i32:
+    for unused in CONSTANT_OBJECTS:
+        yield 7
+
+
+@compile
+def run_constant_object() -> i32:
+    api = instantiate(yield_for_constant_object)
+    it = api.init()
+    api.next(ptr(it))
+    return api.value(ptr(it))
+
+
 # ====================================================================
 # Case 3: constant iterable
 # ====================================================================
@@ -217,6 +263,12 @@ class TestYieldN(unittest.TestCase):
 class TestTypedRange(unittest.TestCase):
     def test_all(self):    self.assertEqual(run_doubled_range_all(), 20)
     def test_partial(self): self.assertEqual(run_doubled_range_partial(), 2)
+
+    def test_nested_constant_elements_use_ordinary_assignment(self):
+        self.assertEqual(run_nested_constant_sums(), 61524)
+
+    def test_iteration_objects_are_bound_as_data(self):
+        self.assertEqual(run_constant_object(), 7)
 
 class TestConst(unittest.TestCase):
     def test_all(self): self.assertEqual(run_const_all(), 60)
