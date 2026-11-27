@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795102501398,
+  "lastUpdate": 1795785391521,
   "repoUrl": "https://github.com/1flei/PythoC",
   "entries": {
     "PythoC Performance": [
@@ -3787,6 +3787,45 @@ window.BENCHMARK_DATA = {
           {
             "name": "compile_speed",
             "value": 1.848,
+            "unit": "seconds/test"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "committer": {
+            "email": "yfleiii@gmail.com",
+            "name": "1flei",
+            "username": "1flei"
+          },
+          "distinct": true,
+          "id": "acfdd38c35fdd45dfa95fdf666fc5649b775274b",
+          "message": "Fix valueref as init value and nested yield",
+          "timestamp": "2026-11-27T20:56:34+08:00",
+          "tree_id": "4da580c50d3a14fb1b367ae9ca19f8bc148b7c3d",
+          "url": "https://github.com/1flei/PythoC/commit/acfdd38c35fdd45dfa95fdf666fc5649b775274b"
+        },
+        "date": 1795785390794,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "binary_tree",
+            "value": 1.14,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "nsieve",
+            "value": 1.01,
+            "unit": "PC/C ratio"
+          },
+          {
+            "name": "compile_speed",
+            "value": 4.127,
             "unit": "seconds/test"
           }
         ]
