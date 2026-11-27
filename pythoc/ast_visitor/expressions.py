@@ -6,7 +6,7 @@ import ast
 import operator
 from typing import Optional
 from llvmlite import ir
-from ..valueref import ValueRef, ensure_ir, wrap_value, get_type, get_type_hint
+from ..valueref import ValueRef, ensure_ir, wrap_value, get_type
 from ..builtin_entities import (
     i8, i16, i32, i64,
     u8, u16, u32, u64,
@@ -21,8 +21,8 @@ from ..builtin_entities import (
 )
 from ..builtin_entities import bool as pc_bool
 from ..logger import logger
-from ..type_converter import TypeConverter, ImplicitCoercer, get_base_type
 from ..literal_protocol import wrap_literal_result
+from .pcir import merge_values
 
 
 class ExpressionsMixin:
@@ -106,10 +106,9 @@ class ExpressionsMixin:
 
     def visit_BoolOp(self, node: ast.BoolOp):
         """Handle boolean operations (and, or) with table-driven dispatch"""
-        # Dispatch table for boolean operations
         bool_op_dispatch = {
-            ast.And: ('and', False, 0),  # (label_prefix, short_circuit_on_true, short_circuit_value)
-            ast.Or: ('or', True, 1),
+            ast.And: ('and', False),
+            ast.Or: ('or', True),
         }
         
         op_key = type(node.op)
@@ -117,81 +116,40 @@ class ExpressionsMixin:
             logger.error(f"Boolean operator {type(node.op).__name__} not supported", node=node,
                         exc_type=NotImplementedError)
         
-        label_prefix, short_circuit_on_true, short_circuit_value = bool_op_dispatch[op_key]
-        return self._visit_short_circuit_op(node.values, label_prefix, short_circuit_on_true, short_circuit_value)
+        label_prefix, short_circuit_on_true = bool_op_dispatch[op_key]
+        return self._visit_short_circuit_op(node.values, label_prefix, short_circuit_on_true)
     
-    def _visit_short_circuit_op(self, values, label_prefix, short_circuit_on_true, short_circuit_value):
-        """Unified implementation for short-circuit boolean operations (AND/OR)
-        
-        Args:
-            values: List of operand expressions
-            label_prefix: Prefix for basic block labels ('and' or 'or')
-            short_circuit_on_true: If True, short-circuit when value is true (OR logic)
-                                   If False, short-circuit when value is false (AND logic)
-            short_circuit_value: The value to use when short-circuiting (0 or 1)
-        """
+    def _visit_short_circuit_op(self, values, label_prefix, short_circuit_on_true):
+        """Visit operands only along edges that continue evaluating the operation."""
+        first = values[0]
+        value = self.value_dispatcher.to_boolean(self.visit_expression(first), first)
         if len(values) == 1:
-            result = self.value_dispatcher.to_boolean(self.visit_expression(values[0]))
-            return wrap_value(result, kind="value")
+            return wrap_value(value, kind="value", type_hint=pc_bool)
 
         end_block = self.builder.create_block(f"{label_prefix}_end")
-        phi_incoming = []
+        incoming = []
+        short_circuit = self.type_converter.create_bool_constant(short_circuit_on_true)
 
-        val = self.value_dispatcher.to_boolean(self.visit_expression(values[0]))
-        first_block = self.builder.block
-
-        if len(values) == 2:
-            continue_block = self.builder.create_block(f"{label_prefix}_continue")
-
-            if short_circuit_on_true:
-                self.builder.cbranch(val, end_block, continue_block)
-            else:
-                self.builder.cbranch(val, continue_block, end_block)
-
-            phi_incoming.append((ir.Constant(ir.IntType(1), short_circuit_value), first_block))
-
-            self.builder.position_at_end(continue_block)
-            val2 = self.value_dispatcher.to_boolean(self.visit_expression(values[1]))
-            second_block = self.builder.block
-            self.builder.branch(end_block)
-            phi_incoming.append((ensure_ir(val2), second_block))
-        else:
+        for expr in values[1:]:
+            current = self.builder.block
             next_block = self.builder.create_block(f"{label_prefix}_next")
-
             if short_circuit_on_true:
-                self.builder.cbranch(val, end_block, next_block)
+                self.builder.cbranch(value, end_block, next_block)
             else:
-                self.builder.cbranch(val, next_block, end_block)
-            phi_incoming.append((ir.Constant(ir.IntType(1), short_circuit_value), first_block))
-
-            for i in range(1, len(values) - 1):
-                self.builder.position_at_end(next_block)
-                val = self.value_dispatcher.to_boolean(self.visit_expression(values[i]))
-                current_block = self.builder.block
-
-                next_block = self.builder.create_block(f"{label_prefix}_next")
-                if short_circuit_on_true:
-                    self.builder.cbranch(val, end_block, next_block)
-                else:
-                    self.builder.cbranch(val, next_block, end_block)
-                phi_incoming.append((ir.Constant(ir.IntType(1), short_circuit_value), current_block))
+                self.builder.cbranch(value, next_block, end_block)
+            incoming.append((short_circuit, current))
 
             self.builder.position_at_end(next_block)
-            val = self.value_dispatcher.to_boolean(self.visit_expression(values[-1]))
-            last_block = self.builder.block
+            operand = self._visit_expression_path(expr)
+            if operand is None:
+                break
+            value = self.value_dispatcher.to_boolean(operand, expr)
+        else:
+            incoming.append((value, self.builder.block))
             self.builder.branch(end_block)
-            phi_incoming.append((ensure_ir(val), last_block))
-        
-        # Create phi node in end block
+
         self.builder.position_at_end(end_block)
-        phi = self.builder.phi(ir.IntType(1))
-        
-        for val, block in phi_incoming:
-            phi.add_incoming(val, block)
-        
-        from ..builtin_entities import bool as bool_type
-        return wrap_value(phi, kind="value", type_hint=bool_type)
-    
+        return merge_values(self.builder, incoming, pc_bool)
 
     def visit_IfExp(self, node: ast.IfExp):
         """Handle ternary conditional expressions (a if condition else b)."""
@@ -199,30 +157,39 @@ class ExpressionsMixin:
 
         # Compile-time Python condition: keep Python semantics and return the
         # selected branch directly without emitting IR.
-        if isinstance(test_val, ValueRef) and test_val.is_python_value():
+        if test_val.is_python_value():
             selected = node.body if test_val.get_python_value() else node.orelse
             return self.visit_rvalue_expression(selected)
 
         # Runtime condition: emit branches and a phi.
-        condition = self.value_dispatcher.to_boolean(test_val)
+        condition = self.value_dispatcher.to_boolean(test_val, node.test)
         then_block = self.builder.create_block("ternary_then")
         else_block = self.builder.create_block("ternary_else")
-        merge_block = self.builder.create_block("ternary_merge")
         self.builder.cbranch(condition, then_block, else_block)
 
         self.builder.position_at_end(then_block)
-        then_val = self.visit_rvalue_expression(node.body)
-        self._check_linear_rvalue_copy(then_val, node.body)
+        then_val = self._visit_expression_path(node.body, rvalue=True)
+        if then_val is not None:
+            self._check_linear_rvalue_copy(then_val, node.body)
         then_block = self.builder.block  # Update in case of nested blocks
 
         self.builder.position_at_end(else_block)
-        else_val = self.visit_rvalue_expression(node.orelse)
-        self._check_linear_rvalue_copy(else_val, node.orelse)
+        else_val = self._visit_expression_path(node.orelse, rvalue=True)
+        if else_val is not None:
+            self._check_linear_rvalue_copy(else_val, node.orelse)
         else_block = self.builder.block  # Update in case of nested blocks
 
+        # A terminating arm has no outgoing edge or value to merge.
+        if then_val is None:
+            return else_val
+        if else_val is None:
+            self.builder.position_at_end(then_block)
+            return then_val
+
+        merge_block = self.builder.create_block("ternary_merge")
         from ..builtin_entities.types import void as _void_type
-        then_hint = get_type_hint(then_val) if isinstance(then_val, ValueRef) else None
-        else_hint = get_type_hint(else_val) if isinstance(else_val, ValueRef) else None
+        then_hint = then_val.type_hint
+        else_hint = else_val.type_hint
         if then_hint is _void_type or else_hint is _void_type:
             # C conditional with a void branch (e.g. assert's
             # `cond ? (void)0 : __assert_rtn(...)`): the whole expression is
@@ -234,7 +201,7 @@ class ExpressionsMixin:
             self.builder.position_at_end(merge_block)
             return wrap_value(None, kind="python", type_hint=_void_type)
 
-        result_type = self._resolve_ternary_result_type(then_val, else_val)
+        result_type = self.type_converter.infer_conditional_pc_type(then_val, else_val)
         if result_type is None:
             from ..type_descriptor import format_type
             logger.error(
@@ -244,8 +211,6 @@ class ExpressionsMixin:
             )
 
         def _coerce_branch(val, block):
-            if not isinstance(val, ValueRef):
-                return val
             self.builder.position_at_end(block)
             if self._is_linear_type(result_type):
                 self._transfer_linear_ownership(val, reason='conditional result', node=node)
@@ -260,62 +225,8 @@ class ExpressionsMixin:
         self.builder.branch(merge_block)
 
         self.builder.position_at_end(merge_block)
-        phi = self.builder.phi(get_type(then_val))
-        phi.add_incoming(ensure_ir(then_val), then_block)
-        phi.add_incoming(ensure_ir(else_val), else_block)
-
-        return wrap_value(phi, kind="value", type_hint=result_type)
-
-    def _resolve_ternary_result_type(self, then_val, else_val):
-        """Pick the common PC type for a ternary expression.
-
-        - PC + PC        -> unify via C conditional-expression rules.
-        - PC + pyconst   -> PC type wins, pyconst is promoted to it.
-        - pyconst + PC   -> PC type wins, pyconst is promoted to it.
-        - pyconst + pyconst -> promote each to its default PC type, then unify.
-        """
-        then_is_py = isinstance(then_val, ValueRef) and then_val.is_python_value()
-        else_is_py = isinstance(else_val, ValueRef) and else_val.is_python_value()
-
-        if not then_is_py and not else_is_py:
-            return TypeConverter.infer_unified_pc_type(
-                then_val.type_hint, else_val.type_hint)
-        if not then_is_py and else_is_py:
-            return then_val.type_hint
-        if then_is_py and not else_is_py:
-            return else_val.type_hint
-
-        # Both pyconst: infer each default runtime PC type and unify.
-        then_type = self._infer_pc_type_from_python_value(then_val)
-        else_type = self._infer_pc_type_from_python_value(else_val)
-        return TypeConverter.infer_unified_pc_type(then_type, else_type)
-
-    def _infer_pc_type_from_python_value(self, value_ref: ValueRef):
-        """If value_ref is a Python value, infer its runtime PC type.
-
-        For @compile/@extern function wrappers this returns the function pointer
-        type.  For primitive literals (int/float/bool/str) this returns the
-        default PC type (i64/f64/bool/ptr[i8]).  Returns None when no runtime
-        PC type can be inferred.
-        """
-        if not (isinstance(value_ref, ValueRef) and value_ref.is_python_value()):
-            return None
-        python_val = value_ref.get_python_value()
-
-        if getattr(python_val, '_is_compiled', False):
-            func_info = getattr(python_val, '_func_info', None)
-            if func_info is not None:
-                return func_info.callable_pc_type
-
-        if getattr(python_val, '_is_extern', False):
-            from ..callable_lowering import extern_callable_type
-            callable_type, _, _ = extern_callable_type(python_val)
-            return callable_type
-
-        try:
-            return TypeConverter.infer_default_pc_type_from_python(python_val)
-        except TypeError:
-            return None
+        incoming = ((then_val, then_block), (else_val, else_block))
+        return merge_values(self.builder, incoming, result_type)
 
     def visit_List(self, node: ast.List):
         """Handle list expressions as pc_list literal carriers."""
@@ -454,29 +365,6 @@ class ExpressionsMixin:
     
 
     
-    def _align_pointer_comparison(self, left, right, left_ir, right_ir, node):
-        """Align pointer types for comparison (null retargeting, void bridging).
-
-        Returns (left_ir, right_ir) with matching LLVM pointer types.
-        """
-        IC = ImplicitCoercer
-        left_type = get_base_type(left.type_hint)
-        right_type = get_base_type(right.type_hint)
-        from ..type_descriptor import can_compare_pointers
-        if not can_compare_pointers(
-                left_type, right_type, left_value=left, right_value=right,
-                context=self.implicit_coercer._resolve_lazy_type_name):
-            logger.error(
-                f"Cannot compare incompatible pointer types '{left_type.get_name()}' "
-                f"and '{right_type.get_name()}'", node=node, exc_type=TypeError)
-        if left_ir.type == right_ir.type:
-            return left_ir, right_ir
-        if IC.is_null_pointer_constant(left):
-            return ir.Constant(right_ir.type, None), right_ir
-        if IC.is_null_pointer_constant(right):
-            return left_ir, ir.Constant(left_ir.type, None)
-        return left_ir, self.builder.bitcast(right_ir, left_ir.type)
-
     def _perform_binary_operation(self, op: ast.operator, left: ValueRef, right: ValueRef,
                                    node: ast.AST = None) -> ValueRef:
         """Unified binary operation handler with table-driven dispatch

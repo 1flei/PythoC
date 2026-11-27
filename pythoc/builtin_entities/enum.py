@@ -25,36 +25,31 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .composite_base import CompositeType
-from ..source import SourceLocation
+from ..source import SourceLocation, class_namespace_key
 from .types import i8, i32, i64, void
 from .union import union as union_type
 from ..valueref import ValueRef, wrap_value, extract_constant_index
 from ..logger import logger
 
 
-def _enum_declarations(cls, annotations):
+def _enum_declarations(cls, annotations, class_ast):
     """Read variant order and tags without executing payload annotations."""
-    import textwrap
-    from ..utils.inspect_utils import get_object_source
-
-    try:
-        source = get_object_source(cls)
-    except (OSError, TypeError):
+    if class_ast is None:
         for name, annotation in annotations.items():
-            yield name, annotation, cls.__dict__.get(name)
+            yield name, annotation, cls.__dict__.get(name), None
         return
-    class_def = ast.parse(textwrap.dedent(source)).body[0]
-    for stmt in class_def.body:
-        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+    for stmt in class_ast.body:
+        if isinstance(stmt, ast.AnnAssign) and stmt.simple:
             name = stmt.target.id
-            yield name, annotations.get(name), cls.__dict__.get(name)
+            key = class_namespace_key(class_ast.name, name)
+            yield name, annotations.get(key), cls.__dict__.get(key), stmt.annotation
         elif isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 if isinstance(target, ast.Name) and not target.id.startswith('_'):
-                    yield target.id, None, cls.__dict__[target.id]
+                    yield target.id, None, cls.__dict__[target.id], target
         elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Name):
             if not stmt.value.id.startswith('_'):
-                yield stmt.value.id, None, None
+                yield stmt.value.id, None, None, stmt.value
 
 
 def _create_enum_type(variants, tag_type, node, class_name=None):
@@ -247,7 +242,8 @@ class EnumType(CompositeType):
         ctype = type(class_name, (ctypes.Structure,), {'_fields_': fields})
         from ..target_layout import validate_ctypes_layout
         return validate_ctypes_layout(
-            cls, ctype, tuple(enumerate(name for name, _ in fields)))
+            cls, ctype, cls._layout_diagnostic_node(sys._getframe(1)),
+            tuple(enumerate(name for name, _ in fields)))
     
     @classmethod
     def get_name(cls) -> str:
@@ -357,12 +353,7 @@ class EnumType(CompositeType):
                 store_payload(variant_type)
                 visitor.builder.branch(merge)
             visitor.builder.position_at_end(invalid)
-            trap = visitor.module.globals.get('llvm.trap')
-            if trap is None:
-                trap = ir.Function(visitor.module, ir.FunctionType(ir.VoidType(), []),
-                                   name='llvm.trap')
-            visitor.builder.call(trap, [])
-            visitor.builder.unreachable()
+            visitor.builder.trap()
             visitor.builder.position_at_end(merge)
         else:
             store_payload(payload_type)
@@ -689,10 +680,13 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
     type_resolver = TypeResolver(user_globals=namespace)
     
     variants = []
+    from ..decorators.class_methods import _read_class_source, attach_class_methods
+    class_ast, source = _read_class_source(cls)
     annotations = getattr(cls, '__annotations__', {})
-    for name, annotation, tag in _enum_declarations(cls, annotations):
-        payload = (None if annotation is None or annotation == 'None' else
-                   type_resolver.parse_annotation(annotation, defer_unresolved=True))
+    for name, annotation, tag, node in _enum_declarations(cls, annotations, class_ast):
+        with logger.at_node(node, source=source):
+            payload = (None if annotation is None or annotation == 'None' else
+                       type_resolver.resolve_annotation(annotation, node, defer_unresolved=True))
         variants.append((name, payload, tag))
     
     # Assign auto tags
@@ -708,7 +702,9 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
         resolved_variants.append((var_name, payload_type, tag))
     
     # Use unified factory to create enum type
-    enum_cls = _create_enum_type(resolved_variants, tag_type, node=None, class_name=cls.__name__)
+    with logger.at_node(class_ast, source=source):
+        enum_cls = _create_enum_type(resolved_variants, tag_type, node=class_ast,
+                                     class_name=cls.__name__)
 
     # The decorator replaces the original class. Bind self references to the
     # resulting enum, using the same rule as struct and union declarations.
@@ -736,12 +732,12 @@ def _create_enum_class(cls, tag_type, suffix=None, anonymous=False):
 
     # Compile and attach plain-def methods declared in the enum body. Source
     # is taken from the original `cls`; wrappers are attached on `enum_cls`.
-    from ..decorators.class_methods import attach_class_methods
     attach_class_methods(
         enum_cls,
         source_cls=cls,
         class_compile_suffix=suffix,
         captured_symbols=captured_symbols,
+        class_body=class_ast.body if class_ast is not None else [],
     )
 
     return enum_cls

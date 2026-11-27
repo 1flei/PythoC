@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from llvmlite import ir
 
-from pythoc.builtin_entities import array, i32, i64, u32, f64, ptr
+from pythoc.builtin_entities import array, i32, i64, u8, u32, f64, ptr
 from pythoc.builtin_entities.struct import create_struct_type
 from pythoc.type_id import get_type_id
 from pythoc.forward_ref import mark_type_defined
@@ -103,16 +103,37 @@ class TestStructTypePerModule(unittest.TestCase):
         self.assertIs(ptr[node_type].get_llvm_type(mod1.context).pointee, t1)
         self.assertIs(ptr[node_type].get_llvm_type(mod2.context).pointee, t2)
 
-    def test_field_map_frozen_across_modules(self):
-        point_type = _make_point_type()
-        mod1 = _make_module('f1')
-        mod2 = _make_module('f2')
+    def test_physical_field_paths_are_materialized_in_each_context(self):
+        from pythoc.target_layout import get_target_layout, make_aggregate_layout_config
 
-        idx1 = point_type._get_llvm_field_index(1, mod1.context)
-        idx2 = point_type._get_llvm_field_index(1, mod2.context)
+        packed = create_struct_type(
+            [u8, u32], ['tag', 'value'], python_class=type('Packed', (), {}),
+            layout_config=make_aggregate_layout_config(alignment=16),
+        )
+        expected_layout = packed.get_layout()
+        target = get_target_layout()
+        for name in ('f1', 'f2'):
+            module = _make_module(name)
+            llvm_type = packed.get_llvm_type(module.context)
+            for offset, path in zip(expected_layout.field_offsets,
+                                    llvm_type._pythoc_field_paths):
+                current = llvm_type
+                actual_offset = 0
+                for index in path:
+                    actual_offset += current.get_element_offset(
+                        target.target_data, index, module.context,
+                    )
+                    current = current.elements[index]
+                self.assertEqual(actual_offset, offset)
 
-        self.assertEqual(idx1, 1)
-        self.assertEqual(idx2, 1)
+            function = ir.Function(module, ir.FunctionType(ir.VoidType(), []), 'f')
+            builder = LLVMBuilder(ir.IRBuilder(function.append_basic_block('entry')))
+            record = builder.alloca(llvm_type)
+            address = builder.gep(record, [
+                ir.Constant(ir.IntType(32), index)
+                for index in (0, *llvm_type._pythoc_field_paths[1])
+            ])
+            self.assertEqual(builder.load(address).align, 2)
 
     def test_recursive_views_of_one_identified_type_share_its_body(self):
         class RecursiveView:
@@ -201,7 +222,7 @@ class TestStructTypePerModule(unittest.TestCase):
         holder = create_struct_type(
             [ptr[i32]], ['next'], python_class=type('ConstantHolder', (), {}))
         constant = assemble_aggregate_value(
-            SimpleNamespace(module=module), holder, [global_value], None)
+            SimpleNamespace(module=module, builder=LLVMBuilder()), holder, [global_value], None)
         self.assertEqual(constant.constant[0].type, constant.type.elements[0])
         self.assertEqual(constant.constant[0].type,
                          ir.PointerType(ir.IntType(32)))
@@ -216,7 +237,8 @@ class TestStructTypePerModule(unittest.TestCase):
             with self.subTest(field=field):
                 holder = create_struct_type([field], ['value'])
                 with self.assertRaisesRegex(TypeError, 'field 0 type mismatch'):
-                    assemble_aggregate_value(SimpleNamespace(module=module), holder, [value], None)
+                    assemble_aggregate_value(
+                        SimpleNamespace(module=module, builder=LLVMBuilder()), holder, [value], None)
 
     def test_aggregate_insertion_cannot_truncate_an_array(self):
         module = _make_module('invalid_storage')
@@ -238,19 +260,16 @@ class TestStructTypePerModule(unittest.TestCase):
                 [ptr[pending]], ['next'],
                 python_class=type('Container', (), {}))
             module = _make_module('late_equivalence')
-            a = first.get_llvm_type(module.context)
-            b = second.get_llvm_type(module.context)
+            first.get_llvm_type(module.context)
+            second.get_llvm_type(module.context)
             mark_type_defined('Pending', pending)
             self.assertIs(canonical_record_type(first),
                           canonical_record_type(second))
-            # Use the completed semantic view for a new declaration. The
-            # previously returned LLVM object is a snapshot of its old view.
-            b = second.get_llvm_type(module.context)
             builder = LLVMCBuilder()
             declared = builder.declare_function(
-                module, 'consume', [a.as_pointer()], ir.IntType(32))
+                module, 'consume', [ptr[first]], i32)
             redeclared = builder.declare_function(
-                module, 'consume', [b.as_pointer()], ir.IntType(32),
+                module, 'consume', [ptr[second]], i32,
                 existing_func=declared.ir_function)
             self.assertIs(declared.ir_function, redeclared.ir_function)
 

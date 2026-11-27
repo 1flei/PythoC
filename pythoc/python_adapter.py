@@ -553,8 +553,8 @@ def _type_flag(pc_type, name: str) -> bool:
 
 
 def _classify_struct(pc_type, abi, stack):
-    from .target_layout import NATURAL_LAYOUT
-    if not getattr(pc_type, '_layout_config', NATURAL_LAYOUT).is_natural:
+    from .target_layout import uses_bit_storage
+    if uses_bit_storage(pc_type):
         return _classify_blob(pc_type, abi)
     field_types = getattr(pc_type, '_field_types', None)
     if field_types is None:
@@ -715,7 +715,7 @@ def _bind_ready_development_callable(wrapper, state) -> None:
         wrapper.bind_slow(_slow_implementation(wrapper))
         return
     wrapper._pythoc_kernel = state.kernel_addresses[spec['symbol']]
-    wrapper.bind_adapter(state.adapter_addresses[spec['adapter']])
+    wrapper.bind_adapter((state.adapter_addresses[spec['adapter']], wrapper._pythoc_kernel))
     wrapper._pythoc_adapter_lib = state.library
     wrapper._pythoc_kernel_lib = state.kernel_library
 
@@ -739,15 +739,6 @@ def _development_group_entries(wrapper, current_spec):
     return list(unique.values())
 
 
-def _kernel_link_input(lib: str) -> str:
-    """COFF links resolve symbols through the import library, not the DLL."""
-    if sys.platform == 'win32':
-        implib = os.path.splitext(lib)[0] + '.lib'
-        if os.path.exists(implib):
-            return implib
-    return lib
-
-
 def _development_adapter_path(wrapper, specs: List[dict]) -> str:
     so_file = os.path.abspath(wrapper._binding.so_file)
     payload = _adapter_identity_payload(specs, None, None)
@@ -759,23 +750,9 @@ def _development_adapter_path(wrapper, specs: List[dict]) -> str:
     identity = _adapter_identity(specs, None, None)
     base = '{}.pythoc_pyadapter_group.{}'.format(root, identity)
     output = base + _shared_suffix()
-    kernel_libs = []
-    for spec in specs:
-        callee = spec.get('callee')
-        binding = getattr(callee, '_binding', getattr(callee, '_state', None))
-        lib = getattr(binding, 'so_file', None) if binding is not None else None
-        if lib:
-            lib = _kernel_link_input(os.path.abspath(lib))
-            if lib not in kernel_libs:
-                kernel_libs.append(lib)
     _compile_adapter_library(
         specs,
         output,
-        # Link against the kernel images so the dynamic loader binds
-        # each kernel symbol to that specific image.  A flat namespace
-        # lookup would resolve a bare name like 'store_i32' to any
-        # already-loaded image that happens to define it.
-        link_objects=kernel_libs,
         link_libraries=_python_libraries(),
     )
     _ADAPTER_SO[key] = output
@@ -796,7 +773,6 @@ def _load_adapter_library(path):
 def _compile_adapter_library(
     specs: List[dict],
     output_path: str,
-    link_objects,
     link_libraries,
 ) -> None:
     from .artifact import (
@@ -837,7 +813,6 @@ def _compile_adapter_library(
         link=LinkPlan(roots=(), obj_files=()),
         output_path=output_path,
         prefix_objects=(object_path, _entry_object_path()),
-        link_objects=tuple(link_objects or ()),
         extra_link_flags=tuple(link_libraries or ()),
         steps=tuple(steps),
     )

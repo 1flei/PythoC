@@ -120,7 +120,7 @@ def is_link_time_constant(value: Any) -> bool:
 # Linkage kinds supported by @compile(linkage=...). They map to the C
 # toolchain concepts of a plain external definition (default), a static
 # function (internal), and inline/ODR definitions (weak_odr / linkonce_odr).
-FUNC_LINKAGE_KINDS = frozenset({'external', 'internal', 'weak_odr', 'linkonce_odr'})
+FUNC_LINKAGE_KINDS = frozenset({'external', 'internal', 'weak', 'weak_odr', 'linkonce_odr'})
 
 
 def validate_func_linkage(linkage: Optional[str], node,
@@ -140,6 +140,69 @@ def validate_func_linkage(linkage: Optional[str], node,
             + f"; expected one of {sorted(FUNC_LINKAGE_KINDS)}",
             node=node, exc_type=TypeError)
     return None if linkage == 'external' else linkage
+
+
+def validate_symbol_visibility(visibility: Optional[str], node=None) -> Optional[str]:
+    """Validate native symbol visibility independently of linkage strength."""
+    if visibility is None or visibility == 'default':
+        return None
+    if visibility not in ('hidden', 'protected'):
+        logger.error(f"Unsupported symbol visibility '{visibility}'",
+                     node=node, exc_type=TypeError)
+    return visibility
+
+
+def llvm_symbol_prefix(linkage: Optional[str], visibility: Optional[str]) -> str:
+    """Combine the prefix tokens emitted together by llvmlite."""
+    if linkage == 'internal':
+        return linkage
+    return ' '.join(token for token in (linkage, visibility) if token)
+
+
+class NativeGlobalVariable(ir.GlobalVariable):
+    """Render data visibility separately from llvmlite's linkage field."""
+
+    visibility = None
+
+    def descr(self, buf):
+        if self.visibility is None or self.linkage == 'internal':
+            return super().descr(buf)
+        parts = []
+        super().descr(parts)
+        # llvmlite prints linkage first (including implicit external for a
+        # declaration). Adding visibility there would make it emit undef.
+        index = int(bool(self.linkage) or self.initializer is None)
+        parts.insert(index, self.visibility + ' ')
+        buf.extend(parts)
+
+
+def merge_native_declaration(value, weak, visibility, attrs, node):
+    """Require identical linkage metadata for declarations of one symbol."""
+    contract = (weak, visibility, frozenset(attrs))
+    previous = getattr(value, '_pc_declaration_contract', None)
+    if previous is not None and previous != contract:
+        logger.error(f'Conflicting linkage, visibility or attributes for native symbol {value.name!r}',
+                     node=node, exc_type=TypeError)
+    value._pc_declaration_contract = contract
+
+
+def declare_native_global(module, llvm_type, symbol, tls, node, *, weak=False, visibility=None):
+    """Get a compatible global object and report whether it was created."""
+    value = module.globals.get(symbol)
+    if value is not None:
+        if (not isinstance(value, ir.GlobalVariable) or value.value_type != llvm_type
+                or (value.storage_class == 'thread_local') != tls):
+            logger.error(f'Incompatible declaration of global symbol {symbol!r}',
+                         node=node, exc_type=TypeError)
+        merge_native_declaration(value, weak, visibility, (), node)
+        return value, False
+    value = NativeGlobalVariable(module, llvm_type, symbol)
+    merge_native_declaration(value, weak, visibility, (), node)
+    value.linkage = 'extern_weak' if weak else 'external'
+    value.visibility = visibility
+    if tls:
+        value.storage_class = 'thread_local'
+    return value, True
 
 
 def make_memory_volatile(instruction):

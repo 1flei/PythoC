@@ -1,6 +1,7 @@
 """Annotation evaluation and definition-scoped PythoC type binding."""
 
 import ast
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import inspect
 import keyword
@@ -100,6 +101,20 @@ class _DependencySyntax(ast.NodeTransformer):
 _MISSING = object()
 
 
+class UnresolvedTypeName(NameError):
+    """A required type name has no binding yet."""
+
+
+@contextmanager
+def report_type_errors(node, *, source=None):
+    """Report type failures when a compiler operation requires the type."""
+    with logger.at_node(node, source=source):
+        try:
+            yield
+        except (SyntaxError, NameError, TypeError) as error:
+            logger.error(error, node=node)
+
+
 class TypeResolver:
     """Evaluate annotations and bind type references through one API."""
 
@@ -158,18 +173,14 @@ class TypeResolver:
 
     def resolve_annotation(self, annotation, node, *, defer_unresolved=False):
         """Resolve an annotation at a compiler entry with a source node."""
-        try:
+        with report_type_errors(node):
             return self._parse_annotation(
                 annotation, node, defer_unresolved=defer_unresolved)
-        except (SyntaxError, NameError, TypeError) as error:
-            logger.error(error, node=node)
 
     def resolve_type_value(self, value_ref, node):
         """Validate an evaluated type value without executing syntax."""
-        try:
+        with report_type_errors(node):
             return self._extract_type_from_valueref(value_ref)
-        except (TypeError, NameError) as error:
-            logger.error(error, node=node)
 
     @staticmethod
     def annotation_expression(annotation):
@@ -285,12 +296,16 @@ class TypeResolver:
         Returns:
             LLVM IR type
         """
-        builtin_type = self.parse_annotation(annotation)
+        with report_type_errors(annotation):
+            builtin_type = self.parse_annotation(annotation)
+            if builtin_type is None:
+                logger.error(f"Cannot resolve type annotation: {annotation}",
+                             node=annotation, exc_type=TypeError)
+            return builtin_type.get_llvm_type(self.module_context)
 
-        if builtin_type is None:
-            raise TypeError(f"TypeResolver: Cannot resolve type annotation: {annotation}")
-
-        return builtin_type.get_llvm_type(self.module_context)
+    @staticmethod
+    def is_reference(value):
+        return isinstance(value, (str, TypeReference))
 
     @staticmethod
     def resolve_type(value, namespace=None, *, required=True, freeze=False):
@@ -300,7 +315,7 @@ class TypeResolver:
         preparation evaluates it once per successful session binding; failed
         preparation leaves its references available for a later retry.
         """
-        if not isinstance(value, (str, TypeReference)):
+        if not TypeResolver.is_reference(value):
             return value
         from .session import CompileSession
         graph = CompileSession.current().type_graph
@@ -622,7 +637,7 @@ class TypeResolver:
                     graph.record_bindings(references, None, False)
                     if not required:
                         return None
-                    raise NameError(f"Type annotation name {missing[0]!r} is not defined")
+                    raise UnresolvedTypeName(f"Type annotation name {missing[0]!r} is not defined")
                 if not freeze and graph._preparation is None:
                     if not required:
                         return None

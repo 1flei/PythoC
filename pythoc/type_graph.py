@@ -5,6 +5,15 @@ from dataclasses import dataclass
 import threading
 import weakref
 
+from .builtin_entities.types import void
+from .builtin_entities.union import UnionType
+from .type_descriptor import StructuralTypeIndex, atom, leaf_key, predicate_shape, type_key, _wire
+from .type_resolver import TypeReference, TypeResolver, report_type_errors
+
+
+class IncompleteRecordError(TypeError):
+    """A declaration does not yet provide all stored member types."""
+
 
 def record_view(pc_type):
     """Unwrap a decorated class without consulting a backend representation."""
@@ -34,7 +43,6 @@ def _owner(view):
 
 
 def _resolve(pc_type):
-    from .type_resolver import TypeResolver
     pc_type = TypeResolver.resolve_type(pc_type, required=False)
     if pc_type is None:
         return None
@@ -50,12 +58,11 @@ def _fields(view):
     fields = tuple(view._field_types or ())
     names = tuple(view._field_names or (None,) * len(fields))
     if len(names) != len(fields):
-        raise TypeError(f'Incomplete PythoC record definition: {view.get_name()}')
+        raise IncompleteRecordError(f'Incomplete PythoC record definition: {view.get_name()}')
     return names, fields, view._layout_config.identity()
 
 
 def _is_union(pc_type):
-    from .builtin_entities.union import UnionType
     return isinstance(pc_type, type) and issubclass(pc_type, UnionType)
 
 
@@ -71,7 +78,6 @@ def _shape(pc_type):
         base = pc_type._base_type
         if base is None:
             base = pc_type._struct_type
-        from .type_descriptor import leaf_key, predicate_shape
         if base is None and pc_type._predicates is None:
             return ('leaf', leaf_key(pc_type)), ()
         shapes = [predicate_shape(pred) for pred in pc_type._predicates or ()]
@@ -81,7 +87,6 @@ def _shape(pc_type):
         return ('refined', predicates, tuple(pc_type._tags or ())), children
     params = getattr(pc_type, 'param_types', None)
     if params is None and getattr(pc_type, '_is_function_type', False):
-        from .type_descriptor import leaf_key
         return ('leaf', leaf_key(pc_type)), ()
     if params is not None:
         flags = tuple(bool(getattr(pc_type, name, False)) for name in (
@@ -91,7 +96,6 @@ def _shape(pc_type):
         head = ('function', names, flags, pc_type.calling_convention)
         return head, tuple((t, False) for t in components)
     if getattr(pc_type, '_is_pointer', False):
-        from .builtin_entities.types import void
         pointee = getattr(pc_type, 'pointee_type', None)
         if pointee is None or pointee is void:
             return ('pointer',), ()
@@ -110,15 +114,20 @@ def _shape(pc_type):
             fields = pc_type._field_types
         names = tuple(pc_type._field_names or (None,) * len(fields))
         if len(names) != len(fields):
-            raise TypeError('Incomplete PythoC record definition: '
-                            + pc_type.get_name())
+            raise IncompleteRecordError('Incomplete PythoC record definition: '
+                                        + pc_type.get_name())
         kind = ('enum' if getattr(pc_type, '_tag_type', None) is not None
                 else 'union' if _is_union(pc_type) else 'struct')
-        name = (record_name(pc_type) if named_record(pc_type) is not None
-                else pc_type.get_name())
+        record = named_record(pc_type)
+        if record is not None:
+            name = record_name(record)
+        elif record_view(pc_type) is not None:
+            # Anonymous struct names are derived from field spellings.
+            name = kind
+        else:
+            name = pc_type.get_name()
         layout = pc_type._layout_config.identity()
         if kind == 'enum':
-            from .type_descriptor import atom
             variants = (tuple(pc_type._variant_names or ()),
                         atom(pc_type._tag_values),
                         tuple(pc_type._variant_types or ()))
@@ -126,7 +135,6 @@ def _shape(pc_type):
                 tuple((t, True) for t in fields)
                 + tuple((t, None) for t in variants[2]))
         return (kind, name, names, layout), tuple((t, True) for t in fields)
-    from .type_descriptor import leaf_key
     return ('leaf', leaf_key(pc_type)), ()
 
 
@@ -139,11 +147,8 @@ def _equivalent(first, second, resolver=None):
     """
     if first is second:
         return True
-    from .type_descriptor import _wire, type_key
-    from .type_resolver import TypeReference, TypeResolver
-
     def resolve(value):
-        if resolver is not None and isinstance(value, (str, TypeReference)):
+        if resolver is not None and TypeResolver.is_reference(value):
             resolved = resolver(value)
             if resolved is not None:
                 value = resolved
@@ -231,7 +236,6 @@ class TypeGraph:
         self._declarations = {}
         self._canonical = {}
         self._by_name = {}
-        from .type_descriptor import StructuralTypeIndex
         self._structural_index = StructuralTypeIndex()
         self._definitions = {}
         self._checked = {}
@@ -254,7 +258,7 @@ class TypeGraph:
             pc_type = _resolve(original)
             if pc_type is None:
                 if stored:
-                    raise TypeError(f'Incomplete PythoC value type: {original}')
+                    raise IncompleteRecordError(f'Incomplete PythoC value type: {original}')
                 continue
             key = id(pc_type)
             if key in nodes:
@@ -343,7 +347,6 @@ class TypeGraph:
                 unresolved, references = set(), set()
 
                 def pending(reference, names):
-                    from .type_resolver import TypeReference
                     unresolved.update(names)
                     if isinstance(reference, TypeReference):
                         references.add(reference)
@@ -459,22 +462,22 @@ class TypeGraph:
 
     def prepare_type(self, pc_type):
         """Fix reachable bindings before layout, ABI, or LLVM construction."""
-        from .type_resolver import TypeResolver
         if pc_type is None:
             return
         with self._lock, self.binding_transaction():
             prepared = self.prepared_types
-            pending, seen, active = [(pc_type, True, 0, False)], {}, {}
-            complete = True
+            pending, seen, active = [(pc_type, True, 0, None, False)], {}, {}
+            parents, incomplete = {}, set()
             while pending:
-                current, stored, depth, finish = pending.pop()
+                current, stored, depth, parent, finish = pending.pop()
                 if finish:
                     del active[id(current)]
                     continue
                 current = TypeResolver.resolve_type(current, required=stored, freeze=True)
                 current = _resolve(current)
                 if current is None:
-                    complete = complete and stored
+                    if not stored and parent is not None:
+                        incomplete.add(parent)
                     continue
                 if isinstance(current, type) and (
                         current in prepared or current in self._preparation[1]):
@@ -486,6 +489,8 @@ class TypeGraph:
                           or getattr(current, '_is_union', False)
                           or getattr(current, '_is_enum', False))
                 key = id(current)
+                if parent is not None:
+                    parents.setdefault(key, set()).add(parent)
                 if key in active:
                     if depth <= active[key]:
                         raise TypeError('Recursive type constructors require a named record')
@@ -494,7 +499,7 @@ class TypeGraph:
                     continue
                 seen[key] = current
                 active[key] = depth
-                pending.append((current, stored, depth, True))
+                pending.append((current, stored, depth, parent, True))
                 _, children = _shape(current)
                 owner = getattr(current, '_python_class', None)
                 declaration = getattr(owner, '_type_declaration', None)
@@ -502,13 +507,21 @@ class TypeGraph:
                     # Static fields are absent from the instance graph, but their
                     # bindings also determine this declaration's storage projection.
                     children = tuple((pc_type, True) for _, _, pc_type, _ in declaration)
-                pending.extend((child, bool(stored), depth, False) for child, stored in children
+                pending.extend((child, bool(stored), depth, key, False) for child, stored in children
                                if stored is not None)
             if seen:
                 self.validate(pc_type)
-            if complete:
-                self._preparation[1].update(
-                    value for value in seen.values() if isinstance(value, type))
+            # An opaque pointee may resolve on a later use. Keep preparing
+            # types that depend on it and reuse the already frozen subgraphs.
+            needs_resolution = list(incomplete)
+            for child in needs_resolution:
+                for parent in parents.get(child, ()):
+                    if parent not in incomplete:
+                        incomplete.add(parent)
+                        needs_resolution.append(parent)
+            self._preparation[1].update(
+                value for key, value in seen.items()
+                if key not in incomplete and isinstance(value, type))
 
 
 def _current_graph():
@@ -545,3 +558,9 @@ def prepare_type(pc_type):
     """Prepare a type in the active compilation session."""
     from .session import CompileSession
     CompileSession.current().type_graph.prepare_type(pc_type)
+
+
+def require_prepared_type(pc_type, node):
+    """Require a usable type at a source location that consumes it."""
+    with report_type_errors(node):
+        prepare_type(pc_type)

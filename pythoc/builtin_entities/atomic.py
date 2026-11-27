@@ -1,9 +1,8 @@
 """Typed sequentially consistent atomic operations."""
 
-from llvmlite import ir
-
 from .base import BuiltinFunction
-from .types import i32, i64, ptr, void
+from .types import bool as pc_bool
+from .types import i8, i32, i64, ptr, void
 from ..logger import logger
 from ..valueref import ensure_ir, wrap_value
 
@@ -26,14 +25,36 @@ def _atomic_pointee(visitor, arg, operation, name, node, fixed=None):
         logger.error(f'{name}: unsupported atomic {operation} on {pointee.get_name()}',
                      node=node, exc_type=TypeError)
     converted = visitor.type_converter.convert(arg, ptr[pointee], node)
-    return (pointee, pointee.get_llvm_type(visitor.module.context),
-            pointee.get_size_bytes(), ensure_ir(converted))
+    address = ensure_ir(converted)
+    alignment = pointee.get_size_bytes()
+    visitor.builder.require_atomic_alignment(address, alignment, name, node)
+    context = visitor.module.context
+    logical_type = pointee.get_llvm_type(context)
+    # A boolean occupies a byte of storage even though its value is an i1.
+    storage_type = logical_type
+    if get_base_type(pointee) is pc_bool:
+        storage_type = i8.get_llvm_type(context)
+        address = visitor.builder.bitcast(address, ptr[i8].get_llvm_type(context))
+    return pointee, logical_type, storage_type, alignment, address
 
 
 def _emit(visitor, operation, pointee, *args, **kwargs):
     from ..ir_helpers import is_volatile
     method = operation + '_volatile' if is_volatile(pointee) else operation
     return getattr(visitor.builder, method)(*args, **kwargs)
+
+
+def _atomic_operand(visitor, argument, pointee, storage_type, node):
+    value = ensure_ir(visitor.implicit_coercer.coerce(argument, pointee, node))
+    if value.type != storage_type:
+        return visitor.builder.zext(value, storage_type)
+    return value
+
+
+def _atomic_result(visitor, value, pointee, logical_type):
+    if value.type != logical_type:
+        value = visitor.builder.trunc(value, logical_type)
+    return wrap_value(value, kind='value', type_hint=pointee)
 
 
 def _handle_atomic(visitor, args, node, name, operation, arity, fixed):
@@ -45,22 +66,22 @@ def _handle_atomic(visitor, args, node, name, operation, arity, fixed):
     if operation == 'fence':
         visitor.builder.fence('seq_cst')
         return wrap_value(None, kind='python', type_hint=void)
-    pointee, llvm_type, align, address = _atomic_pointee(
+    pointee, llvm_type, storage_type, align, address = _atomic_pointee(
         visitor, args[0], operation, name, node, fixed)
     if operation == 'load':
         value = _emit(visitor, 'load_atomic', pointee, address,
-                      ordering='seq_cst', align=align, typ=llvm_type)
-        return wrap_value(value, kind='value', type_hint=pointee)
+                      ordering='seq_cst', align=align, typ=storage_type)
+        return _atomic_result(visitor, value, pointee, llvm_type)
     if operation == 'cas':
-        expected_type, _, expected_align, expected_address = _atomic_pointee(
+        expected_type, _, _, expected_align, expected_address = _atomic_pointee(
             visitor, args[1], 'store', name, node, fixed)
         if not same_type(strip_qualifiers(pointee), strip_qualifiers(expected_type)):
             logger.error(f'{name}: expected pointer must have the same value type as target',
                          node=node, exc_type=TypeError)
         expected = _emit(visitor, 'load_atomic', expected_type, expected_address,
-                         ordering='seq_cst', align=expected_align, typ=llvm_type)
-        desired = visitor.implicit_coercer.coerce(args[2], pointee, node)
-        pair = _emit(visitor, 'cmpxchg', pointee, address, expected, ensure_ir(desired),
+                         ordering='seq_cst', align=expected_align, typ=storage_type)
+        desired = _atomic_operand(visitor, args[2], pointee, storage_type, node)
+        pair = _emit(visitor, 'cmpxchg', pointee, address, expected, desired,
                      ordering='seq_cst', failordering='seq_cst')
         old = visitor.builder.extract_value(pair, 0)
         success = visitor.builder.extract_value(pair, 1)
@@ -72,16 +93,16 @@ def _handle_atomic(visitor, args, node, name, operation, arity, fixed):
               ordering='seq_cst', align=expected_align)
         visitor.builder.branch(merge)
         visitor.builder.position_at_end(merge)
-        result = visitor.builder.zext(success, ir.IntType(32))
+        result = visitor.builder.zext(success, i32.get_llvm_type(visitor.module.context))
         return wrap_value(result, kind='value', type_hint=i32)
-    value = visitor.implicit_coercer.coerce(args[1], pointee, node)
+    value = _atomic_operand(visitor, args[1], pointee, storage_type, node)
     if operation == 'store':
-        _emit(visitor, 'store_atomic', pointee, ensure_ir(value), address,
+        _emit(visitor, 'store_atomic', pointee, value, address,
               ordering='seq_cst', align=align)
         return wrap_value(None, kind='python', type_hint=void)
     result = _emit(visitor, 'atomic_rmw', pointee, operation, address,
-                   ensure_ir(value), ordering='seq_cst')
-    return wrap_value(result, kind='value', type_hint=pointee)
+                   value, ordering='seq_cst')
+    return _atomic_result(visitor, result, pointee, llvm_type)
 
 
 def _atomic_builtin(name, operation, arity, fixed=None):
@@ -98,6 +119,7 @@ def _atomic_builtin(name, operation, arity, fixed=None):
 atomic_load = _atomic_builtin('atomic_load', 'load', 1)
 atomic_store = _atomic_builtin('atomic_store', 'store', 2)
 atomic_fetch_add = _atomic_builtin('atomic_fetch_add', 'add', 2)
+atomic_fetch_sub = _atomic_builtin('atomic_fetch_sub', 'sub', 2)
 atomic_fetch_and = _atomic_builtin('atomic_fetch_and', 'and', 2)
 atomic_fetch_or = _atomic_builtin('atomic_fetch_or', 'or', 2)
 atomic_exchange = _atomic_builtin('atomic_exchange', 'xchg', 2)

@@ -481,7 +481,7 @@ def _emit_enum(lines: list[str], decl: CDeclIR,
             if value.value is None:
                 lines.append(f"    {value_name}: None")
             else:
-                lines.append(f"    {value_name} = {value.value}")
+                lines.append(f"    {value_name}: None = {value.value}")
     lines.append("")
     # C enum constants live in the enclosing scope, not inside the enum type
     for value in decl.values:

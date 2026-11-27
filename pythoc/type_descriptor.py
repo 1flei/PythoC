@@ -182,24 +182,27 @@ def _type_projection(pc_type, resolver=None, *, _validate=True, on_unresolved=No
     through different numbers of intermediate Python specialization objects.
     """
     from .type_graph import (
-        _owner, _resolve, _shape, named_record, record_name,
+        IncompleteRecordError, _owner, _resolve, _shape, named_record, record_name,
         validate_type_graph,
     )
+    from .type_resolver import TypeReference, TypeResolver, UnresolvedTypeName
+
     heads = []
     edges = []
     indices = {}
+    direct_indices = {}
     objects = []
 
     validated = False
 
-    def normalize(current, allow_incomplete):
+    def normalize(current, is_reference):
         nonlocal validated
-        from .type_resolver import TypeReference, TypeResolver
-        if isinstance(current, (str, TypeReference)):
-            resolved = resolver(current) if resolver is not None else None
-            if resolved is None:
-                resolved = _resolve(current)
-            if resolved is None:
+        override = resolver(current) if is_reference and resolver is not None else None
+        if override is not None:
+            current = _resolve(override)
+        else:
+            resolved = _resolve(current)
+            if is_reference and resolved is None:
                 if on_unresolved is not None:
                     expression = (current.expression
                                   if isinstance(current, TypeReference) else current)
@@ -212,51 +215,47 @@ def _type_projection(pc_type, resolver=None, *, _validate=True, on_unresolved=No
                 return ('forward', _opaque(CompileSession.current()),
                         TypeResolver.reference_key(current))
             current = resolved
-        current = _resolve(current)
         if current is None:
             return ('void',)
-        if named_record(current) is not None and any(
-                field is None for field in current._field_types or ()):
-            return ('incomplete-record', _opaque(_owner(current)), record_name(current))
+        record = named_record(current)
+        if record is not None and any(field is None for field in record._field_types or ()):
+            return ('incomplete-record', _opaque(_owner(record)), record_name(record))
         try:
-            if _validate and not validated and named_record(current) is not None:
-                validate_type_graph(current)
+            if _validate and not validated and record is not None:
+                validate_type_graph(record)
                 validated = True
             return current
-        except (TypeError, NameError) as error:
-            if not allow_incomplete or (
-                    isinstance(error, TypeError) and 'Incomplete PythoC' not in str(error)):
-                raise
-            view = named_record(current)
-            if view is None:
-                raise
+        except (IncompleteRecordError, UnresolvedTypeName):
             from .type_id import note_unresolved_name_token
             note_unresolved_name_token()
-            return ('incomplete-record', _opaque(_owner(view)),
-                    record_name(view))
+            return ('incomplete-record', _opaque(_owner(record)), record_name(record))
 
-    def add(current, allow_incomplete=False):
-        current = normalize(current, allow_incomplete)
+    def add(original):
+        identity = id(original)
+        known = direct_indices.get(identity)
+        if known is not None:
+            return known[1]
+        is_reference = TypeResolver.is_reference(original)
+        current = normalize(original, is_reference)
         key = current if isinstance(current, tuple) else id(current)
-        if key in indices:
-            return indices[key]
-        index = len(heads)
-        indices[key] = index
-        objects.append(current)
-        heads.append(None)
-        edges.append(None)
-        pending.append((index, current, allow_incomplete))
+        index = indices.get(key)
+        if index is None:
+            index = len(heads)
+            indices[key] = index
+            objects.append(current)
+            heads.append(None)
+            edges.append(None)
+        if not is_reference and not isinstance(current, tuple):
+            direct_indices[identity] = (original, index)
         return index
 
     # A type key can be requested before a declaration is complete (for a
     # specialization name). Value-use validation remains TypeGraph's job.
-    pending = []
-    root = add(pc_type, allow_incomplete=True)
-    for index, current, allow_incomplete in pending:
+    root = add(pc_type)
+    for index, current in enumerate(objects):
         head, children = (current, ()) if isinstance(current, tuple) else _shape(current)
         heads[index] = _wire(head).decode('utf-8')
-        edges[index] = tuple(add(child, allow_incomplete or not stored)
-                             for child, stored in children)
+        edges[index] = tuple(add(child) for child, _ in children)
     return root, objects, heads, edges
 
 
@@ -341,28 +340,12 @@ class StructuralTypeIndex:
             components.append(component)
         identities = {}
         for component in reversed(components):
-            local = {node: pos for pos, node in enumerate(component)}
-            local_heads = [qheads[node] for node in component]
-            local_edges = []
-            external = {}
-            for node in component:
-                children = []
-                for child in qedges[node]:
-                    if child in local:
-                        children.append(local[child])
-                    else:
-                        identity = identities[child]
-                        if identity not in external:
-                            external[identity] = len(local_heads)
-                            local_heads.append(_wire(('external', identity)).decode('ascii'))
-                        children.append(external[identity])
-                local_edges.append(tuple(children))
-            local_edges.extend(() for _ in external)
-            partition = _bisimulation_classes(local_heads, local_edges)
-            order = sorted(component, key=lambda node: partition[local[node]])
+            order = component
+            if len(component) > 1:
+                order = _canonical_component_order(component, qheads, qedges, identities)
             ranks = {node: rank for rank, node in enumerate(order)}
             key = tuple((qheads[node], tuple(
-                ('internal', ranks[child]) if child in local
+                ('internal', ranks[child]) if child in ranks
                 else ('external', identities[child])
                 for child in qedges[node])) for node in order)
             tokens = self.components.get(key)
@@ -374,6 +357,28 @@ class StructuralTypeIndex:
             identities.update(zip(order, tokens))
         return {id(value): identities[positions[classes[node]]]
                 for node, value in enumerate(objects) if not isinstance(value, tuple)}
+
+
+def _canonical_component_order(component, heads, edges, identities):
+    local = {node: pos for pos, node in enumerate(component)}
+    local_heads = [heads[node] for node in component]
+    local_edges = []
+    external = {}
+    for node in component:
+        children = []
+        for child in edges[node]:
+            if child in local:
+                children.append(local[child])
+            else:
+                identity = identities[child]
+                if identity not in external:
+                    external[identity] = len(local_heads)
+                    local_heads.append(_wire(('external', identity)).decode('ascii'))
+                children.append(external[identity])
+        local_edges.append(tuple(children))
+    local_edges.extend(() for _ in external)
+    partition = _bisimulation_classes(local_heads, local_edges)
+    return sorted(component, key=lambda node: partition[local[node]])
 
 
 def encode_type_key(key):
@@ -455,19 +460,38 @@ def integer_value(pc_type, raw):
 def _constant_value(value):
     """Read a compile-time value without treating LLVM type as type policy."""
     from .valueref import ValueRef
-    if isinstance(value, ValueRef):
-        if value.is_python_value():
-            return True, value.get_python_value()
-        ir_value = value.ir_value
-        if hasattr(ir_value, 'constant'):
-            raw = ir_value.constant
-            if (isinstance(raw, int)
-                    and (getattr(value.type_hint, '_is_integer', False)
-                         or getattr(value.type_hint, '_is_bool', False))):
-                raw = integer_value(value.type_hint, raw)
-            return True, raw
-        return False, None
-    return True, value
+    if not isinstance(value, ValueRef):
+        return True, value
+    known, raw = value.try_get_constant()
+    if (known and isinstance(raw, int)
+            and (getattr(value.type_hint, '_is_integer', False)
+                 or getattr(value.type_hint, '_is_bool', False))):
+        raw = integer_value(value.type_hint, raw)
+    return known, raw
+
+
+def is_null_pointer_constant(value):
+    """Recognize a known null in the PythoC pointer value domain."""
+    from .type_converter import get_base_type
+
+    if value.is_python_value() or not getattr(get_base_type(value.type_hint), '_is_pointer', False):
+        return False
+    known, constant = _constant_value(value)
+    return known and constant is None
+
+
+def nullable_pointer_type(null, other_type):
+    """Retain a concrete pointer type when the other branch is untyped null."""
+    from .builtin_entities.types import void
+    from .type_converter import get_base_type
+
+    source = get_base_type(null.type_hint)
+    if (getattr(source, 'pointee_type', ...) in (None, void)
+            and is_null_pointer_constant(null)
+            and getattr(get_base_type(other_type), '_is_pointer', False)
+            and can_convert(null.type_hint, other_type, value=null)):
+        return other_type
+    return None
 
 
 def _literal_item_relation(item, target, mode, context):
@@ -679,7 +703,8 @@ def _callable_type(literal):
 def _literal_relation(literal, target, mode, context):
     from .builtin_entities.types import void
     from .literal_protocol import (get_mapping_entries, get_sequence_elements,
-                                   is_mapping_carrier, is_sequence_carrier)
+                                   is_mapping_carrier, is_sequence_carrier,
+                                   select_union_member)
     from .schema_protocol import (get_schema_field_names,
                                   get_schema_field_types, is_schema_type)
     if getattr(literal, '_is_compiled', False) or getattr(literal, '_is_extern', False):
@@ -714,6 +739,10 @@ def _literal_relation(literal, target, mode, context):
                             for item, field in zip(items, fields)))
         return False
     if is_mapping_carrier(literal):
+        if getattr(target, '_is_union', False):
+            selected = select_union_member(literal, target)
+            return selected is not None and _literal_item_relation(
+                selected[2], selected[1], mode, context)
         if not is_schema_type(target) or getattr(target, '_is_enum', False):
             return False
         names = get_schema_field_names(target)
@@ -905,7 +934,8 @@ def conversion_failure(source, target, value, mode, context):
     """Explain common value-dependent rejections at the semantic boundary."""
     from .builtin_entities.python_type import PythonType
     from .literal_protocol import (get_mapping_entries, get_sequence_elements,
-                                   is_mapping_carrier, is_sequence_carrier)
+                                   is_mapping_carrier, is_sequence_carrier,
+                                   select_union_member)
     from .schema_protocol import is_schema_type, iter_schema_fields
     from .builtin_entities.types import void
     if target is void and contains_linear_storage(source):
@@ -929,6 +959,12 @@ def conversion_failure(source, target, value, mode, context):
             return (f"Function '{name}' has signature {format_type(actual)}, "
                     f"but is being used as {format_type(target)}")
     target = _unqualified(target)
+    if is_mapping_carrier(literal) and getattr(target, '_is_union', False):
+        selected = select_union_member(literal, target)
+        if selected is None:
+            return 'A union initializer must select exactly one named member'
+        name, field, item = selected
+        return _literal_member_error(item, field, f'member {name!r}', mode, context)
     if is_mapping_carrier(literal) and is_schema_type(target):
         fields = iter_schema_fields(target)
         names = [name for _, name, _ in fields]
@@ -1317,16 +1353,18 @@ def default_argument_promotion(source):
 def atomic_value_is_supported(pointee, operation):
     """Atomic value admission, including storage and proof restrictions."""
     from .type_converter import get_base_type
-    if operation not in ('load', 'store', 'add', 'and', 'or', 'xchg', 'cas'):
+    if operation not in ('load', 'store', 'add', 'sub', 'and', 'or', 'xchg', 'cas'):
         raise ValueError(f'Unknown atomic operation: {operation}')
     if operation != 'load' and _flags(pointee).get('const'):
         return False
-    arithmetic = operation in ('add', 'and', 'or')
+    arithmetic = operation in ('add', 'sub', 'and', 'or')
     if arithmetic and _refinement_chain(_unqualified(pointee))[0]:
         return False
     base = get_base_type(pointee)
     if getattr(base, '_is_integer', False):
         return base._bit_width in (8, 16, 32, 64)
+    if getattr(base, '_is_bool', False):
+        return not arithmetic
     return not arithmetic and bool(getattr(base, '_is_pointer', False))
 
 

@@ -102,6 +102,72 @@ caller()
                     self.assertEqual(result.stderr.count('[ERROR]'), 1)
                     self.assertNotIn('Traceback', result.stderr)
 
+    def test_type_failures_are_reported_at_the_declaration_or_use(self):
+        cases = (
+            ('class_native_name', 'from pythoc import compile, i32\n\n'
+             "@compile(name='native')\nclass Bad:\n    field: i32\n",
+             '3', 'native function name applies only to functions'),
+            ('function_static_prefix', 'from pythoc import compile, i32\n\n'
+             "@compile(static_member_symbol_prefix='pc')\ndef bad() -> i32:\n    return 0\n",
+             '3', 'static_member_symbol_prefix applies only to classes'),
+            ('named_yield', 'from pythoc import compile, i32\n\n'
+             "@compile(name='native')\ndef bad():\n    yield i32(0)\n",
+             '3', 'Native naming and visibility require a standalone function'),
+            ('named_parametric_yield', 'from pythoc import compile, param\n\n'
+             "@compile(name='native')\ndef bad(value: param):\n    yield value\n",
+             '3', 'Native naming and visibility require a standalone function'),
+            ('bad_enum', "from pythoc import enum, i32\n\n"
+             "@enum(i32)\nclass Bad:\n    Variant: '17'\n",
+             '5:13', 'Cannot use as type: 17'),
+            ('bad_union', "from pythoc import union\n\n"
+             "@union\nclass Bad:\n    member: '17'\n",
+             '5:12', 'Cannot use as type: 17'),
+            ('recursive_record', 'from pythoc import compile, i32\n\n'
+             "@compile\nclass Cycle:\n    member: 'Cycle'\n\n"
+             '@compile\ndef describe(value: Cycle) -> i32:\n    return 0\n',
+             '8:20', 'Illegal by-value recursion in PythoC type Cycle'),
+            ('unresolved_record', 'from pythoc import compile, i32, flush_all_pending_outputs\n\n'
+             "@compile\nclass Broken:\n    member: 'MissingRecordMember'\n\n"
+             '@compile\ndef bad(value: Broken) -> i32:\n    return 0\n\n'
+             'flush_all_pending_outputs()\n',
+             '8:15', "Type annotation name 'MissingRecordMember' is not defined"),
+            ('layout_options', 'from pythoc import i32, struct\n\n'
+             '@struct(alignment=3)\nclass Bad:\n    field: i32\n',
+             '3', 'alignment must be a positive power of two'),
+            ('layout_fields', 'from pythoc import i32, union\n\n'
+             "@union(member_alignments={'typo': 64})\nclass Bad:\n    field: i32\n\n"
+             'Bad.get_size_bytes()\n',
+             '3', 'member alignment names are not fields: typo'),
+            ('layout_llvm', 'from llvmlite import ir\nfrom pythoc import i32, struct\n\n'
+             "@struct(member_alignments={'typo': 64})\nclass Bad:\n    field: i32\n\n"
+             'Bad.get_llvm_type(ir.Context())\n',
+             '4', 'member alignment names are not fields: typo'),
+            ('layout_compiled', 'from pythoc import compile, i32, sizeof, struct\n\n'
+             '@struct(abi_alignment=8)\nclass Bad:\n    field: i32\n\n'
+             '@compile\ndef measure() -> i32:\n    return i32(sizeof(Bad))\n\n'
+             'measure()\n',
+             '3', 'record ABI alignment cannot be below member alignment'),
+            ('layout_ctypes', 'from pythoc import i32, struct\n\n'
+             '@struct(storage_unit=32, abi_alignment=32768)\nclass Wide:\n    field: i32\n\n'
+             'Wide.get_ctypes_type()\n',
+             '3', 'ctypes has no carrier for 4096-byte alignment'),
+        )
+        root = Path(__file__).resolve().parents[2]
+        environment = dict(os.environ, PYTHONPATH=str(root), PC_RAISE_ON_ERROR='0')
+        with TemporaryDirectory() as directory:
+            for name, source, location, message in cases:
+                with self.subTest(name=name):
+                    script = Path(directory, f'{name}.py')
+                    script.write_text(source, encoding='utf-8')
+                    result = subprocess.run(
+                        [sys.executable, str(script)], cwd=directory, env=environment,
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(f'[ERROR] [{script.name}:{location}] {message}', result.stderr)
+                    self.assertEqual(result.stderr.count('[ERROR]'), 1)
+                    self.assertNotIn('Traceback', result.stderr)
+
     def test_subscript_error_is_reported_at_the_expression(self):
         source = """from pythoc import compile, i32, struct
 

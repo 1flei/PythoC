@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from llvmlite import binding, ir
 
-from pythoc import const, f32, struct, u3, u5, u6, u8, u33, union, void, volatile
+from pythoc import const, f32, ptr, struct, u3, u5, u6, u8, u16, u33, union, void, volatile
 from pythoc.builtin_entities.bitfield_access import access_bit_field
 from pythoc.target_layout import make_aggregate_layout_config
 from pythoc.valueref import ValueRef
@@ -49,6 +49,35 @@ def make_visitor():
 
 
 class TestBitLayout(unittest.TestCase):
+    def test_defaults_and_byte_alignment_preserve_ordinary_fields(self):
+        defaults = make_aggregate_layout_config(
+            alignment=None, abi_alignment=None, storage_unit=None,
+            bit_order='lsb0', cross_unit=False)
+        self.assertEqual(defaults, make_aggregate_layout_config())
+
+        @struct(alignment=8, abi_alignment=8)
+        class ByteAligned:
+            tag: u8
+            address: ptr[u8]
+
+        layout = ByteAligned.get_layout()
+        pointer_size = ptr[u8].get_size_bytes()
+        self.assertEqual(layout.field_offsets, (0, 1))
+        self.assertEqual((layout.allocation_size, layout.alignment), (1 + pointer_size, 1))
+        self.assertEqual(layout.field_widths_bits, ())
+        self.assertEqual(ByteAligned.get_ctypes_type().address.offset, 1)
+
+    def test_explicit_storage_keeps_bit_field_semantics_at_byte_offsets(self):
+        @struct(storage_unit=8, alignment=8, abi_alignment=8)
+        class Byte:
+            value: u8
+
+        layout = Byte.get_layout()
+        self.assertEqual(layout.field_widths_bits, (8,))
+        self.assertEqual(layout.field_offsets, (0,))
+        self.assertEqual(layout.field_storage_units_bits, (8,))
+        self.assertEqual(Byte.get_llvm_type(ir.Context()), ir.ArrayType(ir.IntType(8), 1))
+
     def test_c_layout_shapes(self):
         for cls, offsets, size, alignment in (
             (AllShort, (0, 3, 8), 2, 2),
@@ -181,16 +210,16 @@ class TestBitLayout(unittest.TestCase):
         visitor.builder.ret_void()
         binding.parse_assembly(str(visitor.module)).verify()
 
-    def test_full_unit_assignment_has_no_read(self):
+    def test_full_units_assignment_has_no_read(self):
         visitor = make_visitor()
-        ty = union(storage_unit=8)(type('Byte', (), {
-            '__annotations__': {'x': u8}, '__module__': __name__}))._union_type
+        ty = union(storage_unit=8, cross_unit=True)(type('Wide', (), {
+            '__annotations__': {'x': u16}, '__module__': __name__}))._union_type
         pointer = visitor.builder.alloca(ty.get_llvm_type(visitor.module.context))
         base = ValueRef('address', pointer, ty, address=pointer)
-        field = access_bit_field(visitor, base, ty, 0, volatile[u8])
-        field.store(visitor.builder, ir.Constant(ir.IntType(8), 42))
+        field = access_bit_field(visitor, base, ty, 0, volatile[u16])
+        field.store(visitor.builder, ir.Constant(ir.IntType(16), 42))
         self.assertNotIn('load ', str(visitor.module))
-        self.assertEqual(str(visitor.module).count('store volatile'), 1)
+        self.assertEqual(str(visitor.module).count('store volatile'), 2)
 
     def test_const_and_temporary_are_not_mutable(self):
         visitor = make_visitor()

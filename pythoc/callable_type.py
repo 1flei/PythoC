@@ -32,6 +32,7 @@ OFF_DICT = LAYOUT['dict']
 OFF_WRAPPED = LAYOUT['wrapped']
 OFF_SLOW = LAYOUT['slow']
 OFF_LOCK = LAYOUT['lock']
+OFF_KERNEL = LAYOUT['kernel']
 OFF_STATE = LAYOUT['state']
 OFF_TP_DICTS = LAYOUT['tp_dictoffset']
 OFF_TP_FLAGS = LAYOUT['tp_flags']
@@ -608,13 +609,19 @@ def callable_get_dict(obj: ptr[void], closure: ptr[void]) -> ptr[void]:
 
 @compile
 def callable_bind_adapter(obj: ptr[void], arg: ptr[void]) -> ptr[void]:
-    addr: u64 = PyLong_AsUnsignedLongLong(arg)
+    adapter_arg = PyTuple_GetItem(arg, i64(0))
+    kernel_arg = PyTuple_GetItem(arg, i64(1))
+    if adapter_arg == ptr[void](0) or kernel_arg == ptr[void](0):
+        return ptr[void](0)
+    addr: u64 = PyLong_AsUnsignedLongLong(adapter_arg)
+    kernel: u64 = PyLong_AsUnsignedLongLong(kernel_arg)
     if i64(PyErr_Occurred()) != i64(0):
         return ptr[void](0)
     if addr == u64(0):
         PyErr_SetString(PyExc_ValueError, "null PythoC adapter address")
         return ptr[void](0)
     lock_enter(obj)
+    store_ptr(obj, i64(OFF_KERNEL), ptr[void](kernel))
     store_ptr(obj, i64(OFF_VECTORCALL), ptr[void](i64(addr)))
     store_state(obj, i32(2))
     lock_leave(obj)
@@ -766,7 +773,7 @@ def PyInit__callable() -> ptr[void]:
     methods[0][0] = "bind_adapter"
     methods[0][1] = ptr[void](callable_bind_adapter)
     methods[0][2] = i32(METH_O)
-    methods[0][3] = "Install a generated vectorcall adapter address."
+    methods[0][3] = "Install a vectorcall adapter and its bound kernel address."
     methods[1][0] = "bind_slow"
     methods[1][1] = ptr[void](callable_bind_slow)
     methods[1][2] = i32(METH_O)

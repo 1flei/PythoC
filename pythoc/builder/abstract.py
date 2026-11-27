@@ -184,6 +184,26 @@ class AbstractBuilder(ABC):
     def store(self, value: Any, ptr: Any, align: Any = None) -> Any:
         """Store value to memory."""
         pass
+
+    @abstractmethod
+    def store_nontemporal(self, value, ptr, align, volatile=False):
+        """Store with a non-temporal memory hint."""
+
+    @abstractmethod
+    def aggregate_value(self, pc_type, values, node, context, *, emitter=None):
+        """Construct a record or array from its semantic field values."""
+
+    @abstractmethod
+    def union_value(self, pc_type, member, name, node, context, constant_only, *, emitter=None):
+        """Construct the backing value of a selected union alternative."""
+
+    @abstractmethod
+    def vector_value(self, pc_type, lanes, context, *, emitter=None):
+        """Construct a vector from its lane values."""
+
+    @abstractmethod
+    def require_atomic_alignment(self, ptr, alignment, name, node):
+        """Reject a known misalignment or guard a runtime address."""
     
     def load_volatile(self, ptr: Any, name: str = "", align: Any = None) -> Any:
         """Emit an observable load; PCIR records this operation explicitly."""
@@ -308,6 +328,11 @@ class AbstractBuilder(ABC):
     @abstractmethod
     def unreachable(self) -> Any:
         """Mark code as unreachable."""
+        pass
+
+    @abstractmethod
+    def trap(self) -> Any:
+        """Terminate execution if control reaches the current block."""
         pass
     
     # ========== PHI and Select ==========

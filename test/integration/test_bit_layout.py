@@ -2,6 +2,7 @@
 
 import unittest
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tempfile
@@ -21,6 +22,7 @@ from pythoc import (
     union,
 )
 from pythoc import array, extern, i3, i8, ptr, static, u33, u64, volatile
+from pythoc.build.output_manager import get_output_manager
 from pythoc.utils.cc_utils import compile_c_to_object, find_available_cc
 from pythoc.utils.link_utils import (
     get_executable_extension, get_shared_lib_extension, link_files,
@@ -268,6 +270,25 @@ class BigBitOrder:
     raw: u8
 
 
+@struct(alignment=8, abi_alignment=8)
+class ByteAlignedRecord:
+    tag: u8
+    value: u64
+
+
+@compile(suffix='byte_aligned_pointer')
+def read_unaligned_member(address: ptr[u64]) -> u64:
+    address[0] += 1
+    return address[0]
+
+
+@compile
+def unaligned_member_address_round_trip() -> u64:
+    record: ByteAlignedRecord = (u8(1), u64(41))
+    address: ptr[u64] = ptr(record.value)
+    return read_unaligned_member(address)
+
+
 @compile
 def packed_round_trip() -> i64:
     value: PackedWord = PackedWord()
@@ -307,7 +328,32 @@ def msb0_storage() -> i64:
     return i64(value.raw)
 
 
+@compile
+def msb0_constant_union() -> u8:
+    value: static[BigBitOrder] = {'field': u3(5)}
+    return value.raw
+
+
+@compile
+def msb0_runtime_union(lane: u8) -> u8:
+    value: BigBitOrder = {'field': u3(lane)}
+    return value.raw
+
+
 class TestBitLayoutIntegration(unittest.TestCase):
+    def test_named_union_initializers_follow_field_layout(self):
+        self.assertEqual(msb0_constant_union(), 0xA0)
+        self.assertEqual(msb0_runtime_union(3), 0x60)
+
+    def test_byte_aligned_member_keeps_address_and_access_alignment(self):
+        self.assertEqual(unaligned_member_address_round_trip(), 42)
+        emitted = get_output_manager().get_ir_text(read_unaligned_member._group_key)
+        reads = re.findall(r'load i64, .*', emitted)
+        writes = re.findall(r'store i64 .*', emitted)
+        self.assertTrue(reads and writes)
+        for access in reads + writes:
+            self.assertRegex(access, r'\balign 1\b')
+
     def test_c_by_value_round_trip(self):
         self.assertEqual(c_round_trip(), 739)
 

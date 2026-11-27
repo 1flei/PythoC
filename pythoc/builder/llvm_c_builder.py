@@ -25,7 +25,7 @@ class FunctionWrapper:
     
     def __init__(self, ir_function: ir.Function, sret_info: Optional[dict] = None,
                  param_coercion_info: Optional[dict] = None,
-                 apply_c_abi: bool = True):
+                 apply_c_abi: bool = True, return_coercion=None):
         """
         Args:
             ir_function: The underlying LLVM function
@@ -39,6 +39,7 @@ class FunctionWrapper:
         self._ir_function = ir_function
         self._sret_info = sret_info
         self._param_coercion_info = param_coercion_info or {}
+        self.return_coercion = return_coercion
         self._arg_offset = 1 if (sret_info and sret_info.get('uses_sret')) else 0
         self._apply_c_abi = apply_c_abi
     
@@ -157,7 +158,7 @@ class LLVMCBuilder(LLVMBuilder):
     
     def set_return_abi_context(self, current_function: ir.Function,
                                sret_info: Optional[dict] = None,
-                               apply_c_abi: bool = True):
+                               apply_c_abi: bool = True, return_coercion=None):
         """Set ABI context for the current function.
         
         This should be called after creating the function entry block.
@@ -174,20 +175,8 @@ class LLVMCBuilder(LLVMBuilder):
         self._current_function = current_function
         self._sret_info = sret_info
         self._apply_c_abi = apply_c_abi
-        self._return_coercion = None
-        
-        # Pre-compute return coercion if needed
-        if current_function is not None:
-            ret_type = current_function.return_value.type
-            # If we have sret_info, the original type is stored there
-            if sret_info and sret_info.get('uses_sret'):
-                original_type = sret_info.get('original_return_type')
-                if original_type:
-                    from .abi import get_target_abi
-                    abi = get_target_abi()
-                    if abi.is_aggregate_type(original_type):
-                        self._return_coercion = abi.classify_return_type(original_type)
-    
+        self._return_coercion = return_coercion
+
     def clear_return_abi_context(self):
         """Clear the ABI context (call when leaving a function)."""
         self._current_function = None
@@ -197,10 +186,10 @@ class LLVMCBuilder(LLVMBuilder):
     # ========== Function Declaration ==========
     
     def declare_function(self, module: ir.Module, name: str,
-                        param_types: List[ir.Type], return_type: ir.Type,
+                        param_types, return_type,
                         var_arg: bool = False,
                         existing_func: Optional[ir.Function] = None,
-                        apply_c_abi: bool = True) -> FunctionWrapper:
+                        apply_c_abi: bool = True, *, is_extern: bool = False) -> FunctionWrapper:
         """Declare a function with ABI handling for struct returns and arguments.
         
         This method handles ABI coercion transparently:
@@ -212,68 +201,46 @@ class LLVMCBuilder(LLVMBuilder):
         Args:
             module: The LLVM module to declare the function in
             name: Function name
-            param_types: List of user-defined parameter LLVM types
-            return_type: User-defined return LLVM type
+            param_types: Declared PythoC parameter types
+            return_type: Declared PythoC return type
             var_arg: Whether the function is variadic
             existing_func: Optional existing forward declaration to reuse
-            apply_c_abi: Whether to apply C ABI coercion (default True)
+            apply_c_abi: Set False to declare an explicit LLVM signature
+            is_extern: Allow library semantics for a foreign symbol declaration
         
         Returns:
             FunctionWrapper that provides access to user parameters
         """
-        actual_return_type = return_type
-        uses_sret = False
-        sret_type = None
-        actual_param_types = list(param_types)
-        byval_params = []
-        param_coercion_info = {}  # Track parameter coercion for unpacking
-        
+        return_coercion = None
+        sret_info = None
+        param_coercion_info = {}
+        byval_indices = []
         if apply_c_abi:
             from .abi import get_target_abi
+
             abi = get_target_abi()
-            
-            actual_param_types = []
-            
-            # Coerce aggregate parameters (struct or array)
-            for i, pt in enumerate(param_types):
-                if abi.is_aggregate_type(pt):
-                    coercion = abi.classify_argument_type(pt)
-                    if coercion.is_indirect:
-                        # byval: pass as pointer with byval attribute
-                        actual_param_types.append(ir.PointerType(pt))
-                        byval_params.append((i, pt))
-                        param_coercion_info[i] = {
-                            'original_type': pt,
-                            'coerced_type': ir.PointerType(pt),
-                            'is_byval': True
-                        }
-                    elif coercion.needs_coercion and coercion.coerced_type is not None:
-                        actual_param_types.append(coercion.coerced_type)
-                        param_coercion_info[i] = {
-                            'original_type': pt,
-                            'coerced_type': coercion.coerced_type,
-                            'is_byval': False
-                        }
-                    else:
-                        actual_param_types.append(pt)
-                else:
-                    actual_param_types.append(pt)
-            
-            if abi.is_aggregate_type(return_type):
-                coercion = abi.classify_return_type(return_type)
-                if coercion.is_indirect:
-                    # Use sret: add pointer parameter, return void
-                    uses_sret = True
-                    sret_type = return_type
-                    actual_return_type = ir.VoidType()
-                    # Insert sret pointer as first parameter
-                    actual_param_types.insert(0, ir.PointerType(return_type))
-                elif coercion.needs_coercion and coercion.coerced_type is not None:
-                    actual_return_type = coercion.coerced_type
-        
-        # Create function type and declaration
-        func_type = ir.FunctionType(actual_return_type, actual_param_types, var_arg=var_arg)
-        
+            signature = abi.classify_signature(param_types, return_type, module.context)
+            func_type = signature.function_type(var_arg)
+            return_coercion = signature.result
+            if return_coercion.is_indirect:
+                sret_info = {
+                    'uses_sret': True,
+                    'sret_type': return_coercion.original_type,
+                    'sret_ptr_arg_index': 0,
+                }
+            for index, argument in enumerate(signature.arguments):
+                if not argument.needs_coercion:
+                    continue
+                param_coercion_info[index] = {
+                    'original_type': argument.original_type,
+                    'coerced_type': argument.abi_type,
+                    'is_byval': argument.is_indirect,
+                }
+                if argument.is_indirect and abi.uses_byval_for_indirect_args():
+                    byval_indices.append(index + int(sret_info is not None))
+        else:
+            func_type = ir.FunctionType(return_type, param_types, var_arg=var_arg)
+
         if existing_func is not None and isinstance(existing_func, ir.Function):
             if existing_func.function_type != func_type:
                 raise TypeError(
@@ -285,32 +252,18 @@ class LLVMCBuilder(LLVMBuilder):
         else:
             logger.debug(f"declare_function: creating new function {name}, type={func_type}")
             ir_function = ir.Function(module, func_type, name)
-        
-        # Add sret attribute to first parameter if using sret
-        if uses_sret:
+
+        if not is_extern:
+            ir_function.attributes.add('nobuiltin')
+        if sret_info:
             ir_function.args[0].add_attribute('sret')
             ir_function.args[0].add_attribute('noalias')
-        
-        # Add byval attribute to indirect struct parameters (x86-64 only)
-        # ARM64 does NOT use byval - it just passes a plain pointer
-        # Account for sret offset if present
-        if apply_c_abi and byval_params:
-            if abi.uses_byval_for_indirect_args():
-                sret_offset = 1 if uses_sret else 0
-                for orig_idx, byval_type in byval_params:
-                    arg_idx = orig_idx + sret_offset
-                    ir_function.args[arg_idx].add_attribute('byval')
-        
-        # Build sret_info
-        sret_info = None
-        if uses_sret:
-            sret_info = {
-                'uses_sret': True,
-                'sret_type': sret_type,
-                'sret_ptr_arg_index': 0
-            }
-        
-        return FunctionWrapper(ir_function, sret_info, param_coercion_info, apply_c_abi)
+        for index in byval_indices:
+            ir_function.args[index].add_attribute('byval')
+
+        return FunctionWrapper(
+            ir_function, sret_info, param_coercion_info, apply_c_abi, return_coercion,
+        )
     
     def setup_function_entry(self, func_wrapper: FunctionWrapper) -> ir.Block:
         """Set up function entry block and ABI context.
@@ -327,7 +280,7 @@ class LLVMCBuilder(LLVMBuilder):
         
         # Set ABI context
         self.set_return_abi_context(func_wrapper.ir_function, func_wrapper.sret_info,
-                                    func_wrapper.apply_c_abi)
+                                    func_wrapper.apply_c_abi, func_wrapper.return_coercion)
         
         return entry_block
     
@@ -345,38 +298,17 @@ class LLVMCBuilder(LLVMBuilder):
         """
         if value is None:
             return self._builder.ret_void()
-        
-        value_type = value.type
-        
-        # Apply ABI coercion for aggregate returns (struct or array)
-        if not self._apply_c_abi:
+
+        coercion = self._return_coercion
+        if not self._apply_c_abi or coercion is None or not coercion.needs_coercion:
             return self._builder.ret(value)
-        
-        # Check if this is an aggregate type that needs coercion
-        from .abi import get_target_abi
-        from .abi.coercion import pack_struct_for_return
-        
-        abi = get_target_abi()
-        if not abi.is_aggregate_type(value_type):
-            return self._builder.ret(value)
-        
-        # Get ABI coercion info
-        coercion = abi.classify_return_type(value_type)
-        
-        if not coercion.needs_coercion:
-            return self._builder.ret(value)
-        
+
         if coercion.is_indirect:
-            # sret: store to the sret pointer and return void
-            if self._sret_info and self._sret_info.get('uses_sret'):
-                sret_ptr = self._current_function.args[self._sret_info['sret_ptr_arg_index']]
-                self._builder.store(value, sret_ptr)
-                return self._builder.ret_void()
-            else:
-                logger.debug(f"Struct return requires sret but sret_info not found")
-                return self._builder.ret(value)
-        
-        # Apply coercion: pack struct into coerced type
+            sret_ptr = self._current_function.args[self._sret_info['sret_ptr_arg_index']]
+            self._builder.store(value, sret_ptr)
+            return self._builder.ret_void()
+
+        from .abi.coercion import pack_struct_for_return
         coerced_value = pack_struct_for_return(self._builder, value, coercion)
         return self._builder.ret(coerced_value)
     
@@ -401,81 +333,38 @@ class LLVMCBuilder(LLVMBuilder):
         Returns:
             The call result, unpacked if struct coercion was applied
         """
-        logger.debug(f"LLVMCBuilder.call: fn={getattr(fn, 'name', fn)}, return_type_hint={return_type_hint}, args={len(args)}")
-        
-        # Get module context
-        if hasattr(fn, 'module') and fn.module:
-            module_context = fn.module.context
-        elif self._builder and self._builder.block:
-            module_context = self._builder.block.function.module.context
-        else:
-            module_context = None
-        
-        # Apply ABI coercion to aggregate arguments (struct or array)
-        coerced_args = list(args)
-        byval_arg_indices = set()
-        if arg_type_hints and module_context:
-            from .abi import get_target_abi
-            from .abi.coercion import pack_struct_for_argument
-            abi = get_target_abi()
-            
-            for i, (arg, hint) in enumerate(zip(args, arg_type_hints)):
-                if hint is not None and hasattr(hint, 'get_llvm_type'):
-                    arg_llvm_type = hint.get_llvm_type(module_context)
-                    if abi.is_aggregate_type(arg_llvm_type):
-                        coercion = abi.classify_argument_type(arg_llvm_type)
-                        if coercion.needs_coercion:
-                            # Coerce aggregate argument (both coerced and indirect)
-                            coerced_args[i] = pack_struct_for_argument(self._builder, arg, coercion)
-                            if coercion.is_indirect and abi.uses_byval_for_indirect_args():
-                                byval_arg_indices.add(i)
-                            logger.debug(f"LLVMCBuilder.call: coerced arg {i} from {arg.type} to {coerced_args[i].type}")
-        
-        # Check if we need to handle sret (indirect aggregate return)
-        if return_type_hint is not None and hasattr(return_type_hint, 'get_llvm_type') and module_context:
-            agg_type = return_type_hint.get_llvm_type(module_context)
-            
-            from .abi import get_target_abi
-            abi = get_target_abi()
-            
-            # Check if it's an aggregate type that needs ABI handling
-            if abi.is_aggregate_type(agg_type):
-                coercion = abi.classify_return_type(agg_type)
-                
-                if coercion.is_indirect:
-                    # sret: allocate buffer, pass as first arg, load result
-                    logger.debug(f"LLVMCBuilder.call: using sret for {getattr(fn, 'name', fn)}, agg_type={agg_type}")
-                    from .abi.coercion import create_sret_alloca
-                    sret_buf = create_sret_alloca(self._builder, agg_type)
-                    call_args = [sret_buf] + coerced_args
-                    call_arg_attrs = {0: ['sret', 'noalias']}
-                    for byval_index in byval_arg_indices:
-                        call_arg_attrs[byval_index + 1] = ['byval']
-                    logger.debug(f"LLVMCBuilder.call: sret call_args={len(call_args)}, fn.function_type={fn.function_type}")
-                    self._builder.call(fn, call_args, name=name, cconv=cconv,
-                                       arg_attrs=call_arg_attrs)
-                    # Load and return the aggregate value
-                    return self._builder.load(sret_buf, name="sret.load")
-                
-                elif coercion.needs_coercion:
-                    # Coerced return: call and unpack
-                    call_arg_attrs = {idx: ['byval'] for idx in byval_arg_indices}
-                    call_result = self._builder.call(
-                        fn,
-                        coerced_args,
-                        name=name,
-                        arg_attrs=call_arg_attrs or None,
-                        cconv=cconv,
-                    )
-                    from .abi.coercion import unpack_struct_from_return
-                    return unpack_struct_from_return(self._builder, call_result, coercion)
-        
-        # Default: direct call
-        call_arg_attrs = {idx: ['byval'] for idx in byval_arg_indices}
-        return self._builder.call(
-            fn,
-            coerced_args,
-            name=name,
-            arg_attrs=call_arg_attrs or None,
-            cconv=cconv,
+        if not arg_type_hints and return_type_hint is None:
+            return self._call(fn, args, name=name, cconv=cconv)
+
+        from .abi import get_target_abi
+        from .abi.coercion import (
+            create_sret_alloca, pack_struct_for_argument, unpack_struct_from_return,
         )
+
+        from ..builtin_entities.types import void
+
+        module_context = self._builder.block.function.module.context
+        return_type = return_type_hint if return_type_hint is not None else void
+        abi = get_target_abi()
+        signature = abi.classify_signature(
+            arg_type_hints or (), return_type, module_context,
+        )
+
+        call_args = []
+        arg_attrs = {}
+        if signature.result.is_indirect:
+            sret_buf = create_sret_alloca(self._builder, signature.result.original_type)
+            call_args.append(sret_buf)
+            arg_attrs[0] = ['sret', 'noalias']
+
+        for arg, argument in zip(args, signature.arguments):
+            if argument.is_indirect and abi.uses_byval_for_indirect_args():
+                arg_attrs[len(call_args)] = ['byval']
+            call_args.append(pack_struct_for_argument(self._builder, arg, argument))
+        call_args.extend(args[len(signature.arguments):])
+        result = self._call(
+            fn, call_args, name=name, cconv=cconv, arg_attrs=arg_attrs or None,
+        )
+        if signature.result.is_indirect:
+            return self._builder.load(sret_buf, name='sret.load')
+        return unpack_struct_from_return(self._builder, result, signature.result)

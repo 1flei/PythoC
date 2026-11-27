@@ -207,6 +207,30 @@ class NullBuilder(AbstractBuilder):
     
     def unreachable(self) -> Any:
         self._raise_error("unreachable")
+
+    def store_nontemporal(self, value, ptr, align, volatile=False):
+        self._raise_error("store_nontemporal")
+
+    def aggregate_value(self, pc_type, values, node, context, *, emitter=None):
+        from .composite_values import aggregate_value
+        return aggregate_value(self, pc_type, values, node, context)
+
+    def union_value(self, pc_type, member, name, node, context, constant_only, *, emitter=None):
+        from .composite_values import union_value
+        return union_value(self, pc_type, member, name, node, context, constant_only)
+
+    def vector_value(self, pc_type, lanes, context, *, emitter=None):
+        from .composite_values import vector_value
+        return vector_value(self, pc_type, lanes, context)
+
+    def alloca_in_entry(self, typ, name):
+        self._raise_error("alloca_in_entry")
+
+    def require_atomic_alignment(self, ptr, alignment, name, node):
+        self._raise_error("require_atomic_alignment")
+
+    def trap(self) -> Any:
+        self._raise_error("trap")
     
     # ========== PHI and Select ==========
     

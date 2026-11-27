@@ -36,11 +36,12 @@ class RecordTypeSemanticsTest(unittest.TestCase):
         @compile(suffix='seed_lookup')
         class _Record:
             __value: i32
+            _Record__literal: i64
             __table: static[array[i32, 2]] = (17, 41)
 
-        self.assertEqual(_Record._field_names, ['__value'])
-        _, initializer, _ = lookup_class_static(_Record, '__table')
-        self.assertEqual(initializer, (17, 41))
+        self.assertEqual(_Record._field_names, ['__value', '_Record__literal'])
+        _, member, _ = lookup_class_static(_Record, '__table')
+        self.assertEqual(member.initializer, (17, 41))
 
     def test_recursive_factory_fields_bind_their_own_declaration(self):
         def make_node(value_type):

@@ -318,14 +318,13 @@ def lower_compile_handle_call(wrapper, visitor, func_ref, args, node):
     """Shared handle_call implementation for @compile and meta compile_api.
 
     Converts the Python wrapper to a func type pointer and delegates
-    to func.handle_call (which handles normalization if needed).
+    to direct call lowering with the callee's declaration attributes.
     """
-    from .callable_lowering import lower_compile_wrapper
+    from .callable_lowering import emit_direct_call, lower_compile_wrapper
 
     converted_func_ref = lower_compile_wrapper(
         wrapper, visitor.module, getattr(visitor, 'current_group_key', None), node=node)
-    func_type = converted_func_ref.type_hint
-    return func_type.handle_call(visitor, converted_func_ref, args, node)
+    return emit_direct_call(visitor, converted_func_ref, args, node, wrapper._func_info.fn_attrs)
 
 
 # ---------------------------------------------------------------------------

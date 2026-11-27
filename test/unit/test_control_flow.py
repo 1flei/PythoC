@@ -5,8 +5,11 @@ import unittest
 from llvmlite import binding, ir
 
 from pythoc.ast_visitor import LLVMIRVisitor
-from pythoc.ast_visitor.control_flow_builder import ControlFlowBuilder
+from pythoc.ast_visitor.control_flow_builder import ControlFlowBuilder, _TerminatedExpression
+from pythoc.ast_visitor.pcir import merge_values
 from pythoc.builder import LLVMBuilder
+from pythoc.builtin_entities import i32
+from pythoc.valueref import ensure_ir, wrap_value
 
 
 class TestVRegCounterPerInstance(unittest.TestCase):
@@ -46,7 +49,62 @@ class TestVRegCounterPerInstance(unittest.TestCase):
         self.assertNotEqual(phi.id, vswitch.id)
 
 
+class TestExpressionContinuation(unittest.TestCase):
+    def test_expression_exit_depends_on_its_final_cursor(self):
+        builder = ControlFlowBuilder(None, LLVMIRVisitor(module=ir.Module()), 'expression')
+        successor = builder.create_block('next')
+
+        def continue_in_successor():
+            builder.branch(successor)
+            builder.position_at_end(successor)
+            return 42
+
+        self.assertEqual(builder.lower_expression(continue_in_successor), 42)
+        with self.assertRaises(_TerminatedExpression):
+            builder.lower_expression(builder.unreachable)
+        self.assertEqual(builder.lower_expression(lambda: 'label'), 'label')
+
+
 class TestPCIRReplayOrder(unittest.TestCase):
+    def test_merge_values_preserves_type_and_only_emits_phi_for_multiple_edges(self):
+        module = ir.Module()
+        signature = ir.FunctionType(ir.IntType(32), [ir.IntType(1)])
+        function = ir.Function(module, signature, 'merge_values')
+        entry = function.append_basic_block('entry')
+        visitor = LLVMIRVisitor(module=module)
+        visitor.current_function = function
+        builder = ControlFlowBuilder(LLVMBuilder(ir.IRBuilder(entry)), visitor)
+        visitor.builder = builder
+
+        left = builder.create_block('left')
+        right = builder.create_block('right')
+        join = builder.create_block('join')
+        entry_block = builder.block
+        builder.cbranch(function.args[0], left, right)
+
+        builder.position_at_end(left)
+        first = wrap_value(ir.Constant(ir.IntType(32), 3), kind='value', type_hint=i32)
+        single = merge_values(builder, [(first, entry_block)], i32)
+        self.assertIs(single.type_hint, i32)
+        self.assertIs(ensure_ir(single), ensure_ir(first))
+        builder.branch(join)
+
+        builder.position_at_end(right)
+        second = ir.Constant(ir.IntType(32), 7)
+        builder.branch(join)
+
+        builder.position_at_end(join)
+        merged = merge_values(builder, [(single, left), (second, right)], i32)
+        self.assertIs(merged.type_hint, i32)
+        builder.ret(ensure_ir(merged))
+        builder.finalize()
+        builder.emit_ir()
+
+        phis = [inst for block in function.blocks
+                for inst in block.instructions if inst.opname == 'phi']
+        self.assertEqual(phis, [ensure_ir(merged).resolve()])
+        binding.parse_assembly(str(module)).verify()
+
     def test_value_defined_in_later_created_predecessor(self):
         module = ir.Module()
         function = ir.Function(module, ir.FunctionType(ir.IntType(32), []),

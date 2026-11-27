@@ -80,6 +80,9 @@ class ExternFunctionWrapper:
         self.lib = lib
         self.calling_convention = calling_convention
         self.config = kwargs
+        from ..ir_helpers import validate_symbol_visibility
+        self.visibility = validate_symbol_visibility(kwargs.get('visibility'))
+        self.weak = kwargs.get('weak', False)
         self._ctypes_func = None
         # Signature types are resolved lazily on first access instead of at
         # decoration time.  C's textual ``#include`` semantics permit two
@@ -174,14 +177,13 @@ class ExternFunctionWrapper:
         This ensures varargs promotion, ABI coercion, and all other call
         mechanics are handled in one place.
         """
-        from ..callable_lowering import lower_extern_wrapper
+        from ..callable_lowering import emit_direct_call, lower_extern_wrapper
 
         caller_group_key = getattr(visitor, 'current_group_key', None)
         lowered = lower_extern_wrapper(
             self, visitor.module, caller_group_key, node=node,
         )
-        func_type = lowered.type_hint
-        return func_type.handle_call(visitor, lowered, args, node)
+        return emit_direct_call(visitor, lowered, args, node, self.config.get('attrs'))
 
     def __call__(self, *args, **kwargs):
         bound = self._signature.bind(*args, **kwargs)
@@ -238,6 +240,7 @@ class ExternFunctionWrapper:
         prepare_type(pc_type)
         pc_type = strip_qualifiers(pc_type)
         from ..schema_protocol import get_field_layout_types
+        from ..target_layout import NATURAL_LAYOUT
         from ..type_converter import get_base_type
 
         pending, seen = [pc_type], set()
@@ -246,9 +249,9 @@ class ExternFunctionWrapper:
             if stored in seen:
                 continue
             seen.add(stored)
-            layout_config = getattr(stored, '_layout_config', None)
+            layout_config = getattr(stored, '_layout_config', NATURAL_LAYOUT)
             if (getattr(stored, '_is_union', False)
-                    or (layout_config is not None and not layout_config.is_natural)):
+                    or not layout_config.is_natural):
                 raise TypeError(
                     f'{stored.get_name()} requires a native trampoline '
                     'for Python extern calls')
@@ -339,10 +342,14 @@ class ExternGlobal:
 
     _is_extern_global = True
 
-    def __init__(self, pc_type, name=None, lib=None):
+    def __init__(self, pc_type, name=None, lib=None, *, weak=False, visibility=None):
+        from ..ir_helpers import validate_symbol_visibility
+
         self.pc_type = pc_type
         self.c_name = name
         self.lib = lib if lib is not None else 'c'
+        self.weak = weak
+        self.visibility = validate_symbol_visibility(visibility)
         self._ctypes_var = None
 
     def lower_to_module(self, visitor, binding_name=None, node=None):
@@ -353,10 +360,10 @@ class ExternGlobal:
         Also records the library dependency so JIT linking and AOT builds
         resolve the symbol, mirroring extern function lowering.
         """
-        from llvmlite import ir
         from ..valueref import wrap_value
         from ..logger import logger
-        from ..ir_helpers import is_thread_local
+        from ..ir_helpers import declare_native_global, is_thread_local, strip_qualifiers
+        from ..type_resolver import TypeResolver
 
         module = visitor.module
         c_name = self.c_name or binding_name
@@ -375,13 +382,17 @@ class ExternGlobal:
         if self.c_name is None:
             self.c_name = c_name
 
-        try:
-            global_var = module.get_global(c_name)
-        except KeyError:
-            llvm_type = self.pc_type.get_llvm_type(module.context)
-            global_var = ir.GlobalVariable(module, llvm_type, c_name)
-            if is_thread_local(self.pc_type):
-                global_var.storage_class = 'thread_local'
+        complete = TypeResolver.resolve_type(strip_qualifiers(self.pc_type),
+                                             required=False, freeze=True)
+        if complete is None:
+            # A declaration can provide a symbol address without a layout.
+            llvm_type = module.context.get_identified_type(f'pythoc.extern.opaque.{c_name}')
+        else:
+            llvm_type = complete.get_llvm_type(module.context)
+        global_var, _ = declare_native_global(
+            module, llvm_type, c_name, is_thread_local(self.pc_type), node,
+            weak=self.weak, visibility=self.visibility,
+        )
 
         # Record link library dependency (same as extern function lowering)
         lib = self.lib
@@ -438,16 +449,17 @@ class ExternGlobal:
         return f"ExternGlobal({self.c_name!r}: {type_name}, lib={self.lib!r})"
 
 
-def extern_global(pc_type, name=None, lib=None):
+def extern_global(pc_type, name=None, lib=None, *, weak=False, visibility=None):
     """Declare a module-level extern global with a raw (unmangled) C symbol.
 
     Usage:
         global_counter = extern_global(i32, 'global_counter', lib='mylib')
 
     The binding is usable both inside @compile functions (read and write)
-    and from plain Python via ``.value``.
+    and from plain Python via ``.value``. A forward-referenced type may stay
+    incomplete when compiled code only takes the symbol's address.
     """
-    return ExternGlobal(pc_type, name=name, lib=lib)
+    return ExternGlobal(pc_type, name=name, lib=lib, weak=weak, visibility=visibility)
 
 
 def extern(func=None, *, lib=None, calling_convention="cdecl", **kwargs):

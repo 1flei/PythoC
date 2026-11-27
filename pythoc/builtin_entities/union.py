@@ -44,15 +44,11 @@ class UnionType(CompositeType):
 
         cls._ensure_field_types_resolved()
 
-        from ..target_layout import get_target_layout
-        layout = cls.get_layout()
-        target_layout = get_target_layout()
-        carrier = target_layout.alignment_carrier(layout.alignment)
-        carrier_layout = target_layout.primitive(carrier)
-        return ir.ArrayType(
-            carrier,
-            layout.allocation_size // carrier_layout.allocation_size,
-        )
+        from ..builder.record_types import union_storage
+        from ..target_layout import uses_bit_storage
+
+        node = cls._layout_diagnostic_node(sys._getframe(1))
+        return union_storage(cls.get_layout(), uses_bit_storage(cls), node)
     
     @classmethod
     def get_ctypes_type(cls):
@@ -66,10 +62,13 @@ class UnionType(CompositeType):
         if cls in cache:
             return cache[cls]
 
-        from ..target_layout import NATURAL_LAYOUT
-        if not getattr(cls, '_layout_config', NATURAL_LAYOUT).is_natural:
-            from .bitfield_access import get_bit_storage_ctypes
-            storage = get_bit_storage_ctypes(cls.get_layout(), 'CBitUnion')
+        from ..target_layout import align_ctypes_record, uses_bit_storage, validate_ctypes_layout
+        from .bitfield_access import get_bit_storage_ctypes
+
+        layout = cls.get_layout()
+        node = cls._layout_diagnostic_node(sys._getframe(1))
+        if uses_bit_storage(cls):
+            storage = get_bit_storage_ctypes(layout, 'CBitUnion', node)
             cache[cls] = storage
             return storage
 
@@ -90,13 +89,16 @@ class UnionType(CompositeType):
         if not fields:
             return None
 
-        union_class = type(
-            f"CUnion_{cls.get_name()}",
-            (ctypes.Union,),
-            {'_fields_': fields},
-        )
-        from ..target_layout import validate_ctypes_layout
-        validate_ctypes_layout(cls, union_class)
+        class_name = f'CUnion_{cls.get_name()}'
+        attributes = {'_fields_': fields}
+        if cls._layout_config.alignment is not None:
+            attributes['_layout_'] = 'ms'
+            attributes['_pack_'] = cls._layout_config.alignment // 8
+        if cls._layout_config.abi_alignment is not None:
+            attributes['_align_'] = layout.alignment
+        union_class = type(class_name, (ctypes.Union,), attributes)
+        union_class = align_ctypes_record(union_class, layout.alignment, node)
+        validate_ctypes_layout(cls, union_class, node)
         cache[cls] = union_class
         return union_class
     
@@ -109,16 +111,11 @@ class UnionType(CompositeType):
         from ..type_graph import prepare_type
         prepare_type(cls)
         cls._ensure_field_types_resolved()
-        from ..target_layout import get_target_layout, get_type_layout
-        from ..target_layout import NATURAL_LAYOUT, bit_aggregate_layout
-        layout_config = getattr(cls, '_layout_config', NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            return bit_aggregate_layout(
-                cls._field_names, cls._field_types, layout_config,
-                is_union=True,
-            )
-        fields = (get_type_layout(field) for field in cls._field_types)
-        return get_target_layout().union(fields)
+        from ..target_layout import aggregate_layout
+        return aggregate_layout(
+            cls._field_names, cls._field_types, cls._layout_config,
+            cls._layout_diagnostic_node(sys._getframe(1)), is_union=True,
+        )
 
     @classmethod
     def get_size_bytes(cls) -> int:
@@ -138,78 +135,20 @@ class UnionType(CompositeType):
     
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
-        """Handle value subscript access on union instances: u[0]
-        
-        Note: Type subscripts (union[i32, f64]) are now handled by PythonType.handle_subscript
-        which extracts items and calls union.handle_type_subscript directly.
-        This method only handles value subscripts.
-        """
-        import ast
-        from ..valueref import wrap_value, ensure_ir, get_type
-        
-        # VALUE SUBSCRIPT: u[0] - field access by index
-        # Extract constant index from pre-evaluated index ValueRef
-        index_val = extract_constant_index(index, node, "union subscript")
-        
-        if index_val < 0 or index_val >= len(cls._field_types):
-            logger.error(f"union index {index_val} out of range (0-{len(cls._field_types)-1})",
-                        node=node, exc_type=IndexError)
-        
-        field_type = cls._field_types[index_val]
+        """Project a union alternative by declaration index."""
+        cls._ensure_field_types_resolved()
+        index = extract_constant_index(index, node, 'union subscript')
+        if not 0 <= index < len(cls._field_types):
+            logger.error(f'union index {index} out of range (0-{len(cls._field_types)-1})',
+                         node=node, exc_type=IndexError)
+        return cls._project_field(visitor, base, index)
 
-        from ..ir_helpers import propagate_qualifiers
-        field_type = propagate_qualifiers(base.type_hint, field_type)
-
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            from .bitfield_access import access_bit_field
-            return access_bit_field(
-                visitor,
-                base,
-                cls,
-                index_val,
-                field_type,
-            )
-        
-        # Get the address of the union
-        union_ptr = cls._get_value_address(visitor, base)
-        
-        # For union, all fields share the same memory location
-        # Bitcast the union pointer to the field type pointer
-        if hasattr(field_type, 'get_llvm_type'):
-            try:
-                module_context = visitor.module.context if hasattr(visitor, 'module') else None
-                field_llvm_type = field_type.get_llvm_type(module_context)
-            except TypeError:
-                field_llvm_type = field_type.get_llvm_type()
-        else:
-            logger.error(f"union field type {field_type} has no get_llvm_type method",
-                        node=node, exc_type=TypeError)
-        
-        # A union field may be ``void`` (e.g. the payload of an enum variant with
-        # no data). LLVM cannot represent a pointer-to-void, so return a dummy
-        # address value instead of loading.
-        from llvmlite.ir.types import VoidType
-        if isinstance(field_llvm_type, VoidType):
-            return wrap_value(union_ptr, kind="address", type_hint=field_type,
-                              address=union_ptr)
-
-        # Bitcast union pointer to field type pointer
-        field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
-
-        # Load value and return with address for lvalue support
-        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr)
-    
     @classmethod
     def handle_attribute(cls, visitor, base, attr_name, node):
         """Handle attribute access on union instances: u.x
         
         All fields share the same memory location, so we bitcast to the field type.
         """
-        from ..valueref import wrap_value, ensure_ir, get_type
-        from ..ir_helpers import propagate_qualifiers
-        
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
         
@@ -237,44 +176,27 @@ class UnionType(CompositeType):
                 return wrap_class_method_as_python_value(method, node)
             logger.error(f"union has no field named '{attr_name}'", node=node, exc_type=AttributeError)
         
-        field_index = cls._get_field_index(attr_name, node)
-        field_type = cls._field_types[field_index]
-        
-        # Propagate qualifiers from union type to field type
-        # If we have const[union], accessing field should give const[field_type]
-        if base.type_hint:
-            field_type = propagate_qualifiers(base.type_hint, field_type)
+        return cls._project_field(visitor, base, cls._get_field_index(attr_name, node))
 
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
+    @classmethod
+    def _project_field(cls, visitor, base, index):
+        from .types import void
+        from ..ir_helpers import propagate_qualifiers
+        from ..target_layout import uses_bit_storage
+        from ..type_converter import strip_qualifiers
+        from ..valueref import wrap_value
+
+        field_type = propagate_qualifiers(base.type_hint, cls._field_types[index])
+        if strip_qualifiers(field_type) is void:
+            return wrap_value(None, kind='python', type_hint=void)
+        if uses_bit_storage(cls):
             from .bitfield_access import access_bit_field
-            return access_bit_field(
-                visitor,
-                base,
-                cls,
-                field_index,
-                field_type,
-            )
-        
-        # Get the address of the union
-        union_ptr = cls._get_value_address(visitor, base)
-        
-        # Bitcast to field type pointer
-        if hasattr(field_type, 'get_llvm_type'):
-            try:
-                module_context = visitor.module.context if hasattr(visitor, 'module') else None
-                field_llvm_type = field_type.get_llvm_type(module_context)
-            except TypeError:
-                field_llvm_type = field_type.get_llvm_type()
-        else:
-            logger.error(f"union field type {field_type} has no get_llvm_type method",
-                        node=node, exc_type=TypeError)
-        
-        field_ptr = visitor.builder.bitcast(union_ptr, ir.PointerType(field_llvm_type))
-        
-        # Load value and return with address
-        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr)
+            return access_bit_field(visitor, base, cls, index, field_type)
+
+        address = cls._get_value_address(visitor, base)
+        field_llvm = field_type.get_llvm_type(visitor.module.context)
+        address = visitor.builder.bitcast(address, ir.PointerType(field_llvm))
+        return wrap_value(address, kind='address', type_hint=field_type, address=address)
 
 
 def create_union_type(
@@ -353,26 +275,15 @@ class union(UnionType):
     - @union(anonymous=True) - decorator with anonymous naming
     """
     
-    def __init__(self, target=None, suffix=None, anonymous=False):
-        """Initialize union decorator with optional parameters"""
-        self.target = target
-        self.suffix = suffix
-        self.anonymous = anonymous
-    
-    def __call__(self, cls):
-        """Decorator application"""
-        return self._apply_decorator(cls, self.suffix, self.anonymous)
-    
     def __new__(cls, target=None, suffix=None, **kwargs):
         """Support @union decorator syntax with parameters
         
         Uses the common decorator pattern from CompositeType base class.
         """
-        # Delegate to base class factory method
-        return cls.create_decorator_instance(target, suffix, **kwargs)
+        return cls.create_decorator_instance(target, suffix, kwargs)
     
     @classmethod
-    def _apply_decorator(cls, target_cls, suffix=None, **kwargs):
+    def _apply_decorator(cls, target_cls, suffix, layout_config):
         """Apply union decorator to target class
         
         Uses common field parsing from CompositeType base class.
@@ -380,7 +291,7 @@ class union(UnionType):
         Args:
             target_cls: The class being decorated
             suffix: Optional suffix for compilation
-            **kwargs: Additional parameters
+            layout_config: Normalized layout options
         
         Returns:
             Decorated class with union behavior
@@ -389,17 +300,17 @@ class union(UnionType):
         # class-body methods can resolve closure names (factory locals etc.).
         from ..decorators.visible import capture_user_caller_symbols
         captured_symbols = capture_user_caller_symbols()
+        from ..decorators.class_methods import _read_class_source, attach_class_methods
+        from ..source import class_annotation_nodes
+        class_ast, source = _read_class_source(target_cls)
 
         # Mark as union
         target_cls._is_union = True
         target_cls._is_struct = False
         
         # Use common field parsing logic
-        parsed = cls._parse_class_fields(target_cls)
+        parsed = cls._parse_class_fields(target_cls, class_annotation_nodes(class_ast), source)
 
-        from ..target_layout import make_aggregate_layout_config
-        layout_config = make_aggregate_layout_config(**kwargs)
-        
         # Create union type
         unified_type = create_union_type(
             parsed['field_types'],
@@ -416,11 +327,11 @@ class union(UnionType):
         cls._link_class_to_type(target_cls, unified_type, suffix)
 
         # Compile and attach plain-def methods declared in the union body.
-        from ..decorators.class_methods import attach_class_methods
         attach_class_methods(
             target_cls,
             class_compile_suffix=suffix,
             captured_symbols=captured_symbols,
+            class_body=class_ast.body if class_ast is not None else [],
         )
 
         return target_cls

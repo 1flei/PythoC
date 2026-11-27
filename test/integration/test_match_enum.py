@@ -21,6 +21,22 @@ class Status:
     Pending: None
 
 
+@enum(i32)
+class _PrivateStatus:
+    __Payload: i32 = 23
+    _PrivateStatus__Literal: None = 41
+
+
+@compile
+def private_variant_payload() -> i32:
+    value = _PrivateStatus(_PrivateStatus.__Payload, 19)
+    match value:
+        case (_PrivateStatus.__Payload, payload):
+            return payload + i32(_PrivateStatus.__Payload)
+        case _:
+            return 0
+
+
 @enum(i8)
 class Color:
     Red: None
@@ -444,6 +460,10 @@ def test_enum_multiple_conditions() -> i32:
 
 
 class TestMatchEnumPatterns(unittest.TestCase):
+    def test_private_variant_preserves_payload_tag_and_spelling(self):
+        self.assertEqual(private_variant_payload(), 42)
+        self.assertEqual(_PrivateStatus._PrivateStatus__Literal, 41)
+
     """Test enum pattern matching (legacy tag-based)"""
     
     def test_enum_tag_match(self):

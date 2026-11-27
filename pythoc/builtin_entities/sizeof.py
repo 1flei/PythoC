@@ -25,7 +25,9 @@ class sizeof(BuiltinFunction):
         
         pc_type = visitor.type_resolver.resolve_type_value(args[0], node)
         
-        size = cls._get_type_size(pc_type, node)
+        from ..type_resolver import report_type_errors
+        with report_type_errors(node):
+            size = cls._get_type_size(pc_type, node)
         from .python_type import PythonType
         from .types import u64
         # Keep the result foldable as a Python constant, but mark its preferred

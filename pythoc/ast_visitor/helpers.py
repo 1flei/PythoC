@@ -53,20 +53,7 @@ class HelpersMixin:
 
     def _create_alloca_in_entry(self, llvm_type, name):
         """Create an alloca instruction in the entry block of the current function"""
-        # Save current builder position
-        current_block = self.builder.block
-        
-        # Move to entry block and position at start (before any existing instructions)
-        entry_block = self.builder.entry_block
-        self.builder.position_at_start(entry_block)
-        
-        # Create alloca instruction
-        alloca = self.builder.alloca(llvm_type, name=name)
-        
-        # Restore builder position to the original block
-        self.builder.position_at_end(current_block)
-        
-        return alloca
+        return self.builder.alloca_in_entry(llvm_type, name)
     
 
     def _align_to(self, size: int, alignment: int) -> int:

@@ -12,6 +12,11 @@ def add(a: i64, b: i64) -> i64:
     return a + b
 
 
+@compile(name='abs')
+def custom_abs(value: i32) -> i32:
+    return 42
+
+
 @compile
 def main() -> i32:
     return 0 if add(20, 22) == 42 else 1
@@ -23,6 +28,8 @@ def run_checks():
             raise SystemExit('installed adapter was not bound at import')
         if add(20, 22) != 42:
             raise SystemExit('installed adapter returned the wrong result')
+        if not custom_abs.is_fast_bound() or custom_abs(-6) != 42:
+            raise SystemExit('installed adapter did not call the PythoC abs')
         return
 
     out_dir = os.path.join('build', 'python_ext_check')
@@ -71,7 +78,7 @@ def run_checks():
             raise SystemExit('native executable is missing the kernel symbol')
 
     compile_to_python_extension(
-        add,
+        add, custom_abs,
         output_path=os.path.join(out_dir, '_pythoc_native'),
         module_name='_pythoc_native',
     )

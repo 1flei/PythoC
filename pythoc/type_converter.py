@@ -418,6 +418,10 @@ class TypeConverter:
             logger.error(f"Cannot promote sequence literal {python_val} to PC type {target_type}", node=node, exc_type=TypeError)
 
         if is_mapping_carrier(python_val):
+            if getattr(target_type, '_is_union', False):
+                from .literal_protocol import lower_union_mapping
+                seed = lower_union_mapping(self._visitor, python_val, target_type, node)
+                return wrap_value(seed, kind='value', type_hint=target_type)
             if is_schema_type(target_type):
                 return self._convert_dict_to_struct(python_val, target_type, node=node)
             logger.error(f"Cannot promote mapping literal to PC type {target_type}", node=node, exc_type=TypeError)
@@ -693,7 +697,7 @@ class TypeConverter:
         return wrap_value(tmp_alloca, kind="value", type_hint=target_array_type)
 
     def try_const_aggregate(self, value_ref, target_pc_type, node):
-        """Fold a braced aggregate initializer to an ir.Constant, or return None.
+        """Fold a literal aggregate initializer to an ir.Constant, or return None.
 
         Thin entry over the shared carrier lowering: a static/global aggregate
         initialized by a sequence literal whose elements are all compile-time
@@ -702,13 +706,15 @@ class TypeConverter:
         caller falls back to the normal conversion path.
         """
         from .literal_protocol import (
-            is_sequence_carrier, lower_sequence_to_constant,
+            is_mapping_carrier, is_sequence_carrier, lower_sequence_to_constant, lower_union_mapping,
         )
 
         if not (isinstance(value_ref, ValueRef) and value_ref.is_python_value()):
             return None
         carrier = value_ref.get_python_value()
-        if not is_sequence_carrier(carrier):
+        union_mapping = (getattr(strip_qualifiers(target_pc_type), '_is_union', False)
+                         and is_mapping_carrier(carrier))
+        if not union_mapping and not is_sequence_carrier(carrier):
             return None
         from .type_descriptor import can_convert, conversion_message
         resolver = getattr(getattr(self._visitor, 'implicit_coercer', None),
@@ -719,6 +725,9 @@ class TypeConverter:
                                         mode='implicit', context=resolver)
             logger.error(f'Invalid static aggregate initializer: {detail}',
                          node=node, exc_type=TypeError)
+        if union_mapping:
+            return lower_union_mapping(self._visitor, carrier, target_pc_type, node,
+                                       constant_only=True)
         return lower_sequence_to_constant(self._visitor, carrier, target_pc_type, node)
 
     def _convert_tuple_to_struct(self, python_tuple, target_struct_type, node):
@@ -1272,6 +1281,34 @@ class TypeConverter:
         from .type_descriptor import common_value_type
         return common_value_type(left_pc_type, right_pc_type)
 
+    def infer_conditional_pc_type(self, left, right):
+        from .type_descriptor import (
+            _callable_type, common_value_type, is_null_pointer_constant, nullable_pointer_type,
+        )
+
+        def default_type(value):
+            if not value.is_python_value():
+                return value.type_hint
+            obj = value.get_python_value()
+            callable_type = _callable_type(obj)
+            if callable_type is not None:
+                return callable_type
+            try:
+                return self.infer_default_pc_type_from_python(obj)
+            except TypeError:
+                return None
+
+        if left.is_python_value() != right.is_python_value():
+            pc, python = (right, left) if left.is_python_value() else (left, right)
+            if is_null_pointer_constant(pc):
+                return nullable_pointer_type(pc, default_type(python)) or pc.type_hint
+            return pc.type_hint
+        if not left.is_python_value():
+            return (nullable_pointer_type(left, right.type_hint)
+                    or nullable_pointer_type(right, left.type_hint)
+                    or common_value_type(left.type_hint, right.type_hint))
+        return common_value_type(default_type(left), default_type(right))
+
     def integer_operand(self, value, node=None):
         """Validate an index or offset and materialize it at pointer precision."""
         from .builtin_entities.types import i64
@@ -1358,7 +1395,7 @@ class ImplicitCoercer:
     def coerce(self, value: ValueRef, target_type, node=None) -> ValueRef:
         """Implicit conversion: checks policy, then delegates to TypeConverter.convert()."""
         source_type = value.type_hint
-        from .type_descriptor import can_convert, conversion_message, format_type
+        from .type_descriptor import can_convert, conversion_message, format_type, is_null_pointer_constant
         from .builtin_entities.python_type import PythonType
         if value.is_python_value() and not isinstance(strip_qualifiers(target_type), PythonType):
             _reject_compile_level_callable(value.get_python_value(), node)
@@ -1420,7 +1457,7 @@ class ImplicitCoercer:
 
         if source_is_ptr and target_is_ptr:
             # Null pointer constant -> any pointer: allowed
-            if self.is_null_pointer_constant(value):
+            if is_null_pointer_constant(value):
                 check_relation()
                 return self._tc.convert(value, target_type, node)
             # The PythoC relation checks void pointers, function signatures,
@@ -1478,16 +1515,6 @@ class ImplicitCoercer:
             return True
         from .builtin_entities.types import void
         return pointee is void
-
-    @staticmethod
-    def is_null_pointer_constant(value: ValueRef) -> bool:
-        """True if value is a null pointer constant (ir.Constant with None)."""
-        from llvmlite import ir as llvm_ir
-        if isinstance(value, ValueRef):
-            ir_val = value.ir_value
-            if isinstance(ir_val, llvm_ir.Constant) and isinstance(ir_val.type, llvm_ir.PointerType):
-                return ir_val.constant is None
-        return False
 
     @staticmethod
     def are_compatible_pointers(source_type, target_type, resolve_name=None) -> bool:

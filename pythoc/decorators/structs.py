@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-import ast
 from ..registry import register_struct_from_class
 from ..builtin_entities.struct import _create_struct_type
 from ..logger import logger
+from ..source import class_annotation_nodes
 from .class_methods import _INHERIT_EFFECT_SUFFIX, _read_class_source
 
 
@@ -12,6 +12,7 @@ def compile_dynamic_class(
     type_factory=None,
     captured_symbols=None,
     static_linkage='weak_odr',
+    static_member_symbol_prefix=None,
     layout_config=None,
     effect_suffix=_INHERIT_EFFECT_SUFFIX,
 ):
@@ -48,8 +49,9 @@ def compile_dynamic_class(
     
     class_ast, diagnostic_source = _read_class_source(cls)
     class_body = class_ast.body if class_ast is not None else []
-    field_nodes = {stmt.target.id: stmt.annotation for stmt in class_body
-                   if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)}
+    field_nodes = class_annotation_nodes(class_ast)
+    cls._static_field_nodes = {stmt.target.id: stmt for stmt in field_nodes.values()}
+    cls._static_initializer_source = diagnostic_source
     
     # === UNIFIED STRUCT COMPILATION PATH ===
     # This handles ALL cases: overload/non-overload, dynamic/static, with/without source
@@ -106,7 +108,8 @@ def compile_dynamic_class(
     for fname, ftype in cls._struct_fields:
         if isinstance(ftype, str):
             # Delay the whole expression if a dependency is not defined yet.
-            field_node = field_nodes.get(fname)
+            declaration = field_nodes.get(fname)
+            field_node = declaration.annotation if declaration is not None else None
             with logger.at_node(field_node, source=diagnostic_source):
                 resolved_type = type_resolver.resolve_annotation(
                     ftype, field_node, defer_unresolved=True)
@@ -121,8 +124,8 @@ def compile_dynamic_class(
 
     # Class-level static members (``name: static[T] = ...``) are not instance
     # fields; split them out before the unified type is built.
-    from .class_statics import split_static_members
-    parsed_field_types = split_static_members(cls, parsed_field_types)
+    from .class_statics import split_static_members, has_deferred_storage
+    parsed_field_types = split_static_members(cls, parsed_field_types, field_nodes=field_nodes)
 
     # === CREATE UNIFIED STRUCT TYPE ===
     field_names = [fname for fname, ftype in cls._struct_fields]
@@ -149,7 +152,7 @@ def compile_dynamic_class(
     
     # Keep references scoped until their first actual lowering. Name
     # notifications must not freeze an intermediate registry placeholder.
-    unified_type._needs_type_resolution = True
+    unified_type._needs_type_resolution = has_deferred_storage(cls)
 
     # === LINK PYTHON CLASS TO UNIFIED TYPE ===
     cls._struct_type = unified_type
@@ -166,6 +169,7 @@ def compile_dynamic_class(
         cls._anonymous_suffix = None
         cls._compile_suffix = None
     cls._static_linkage = static_linkage
+    cls._static_member_symbol_prefix = static_member_symbol_prefix
     
     # Delegate all protocol methods to unified type
     cls.handle_type_call = unified_type.handle_type_call
@@ -210,7 +214,7 @@ def compile_dynamic_class(
     # Mark type as defined (triggers forward reference callbacks)
     from ..forward_ref import mark_type_defined
     mark_type_defined(original_cls_name, cls)
-    
+
     # Compile and attach plain-def methods declared in the class body.
     from .class_methods import attach_class_methods
     attach_class_methods(

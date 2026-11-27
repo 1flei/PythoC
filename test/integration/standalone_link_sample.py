@@ -1,22 +1,30 @@
 """Standalone helper/library dependency sample for subprocess tests."""
 
+from __future__ import annotations
+
 import hashlib
 import json
 import os
 from pathlib import Path
 import subprocess
 
-from pythoc import compile, compile_to_executable, extern, i32, ptr
+from pythoc import compile, compile_to_executable, extern, i32, param, ptr
 from pythoc import callable_type, python_entry
 from pythoc.artifact import ArtifactRole, LinkPlan
 from pythoc.build.output_manager import get_output_manager
-from pythoc.c_helpers import post_inc
 from pythoc.utils.link_utils import get_executable_extension
 
 
 @extern(lib=os.environ["PC_TEST_LINK_LIBRARY"])
 def link_probe_value() -> i32:
     pass
+
+
+@compile
+def post_inc(T: param, address: ptr[T]) -> T:
+    previous: T = address[0]
+    address[0] = previous + 1
+    return previous
 
 
 @compile

@@ -130,9 +130,7 @@ class LoopsMixin:
             self._visit_stmt_list(node.body, add_to_cfg=True)
 
             # Back-edge: emit defers for this iteration, then branch to loop top
-            if not cf.is_terminated():
-                self.scope_manager.emit_defers_to_depth(scope.depth - 1, cf)
-            if not cf.is_terminated():
+            if self.scope_manager.emit_defers_to_depth(scope.depth - 1, cf):
                 cf.branch(loop_top)
                 cf.mark_loop_back(loop_top)
 

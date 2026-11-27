@@ -19,6 +19,7 @@ from pythoc import (
     f64,
     i32,
     ptr,
+    simd,
     struct,
     union,
     compile,
@@ -49,6 +50,12 @@ def _debug_scalar_target(flag: bool, value: f64) -> f64:
     if flag:
         scaled = scaled + 1.0
     return scaled
+
+
+@compile(suffix='unmapped_debug_type')
+def _debug_vector_target(x: i32) -> i32:
+    vector_value: simd[i32, 4] = simd[i32, 4](x)
+    return vector_value[0]
 
 
 @compile
@@ -205,6 +212,16 @@ class DebugInfoTestCase(unittest.TestCase):
             for name in ('data', 'local_arr'):
                 self.assertIn(name, dump, f'variable {name!r} missing from DWARF dump')
             self.assertIn('DW_TAG_array_type', dump)
+
+    def test_local_with_unmapped_type_emits_an_object(self):
+        with config.override(debug_info=True, opt_level=0):
+            self.assertEqual(_debug_vector_target(11), 11)
+            obj_file = _object_file_for(_debug_vector_target)
+            self.assertTrue(os.path.exists(obj_file))
+            dump = _run_debug_dump(obj_file)
+            if not dump:
+                self.skipTest('no DWARF dumping tool available')
+            self.assertIn('_debug_vector_target', dump)
 
     def test_struct_type(self):
         with config.override(debug_info=True):

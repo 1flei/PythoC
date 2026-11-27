@@ -37,6 +37,7 @@ from ..builtin_entities import bool as pc_bool
 from ..type_resolver import TypeResolver
 from ..logger import logger
 from ..scope_manager import ScopeManager, ScopeType
+from .control_flow_builder import ControlFlowBuilder, _TerminatedExpression
 
 if TYPE_CHECKING:
     from ..backend import AbstractBackend
@@ -115,6 +116,10 @@ class LLVMIRVisitor(ast.NodeVisitor):
         try:
             with logger.at_node(node, source=source):
                 return super().visit(node)
+        except _TerminatedExpression:
+            if not isinstance(node, ast.stmt):
+                raise
+            return None
         finally:
             self._current_node = old_node
 
@@ -440,8 +445,8 @@ class LLVMIRVisitor(ast.NodeVisitor):
     def visit_expression(self, expr):
         """Visit an expression and return a ValueRef preserving type hints.
 
-        The contract is: this method always returns a ValueRef. Non-ValueRef
-        results from visit() are automatically wrapped as python constants.
+        A continuing expression returns a ValueRef. Terminating expressions unwind
+        to the next statement or CFG branch boundary.
         """
         from ..valueref import wrap_python_constant
 
@@ -450,7 +455,7 @@ class LLVMIRVisitor(ast.NodeVisitor):
             # A captured place retains the ownership of the original expression.
             return bound_value
 
-        result = self.visit(expr)
+        result = self._lower_expression(self.visit, expr)
         if result is None:
             logger.error(f"Expression {ast.dump(expr)} returned None", node=expr, exc_type=ValueError)
         
@@ -460,6 +465,20 @@ class LLVMIRVisitor(ast.NodeVisitor):
         # Wrap non-ValueRef results (type objects, raw Python values)
         # as compile-time python constants so callers see a uniform type.
         return wrap_python_constant(result)
+
+    def _lower_expression(self, lower, *args):
+        cf = self._get_cf_builder()
+        if cf is None:
+            return lower(*args)
+        return cf.lower_expression(lower, *args)
+
+    def _visit_expression_path(self, expr, *, rvalue=False):
+        """Evaluate a path that may terminate and yield no expression value."""
+        visit = self.visit_rvalue_expression if rvalue else self.visit_expression
+        try:
+            return visit(expr)
+        except _TerminatedExpression:
+            return None
 
     def _bind_name_reference(self, binding: VariableInfo, name: str) -> ValueRef:
         """Attach top-level variable tracking metadata to a binding reference."""
@@ -565,7 +584,6 @@ class LLVMIRVisitor(ast.NodeVisitor):
     
     def _get_cf_builder(self):
         """Get the ControlFlowBuilder if builder is one, else None"""
-        from .control_flow_builder import ControlFlowBuilder
         if isinstance(self.builder, ControlFlowBuilder):
             return self.builder
         return None

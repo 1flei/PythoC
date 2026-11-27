@@ -1,8 +1,10 @@
 from llvmlite import ir
 import ast
+import sys
 from .base import BuiltinType
 from ..valueref import wrap_value, ensure_ir
 from ..logger import logger
+from ..source import SourceLocation
 
 # Array type (exact copy from entities_impl.py)
 class array(BuiltinType):
@@ -51,7 +53,8 @@ class array(BuiltinType):
             result_type = result_type * dim
         
         from ..target_layout import validate_ctypes_layout
-        return validate_ctypes_layout(cls, result_type)
+        node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+        return validate_ctypes_layout(cls, result_type, node)
     
     @classmethod
     def get_name(cls) -> str:

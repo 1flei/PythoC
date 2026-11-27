@@ -1,7 +1,11 @@
 import math
+import re
+import struct
+import subprocess
+import sys
 import unittest
 
-from pythoc import array, bool as pc_bool, i64, static
+from pythoc import array, bool as pc_bool, i64, ptr, static, u16, u32, u64, union
 from pythoc import f16, bf16, f32, f64, f128, i32, compile
 from pythoc.libc.stdio import printf
 
@@ -76,26 +80,25 @@ def float_operations(T):
     return negate, truth, logical_not
 
 
-def float_constants(T):
+def float_constant_bits(T, Bits):
     @compile(suffix=T)
-    def read(index: i32) -> f64:
+    def read(index: i32) -> Bits:
         values: static[array[T, 4]] = (
             -T(2.5), -T(0.0), -(-T(0.0)), -T(-2.5),
         )
-        return f64(values[index])
+        return ptr[Bits](ptr(values[index]))[0]
 
     return read
 
 
 class FloatingUnaryTruthinessTest(unittest.TestCase):
     def test_negated_constants_initialize_static_storage(self):
-        for T in (f16, f32, f64):
+        for T, bits_type, encoding in ((f16, u16, 'e'), (f32, u32, 'f'), (f64, u64, 'd')):
             with self.subTest(type=T):
-                read = float_constants(T)
-                self.assertEqual(read(0), -2.5)
-                self.assertEqual(math.copysign(1.0, read(1)), -1.0)
-                self.assertEqual(math.copysign(1.0, read(2)), 1.0)
-                self.assertEqual(read(3), 2.5)
+                read = float_constant_bits(T, bits_type)
+                expected = tuple(int.from_bytes(struct.pack('>' + encoding, value), 'big')
+                                 for value in (-2.5, -0.0, 0.0, 2.5))
+                self.assertEqual(tuple(read(i) for i in range(4)), expected)
 
     def test_f64_negation_preserves_zero_sign(self):
         negate, _, _ = float_operations(f64)
@@ -103,6 +106,25 @@ class FloatingUnaryTruthinessTest(unittest.TestCase):
         self.assertEqual(math.copysign(1.0, negate(-0.0)), 1.0)
 
     def test_half_negation_and_truthiness(self):
+        # Missing native compiler builtins can terminate the process at the
+        # first call through a lazily bound symbol.
+        test = (
+            'test.integration.test_float_types.'
+            'FloatingUnaryTruthinessTest.check_half_negation_and_truthiness'
+        )
+        result = subprocess.run(
+            [sys.executable, '-m', 'unittest', test],
+            capture_output=True, text=True, timeout=120,
+        )
+        missing = re.search(
+            r'undefined symbol: (__(?:truncdfhf2|truncsfhf2|extendhfsf2))\b',
+            result.stderr,
+        )
+        if sys.platform == 'linux' and result.returncode == 127 and missing:
+            self.skipTest(f'C toolchain runtime does not provide {missing[1]}')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def check_half_negation_and_truthiness(self):
         negate, truth, logical_not = float_operations(f16)
         self.assertEqual(negate(2.5), -2.5)
         self.assertEqual(negate(-2.5), 2.5)
@@ -144,6 +166,18 @@ def constant_conversions(T):
 large_quad = f128(9007199254740993)
 
 
+@union
+class WideFloatStorage:
+    value: f128
+    words: array[u64, 2]
+
+
+@compile
+def wide_float_in_static_union() -> i64:
+    storage: static[WideFloatStorage] = {'value': f128(9007199254740993)}
+    return i64(storage.value)
+
+
 @compile
 def wide_integer_literal() -> i64:
     return i64(f128(9007199254740993))
@@ -169,6 +203,7 @@ class FloatingConstantConversionTest(unittest.TestCase):
     def test_quad_integer_literals_and_captures_keep_all_bits(self):
         self.assertEqual(wide_integer_literal(), 9007199254740993)
         self.assertEqual(captured_wide_integer(), 9007199254740993)
+        self.assertEqual(wide_float_in_static_union(), 9007199254740993)
 
 
 if __name__ == "__main__":

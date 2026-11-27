@@ -30,6 +30,7 @@ struct PcCallableProbe {
     PyObject *wrapped;
     PyObject *slow;
     PyThread_type_lock lock;
+    void *kernel;
     int state;
 };
 
@@ -137,6 +138,7 @@ def _layout_via_libclang(include_dirs) -> dict:
         'wrapped': _field(probe, 'wrapped')['offset'],
         'slow': _field(probe, 'slow')['offset'],
         'lock': _field(probe, 'lock')['offset'],
+        'kernel': _field(probe, 'kernel')['offset'],
         'state': _field(probe, 'state')['offset'],
         'tp_dictoffset': _field(typeobj, 'tp_dictoffset')['offset'],
         'tp_flags': flags['offset'],
@@ -189,6 +191,7 @@ int main(void) {
     P("wrapped", offsetof(struct PcCallableProbe, wrapped));
     P("slow", offsetof(struct PcCallableProbe, slow));
     P("lock", offsetof(struct PcCallableProbe, lock));
+    P("kernel", offsetof(struct PcCallableProbe, kernel));
     P("state", offsetof(struct PcCallableProbe, state));
     P("tp_dictoffset", offsetof(PyTypeObject, tp_dictoffset));
     P("tp_flags", offsetof(PyTypeObject, tp_flags));

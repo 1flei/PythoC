@@ -1,5 +1,6 @@
 """Aggregate operations preserve the types fixed by lowering."""
 
+from types import SimpleNamespace
 import unittest
 
 from llvmlite import binding, ir
@@ -8,9 +9,26 @@ from pythoc import array, i32, ptr
 from pythoc.ast_visitor.pcir import infer_result_type
 from pythoc.builder.llvm_simple_builder import LLVMBuilder
 from pythoc.builtin_entities.struct import create_struct_type
+from pythoc.valueref import ensure_ir, read_rvalue, wrap_value
 
 
 class TypedExtractValueTest(unittest.TestCase):
+    def test_pointer_field_reads_only_the_projected_value(self):
+        module = ir.Module(context=ir.Context())
+        record = create_struct_type([i32, array[i32, 131072]], ['key', 'entries'])
+        record_pointer = ptr[record]
+        signature = ir.FunctionType(ir.IntType(32), [record_pointer.get_llvm_type(module.context)])
+        function = ir.Function(module, signature, 'read_key')
+        builder = LLVMBuilder(ir.IRBuilder(function.append_basic_block('entry')))
+        visitor = SimpleNamespace(module=module, builder=builder)
+        base = wrap_value(function.args[0], kind='value', type_hint=record_pointer)
+        key = record_pointer.handle_attribute(visitor, base, 'key', None)
+        builder.ret(ensure_ir(read_rvalue(key, builder)))
+
+        self.assertEqual([instruction.opname for instruction in builder.block.instructions],
+                         ['getelementptr', 'load', 'ret'])
+        binding.parse_assembly(str(module)).verify()
+
     def test_raw_extraction_preserves_physical_storage(self):
         aggregate = ir.Constant(ir.LiteralStructType([ir.PointerType(ir.IntType(8))]), None)
         result = infer_result_type('extract_value', (aggregate, 0), {})

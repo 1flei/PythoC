@@ -567,7 +567,8 @@ class OutputManager:
             compiler: LLVMCompiler instance
             func_info: FunctionInfo with signature information
         """
-        from llvmlite import ir
+        from ..builder import LLVMBuilder
+        from ..builtin_entities.types import void
         from ..logger import logger
         
         func_name = func_info.mangled_name or func_info.name
@@ -579,34 +580,14 @@ class OutputManager:
         except KeyError:
             pass
         
-        # Build LLVM function type from func_info
-        module_context = compiler.module.context
-        param_llvm_types = []
-        nodes = func_info.annotation_nodes()
-        source = func_info.diagnostic_source
-        for param_name in func_info.param_names:
-            pc_type = func_info.param_type_hints.get(param_name)
-            if pc_type is not None and hasattr(pc_type, 'get_llvm_type'):
-                with logger.at_node(nodes.get(param_name, func_info.ast_node), source=source):
-                    param_llvm_types.append(pc_type.get_llvm_type(module_context))
-            else:
-                # Fallback to i32 if type unknown
-                param_llvm_types.append(ir.IntType(32))
-        
-        if func_info.return_type_hint is not None and hasattr(func_info.return_type_hint, 'get_llvm_type'):
-            with logger.at_node(nodes.get('return'), source=source):
-                return_type = func_info.return_type_hint.get_llvm_type(module_context)
-        else:
-            return_type = ir.VoidType()
-        
-        # Use LLVMBuilder to declare function with proper ABI handling
-        from ..builder import LLVMBuilder
-        temp_builder = LLVMBuilder()
-        func_wrapper = temp_builder.declare_function(
-            compiler.module, func_name,
-            param_llvm_types, return_type,
-            var_arg=func_info.has_llvm_varargs
-        )
+        param_types = [func_info.param_type_hints.get(name) for name in func_info.param_names]
+        return_type = func_info.return_type_hint
+        with logger.at_node(func_info.ast_node, source=func_info.diagnostic_source):
+            LLVMBuilder().declare_function(
+                compiler.module, func_name, param_types,
+                return_type if return_type is not None else void,
+                var_arg=func_info.has_llvm_varargs,
+            )
     
     def get_ir_text(self, group_key):
         """Return the (optimised) LLVM IR text for *group_key*.
@@ -644,19 +625,15 @@ class OutputManager:
                 f"group {group_key!r} has no compiler attached"
             )
 
-        # If the live compiler module already carries function bodies
-        # (cache miss path was taken during a prior flush), we can
-        # serve directly from it.
-        existing_ir = compiler.get_ir()
-        if 'define ' in existing_ir:
-            return existing_ir
+        if group.get('_materialized'):
+            return compiler.get_ir()
 
         # Cache-hit path: callbacks are parked in _cached_compilations.
         # Replay them against a throwaway compiler that shares the
         # same source_file/user_globals so that imports resolve
         # consistently.
         cached = self._cached_compilations.get(group_key, [])
-        if not cached:
+        if not cached and not group.get('static_classes'):
             raise KeyError(
                 f"group {group_key!r} has neither in-memory IR nor "
                 f"cached compilation callbacks"
@@ -664,6 +641,7 @@ class OutputManager:
 
         from ..compiler import LLVMCompiler
         scratch = LLVMCompiler(user_globals=getattr(compiler, 'user_globals', None))
+        self._lower_static_definitions(scratch, group_key, group)
 
         # Phase 1: forward declare all functions on the scratch
         # compiler so that references between them resolve.
@@ -810,6 +788,9 @@ class OutputManager:
 
         compiled_funcs = set()
         result = _CompileResult()
+        symbols = self._lower_static_definitions(compiler, group_key, group)
+        result.compiled_symbols.update(symbols)
+        result.compiled_count += len(symbols)
         seen_globals_ids = set()
         group_effect_deps = set()
 
@@ -847,6 +828,14 @@ class OutputManager:
             )
 
         return result
+
+    @staticmethod
+    def _lower_static_definitions(compiler, group_key, group):
+        owners = group.get('static_classes')
+        if not owners:
+            return ()
+        from ..decorators.class_statics import emit_static_definitions
+        return emit_static_definitions(compiler, group_key, owners)
     
     def _group_object_cache_hit(self, group_key, group) -> bool:
         """Return whether the current object artifact covers pending work."""
@@ -1001,6 +990,7 @@ class OutputManager:
             group,
             compiled_symbols=compiled_symbols,
         )
+        group['_materialized'] = True
 
     def _commit_compiled_group(self, group_key, group):
         """Commit OutputManager state after publishing a fresh object."""
@@ -1041,7 +1031,7 @@ class OutputManager:
                 if compile_result.compiled_count == 0:
                     return _GroupObjectTaskResult(group_key, group, 'empty')
 
-                if not group.get('wrappers'):
+                if not (group.get('wrappers') or group.get('static_classes')):
                     return _GroupObjectTaskResult(group_key, group, None)
 
                 self._publish_group_object(group_key, group, compile_result)
@@ -1114,7 +1104,7 @@ class OutputManager:
             if compile_result.compiled_count == 0:
                 return _CodegenTaskResult(group_key, group, 'empty')
 
-            if not group.get('wrappers'):
+            if not (group.get('wrappers') or group.get('static_classes')):
                 return _CodegenTaskResult(group_key, group, None)
 
             return _CodegenTaskResult(group_key, group, 'compiled', compile_result)

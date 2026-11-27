@@ -50,10 +50,15 @@ def get_target_abi(triple: str = None) -> ABIInfo:
             max_register_size=max_reg_size,
             use_byval_for_indirect_args=not is_windows,
             pow2_register_sizes=is_windows,
+            int64_vectors_in_sse=not any(
+                platform in triple_lower for platform in ('apple', 'freebsd', 'scei')
+            ),
         )
     elif arch in ('aarch64', 'arm64'):
         from .aarch64 import AArch64ABI
-        return AArch64ABI()
+        return AArch64ABI(
+            use_adjusted_argument_alignment=is_windows or 'apple' in triple_lower,
+        )
     else:
         # Default to x86_64 for now
         return X86_64ABI()

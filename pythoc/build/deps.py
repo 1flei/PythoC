@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from ..logger import logger
 
 # Version for .deps file format
-DEPS_VERSION = 22  # Invalidate definition-site capture and expansion binding code.
+DEPS_VERSION = 25  # Native vector aggregates have new ABI carriers.
 
 
 # Memo for _type_source_file: id(type) -> (type, source_file).  The strong

@@ -126,7 +126,12 @@ class ValueRef:
             )
         if self._kind != 'python':
             from .type_resolver import TypeResolver
-            self.type_hint = TypeResolver.resolve_type(self.type_hint, freeze=True)
+            # Taking a place's address does not require its storage layout.
+            resolved_type = TypeResolver.resolve_type(
+                self.type_hint, freeze=True, required=self._kind != 'address',
+            )
+            if resolved_type is not None:
+                self.type_hint = resolved_type
             if self.is_python_value():
                 # The type determines the value. Retain the actual place, if any.
                 self._address = self.get_place()
@@ -180,6 +185,15 @@ class ValueRef:
     def is_llvm_value(self) -> bool:
         """Check if this ValueRef holds an LLVM IR value."""
         return self.is_pcvalue()
+
+    def try_get_constant(self):
+        """Read an immediate value without materializing a load."""
+        if self.is_python_value():
+            return True, self.get_python_value()
+        if self.has_storage():
+            return False, None
+        raw = getattr(self.value, 'constant', _UNSET)
+        return (False, None) if raw is _UNSET else (True, raw)
     
     def get_python_value(self) -> AnyType:
         """Get the Python value.

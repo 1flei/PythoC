@@ -458,8 +458,10 @@ class TypeRelationsTest(unittest.TestCase):
         from pythoc.cimport_ir import CDeclIR, CTypeIR, CModuleIR, CEnumValueIR
         from pythoc.cimport_emitter import emit_pythoc_module, _LayoutModel
         declaration = CDeclIR('enum', 'Wide', type=CTypeIR('primitive', 'u64'),
-                              values=[CEnumValueIR('Large', 1 << 40)])
-        self.assertIn('@enum(u64)', emit_pythoc_module(CModuleIR([declaration]), 'c'))
+                              values=[CEnumValueIR('__Large', 1 << 40)])
+        emitted = emit_pythoc_module(CModuleIR([declaration]), 'c')
+        self.assertIn('@enum(u64)', emitted)
+        self.assertIn(f'    __Large: None = {1 << 40}', emitted)
         self.assertEqual(_LayoutModel([declaration]).type_layout(CTypeIR('enum', 'Wide')),
                          (u64.get_size_bytes(), u64.get_alignment()))
 
@@ -544,6 +546,24 @@ class TypeRelationsTest(unittest.TestCase):
         self.assertIs(resolved.predicate, proof.predicate)
         self.assertTrue(same_type(resolved._base_type, ptr[i64]))
 
+    def test_preparation_reuses_closed_subgraphs_and_rechecks_opaque_edges(self):
+        from pythoc import struct
+        from pythoc.type_graph import prepare_type
+        from pythoc.type_resolver import TypeReference
+
+        with CompileSession() as session:
+            namespace = {}
+            resolved = struct['data': array[i32, 3]]
+            pending = ptr[TypeReference('LatePointee', namespace)]
+            root = struct['resolved': resolved, 'pending': pending]
+            prepare_type(root)
+            self.assertIn(resolved, session.type_graph.prepared_types)
+            self.assertNotIn(root, session.type_graph.prepared_types)
+            namespace['LatePointee'] = i64
+            prepare_type(root)
+            self.assertIn(root, session.type_graph.prepared_types)
+            self.assertTrue(same_type(pending, ptr[i64]))
+
     def test_standard_predicate_type_edges_close_recursive_records(self):
         from pythoc.std.refinement import nonnull
         records, proofs = [], []
@@ -580,6 +600,15 @@ class TypeRelationsTest(unittest.TestCase):
             validate_type_graph(record)
         record._field_types = [i32]
         self.assertNotEqual(before, get_type_id(ptr[record]))
+
+    def test_anonymous_record_identity_uses_resolved_field_types(self):
+        from pythoc import mark_type_defined, struct
+
+        forward = struct['member': ptr['AnonymousRecordFieldAlias']]
+        mark_type_defined('AnonymousRecordFieldAlias', i32)
+        complete = struct['member': ptr[i32]]
+        self.assertTrue(same_type(forward, complete))
+        self.assertEqual(get_type_id(forward), get_type_id(complete))
 
     def test_incomplete_same_name_declarations_remain_distinct(self):
         first = create_struct_type([], ['value'],

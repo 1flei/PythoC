@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List
 from llvmlite import ir, binding
 from .ast_visitor import LLVMIRVisitor
-from .registry import get_unified_registry
 from .type_resolver import TypeResolver
 from .logger import logger
 from .source import SourceLocation
@@ -126,7 +125,7 @@ def _emit_wide_int_ffi_trampoline(module, llvm_function):
         builder.ret_void()
     else:
         builder.ret(result)
-from .debug_info import DebugInfoBuilder
+from .debug_info import DebugInfoBuilder, MetadataModule
 
 # Initialize LLVM
 # llvmlite 0.45+ auto-initializes core; calling initialize() raises RuntimeError.
@@ -146,8 +145,6 @@ class _ResolvedFunctionDeclaration:
     param_names: List[str]
     param_type_hints: Dict[str, Any]
     return_type_hint: Any
-    param_llvm_types: List[ir.Type]
-    return_llvm_type: ir.Type
     varargs: Any
     kwargs: Any = None
 
@@ -174,7 +171,7 @@ class LLVMCompiler:
     
     def create_module(self, name: str = "main"):
         """Create a new LLVM module"""
-        self.module = ir.Module(name=name, context=ir.Context())
+        self.module = MetadataModule(name=name, context=ir.Context())
         triple = default_target_triple()
         self.module.triple = triple
         # Set data layout for correct struct size calculation
@@ -191,37 +188,6 @@ class LLVMCompiler:
             self._debug_info = DebugInfoBuilder(self.module, source_file)
         return self._debug_info
 
-    def _recreate_type_in_context(self, pc_type):
-        """Recreate a PC type's LLVM representation in current module's context"""
-        # Handle None
-        if pc_type is None:
-            raise ValueError("Cannot create LLVM type for None")
-        
-        # Handle LLVM types directly (e.g., struct types)
-        if isinstance(pc_type, ir.Type):
-            # If it's a struct type, get the corresponding type from current context
-            if isinstance(pc_type, ir.IdentifiedStructType):
-                type_name = pc_type.name
-                return self.module.context.get_identified_type(type_name)
-            return pc_type
-
-        if hasattr(pc_type, 'get_llvm_type'):
-            try:
-                return pc_type.get_llvm_type(self.module.context)
-            except TypeError as e:
-                if "positional argument" in str(e) or "takes" in str(e):
-                    return pc_type.get_llvm_type()
-                raise
-        
-        # Handle struct types by name
-        if hasattr(pc_type, '__name__'):
-            type_name = pc_type.__name__
-            if get_unified_registry().has_struct(type_name):
-                # Get struct type from current module's context
-                return self.module.context.get_identified_type(type_name)
-
-        raise TypeError(f"Cannot recreate LLVM type for {pc_type}")
-    
     def _resolve_function_declaration(
         self,
         ast_node: ast.FunctionDef,
@@ -229,7 +195,7 @@ class LLVMCompiler:
         return_type_hint=None,
         user_globals: dict = None,
     ) -> _ResolvedFunctionDeclaration:
-        """Resolve one function declaration into PC and LLVM types once."""
+        """Resolve the PythoC signature of a function declaration."""
         from .ast_visitor.varargs import resolve_varargs
         from .builtin_entities.types import void
 
@@ -280,18 +246,10 @@ class LLVMCompiler:
             param_names.append(resolved_kwargs.param_name)
             resolved_param_type_hints[resolved_kwargs.param_name] = resolved_kwargs.parsed_type
 
-        param_llvm_types = [
-            self._recreate_type_in_context(resolved_param_type_hints[name])
-            for name in param_names
-        ]
-        return_llvm_type = self._recreate_type_in_context(resolved_return_type)
-
         return _ResolvedFunctionDeclaration(
             param_names=param_names,
             param_type_hints=resolved_param_type_hints,
             return_type_hint=resolved_return_type,
-            param_llvm_types=param_llvm_types,
-            return_llvm_type=return_llvm_type,
             varargs=varargs,
             kwargs=resolved_kwargs,
         )
@@ -378,18 +336,14 @@ class LLVMCompiler:
         
         # Use builder to declare function with C ABI for interop with C code
         # pythoc functions must use C ABI so they can be called from C via function pointers
-        from .builder import LLVMBuilder, FunctionWrapper
+        from .builder import LLVMBuilder
         temp_builder = LLVMBuilder()
-        logger.debug(
-            f"declare_function: {ast_node.name}, "
-            f"param_types={resolved_decl.param_llvm_types}, "
-            f"return_type={resolved_decl.return_llvm_type}, existing_func={existing_func}"
-        )
         func_wrapper = temp_builder.declare_function(
             self.module, ast_node.name,
-            resolved_decl.param_llvm_types, resolved_decl.return_llvm_type,
+            [resolved_decl.param_type_hints[name] for name in resolved_decl.param_names],
+            resolved_decl.return_type_hint,
             var_arg=resolved_decl.has_llvm_varargs,
-            existing_func=existing_func
+            existing_func=existing_func,
         )
         logger.debug(f"After declare_function: ir_function.args types={[a.type for a in func_wrapper.ir_function.args]}")
         logger.debug(f"param_coercion_info={func_wrapper.param_coercion_info}")
@@ -401,9 +355,11 @@ class LLVMCompiler:
         # external linkage; only the definition's linkage controls how the
         # symbol is emitted into the object file.
         func_info = getattr(getattr(func_state, 'wrapper', None), '_func_info', None)
-        linkage = getattr(func_info, 'linkage', None)
-        if linkage:
-            llvm_function.linkage = linkage
+        if func_info is not None:
+            from .ir_helpers import llvm_symbol_prefix
+            llvm_function.linkage = llvm_symbol_prefix(func_info.linkage, func_info.visibility)
+            if 'noreturn' in (func_info.fn_attrs or ()):
+                llvm_function.attributes.add('noreturn')
         
         # Set parameter names (user parameters only, sret is handled internally)
         for i, param_name in enumerate(resolved_decl.param_names):
@@ -471,7 +427,10 @@ class LLVMCompiler:
         visitor.scope_manager.reset_label_tracking()
 
         # Set ABI context for struct returns
-        real_builder.set_return_abi_context(llvm_function, compile_frame.sret_info)
+        real_builder.set_return_abi_context(
+            llvm_function, compile_frame.sret_info,
+            return_coercion=func_wrapper.return_coercion,
+        )
 
         # Create ControlFlowBuilder wrapping real_builder and set as visitor.builder
         # This must happen before parameter initialization which uses visitor.builder

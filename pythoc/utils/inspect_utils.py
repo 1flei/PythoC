@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
+import ast
+from collections import OrderedDict
 import inspect
+import linecache
 import os
 import tempfile
 import textwrap
+from threading import Lock
 
 # Memo for inspect.getsourcelines per object.  Compilation queries the same
 # function/class object's source 2+ times (start line + source text, plus
@@ -11,6 +15,72 @@ import textwrap
 # entries are identity-validated and the strong reference prevents id reuse.
 _OBJECT_SOURCELINES: dict = {}
 _OBJECT_SOURCELINES_LIMIT = 100000
+_CLASS_SOURCE_INDEXES = OrderedDict()
+_CLASS_SOURCE_INDEX_LIMIT = 16
+_CLASS_SOURCE_INDEX_LOCK = Lock()
+
+
+class _ClassLineIndex(ast.NodeVisitor):
+    """Locate class definitions by the same qualified names used by inspect."""
+
+    def __init__(self):
+        self.scope = []
+        self.lines = {}
+
+    def visit_ClassDef(self, node):
+        self.scope.append(node.name)
+        first = node.decorator_list[0] if node.decorator_list else node
+        self.lines.setdefault('.'.join(self.scope), first.lineno - 1)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node):
+        self.scope.extend((node.name, '<locals>'))
+        self.generic_visit(node)
+        del self.scope[-2:]
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+
+class _SourceTail:
+    """Let inspect tokenize a block without copying the rest of a module."""
+
+    def __init__(self, lines, start):
+        self.lines = lines
+        self.start = start
+
+    def __iter__(self):
+        for index in range(self.start, len(self.lines)):
+            yield self.lines[index]
+
+    def __getitem__(self, index):
+        start, stop, step = index.indices(len(self.lines) - self.start)
+        return self.lines[self.start + start:self.start + stop:step]
+
+
+def _class_sourcelines(cls):
+    filename = inspect.getsourcefile(cls)
+    if filename is None:
+        return inspect.getsourcelines(cls)
+    linecache.checkcache(filename)
+    module = inspect.getmodule(cls, filename)
+    lines = linecache.getlines(filename, vars(module) if module else None)
+    if not lines:
+        raise OSError('could not get source code')
+    with _CLASS_SOURCE_INDEX_LOCK:
+        cached = _CLASS_SOURCE_INDEXES.get(filename)
+        if cached is None or cached[0] is not lines:
+            index = _ClassLineIndex()
+            index.visit(ast.parse(''.join(lines), filename=filename))
+            cached = (lines, index.lines)
+            _CLASS_SOURCE_INDEXES[filename] = cached
+            if len(_CLASS_SOURCE_INDEXES) > _CLASS_SOURCE_INDEX_LIMIT:
+                _CLASS_SOURCE_INDEXES.popitem(last=False)
+        _CLASS_SOURCE_INDEXES.move_to_end(filename)
+    start = cached[1].get(cls.__qualname__)
+    if start is None:
+        raise OSError('could not find class definition')
+    return inspect.getblock(_SourceTail(lines, start)), start + 1
 
 
 def get_object_sourcelines(obj):
@@ -19,7 +89,11 @@ def get_object_sourcelines(obj):
     ent = _OBJECT_SOURCELINES.get(key)
     if ent is not None and ent[0] is obj:
         return ent[1]
-    result = inspect.getsourcelines(obj)
+    source = inspect.unwrap(obj)
+    if inspect.isclass(source) and not hasattr(source, '__firstlineno__'):
+        result = _class_sourcelines(source)
+    else:
+        result = inspect.getsourcelines(source)
     if len(_OBJECT_SOURCELINES) >= _OBJECT_SOURCELINES_LIMIT:
         _OBJECT_SOURCELINES.clear()
     _OBJECT_SOURCELINES[key] = (obj, result)

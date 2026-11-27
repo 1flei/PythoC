@@ -20,6 +20,7 @@ from .cimport_ir import (
     CTypeIR,
 )
 from .cimport_wrappers import render_stub_source, wrapper_prefix_for_path
+from .utils.cc_utils import DEFAULT_C_DIALECT
 
 
 class ClangCImportError(RuntimeError):
@@ -385,7 +386,7 @@ def _build_clang_args(
     clang_args: Optional[list[str]],
     system_include_dirs: Optional[list[str]] = None,
 ) -> list[str]:
-    args: list[str] = []
+    args: list[str] = [DEFAULT_C_DIALECT]
     if target:
         args.extend(["-target", target])
     if sysroot:

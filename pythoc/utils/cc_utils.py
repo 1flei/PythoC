@@ -15,6 +15,8 @@ from typing import List, Optional
 
 from .link_utils import _which_cached, _zig_tool_cmd
 
+DEFAULT_C_DIALECT = '-std=gnu11'
+
 
 def get_cc_candidates() -> List[str]:
     """Get C compiler candidates based on availability.
@@ -134,8 +136,8 @@ def compile_c_to_object(source_path: str, output_path: Optional[str] = None,
     if cc is None:
         cc = find_available_cc()
     
-    # Default flags
-    cflags = list(cflags or [])
+    # Use the same dialect across C drivers, with user flags passed last.
+    cflags = [DEFAULT_C_DIALECT, *(cflags or ())]
     include_dirs = list(include_dirs or [])
     defines = list(defines or [])
     

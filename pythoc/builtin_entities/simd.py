@@ -40,14 +40,6 @@ def _vector_suffix(vec_type, node):
     return "v%d%s" % (vec_type.count, scalar)
 
 
-def _splat(visitor, scalar_ir, vec_type):
-    undef = ir.Constant(vec_type, ir.Undefined)
-    inserted = visitor.builder.insert_element(undef, scalar_ir, _i32(0))
-    mask = ir.Constant(ir.VectorType(ir.IntType(32), vec_type.count),
-                       [0] * vec_type.count)
-    return visitor.builder.shuffle_vector(inserted, undef, mask)
-
-
 def _declare(module, name, fn_ty):
     try:
         return module.get_global(name)
@@ -188,15 +180,32 @@ class simd(BuiltinType):
         if len(args) != 1:
             logger.error("%s() takes exactly one argument" % cls.get_name(),
                          node=node, exc_type=TypeError)
+        from ..literal_protocol import is_sequence_carrier
+        argument = args[0]
+        if argument.is_python_value() and is_sequence_carrier(argument.get_python_value()):
+            return cls._from_lanes(visitor, argument.get_python_value(), node)
         from ..type_descriptor import format_type
-        if getattr(args[0].type_hint, 'lanes', None) is not None:
-            logger.error(f'Cannot convert {format_type(args[0].type_hint)} through '
+        if getattr(argument.type_hint, 'lanes', None) is not None:
+            logger.error(f'Cannot convert {format_type(argument.type_hint)} through '
                          f'{format_type(cls)}(): its constructor takes one '
-                         f'{format_type(cls.element_type)} lane value', node=node, exc_type=TypeError)
-        scalar = visitor.implicit_coercer.coerce(args[0], cls.element_type,
-                                                node)
-        result = _splat(visitor, ensure_ir(scalar), cls.get_llvm_type())
+                         f'{format_type(cls.element_type)} lane value or a sequence',
+                         node=node, exc_type=TypeError)
+        scalar = visitor.implicit_coercer.coerce(argument, cls.element_type, node)
+        result = visitor.builder.vector_value(cls, (ensure_ir(scalar),), visitor.module.context)
         return wrap_value(result, kind="value", type_hint=cls)
+
+    @classmethod
+    def _from_lanes(cls, visitor, sequence, node):
+        from ..literal_protocol import get_sequence_elements, wrap_literal_result
+
+        elements = get_sequence_elements(sequence)
+        if len(elements) != cls.lanes:
+            logger.error(f'{cls.get_name()} requires {cls.lanes} lane values, '
+                         f'got {len(elements)}', node=node, exc_type=TypeError)
+        lanes = [ensure_ir(visitor.implicit_coercer.coerce(
+            wrap_literal_result(element), cls.element_type, node)) for element in elements]
+        result = visitor.builder.vector_value(cls, lanes, visitor.module.context)
+        return wrap_value(result, kind='value', type_hint=cls)
 
     @classmethod
     def _coerce_operand(cls, visitor, operand, node):
@@ -211,7 +220,7 @@ class simd(BuiltinType):
             return ensure_ir(operand)
         scalar = visitor.implicit_coercer.coerce(operand, cls.element_type,
                                                 node)
-        return _splat(visitor, ensure_ir(scalar), cls.get_llvm_type())
+        return visitor.builder.vector_value(cls, (ensure_ir(scalar),), visitor.module.context)
 
     @classmethod
     def _binary(cls, visitor, left, right, node, float_op, int_op):
@@ -290,7 +299,9 @@ class simd_load(BuiltinFunction):
 
 
 class simd_store(BuiltinFunction):
-    """simd_store(ptr, value) -> unaligned vector store."""
+    """Store a vector with optional alignment and a non-temporal hint."""
+
+    _pc_call_keywords = ('alignment', 'nontemporal')
 
     @classmethod
     def get_name(cls):
@@ -301,11 +312,31 @@ class simd_store(BuiltinFunction):
         if len(args) != 2:
             logger.error("simd_store(ptr, value) takes two arguments",
                          node=node, exc_type=TypeError)
+        options = {}
+        for name, argument in getattr(args, 'keywords', {}).items():
+            if not argument.is_python_value():
+                logger.error(f'simd_store {name} must be a compile-time value',
+                             node=node, exc_type=TypeError)
+            options[name] = argument.get_python_value()
+        alignment = options.get('alignment', 1)
+        if type(alignment) is not int or alignment <= 0 or alignment & (alignment - 1):
+            logger.error('simd_store alignment must be a positive power of two',
+                         node=node, exc_type=ValueError)
+        nontemporal = options.get('nontemporal', False)
+        if type(nontemporal) is not bool:
+            logger.error('simd_store nontemporal must be a boolean',
+                         node=node, exc_type=TypeError)
         simd_type = _require_simd(args[1], "simd_store", node)
         ptr_ir, pointee = _vector_pointer(
             visitor, args[0], simd_type, "simd_store", node)
-        from ..ir_helpers import safe_store
-        safe_store(visitor.builder, ensure_ir(args[1]), ptr_ir, pointee, align=1, node=node)
+        from ..ir_helpers import check_const_store, is_volatile, safe_store
+        value = ensure_ir(args[1])
+        if nontemporal:
+            check_const_store(pointee, node)
+            visitor.builder.store_nontemporal(value, ptr_ir, align=alignment,
+                                              volatile=is_volatile(pointee))
+        else:
+            safe_store(visitor.builder, value, ptr_ir, pointee, align=alignment, node=node)
         from .types import void
 
         return wrap_value(None, kind="python", type_hint=void)

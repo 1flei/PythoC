@@ -479,9 +479,74 @@ def intrinsic(module, name, llvm_type):
     return module.declare_intrinsic(name, [llvm_type])
 
 
-def fold_instruction(operation, args):
+_WRAPPING_INT_BINOPS = {
+    'add': operator.add,
+    'sub': operator.sub,
+    'mul': operator.mul,
+    'and_': operator.and_,
+    'or_': operator.or_,
+    'xor': operator.xor,
+}
+
+
+class ConstantAddress(ir.FormattedConstant):
+    """A link-time projection that retains its base for alignment checks."""
+
+    def __init__(self, constant, pointer, indices=()):
+        super().__init__(constant.type, constant.get_reference())
+        self.pointer = pointer
+        self.indices = tuple(indices)
+        self.source_etype = pointer.type.pointee if indices else None
+
+
+def fold_gep(pointer, indices, inbounds):
+    from .ir_helpers import is_link_time_constant
+
+    if (not is_link_time_constant(pointer) or not isinstance(pointer.type, ir.PointerType)
+            or pointer.type.is_opaque or not indices):
+        return None
+    if not all(isinstance(index, ir.Constant) and type(index.constant) is int
+               for index in indices):
+        return None
+    # llvmlite constant GEPs cannot spell inbounds.
+    if inbounds and any(index.constant != 0 for index in indices):
+        return None
+    return ConstantAddress(pointer.gep(indices), pointer, indices)
+
+
+def fold_pointer_bitcast(value, target):
+    from .ir_helpers import is_link_time_constant
+
+    if (not is_link_time_constant(value) or not isinstance(value.type, ir.PointerType)
+            or not isinstance(target, ir.PointerType) or value.type.addrspace != target.addrspace):
+        return None
+    converted = value.bitcast(target)
+    return value if converted is value else ConstantAddress(converted, value)
+
+
+def _integer_immediate(value):
+    if isinstance(value, ir.Constant) and isinstance(value.type, ir.IntType):
+        if isinstance(value.constant, int):
+            return value.constant
+        if value.constant is None:
+            return 0
+    return None
+
+
+def fold_instruction(operation, args, *, inbounds=False):
     """Fold before a captured builder operation becomes a runtime register."""
-    if operation in ('fadd', 'fsub', 'fmul', 'fdiv'):
+    if operation == 'gep':
+        pointer, indices = args[:2]
+        return fold_gep(pointer, indices, args[2] if len(args) > 2 else inbounds)
+    if operation == 'bitcast':
+        return fold_pointer_bitcast(*args[:2])
+    if operation in _WRAPPING_INT_BINOPS:
+        left, right = args[:2]
+        a, b = _integer_immediate(left), _integer_immediate(right)
+        if left.type == right.type and a is not None and b is not None:
+            value = _WRAPPING_INT_BINOPS[operation](a, b)
+            return ir.Constant(left.type, value & ((1 << left.type.width) - 1))
+    elif operation in ('fadd', 'fsub', 'fmul', 'fdiv'):
         left, right = args[:2]
         if (is_float_type(left.type) and _constant_value(left) is not None
                 and _constant_value(right) is not None):

@@ -75,6 +75,11 @@ def memcpy(dest: ptr[void], src: ptr[void], n: size_t) -> ptr[void]:
     pass
 
 @extern(lib='c')
+def mempcpy(dest: ptr[void], src: ptr[void], n: size_t) -> ptr[void]:
+    """Copy n bytes and return the destination advanced by n bytes."""
+    pass
+
+@extern(lib='c')
 def memset(s: ptr[void], c: i32, n: size_t) -> ptr[void]:
     """Fill memory with constant byte"""
     pass

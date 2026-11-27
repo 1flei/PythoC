@@ -42,6 +42,12 @@ class CompositeType(BuiltinType):
     _type_namespace: Optional[dict] = None
 
     _layout_config = NATURAL_LAYOUT
+
+    @classmethod
+    def _layout_diagnostic_node(cls, caller):
+        owner = getattr(cls, '_python_class', None)
+        return (getattr(owner, '_layout_location', None) or logger.current_location()
+                or SourceLocation.from_frame(caller))
     
     @classmethod
     def _get_value_address(cls, visitor, base: ValueRef):
@@ -169,15 +175,12 @@ class CompositeType(BuiltinType):
         owner = getattr(cls, '_python_class', None)
         if owner is not None:
             from ..decorators.class_statics import split_static_members
-            for _, _, field, _ in owner._type_declaration:
-                TypeResolver.resolve_type(field, cls._type_namespace, required=False)
-            fields = split_static_members(owner, cls._field_types)
+            fields = split_static_members(owner, cls._field_types, cls._type_namespace)
             names = [name for name, _ in owner._struct_fields]
             if (names != cls._field_names or len(fields) != len(cls._field_types)
                     or any(a is not b for a, b in zip(fields, cls._field_types))):
                 cls._field_types[:] = fields
                 cls._field_names[:] = names
-                cls._llvm_field_map = None
         else:
             for field in cls._field_types:
                 TypeResolver.resolve_type(field, cls._type_namespace, required=False)
@@ -248,7 +251,7 @@ class CompositeType(BuiltinType):
         return cls._field_types is not None
     
     @classmethod
-    def _parse_class_fields(cls, target_cls):
+    def _parse_class_fields(cls, target_cls, field_nodes, source):
         """Parse class fields from annotations - common logic for struct/union/enum
         
         This extracts field types and names from a decorated class, handling:
@@ -258,6 +261,8 @@ class CompositeType(BuiltinType):
         
         Args:
             target_cls: The class being decorated
+            field_nodes: Annotation nodes keyed by Python class dictionary name
+            source: File and line offset for the class source
             
         Returns:
             dict with keys:
@@ -306,7 +311,11 @@ class CompositeType(BuiltinType):
         for fname, ftype in target_cls._struct_fields:
             if isinstance(ftype, str):
                 # Delay the whole expression until its dependencies exist.
-                resolved_type = type_resolver.parse_annotation(ftype, defer_unresolved=True)
+                declaration = field_nodes.get(fname)
+                node = declaration.annotation if declaration is not None else None
+                with logger.at_node(node, source=source):
+                    resolved_type = type_resolver.resolve_annotation(
+                        ftype, node, defer_unresolved=True)
             else:
                 resolved_type = ftype
             from ..type_resolver import TypeResolver
@@ -316,11 +325,12 @@ class CompositeType(BuiltinType):
 
         # Class-level static members (``name: static[T] = ...``) are not
         # instance fields; split them out before the unified type is built.
-        from ..decorators.class_statics import split_static_members
-        parsed_field_types = split_static_members(target_cls, parsed_field_types)
+        from ..decorators.class_statics import split_static_members, has_deferred_storage
+        parsed_field_types = split_static_members(target_cls, parsed_field_types,
+                                                  field_nodes=field_nodes)
 
         field_names = [fname for fname, ftype in target_cls._struct_fields]
-        needs_type_resolution = True
+        needs_type_resolution = has_deferred_storage(target_cls)
         
         return {
             'field_types': parsed_field_types,
@@ -387,53 +397,28 @@ class CompositeType(BuiltinType):
         mark_type_defined(target_cls.__name__, target_cls)
     
     @classmethod
-    def create_decorator_instance(cls, target=None, suffix=None, **kwargs):
-        """Factory method to create decorator instance with common parameters
-        
-        This provides a unified interface for struct/union/enum decorators to accept
-        common compilation parameters (suffix, etc.)
-        
-        Args:
-            target: The class being decorated (if used without parens)
-            suffix: Optional suffix for compilation output naming
-            **kwargs: Additional decorator-specific parameters
-        
-        Returns:
-            Either the decorated result (if target provided) or decorator instance
-        """
-        # Create a decorator instance that holds the parameters
-        class DecoratorInstance:
-            def __init__(self):
-                self.suffix = suffix
-                self.kwargs = kwargs
-            
-            def __call__(self, target_cls):
-                return cls._apply_decorator(target_cls, suffix, **kwargs)
-        
-        # If target is provided, apply directly
-        if target is not None and isinstance(target, type):
-            return cls._apply_decorator(target, suffix, **kwargs)
-        
-        # Otherwise return decorator instance
-        return DecoratorInstance()
-    
-    @classmethod
-    def _apply_decorator(cls, target_cls, suffix=None, **kwargs):
-        """Apply decorator to target class - to be overridden by subclasses
-        
-        Args:
-            target_cls: The class being decorated
-            suffix: Optional suffix for compilation
-            **kwargs: Additional parameters
-        
-        Returns:
-            Decorated class/type
-        """
-        # Default implementation: delegate to compile_dynamic_class
-        from ..decorators.structs import compile_dynamic_class
-        from ..target_layout import make_aggregate_layout_config
+    def create_decorator_instance(cls, target, suffix, layout_options):
+        """Validate layout options at the call that supplied them."""
+        from ..target_layout import make_aggregate_layout_config, report_layout_errors
+        from ..utils.frame_utils import find_caller_frame
 
-        layout_config = make_aggregate_layout_config(**kwargs)
+        node = logger.current_location() or SourceLocation.from_frame(
+            find_caller_frame() or sys._getframe(1))
+        with report_layout_errors(node):
+            layout_config = make_aggregate_layout_config(**layout_options)
+
+        def decorate(target_cls):
+            target_cls._layout_location = node
+            return cls._apply_decorator(target_cls, suffix, layout_config)
+
+        if isinstance(target, type):
+            return decorate(target)
+        return decorate
+
+    @classmethod
+    def _apply_decorator(cls, target_cls, suffix, layout_config):
+        from ..decorators.structs import compile_dynamic_class
+
         return compile_dynamic_class(
             target_cls,
             suffix=suffix,

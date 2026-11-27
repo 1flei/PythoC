@@ -16,6 +16,19 @@ import ast
 from dataclasses import dataclass, field
 from typing import Optional, Any, Tuple, List
 from llvmlite import ir
+from ..valueref import ensure_ir, get_type, wrap_value
+
+
+def merge_values(builder, incoming, pc_type):
+    """Merge incoming rvalues in the current block and retain their PC type."""
+    first, _ = incoming[0]
+    if len(incoming) == 1:
+        return wrap_value(ensure_ir(first), kind="value", type_hint=pc_type)
+
+    phi = builder.phi(get_type(first))
+    for value, predecessor in incoming:
+        phi.add_incoming(ensure_ir(value), predecessor)
+    return wrap_value(phi, kind="value", type_hint=pc_type)
 
 
 class VReg:
@@ -251,7 +264,8 @@ def infer_result_type(op: str, args: tuple, kwargs: dict) -> Optional[ir.Type]:
             return None
         return ir.LiteralStructType([value_type, ir.IntType(1)])
 
-    if op in ('store', 'store_volatile', 'store_atomic', 'store_atomic_volatile'):
+    if op in ('store', 'store_volatile', 'store_nontemporal',
+              'store_atomic', 'store_atomic_volatile'):
         return None
 
     # GEP

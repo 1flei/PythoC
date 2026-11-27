@@ -327,9 +327,10 @@ class ptr(BuiltinType):
     @classmethod
     def handle_sub(cls, visitor, left, right, node: ast.BinOp):
         """Handle pointer subtraction: ptr - offset or ptr - ptr or ptr - array"""
+        from ..type_converter import get_base_type
         from ..valueref import wrap_value, ensure_ir
         
-        right_type = right.type_hint
+        right_type = get_base_type(right.type_hint)
         
         # Check if right is an array - decay to pointer first
         if right_type and hasattr(right_type, 'is_array') and right_type.is_array():
@@ -581,7 +582,7 @@ class ptr(BuiltinType):
         Returns:
             ValueRef with field value
         """
-        from ..valueref import wrap_value, ensure_ir, get_type
+        from ..valueref import wrap_value, ensure_ir
         
         current_ir = ensure_ir(base)
         current_type_hint = get_type_hint(base)
@@ -623,16 +624,9 @@ class ptr(BuiltinType):
         
         typed_ptr = ir.PointerType(struct_type.get_llvm_type(visitor.module.context))
         current_ir = visitor.builder.bitcast(current_ir, typed_ptr)
-        struct_value = visitor.builder.load(current_ir)
-        struct_base = wrap_value(struct_value, kind="address", type_hint=struct_type, address=current_ir)
-
+        struct_base = wrap_value(current_ir, kind='address', type_hint=struct_type,
+                                 address=current_ir)
         return struct_type.handle_attribute(visitor, struct_base, attr_name, node)
-        # Create a ValueRef that struct.handle_attribute expects
-        # IMPORTANT: type_hint should be the struct type, not the ptr type!
-        # ptr_base = wrap_value(current_ir, kind="value", type_hint=struct_type)
-        
-        # # Delegate to struct - let it handle GEP and load
-        # return struct_type.handle_attribute(visitor, ptr_base, attr_name, node)
     
     @classmethod
     def _handle_typed_ptr_call(cls, visitor, args, node: ast.Call) -> ir.Value:

@@ -235,7 +235,7 @@ class ScopeManager:
         return scope
     
     def emit_defers_to_depth(self, target_depth: int, cf):
-        """Emit defers from current scope down to target_depth (exclusive).
+        """Emit defers down to target_depth and return whether the path continues.
 
         This is the single entry point for all control-flow defer emission:
         - return:        emit_defers_to_depth(0, cf)           — all scopes
@@ -251,12 +251,13 @@ class ScopeManager:
             cf: ControlFlowBuilder for termination checks.
         """
         if cf.is_terminated():
-            return
+            return False
 
         for scope in reversed(self._scopes):
             if scope.depth <= target_depth:
                 break
             self._emit_defers_for_scope(scope)
+        return not cf.is_terminated()
     
     def _emit_defers_for_scope(self, scope: Scope):
         """Emit deferred calls for a single scope.
@@ -687,8 +688,7 @@ class ScopeManager:
             ctx: The LabelContext being exited.
             cf: ControlFlowBuilder instance.
         """
-        if not cf.is_terminated():
-            self.emit_defers_to_depth(self.current_depth - 1, cf)
+        if self.emit_defers_to_depth(self.current_depth - 1, cf):
             cf.branch(ctx.end_block)
 
         logger.debug(f"Exited label scope '{ctx.name}'")
@@ -743,8 +743,8 @@ class ScopeManager:
             ctx: The target LabelContext.
             cf: ControlFlowBuilder instance.
         """
-        self.emit_defers_to_depth(ctx.parent_scope_depth, cf)
-        cf.branch(ctx.begin_block, kind='goto')
+        if self.emit_defers_to_depth(ctx.parent_scope_depth, cf):
+            cf.branch(ctx.begin_block, kind='goto')
 
     def resolve_backward_goto_end(self, ctx: LabelContext, cf):
         """Resolve a backward goto_end (label already defined).
@@ -755,8 +755,8 @@ class ScopeManager:
             ctx: The target LabelContext.
             cf: ControlFlowBuilder instance.
         """
-        self.emit_defers_to_depth(ctx.parent_scope_depth, cf)
-        cf.branch(ctx.end_block, kind='goto_end')
+        if self.emit_defers_to_depth(ctx.parent_scope_depth, cf):
+            cf.branch(ctx.end_block, kind='goto_end')
 
     def check_goto_consistency(self, func_node: Any):
         """Check that all scoped gotos have been resolved.

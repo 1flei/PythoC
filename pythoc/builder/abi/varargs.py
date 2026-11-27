@@ -164,7 +164,8 @@ class X86_64SysVVAArgLowering(VAArgLowering):
 
     GP args live at reg_save_area + gp_offset  (6 regs, 0..47)
     FP args live at reg_save_area + fp_offset  (8 regs, 48..175)
-    Stack args live at overflow_arg_area (bump forward by 8).
+    Scalar stack arguments live at overflow_arg_area. On x87 the stack
+    argument occupies a sixteen-byte slot with sixteen-byte alignment.
 
     Replicates clang's ``X86_64ABIInfo::EmitVAArg`` (simplified for scalar
     types that pythoc currently supports: integers, floats, pointers).
@@ -189,6 +190,9 @@ class X86_64SysVVAArgLowering(VAArgLowering):
         va_list_struct_ptr = builder.bitcast(
             va_list_ptr, ir.PointerType(self._va_list_tag))
 
+        if getattr(target_type, 'intrinsic_name', None) == 'f80':
+            return self._emit_stack_va_arg(builder, va_list_struct_ptr,
+                                           target_type, name, alignment=16, size=16)
         is_fp = _is_fp_type(target_type)
 
         if is_fp:
@@ -196,6 +200,25 @@ class X86_64SysVVAArgLowering(VAArgLowering):
                                         target_type, name)
         return self._emit_gp_va_arg(builder, va_list_struct_ptr,
                                     target_type, name)
+
+    def _emit_stack_va_arg(self, builder, va_struct_ptr, target_type, name,
+                           *, alignment=8, size=8):
+        overflow_p = builder.gep(
+            va_struct_ptr, [ir.Constant(_i32, 0), ir.Constant(_i32, 2)],
+            name="overflow_p")
+        overflow = builder.load(overflow_p, name="overflow")
+        if alignment > 8:
+            address = builder.ptrtoint(overflow, _i64)
+            rounded = builder.add(address, ir.Constant(_i64, alignment - 1))
+            aligned = builder.and_(rounded, ir.Constant(_i64, -alignment))
+            overflow = builder.inttoptr(aligned, _i8ptr, name="overflow.aligned")
+        value = builder.load(
+            builder.bitcast(overflow, ir.PointerType(target_type)),
+            name=name or "va.arg", align=alignment)
+        next_address = builder.gep(overflow, [ir.Constant(_i32, size)],
+                                   name="new_overflow")
+        builder.store(next_address, overflow_p)
+        return value
 
     def _emit_gp_va_arg(self, builder, va_struct_ptr, target_type, name):
         """Emit va_arg for a GP-class type (int, pointer)."""
@@ -238,18 +261,7 @@ class X86_64SysVVAArgLowering(VAArgLowering):
 
         # ---- in_mem path ----
         builder.position_at_end(in_mem_bb)
-        overflow_p = builder.gep(
-            va_struct_ptr, [ir.Constant(_i32, 0), ir.Constant(_i32, 2)],
-            name="overflow_p")
-        overflow = builder.load(overflow_p, name="overflow")
-        mem_val = builder.load(
-            builder.bitcast(overflow, ir.PointerType(target_type)),
-            name="mem_val")
-
-        # Advance overflow by 8
-        new_overflow = builder.gep(overflow, [ir.Constant(_i32, 8)],
-                                   name="new_overflow")
-        builder.store(new_overflow, overflow_p)
+        mem_val = self._emit_stack_va_arg(builder, va_struct_ptr, target_type, "mem_val")
         builder.branch(end_bb)
         in_mem_final = builder.block
 
@@ -300,18 +312,7 @@ class X86_64SysVVAArgLowering(VAArgLowering):
 
         # ---- in_mem path ----
         builder.position_at_end(in_mem_bb)
-        overflow_p = builder.gep(
-            va_struct_ptr, [ir.Constant(_i32, 0), ir.Constant(_i32, 2)],
-            name="overflow_p")
-        overflow = builder.load(overflow_p, name="overflow")
-        mem_val = builder.load(
-            builder.bitcast(overflow, ir.PointerType(target_type)),
-            name="fp_mem_val")
-
-        # Advance overflow by 8
-        new_overflow = builder.gep(overflow, [ir.Constant(_i32, 8)],
-                                   name="new_overflow")
-        builder.store(new_overflow, overflow_p)
+        mem_val = self._emit_stack_va_arg(builder, va_struct_ptr, target_type, "fp_mem_val")
         builder.branch(end_bb)
         in_mem_final = builder.block
 

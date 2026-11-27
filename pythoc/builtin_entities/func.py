@@ -65,71 +65,6 @@ class func(BuiltinType):
         return ir.PointerType(cls.get_function_type(module_context))
 
     @classmethod
-    def _pc_type_to_llvm(cls, pc_type, module_context=None):
-        # A quoted component name (``func[..., "T"]``) arrives as a plain
-        # string; resolve it through the forward-ref registry at use time,
-        # mirroring ptr's string pointee.  A value component of a func type
-        # must be complete (C agrees: no by-value incomplete types in a
-        # signature), so an unresolvable name is a hard error here.
-        from ..type_resolver import TypeResolver
-        pc_type = TypeResolver.resolve_type(pc_type, freeze=True)
-        if hasattr(pc_type, 'get_llvm_type'):
-            return pc_type.get_llvm_type(module_context)
-        if isinstance(pc_type, ir.Type):
-            logger.error(
-                f"function type contains raw LLVM type {pc_type}. "
-                f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
-                node=None,
-                exc_type=TypeError,
-            )
-        logger.error(
-            f"Unknown function type component {pc_type}",
-            node=None,
-            exc_type=TypeError,
-        )
-
-    @classmethod
-    def _get_user_signature(cls, module_context=None):
-        if cls.param_types is None or cls.return_type is None:
-            return [], ir.VoidType()
-        param_llvm_types = [
-            cls._pc_type_to_llvm(param_type, module_context)
-            for param_type in cls.param_types
-        ]
-        return_llvm_type = cls._pc_type_to_llvm(cls.return_type, module_context)
-        return param_llvm_types, return_llvm_type
-
-    @classmethod
-    def _lower_c_abi_signature(cls, param_llvm_types, return_llvm_type):
-        from ..builder.abi import get_target_abi
-
-        abi = get_target_abi()
-        actual_param_types = []
-
-        for param_type in param_llvm_types:
-            if abi.is_aggregate_type(param_type):
-                coercion = abi.classify_argument_type(param_type)
-                if coercion.is_indirect:
-                    actual_param_types.append(ir.PointerType(param_type))
-                elif coercion.needs_coercion and coercion.coerced_type is not None:
-                    actual_param_types.append(coercion.coerced_type)
-                else:
-                    actual_param_types.append(param_type)
-            else:
-                actual_param_types.append(param_type)
-
-        actual_return_type = return_llvm_type
-        if abi.is_aggregate_type(return_llvm_type):
-            coercion = abi.classify_return_type(return_llvm_type)
-            if coercion.is_indirect:
-                actual_return_type = ir.VoidType()
-                actual_param_types.insert(0, ir.PointerType(return_llvm_type))
-            elif coercion.needs_coercion and coercion.coerced_type is not None:
-                actual_return_type = coercion.coerced_type
-
-        return actual_param_types, actual_return_type
-
-    @classmethod
     def get_ctypes_type(cls):
         """Get ctypes function pointer type for FFI.
 
@@ -184,7 +119,7 @@ class func(BuiltinType):
         Returns:
             ValueRef with call result
         """
-        from ..valueref import ensure_ir, wrap_value, get_type
+        from ..valueref import ensure_ir, wrap_value
 
         # Get the function pointer from func_ref
         # func_ref comes from visit_Name which already loads the alloca,
@@ -195,19 +130,6 @@ class func(BuiltinType):
         # Get parameter and return types from this func type
         if cls.param_types is None or cls.return_type is None:
             logger.error("Function pointer has incomplete type", node=node, exc_type=TypeError)
-
-        # Convert PC types to LLVM types
-        param_llvm_types = []
-        for pc_param_type in cls.param_types:
-            if hasattr(pc_param_type, 'get_llvm_type'):
-                # All PC types now accept module_context parameter uniformly
-                param_llvm_types.append(pc_param_type.get_llvm_type(visitor.module.context))
-            else:
-                logger.error(
-                    f"Cannot get LLVM type from {pc_param_type}",
-                    node=node,
-                    exc_type=TypeError,
-                )
 
         fn_type = getattr(func_ptr, 'function_type', None)
         is_varargs = bool(
@@ -240,11 +162,7 @@ class func(BuiltinType):
 
         # Type conversion for fixed arguments
         converted_args = []
-        for idx, (arg, expected_type) in enumerate(zip(args, param_llvm_types)):
-            target_pc_type = cls.param_types[idx]
-
-            # The PythoC relation is authoritative even when the IR type
-            # happens to match the parameter's backend representation.
+        for arg, target_pc_type in zip(args, cls.param_types):
             converted = visitor.implicit_coercer.coerce(arg, target_pc_type, node)
             converted_args.append(ensure_ir(converted))
 
@@ -253,12 +171,12 @@ class func(BuiltinType):
         # Compile-time Python constants (e.g. sizeof/offsetof results) that carry
         # a preferred PC type are materialized to that type so they are passed as
         # real varargs values instead of zero-sized pyconst placeholders.
-        if is_varargs and len(args) > len(param_llvm_types):
+        if is_varargs and len(args) > len(cls.param_types):
             from . import i8 as pc_i8
             from ..type_descriptor import default_argument_promotion
             from . import ptr as pc_ptr
             from ..valueref import wrap_value
-            for extra_arg in args[len(param_llvm_types):]:
+            for extra_arg in args[len(cls.param_types):]:
                 hint = getattr(extra_arg, 'type_hint', None)
                 # C default argument promotions for varargs
                 promotion = default_argument_promotion(hint)
@@ -308,7 +226,6 @@ class func(BuiltinType):
             arg_type_hints=cls.param_types,
             cconv='x86_stdcallcc' if cls.calling_convention == 'stdcall' else None,
         )
-
         # Wrap result with return type hint (tracking happens in visit_expression)
         return wrap_value(result, kind="value", type_hint=cls.return_type)
 
@@ -318,15 +235,12 @@ class func(BuiltinType):
         if cls.param_types is None:
             logger.error('Function values require a specialized func[...] type',
                          exc_type=TypeError)
-        param_llvm_types, return_llvm_type = cls._get_user_signature(module_context)
-        actual_param_types, actual_return_type = cls._lower_c_abi_signature(
-            param_llvm_types, return_llvm_type,
+        from ..builder.abi import get_target_abi
+
+        signature = get_target_abi().classify_signature(
+            cls.param_types, cls.return_type, module_context,
         )
-        return ir.FunctionType(
-            actual_return_type,
-            actual_param_types,
-            var_arg=cls.has_llvm_varargs,
-        )
+        return signature.function_type(cls.has_llvm_varargs)
 
     @classmethod
     def map_type_components(cls, mapper):

@@ -55,6 +55,25 @@ def copy_ast_location(node, original):
     return node
 
 
+def class_namespace_key(class_name, member_name):
+    """Return the class dictionary key for an identifier from its source."""
+    prefix = class_name.lstrip('_')
+    if prefix and member_name.startswith('__') and not member_name.endswith('__'):
+        return f'_{prefix}{member_name}'
+    return member_name
+
+
+def class_annotation_nodes(class_ast):
+    """Index the source declarations by their Python class dictionary keys."""
+    if class_ast is None:
+        return {}
+    return {
+        class_namespace_key(class_ast.name, stmt.target.id): stmt
+        for stmt in class_ast.body
+        if isinstance(stmt, ast.AnnAssign) and stmt.simple
+    }
+
+
 def call_source_name(call):
     """Display the source callee for diagnostics on an already-bound call."""
     return _source_expression(call.func)

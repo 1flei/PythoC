@@ -2,6 +2,8 @@
 
 import ctypes
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from unittest.mock import patch
 
 from llvmlite import ir
@@ -190,6 +192,28 @@ class TestTargetLayout(unittest.TestCase):
             self.assertEqual(NaturalUnion.get_alignment(), 8)
             self.assertEqual(ctypes.sizeof(NaturalUnion.get_ctypes_type()), 32)
 
+    def test_explicit_member_layout_can_embed_a_record_that_points_back(self):
+        with CompileSession():
+            @struct
+            class Outer:
+                child: ptr['AlignedChild']
+                value: i32
+
+            @struct(abi_alignment=256)
+            class AlignedChild:
+                prefix: i8
+                parent: Outer
+
+            context = ir.Context()
+            outer = Outer.get_llvm_type(context)
+            child = outer.elements[0].pointee
+            target = get_target_layout()
+            self.assertIs(child, AlignedChild.get_llvm_type(context))
+            self.assertEqual(target.primitive(child).alignment, 32)
+            self.assertEqual(target.primitive(child).allocation_size, 32)
+            self.assertEqual(child.get_element_offset(target.target_data, 1, context),
+                             AlignedChild.get_layout().field_offsets[1])
+
     def test_abi_queries_preserve_custom_identified_context(self):
         from pythoc.builder.abi.aarch64 import AArch64ABI
         context = ir.Context()
@@ -222,6 +246,21 @@ class TestTargetLayout(unittest.TestCase):
             'e-p:32:32-i64:64-n8:16:32-S128'))
         layout = target.primitive(ir.PointerType(ir.IntType(8)))
         self.assertEqual((layout.allocation_size, layout.alignment), (4, 4))
+
+    def test_missing_alignment_carrier_reports_each_request_at_its_source(self):
+        from llvmlite import binding
+        from pythoc.logger import logger
+        from pythoc.source import SourceLocation
+
+        target = TargetLayout(target_data=binding.create_target_data(
+            'e-i64:64-v256:128:128'))
+        for line in (3, 7):
+            output = StringIO()
+            node = SourceLocation('record.py', line)
+            with redirect_stderr(output), patch.object(logger, 'raise_on_error', True):
+                with self.assertRaisesRegex(ValueError, 'no storage carrier for alignment 32'):
+                    target.alignment_carrier(32, node)
+            self.assertIn(f'[ERROR] [record.py:{line}]', output.getvalue())
 
     def test_immutable_primitive_facts_are_queried_only_once(self):
         target = TargetLayout()

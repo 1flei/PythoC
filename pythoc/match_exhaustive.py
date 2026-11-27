@@ -516,8 +516,7 @@ class PatternNormalizer:
         from .builtin_entities import ptr
         from .type_converter import strip_qualifiers
         from .type_descriptor import same_type
-        from .type_resolver import TypeResolver
-        _, pattern_type = self._resolve_value(pattern.cls)
+        value_ref, pattern_type = self._resolve_value(pattern.cls)
         if pattern_type is ptr:
             if pattern.kwd_attrs or len(pattern.patterns) != 1:
                 logger.error('ptr pattern requires one capture name',
@@ -530,7 +529,7 @@ class PatternNormalizer:
             result.pointer_capture = True
             result.bindings = (inner.name,) if inner.name is not None else ()
             return result
-        pattern_type = TypeResolver._require_type(pattern_type)
+        pattern_type = self.visitor.type_resolver.resolve_type_value(value_ref, pattern.cls)
         if not same_type(strip_qualifiers(pattern_type), strip_qualifiers(subject_type)):
             logger.error(
                 f'Pattern type {pattern_type.get_name()} does not match '

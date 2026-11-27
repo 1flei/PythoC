@@ -100,7 +100,7 @@ class TestLinkClosure(unittest.TestCase):
             key = ("/arbitrary/runtime.py", role.value, None, None)
             self.group(key, role.value + ".o", role=role)
             self.assertTrue(is_internal_group(key, groups=self.groups))
-        for path in (package / "c_helpers.py", package / "libc/errno.py",
+        for path in (package / "libc/string.py", package / "libc/errno.py",
                      package / "python_entry.py"):
             key = (str(path), None, None, None)
             self.group(key, path.name + ".o")
@@ -142,7 +142,7 @@ class TestLinkClosure(unittest.TestCase):
 
     def test_all_groups_collects_native_support_transitively(self):
         helper = (
-            str(Path(pythoc.__file__).parent / "c_helpers.py"),
+            str(Path(pythoc.__file__).parent / "libc/string.py"),
             None, None, None,
         )
         obj = self.group(helper, "helper.o", targets=[self.child])
@@ -191,11 +191,13 @@ class TestFrozenLinkInputs(unittest.TestCase):
                            spec["adapter"] for spec in specs)), patch(
                        "pythoc.artifact.build_artifact") as build:
             specs = [{"adapter": "first"}, {"adapter": "second"}]
-            _compile_adapter_library(specs, "adapter.so", (), ())
+            _compile_adapter_library(specs, "adapter.so", ())
             _compile_adapter_library(
-                [{"adapter": "other-group"}], "other.so", (), (),
+                [{"adapter": "other-group"}], "other.so", (),
             )
-        first, second = [call.args[0].steps for call in build.call_args_list]
+        first_plan, second_plan = [call.args[0] for call in build.call_args_list]
+        self.assertEqual(first_plan.link_objects, ())
+        first, second = first_plan.steps, second_plan.steps
         self.assertEqual(len(first), 1)
         self.assertEqual(len(second), 1)
         self.assertEqual(first[0].resources, ('python-entry-codegen',))

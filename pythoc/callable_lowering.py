@@ -30,6 +30,14 @@ def _get_binding(wrapper):
     return getattr(wrapper, '_binding', getattr(wrapper, '_state', None))
 
 
+def emit_direct_call(visitor, target, args, node, attrs):
+    """Apply the known declaration's control flow around a normal func call."""
+    result = target.type_hint.handle_call(visitor, target, args, node)
+    if attrs and 'noreturn' in attrs:
+        visitor.builder.unreachable()
+    return result
+
+
 def lower_compile_wrapper(
     wrapper,
     module: ir.Module,
@@ -168,8 +176,6 @@ def _record_dependency(func_info, binding_state, caller_group_key):
 
 def _declare_or_get(func_info, actual_func_name, module, node=None):
     """Get existing or declare new ir.Function in the module."""
-    module_context = module.context
-
     try:
         return module.get_global(actual_func_name)
     except KeyError:
@@ -181,8 +187,7 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
     from .type_resolver import TypeResolver
     TypeResolver.resolve_signature_types(func_info)
 
-    # Build LLVM parameter types from PC type hints
-    param_llvm_types = []
+    param_types = []
     for param_name in func_info.param_names:
         param_type = func_info.param_type_hints.get(param_name)
         if param_type is None or not hasattr(param_type, 'get_llvm_type'):
@@ -191,7 +196,7 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
                 f"has no valid PC type (got {param_type!r})",
                 node=node, exc_type=TypeError,
             )
-        param_llvm_types.append(param_type.get_llvm_type(module_context))
+        param_types.append(param_type)
 
     return_type = func_info.return_type_hint
     if return_type is None or not hasattr(return_type, 'get_llvm_type'):
@@ -200,17 +205,15 @@ def _declare_or_get(func_info, actual_func_name, module, node=None):
             f"has no valid PC type (got {return_type!r})",
             node=node, exc_type=TypeError,
         )
-    return_llvm_type = return_type.get_llvm_type(module_context)
-
-    # Declare with C ABI via LLVMBuilder
     from .builder import LLVMBuilder
-    temp_builder = LLVMBuilder()
-    func_wrapper = temp_builder.declare_function(
-        module, actual_func_name,
-        param_llvm_types, return_llvm_type,
+    func_wrapper = LLVMBuilder().declare_function(
+        module, actual_func_name, param_types, return_type,
         var_arg=bool(func_info.has_llvm_varargs),
     )
     ir_func = func_wrapper.ir_function
+    if func_info.visibility is not None:
+        from .ir_helpers import llvm_symbol_prefix
+        ir_func.linkage = llvm_symbol_prefix(None, func_info.visibility)
 
     # Apply function-level attributes for cross-module optimization
     if func_info.fn_attrs:
@@ -291,19 +294,7 @@ def lower_extern_wrapper(
     # The C symbol name may differ from the Python function name when the
     # wrapper uses @extern(name='...') to avoid identifier collisions.
     c_name = getattr(extern_wrapper, 'c_name', func_name)
-    callable_pc_type, fixed_params, varargs_name = extern_callable_type(
-        extern_wrapper, node)
-    has_varargs = varargs_name is not None
-
-    module_context = module.context
-    param_llvm_types = [
-        param_type.get_llvm_type(module_context)
-        for _, param_type in fixed_params
-    ]
-    return_llvm_type = (
-        ir.VoidType() if extern_wrapper.return_type is None
-        else extern_wrapper.return_type.get_llvm_type(module_context)
-    )
+    callable_pc_type, _, varargs_name = extern_callable_type(extern_wrapper, node)
     convention = (
         'x86_stdcallcc'
         if callable_pc_type.calling_convention == 'stdcall' else 'ccc'
@@ -320,12 +311,19 @@ def lower_extern_wrapper(
     from .builder import LLVMBuilder
 
     func_wrapper = LLVMBuilder().declare_function(
-        module, c_name, param_llvm_types, return_llvm_type,
-        var_arg=has_varargs, existing_func=existing,
+        module, c_name, callable_pc_type.param_types, callable_pc_type.return_type,
+        var_arg=varargs_name is not None, existing_func=existing, is_extern=True,
     )
     ir_func = func_wrapper.ir_function
     ir_func.calling_convention = convention
-    for attr in extern_wrapper.config.get('attrs') or ():
+    attrs = extern_wrapper.config.get('attrs') or ()
+    if ir_func.is_declaration:
+        from .ir_helpers import llvm_symbol_prefix, merge_native_declaration
+        merge_native_declaration(ir_func, extern_wrapper.weak, extern_wrapper.visibility,
+                                 attrs, node)
+        linkage = 'extern_weak' if extern_wrapper.weak else None
+        ir_func.linkage = llvm_symbol_prefix(linkage, extern_wrapper.visibility)
+    for attr in attrs:
         ir_func.attributes.add(attr)
 
     # --- Record link library dependency ---

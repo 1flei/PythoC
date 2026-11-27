@@ -360,14 +360,55 @@ def lower_sequence_to_constant(visitor, carrier, target_pc_type, node):
     or unsupported shape returns None. Builder-free, so it is valid at global
     scope.
     """
-    from llvmlite import ir
-
     lowered = _lower_aggregate_slots(
         visitor, carrier, target_pc_type, _lower_element_to_constant, node)
     if lowered is None:
         return None
     _, consts = lowered
     return assemble_aggregate_value(visitor, target_pc_type, consts, node)
+
+
+def select_union_member(carrier, union_type):
+    """Return the named alternative, its type and its seed."""
+    from .schema_protocol import get_field_layout_types
+
+    entries = get_mapping_entries(carrier)
+    if len(entries) != 1:
+        return None
+    key, value = entries[0]
+    name = unwrap_literal_item(key)
+    if not isinstance(name, str) or not union_type.has_field(name):
+        return None
+    index = union_type.get_field_index(name)
+    field_type = get_field_layout_types(union_type)[index]
+    return name, field_type, value
+
+
+def lower_union_mapping(visitor, carrier, union_type, node, *, constant_only=False):
+    """Initialize just the selected member, using its declared storage layout."""
+    from .target_layout import uses_bit_storage
+    from .type_converter import strip_qualifiers
+
+    union_type = strip_qualifiers(union_type)
+
+    selected = select_union_member(carrier, union_type)
+    if selected is None:
+        logger.error('A union initializer must select exactly one named member',
+                     node=node, exc_type=TypeError)
+    name, field_type, value = selected
+    lower = _lower_element_to_constant if constant_only else _lower_element_value
+    member = lower(visitor, value, field_type, node)
+    if member is None:
+        logger.error(f'Union initializer for {name!r} requires a link-time constant',
+                     node=node, exc_type=TypeError)
+    index = union_type.get_field_index(name)
+    if uses_bit_storage(union_type):
+        from .builtin_entities.bitfield_access import assemble_bit_field_items
+        return assemble_bit_field_items(visitor, union_type, ((index, member),), node)
+
+    return visitor.builder.union_value(
+        union_type, member, name, node, visitor.module.context, constant_only,
+    )
 
 
 def materialize_sequence_value(visitor, carrier, target_pc_type, node):
@@ -380,9 +421,6 @@ def materialize_sequence_value(visitor, carrier, target_pc_type, node):
     builder (use at function scope); for static seeds use
     :func:`lower_sequence_to_constant`.
     """
-    from llvmlite import ir
-    from .ir_helpers import is_link_time_constant
-
     lowered = _lower_aggregate_slots(
         visitor, carrier, target_pc_type, _lower_element_value, node)
     if lowered is None:
@@ -395,33 +433,14 @@ def materialize_sequence_value(visitor, carrier, target_pc_type, node):
 
 def assemble_aggregate_value(visitor, target_pc_type, values, node):
     """Assemble fields already lowered to the aggregate's declared types."""
-    from llvmlite import ir
-    from .ir_helpers import is_link_time_constant
-    from .target_layout import NATURAL_LAYOUT
+    from .target_layout import uses_bit_storage
     from .type_converter import strip_qualifiers
 
     target_pc_type = strip_qualifiers(target_pc_type)
-    agg_llvm = target_pc_type.get_llvm_type(visitor.module.context)
-    layout_config = getattr(target_pc_type, '_layout_config', NATURAL_LAYOUT)
-    if not layout_config.is_natural:
+    if uses_bit_storage(target_pc_type):
         from .builtin_entities.bitfield_access import assemble_bit_fields
         return assemble_bit_fields(visitor, target_pc_type, values)
-    fields = agg_llvm.elements
-    if len(values) != len(fields):
-        logger.error('Aggregate initializer field count mismatch',
-                     node=node, exc_type=TypeError)
-    for index, (value, field) in enumerate(zip(values, fields)):
-        if value.type != field:
-            logger.error(
-                f'Aggregate initializer field {index} type mismatch: '
-                f'expected {field}, got {value.type}',
-                node=node, exc_type=TypeError)
-    if all(is_link_time_constant(v) for v in values):
-        return ir.Constant(agg_llvm, values)
-    agg = ir.Constant(agg_llvm, ir.Undefined)
-    for i, v in enumerate(values):
-        agg = visitor.builder.insert_value(agg, v, i)
-    return agg
+    return visitor.builder.aggregate_value(target_pc_type, values, node, visitor.module.context)
 
 
 def _carrier_of(elem):
@@ -445,6 +464,12 @@ def _lower_element_to_constant(visitor, elem, target_pc_type, node):
     nested = _carrier_of(elem)
     if nested is not None:
         return lower_sequence_to_constant(visitor, nested, target_pc_type, node)
+
+    from .type_converter import strip_qualifiers
+    if getattr(strip_qualifiers(target_pc_type), '_is_union', False):
+        carrier = unwrap_literal_item(elem)
+        if is_mapping_carrier(carrier):
+            return lower_union_mapping(visitor, carrier, target_pc_type, node, constant_only=True)
 
     if not isinstance(elem, ValueRef):
         from .builtin_entities.python_type import PythonType

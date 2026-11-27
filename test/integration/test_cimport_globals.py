@@ -266,7 +266,7 @@ int public_counter = 2;
         from pythoc.cimport import cimport
 
         source = self._write("tls_g.c", """
-_Thread_local int tls_counter = 1;
+__thread int tls_counter = 1;
 int plain_counter = 2;
 """)
         mod = cimport(source, compile_sources=True)

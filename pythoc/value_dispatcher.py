@@ -8,8 +8,7 @@ import ast
 import operator
 from typing import Optional, Sequence
 
-from llvmlite import ir
-
+from .ast_visitor.pcir import merge_values
 from .builtin_entities.base import BuiltinType
 from .ir_helpers import safe_load
 from .logger import logger
@@ -132,8 +131,8 @@ class ValueRefDispatcher:
                 exc_type=TypeError,
             )
 
-        from .type_graph import prepare_type
-        prepare_type(type_obj)
+        from .type_graph import require_prepared_type
+        require_prepared_type(type_obj, node)
         return handle_type_call(self.visitor, func_ref, args, node)
 
     def explicit_cast(self, target_type, value: ValueRef, node: Optional[ast.AST] = None):
@@ -528,25 +527,25 @@ class ValueRefDispatcher:
                 )
             return wrap_value(result, kind="value", type_hint=bool_type)
 
-        left_ir = ensure_ir(left)
-        right_ir = ensure_ir(right)
+        left_ir, right_ir = ensure_ir(left), ensure_ir(right)
+        left_storage, right_storage = get_type(left_ir), get_type(right_ir)
         left_hint = self._get_base_pc_type(left) or get_type_hint(left)
         right_hint = self._get_base_pc_type(right) or get_type_hint(right)
         left_is_pointer = (
             self._has_type_flag(left_hint, "_is_pointer")
-            or self.visitor.type_converter.is_llvm_pointer_type(left_ir.type)
+            or self.visitor.type_converter.is_llvm_pointer_type(left_storage)
         )
         right_is_pointer = (
             self._has_type_flag(right_hint, "_is_pointer")
-            or self.visitor.type_converter.is_llvm_pointer_type(right_ir.type)
+            or self.visitor.type_converter.is_llvm_pointer_type(right_storage)
         )
         left_is_integer_like = (
             self._is_integer_like_pc_type(left_hint)
-            or self.visitor.type_converter.is_llvm_integer_type(left_ir.type)
+            or self.visitor.type_converter.is_llvm_integer_type(left_storage)
         )
         right_is_integer_like = (
             self._is_integer_like_pc_type(right_hint)
-            or self.visitor.type_converter.is_llvm_integer_type(right_ir.type)
+            or self.visitor.type_converter.is_llvm_integer_type(right_storage)
         )
 
         if not (left_is_integer_like or left_is_pointer):
@@ -567,13 +566,7 @@ class ValueRefDispatcher:
             )
 
         if left_is_pointer and right_is_pointer:
-            left_ir, right_ir = self.visitor._align_pointer_comparison(
-                left,
-                right,
-                left_ir,
-                right_ir,
-                node,
-            )
+            left_ir, right_ir = self._align_pointer_comparison(left, right, left_ir, right_ir, node)
 
         from .builtin_entities import is_unsigned_int
 
@@ -584,13 +577,34 @@ class ValueRefDispatcher:
         result = icmp(predicate, left_ir, right_ir)
         return wrap_value(result, kind="value", type_hint=bool_type)
 
+    def _align_pointer_comparison(self, left: ValueRef, right: ValueRef, left_ir, right_ir, node):
+        """Check the pointer relation and put both operands in one representation."""
+        from .type_descriptor import can_compare_pointers, format_type, is_null_pointer_constant
+
+        left_type = self._get_base_pc_type(left)
+        right_type = self._get_base_pc_type(right)
+        if not can_compare_pointers(
+                left_type, right_type, left_value=left, right_value=right,
+                context=self.visitor.implicit_coercer._resolve_lazy_type_name):
+            logger.error(
+                f"Cannot compare incompatible pointer types '{format_type(left_type)}' "
+                f"and '{format_type(right_type)}'", node=node, exc_type=TypeError)
+        left_storage, right_storage = get_type(left_ir), get_type(right_ir)
+        if left_storage == right_storage:
+            return left_ir, right_ir
+        if is_null_pointer_constant(left):
+            return self._zero_constant_for(right_ir), right_ir
+        if is_null_pointer_constant(right):
+            return left_ir, self._zero_constant_for(left_ir)
+        return left_ir, self.visitor.builder.bitcast(right_ir, left_storage)
+
     def handle_compare_chain(
         self,
         left: ValueRef,
         ops: Sequence[ast.cmpop],
         comparators: Sequence[ast.AST],
         node: ast.Compare,
-    ) -> ValueRef:
+    ) -> Optional[ValueRef]:
         """Evaluate each middle operand once, only along the preceding true edge."""
         from .builtin_entities import bool as bool_type
 
@@ -600,7 +614,10 @@ class ValueRefDispatcher:
         merge = None
         false_edges = []
         for index, (op, comparator) in enumerate(zip(ops, comparators)):
-            right = self.visitor.visit_rvalue_expression(comparator)
+            right = self.visitor._visit_expression_path(comparator, rvalue=True)
+            if right is None:
+                result = None
+                break
             result = self.handle_compare(op, left, right, comparator)
             if index == len(ops) - 1:
                 break
@@ -620,15 +637,14 @@ class ValueRefDispatcher:
 
         if merge is None:
             return result
-        last_value = self.to_boolean(result, node)
-        last_block = builder.block
-        builder.branch(merge)
+        false_value = self._bool_constant(False)
+        incoming = [(false_value, block) for block in false_edges]
+        if result is not None:
+            last_value = self.to_boolean(result, node)
+            incoming.append((last_value, builder.block))
+            builder.branch(merge)
         builder.position_at_end(merge)
-        phi = builder.phi(ir.IntType(1))
-        for block in false_edges:
-            phi.add_incoming(self._bool_constant(False), block)
-        phi.add_incoming(last_value, last_block)
-        return wrap_value(phi, kind="value", type_hint=bool_type)
+        return merge_values(builder, incoming, bool_type)
 
     def _resolve_attribute_protocol(self, base: ValueRef, attr_name: str, node: ast.AST):
         base = self._require_valueref(base, context="attribute base", node=node)

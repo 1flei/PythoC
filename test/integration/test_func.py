@@ -10,7 +10,7 @@ Demonstrates various uses of function pointers:
 """
 
 from pythoc import compile
-from pythoc.builtin_entities import i32, i64, f64, func, void, ptr, u64, static
+from pythoc.builtin_entities import i32, i64, f64, func, void, ptr, u64, static, nullptr
 from pythoc.libc.stdlib import malloc
 from pythoc.libc.stdio import printf
 
@@ -145,6 +145,15 @@ def ternary_func_ptr(op: i32, x: i32, y: i32) -> i32:
 
 
 @compile
+def ternary_nullable_func_ptr(flag: i32, x: i32, y: i32) -> i32:
+    first = add if flag else nullptr
+    second = nullptr if flag else subtract
+    if first:
+        return first(x, y)
+    return second(x, y)
+
+
+@compile
 def ternary_int_literals(flag: i32) -> i32:
     return (1 if flag else 2)
 
@@ -249,6 +258,10 @@ class TestFunc(unittest.TestCase):
         """Ternary expression selecting a function pointer."""
         self.assertEqual(ternary_func_ptr(0, 2, 3), 5)
         self.assertEqual(ternary_func_ptr(1, 2, 3), -1)
+
+    def test_ternary_nullable_func_ptr(self):
+        self.assertEqual(ternary_nullable_func_ptr(1, 2, 3), 5)
+        self.assertEqual(ternary_nullable_func_ptr(0, 2, 3), -1)
 
     def test_ternary_int_literals(self):
         """Ternary expression with two integer literals."""

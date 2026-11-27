@@ -43,6 +43,7 @@ def compile_ast(
     suffix=None,
     attrs=None,
     linkage=None,
+    visibility=None,
     source_file=None,
     source_code=None,
     start_line=1,
@@ -54,6 +55,7 @@ def compile_ast(
     group_key=None,
     copy_ast=True,
     debug=False,
+    _native_name=None,
 ):
     """Compile an ast.FunctionDef through the standard @compile lifecycle.
 
@@ -70,6 +72,7 @@ def compile_ast(
         suffix: Explicit compile_suffix for specialization.
         attrs: Set of LLVM function-level attributes.
         linkage: Linkage kind for the emitted definition (see @compile).
+        visibility: Native symbol visibility for the emitted definition.
         source_file: Source file for grouping/diagnostics. If None, uses
             the caller's file.
         source_code: Source code string for diagnostics.
@@ -115,9 +118,10 @@ def compile_ast(
         source_file = os.path.realpath(source_file)
     diagnostic_source = (source_file, start_line - 1)
 
-    from ..ir_helpers import validate_func_linkage
+    from ..ir_helpers import validate_func_linkage, validate_symbol_visibility
     with logger.at_node(fn_ast, source=diagnostic_source):
         linkage = validate_func_linkage(linkage, fn_ast, func_name)
+        visibility = validate_symbol_visibility(visibility, fn_ast)
 
     # #6: Debug dump — print the generated Python-like source for inspection.
     if debug:
@@ -171,8 +175,7 @@ def compile_ast(
     definition_context = capture_compile_context(effect_suffix, _effect_override_names)
 
     # Build mangled name
-    mangled_name = None
-    actual_func_name = func_name
+    actual_func_name = _native_name if _native_name is not None else func_name
     suffix_parts = []
     if compile_suffix:
         suffix_parts.append(compile_suffix)
@@ -180,9 +183,9 @@ def compile_ast(
         suffix_parts.append(effect_suffix)
     if suffix_parts:
         combined = '_'.join(suffix_parts)
-        mangled_name = func_name + '_' + combined
-        fn_ast.name = mangled_name
-        actual_func_name = mangled_name
+        actual_func_name += '_' + combined
+    mangled_name = actual_func_name if actual_func_name != func_name else None
+    fn_ast.name = actual_func_name
 
     # Get compiler instance
     has_suffix = (
@@ -284,6 +287,7 @@ def compile_ast(
         overload_enabled=False,
         fn_attrs=fn_attrs,
         linkage=linkage,
+        visibility=visibility,
     )
 
     from ..build.cache import function_registration_identity
@@ -356,6 +360,8 @@ def compile_ast(
             fn_ast, name=func_name, param_types=param_type_hints,
             return_type=return_type_hint, user_globals=st.captured_symbols,
             suffix=st.compile_suffix, attrs=fn_attrs, linkage=linkage,
+            visibility=visibility,
+            _native_name=_native_name,
             source_file=st.source_file, source_code=source_code, start_line=start_line,
             effect_suffix=effect_key, effect_scope=scope,
             _effect_override_names=override_names)

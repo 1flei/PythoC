@@ -75,7 +75,8 @@ class ControlFlowMixin:
                     value = self.implicit_coercer.coerce(value, expected_pc_type, node)
             
             # Execute all deferred calls after return value is evaluated (Zig/Go semantics)
-            self.scope_manager.emit_defers_to_depth(0, cf)
+            if not self.scope_manager.emit_defers_to_depth(0, cf):
+                return
             
             # Now generate the actual return
             if value is not None:
@@ -106,19 +107,10 @@ class ControlFlowMixin:
             logger.error("'break' outside loop", node=node, exc_type=SyntaxError)
 
         cf = self._get_cf_builder()
-        if not cf.is_terminated():
-            loop_scope_depth = self.scope_manager.get_loop_scope_depth()
-
-            logger.debug(f"Break: current scope={self.scope_manager.current_depth}, loop scope={loop_scope_depth}")
-
-            # Emit deferred calls from current scope down to loop scope (inclusive)
-            self.scope_manager.emit_defers_to_depth(loop_scope_depth - 1, cf)
-
-            # Get the break target from scope_manager
-            _, break_block = self.scope_manager.get_loop_targets()
-
-            # Add break edge to CFG and generate IR
-            cf.branch(break_block, kind='break')
+        scope_depth = self.scope_manager.get_loop_scope_depth()
+        if self.scope_manager.emit_defers_to_depth(scope_depth - 1, cf):
+            _, target = self.scope_manager.get_loop_targets()
+            cf.branch(target, kind='break')
 
     def visit_Continue(self, node: ast.Continue):
         """Handle continue statements
@@ -129,17 +121,10 @@ class ControlFlowMixin:
             logger.error("'continue' outside loop", node=node, exc_type=SyntaxError)
 
         cf = self._get_cf_builder()
-        if not cf.is_terminated():
-            loop_scope_depth = self.scope_manager.get_loop_scope_depth()
-
-            # Emit deferred calls from current scope down to loop scope (inclusive)
-            self.scope_manager.emit_defers_to_depth(loop_scope_depth - 1, cf)
-
-            # Get the continue target from scope_manager
-            continue_block, _ = self.scope_manager.get_loop_targets()
-
-            # Add continue edge to CFG and generate IR
-            cf.branch(continue_block, kind='continue')
+        scope_depth = self.scope_manager.get_loop_scope_depth()
+        if self.scope_manager.emit_defers_to_depth(scope_depth - 1, cf):
+            target, _ = self.scope_manager.get_loop_targets()
+            cf.branch(target, kind='continue')
 
     def visit_Expr(self, node: ast.Expr):
         """Handle expression statements (like function calls)"""
@@ -180,7 +165,7 @@ class ControlFlowMixin:
                 if func_val.get_python_value() is _effect_proxy:
                     self._visit_with_effect_binding(node, context)
                     return
-            ctx_expr = self._visit_call_with_target(context, func_val)
+            ctx_expr = self._lower_expression(self._visit_call_with_target, context, func_val)
         else:
             ctx_expr = self.visit_expression(context)
 

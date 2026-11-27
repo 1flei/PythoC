@@ -161,9 +161,8 @@ def _form(pc_type):
         base['kind'] = 'blob'
         return base
     if _type_flag(pc_type, 'is_struct_type') or getattr(pc_type, '_is_struct', False):
-        from .target_layout import NATURAL_LAYOUT
-        layout_config = getattr(pc_type, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
+        from .target_layout import uses_bit_storage
+        if uses_bit_storage(pc_type):
             base['kind'] = 'blob'
             return base
         fields = []
@@ -1260,10 +1259,22 @@ def _object_args():
     ]
 
 
-def _development_entry(spec, source_file):
+@meta.quote
+def _bound_kernel(ty, offset, *, self_):
+    kern: ty = ty(ptr[ptr[void]](ptr[i8](self_) + i64(offset))[0])
+
+
+def _adapter_entry(spec, source_file, *, bound_kernel):
     body, bind = build_entry(spec)
-    user_globals = dict(bind.globals)
-    user_globals['kern'] = spec['callee']
+    if bound_kernel:
+        from .callable_type import OFF_KERNEL
+
+        signature = spec['callee']._func_info.callable_pc_type
+        load_kernel = _bound_kernel(bind.alias(signature), OFF_KERNEL, self_='self_')
+        body = [*load_kernel.stmts, *body]
+        user_globals = dict(bind.globals)
+    else:
+        user_globals = dict(bind.globals, kern=spec['callee'])
     user_globals['__name__'] = 'pythoc.python_entry_bind'
     generated = _generated_function(
         spec['adapter'],
@@ -1281,7 +1292,9 @@ def compile_adapter_object(specs, group_key, init_symbol, module_name):
     source_file = group_key[0]
     wrappers = []
     for spec in specs:
-        generated, user_globals = _development_entry(spec, source_file)
+        generated, user_globals = _adapter_entry(
+            spec, source_file, bound_kernel=init_symbol is None,
+        )
         wrappers.append(meta.compile_generated(
             generated,
             user_globals=user_globals,

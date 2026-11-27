@@ -150,6 +150,7 @@ def function_registration_identity(info, fn_ast, user_globals, content):
     from ..type_descriptor import specialization_key
     from ..builtin_entities.base import _is_type_like
     from ..type_id import get_type_id
+    from ..type_resolver import report_type_errors
 
     def has_type(key):
         return (isinstance(key, tuple)
@@ -157,23 +158,28 @@ def function_registration_identity(info, fn_ast, user_globals, content):
                      or any(has_type(item) for item in key)))
 
     inputs = {}
-    names = {node.id for node in ast.walk(fn_ast)
-             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    name_nodes = {}
+    for node in ast.walk(fn_ast):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            name_nodes.setdefault(node.id, node)
     projections = {}
-    for name in sorted(names):
+    for name in sorted(name_nodes):
         value = user_globals.get(name, _MISSING)
         if (type(value) not in (tuple, list, dict)
                 and not _is_type_like(value)):
             continue
         address = id(value)
         if address not in projections:
-            projections[address] = specialization_key(value)
+            with report_type_errors(name_nodes[name], source=info.diagnostic_source):
+                projections[address] = specialization_key(value)
         key = projections[address]
         if has_type(key):
             inputs[name] = key
-    identity = (get_type_id(info.callable_pc_type), ast.dump(fn_ast),
+    with report_type_errors(fn_ast, source=info.diagnostic_source):
+        signature = get_type_id(info.callable_pc_type)
+    identity = (signature, ast.dump(fn_ast),
                 tuple(sorted(inputs.items())), content.captured,
-                info.linkage, tuple(sorted(info.fn_attrs)))
+                info.linkage, info.visibility, tuple(sorted(info.fn_attrs)))
     return json.dumps(identity, ensure_ascii=False, separators=(',', ':'))
 
 

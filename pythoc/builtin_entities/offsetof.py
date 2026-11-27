@@ -1,9 +1,7 @@
 from llvmlite import ir
-from .base import BuiltinFunction, BuiltinEntity, _get_unified_registry
+from .base import BuiltinFunction
 from ..valueref import wrap_value
 from ..logger import logger
-from .types import u64
-from .union import UnionType
 import ast
 
 
@@ -51,96 +49,22 @@ class offsetof(BuiltinFunction):
     @classmethod
     def _get_member_layout(cls, pc_type, field_name: str, node):
         """Resolve a member's local byte offset and type together."""
+        from ..schema_protocol import get_field_layout_owner, iter_field_layout
+        from ..target_layout import uses_bit_storage
+        from ..type_converter import get_base_type
         from ..type_resolver import TypeResolver
         pc_type = TypeResolver.resolve_type(pc_type, freeze=True)
-        pc_type = getattr(pc_type, '_union_type', pc_type)
-        field_names, field_types = cls._get_struct_fields(pc_type, node)
-
-        if field_name not in field_names:
-            logger.error(f"offsetof(): field '{field_name}' not found in type '{cls._type_name(pc_type)}'",
-                        node=node, exc_type=AttributeError)
-
-        from ..target_layout import NATURAL_LAYOUT
-        if not getattr(pc_type, '_layout_config', NATURAL_LAYOUT).is_natural:
-            logger.error('offsetof() cannot be applied to a bit field',
+        record = get_field_layout_owner(get_base_type(pc_type))
+        type_name = getattr(pc_type, '__name__', pc_type)
+        if record is None:
+            logger.error(f"offsetof(): type '{type_name}' is not a struct",
                          node=node, exc_type=TypeError)
-
-        # All fields of a union share offset 0.
-        if isinstance(pc_type, type) and issubclass(pc_type, UnionType):
-            return 0, field_types[field_names.index(field_name)]
-
-        if hasattr(pc_type, 'get_layout'):
-            index = field_names.index(field_name)
-            return pc_type.get_layout().field_offsets[index], field_types[index]
-
-        offset = 0
-        for name, field_type in zip(field_names, field_types):
-            field_alignment = cls._get_type_alignment(field_type, node)
-            offset = cls._align_to(offset, field_alignment)
-
-            if name == field_name:
-                return offset, field_type
-
-            field_size = cls._get_type_size(field_type, node)
-            offset += field_size
-
-        logger.error(f"offsetof(): field '{field_name}' not found in type '{cls._type_name(pc_type)}'",
+        for index, name, field_type in iter_field_layout(record):
+            if name != field_name:
+                continue
+            if uses_bit_storage(record):
+                logger.error('offsetof() cannot be applied to a bit field',
+                             node=node, exc_type=TypeError)
+            return record.get_layout().field_offsets[index], field_type
+        logger.error(f"offsetof(): field '{field_name}' not found in type '{type_name}'",
                     node=node, exc_type=AttributeError)
-
-    @classmethod
-    def _get_struct_fields(cls, pc_type, node):
-        """Return (field_names, field_types) for a struct-like type."""
-        ensure_fields = getattr(pc_type, '_ensure_field_types_resolved', None)
-        if callable(ensure_fields):
-            ensure_fields()
-        if hasattr(pc_type, '_field_names') and hasattr(pc_type, '_field_types'):
-            return pc_type._field_names, pc_type._field_types
-
-        # Fallback to registry for types not created by pythoc's struct[...]
-        struct_name = cls._type_name(pc_type)
-        registry = _get_unified_registry()
-        if registry.has_struct(struct_name):
-            struct_info = registry.get_struct(struct_name)
-            return [name for name, _ in struct_info.fields], [typ for _, typ in struct_info.fields]
-
-        logger.error(f"offsetof(): type '{struct_name}' is not a struct",
-                    node=node, exc_type=TypeError)
-
-    @classmethod
-    def _type_name(cls, pc_type) -> str:
-        if hasattr(pc_type, '__name__'):
-            return pc_type.__name__
-        return str(pc_type)
-
-    @classmethod
-    def _get_type_size(cls, pc_type, node) -> int:
-        """Get size of a type in bytes."""
-        if hasattr(pc_type, 'get_size_bytes'):
-            return pc_type.get_size_bytes()
-
-        if isinstance(pc_type, type) and issubclass(pc_type, BuiltinEntity):
-            if pc_type.can_be_type():
-                return pc_type.get_size_bytes()
-
-        registry = _get_unified_registry()
-        type_name = cls._type_name(pc_type)
-        entity_cls = registry.get_builtin_entity(type_name)
-        if entity_cls and entity_cls.can_be_type():
-            return entity_cls.get_size_bytes()
-
-        logger.error(f"offsetof(): cannot determine size of type '{type_name}'",
-                    node=node, exc_type=TypeError)
-
-    @classmethod
-    def _get_type_alignment(cls, pc_type, node) -> int:
-        """Get alignment of a type in bytes."""
-        if hasattr(pc_type, 'get_alignment'):
-            return pc_type.get_alignment()
-
-        size = cls._get_type_size(pc_type, node)
-        return min(size, 8)
-
-    @classmethod
-    def _align_to(cls, offset: int, alignment: int) -> int:
-        """Align offset to the specified alignment boundary."""
-        return (offset + alignment - 1) & ~(alignment - 1)

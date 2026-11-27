@@ -14,7 +14,7 @@ import unittest
 from pythoc import (
     i8, i32, i64, u8, u32, u64, i128, u128, f32, f64, bool, ptr, array, compile,
     void, static,
-    atomic_load, atomic_store, atomic_fetch_add, atomic_cas, atomic_fence,
+    atomic_load, atomic_store, atomic_fetch_add, atomic_fetch_sub, atomic_cas, atomic_fence,
     atomic_fetch_and, atomic_fetch_or, atomic_exchange,
     inf, inff, nan, nanf,
     bswap, popcount, ctlz, cttz,
@@ -137,11 +137,25 @@ def atomic_generic_cas() -> i64:
 
 @compile
 def atomic_generic_i32() -> i32:
-    """Width is derived from the pointer: ptr[i32] gives 32-bit atomics."""
+    """Width and the fetched result are independent of the update operation."""
     val: i32 = 100
     p: ptr[i32] = ptr[i32](ptr[void](ptr(val)))
     old: i32 = atomic_fetch_add(p, i32(23))
-    return old + val  # 100 + 123 = 223
+    before_sub: i32 = atomic_fetch_sub(p, i32(3))
+    return old + before_sub + val  # 100 + 123 + 120 = 343
+
+
+@compile
+def atomic_boolean_ops() -> i32:
+    active: bool = False
+    expected: bool = False
+    address = ptr(active)
+    atomic_store(address, True)
+    old = atomic_exchange(address, False)
+    success = atomic_cas(address, ptr(expected), True)
+    failure = atomic_cas(address, ptr(expected), False)
+    return (i32(old) + success * 2 + failure * 4 + i32(expected) * 8
+            + i32(atomic_load(address)) * 16)
 
 
 # ============================================================
@@ -330,7 +344,10 @@ class TestGenericAtomics(unittest.TestCase):
         self.assertEqual(atomic_generic_cas(), 199099)
 
     def test_i32_width(self):
-        self.assertEqual(atomic_generic_i32(), 223)
+        self.assertEqual(atomic_generic_i32(), 343)
+
+    def test_boolean_uses_byte_storage(self):
+        self.assertEqual(atomic_boolean_ops(), 27)
 
 
 class TestBitops(unittest.TestCase):

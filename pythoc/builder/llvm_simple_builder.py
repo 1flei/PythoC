@@ -8,12 +8,18 @@ without any ABI coercion.
 For C-compatible calling conventions, use LLVMCBuilder instead.
 """
 
+from math import gcd
 from typing import Any, List, Optional
 from llvmlite import ir
 
 from .abstract import AbstractBuilder
 from .. import llvm_extensions as floating
-from ..ir_helpers import is_link_time_constant
+
+
+class _ConstantFunctionPointer(ir.FormattedConstant):
+    @property
+    def function_type(self):
+        return self.type.pointee
 
 
 class _AsmMemoryAttributes(ir.ArgumentAttributes):
@@ -28,6 +34,48 @@ class _AsmMemoryAttributes(ir.ArgumentAttributes):
             return f'elementtype({self.element_type})'
         return super()._expand(name, typ)
 
+
+
+def _address_congruence(pointer, target):
+    """Track the actual address and the contract of any storage projection."""
+    if isinstance(pointer, (ir.AllocaInstr, ir.GlobalVariable)):
+        alignment = pointer.align or target.primitive(pointer.type.pointee).alignment
+        return (alignment, 0), (alignment, 0)
+    if isinstance(pointer, ir.instructions.CastInstr) and pointer.opname == 'bitcast':
+        return _address_congruence(pointer.operands[0], target)
+    if not isinstance(pointer, (ir.GEPInstr, floating.ConstantAddress)):
+        return (1, 0), None
+
+    from ..target_layout import _llvm_context
+    (modulus, displacement), projected = _address_congruence(pointer.pointer, target)
+    current = pointer.source_etype
+    step, offset = 0, 0
+    for position, index in enumerate(pointer.indices):
+        if position == 0 or isinstance(current, (ir.ArrayType, ir.VectorType)):
+            if position:
+                current = current.element
+            stride = target.primitive(current).stride
+            if isinstance(index, ir.Constant):
+                offset += (index.constant or 0) * stride
+            else:
+                step = gcd(step, stride)
+        else:
+            if projected is None:
+                projected = target.primitive(pointer.source_etype).alignment, 0
+            member = index.constant
+            offset += current.get_element_offset(
+                target.target_data, member, _llvm_context(current),
+            )
+            current = current.elements[member]
+    if projected is not None:
+        projected = gcd(projected[0], step), projected[1] + offset
+    return (gcd(modulus, step), displacement + offset), projected
+
+
+def _memory_alignment(pointer):
+    from ..target_layout import get_target_layout
+    actual, _ = _address_congruence(pointer, get_target_layout())
+    return gcd(*actual)
 
 
 class LLVMBuilder(AbstractBuilder):
@@ -150,12 +198,39 @@ class LLVMBuilder(AbstractBuilder):
     
     def alloca(self, typ: Any, size: Any = None, name: str = "") -> Any:
         return self._builder.alloca(typ, size=size, name=name)
+
+    def alloca_in_entry(self, typ, name):
+        from ..ir_helpers import alloca_in_entry
+        return alloca_in_entry(self, typ, name)
     
     def load(self, ptr: Any, name: str = "", align: Any = None) -> Any:
+        if align is None:
+            align = _memory_alignment(ptr)
         return self._builder.load(ptr, name=name, align=align)
     
     def store(self, value: Any, ptr: Any, align: Any = None) -> Any:
+        if align is None:
+            align = _memory_alignment(ptr)
         return self._builder.store(value, ptr, align=align)
+
+    def store_nontemporal(self, value: Any, ptr: Any, align: int, volatile: bool = False):
+        store = self.store_volatile if volatile else self.store
+        instruction = store(value, ptr, align=align)
+        hint = self._builder.module.add_metadata([ir.Constant(ir.IntType(32), 1)])
+        instruction.set_metadata('nontemporal', hint)
+        return instruction
+
+    def aggregate_value(self, pc_type, values, node, context, *, emitter=None):
+        from .composite_values import aggregate_value
+        return aggregate_value(emitter or self, pc_type, values, node, context)
+
+    def union_value(self, pc_type, member, name, node, context, constant_only, *, emitter=None):
+        from .composite_values import union_value
+        return union_value(emitter or self, pc_type, member, name, node, context, constant_only)
+
+    def vector_value(self, pc_type, lanes, context, *, emitter=None):
+        from .composite_values import vector_value
+        return vector_value(emitter or self, pc_type, lanes, context)
 
     def load_atomic(
         self, ptr: Any, ordering: str, align: int, name: str = "",
@@ -164,6 +239,34 @@ class LLVMBuilder(AbstractBuilder):
         return self._builder.load_atomic(
             ptr, ordering=ordering, align=align, name=name, typ=typ,
         )
+
+    def require_atomic_alignment(self, ptr, alignment, name, node):
+        from ..logger import logger
+        from ..target_layout import get_target_layout
+        target = get_target_layout()
+        (modulus, displacement), projected = _address_congruence(ptr, target)
+        available = gcd(modulus, displacement)
+        if available >= alignment:
+            return
+        projection_alignment = gcd(*projected) if projected is not None else alignment
+        if projection_alignment < alignment or displacement % gcd(modulus, alignment):
+            logger.error(
+                f'{name}: requires {alignment}-byte alignment, address provides '
+                f'{max(available, projection_alignment) if projected else available}',
+                node=node, exc_type=TypeError,
+            )
+
+        # Typed pointers may still refer to packed storage across a call.
+        integer = ir.IntType(target.primitive(ptr.type).allocation_bits)
+        address = self._builder.ptrtoint(ptr, integer)
+        low_bits = self._builder.and_(address, ir.Constant(integer, alignment - 1))
+        aligned = self._builder.icmp_unsigned('==', low_bits, ir.Constant(integer, 0))
+        check_failed = self._builder.append_basic_block('atomic.misaligned')
+        continuation = self._builder.append_basic_block('atomic.aligned')
+        self._builder.cbranch(aligned, continuation, check_failed)
+        self._builder.position_at_end(check_failed)
+        self.trap()
+        self._builder.position_at_end(continuation)
 
     def store_atomic(
         self, value: Any, ptr: Any, ordering: str, align: int,
@@ -193,6 +296,9 @@ class LLVMBuilder(AbstractBuilder):
         )
     
     def gep(self, ptr: Any, indices: List[Any], inbounds: bool = False, name: str = "") -> Any:
+        constant = floating.fold_gep(ptr, indices, inbounds)
+        if constant is not None:
+            return constant
         return self._builder.gep(ptr, indices, inbounds=inbounds, name=name)
     
     # ========== Type Conversion ==========
@@ -230,20 +336,8 @@ class LLVMBuilder(AbstractBuilder):
     def inttoptr(self, value: Any, typ: Any, name: str = "") -> Any:
         return self._builder.inttoptr(value, typ, name=name)
     
-    @staticmethod
-    def _constant_pointer_bitcast(value: Any, typ: Any):
-        """Keep an address conversion usable in a static initializer."""
-        if not is_link_time_constant(value):
-            return None
-        if (not isinstance(value.type, ir.PointerType)
-                or not isinstance(typ, ir.PointerType)):
-            return None
-        if value.type.addrspace != typ.addrspace:
-            return None
-        return value.bitcast(typ)
-
     def bitcast(self, value: Any, typ: Any, name: str = "") -> Any:
-        constant = self._constant_pointer_bitcast(value, typ)
+        constant = floating.fold_pointer_bitcast(value, typ)
         if constant is not None:
             return constant
         return self._builder.bitcast(value, typ, name=name)
@@ -269,6 +363,12 @@ class LLVMBuilder(AbstractBuilder):
     
     def unreachable(self) -> Any:
         return self._builder.unreachable()
+
+    def trap(self) -> Any:
+        signature = ir.FunctionType(ir.VoidType(), [])
+        intrinsic = self._builder.module.declare_intrinsic('llvm.trap', fnty=signature)
+        self._builder.call(intrinsic, [])
+        return self.unreachable()
     
     # ========== PHI and Select ==========
     
@@ -280,6 +380,14 @@ class LLVMBuilder(AbstractBuilder):
     
     # ========== Function Calls ==========
     
+    def _call(self, fn, args, **options):
+        # llvmlite's call instruction needs the signature on the operand.
+        # Constant casts retain it on their pointer type.
+        if (isinstance(fn, ir.Constant)
+                and isinstance(getattr(fn.type, 'pointee', None), ir.FunctionType)):
+            fn = _ConstantFunctionPointer(fn.type, fn.get_reference())
+        return self._builder.call(fn, args, **options)
+
     def call(self, fn: Any, args: List[Any], name: str = "",
              return_type_hint: Any = None, arg_type_hints: List[Any] = None,
              cconv: Optional[str] = None) -> Any:
@@ -288,7 +396,7 @@ class LLVMBuilder(AbstractBuilder):
         Note: return_type_hint and arg_type_hints are ignored in this simple builder.
         Use LLVMCBuilder for ABI-aware calls.
         """
-        return self._builder.call(fn, args, name=name, cconv=cconv)
+        return self._call(fn, args, name=name, cconv=cconv)
     
     def call_inline_asm(self, fn: Any, args: List[Any], name: str = "",
                         element_types: Any = None) -> Any:

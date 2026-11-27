@@ -131,10 +131,7 @@ class InlineAdapter:
         inline_result.reference_bindings = definition.references
 
         with inline_globals_scope(self.visitor, inline_result):
-            for i, stmt in enumerate(inline_result.stmts):
-                stmt_str = ast.unparse(stmt) if hasattr(ast, 'unparse') else str(stmt)
-                logger.debug(f"{tag}: visiting stmt[{i}]: {stmt_str}")
-                self.visitor.visit(stmt)
+            self.visitor._visit_stmt_list(inline_result.stmts, add_to_cfg=False)
 
         if self.visitor.scope_manager.lookup_variable(result_var) is not None:
             return self._lookup_result_var(result_var, call_site)

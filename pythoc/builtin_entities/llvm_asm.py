@@ -38,6 +38,7 @@ memory.  It is not a prefetch hint.
 """
 import ast
 from llvmlite import ir
+from llvmlite.ir.values import _escape_string
 
 from .base import BuiltinFunction
 from ..valueref import wrap_value, ensure_ir
@@ -122,6 +123,11 @@ class llvm_asm(BuiltinFunction):
                 node=node, exc_type=TypeError,
             )
         input_values = kw_inputs if kw_inputs is not None else positional_operands
+        input_values = [
+            visitor.type_converter.promote_to_pc_default(value.get_python_value(), node)
+            if value.is_python_value() else value
+            for value in input_values
+        ]
 
         if ret_type is not None and ret_type is not void:
             llvm_ret_type = ret_type.get_llvm_type()
@@ -143,7 +149,8 @@ class llvm_asm(BuiltinFunction):
 
         asm_func_type = ir.FunctionType(llvm_ret_type, llvm_input_types)
         inline_asm = ir.InlineAsm(
-            asm_func_type, asm_str, constraints, side_effect=side_effect
+            asm_func_type, _escape_string(asm_str), _escape_string(constraints),
+            side_effect=side_effect,
         )
         element_types = cls._indirect_types(constraints, input_values, visitor, node)
         result = visitor.builder.call_inline_asm(

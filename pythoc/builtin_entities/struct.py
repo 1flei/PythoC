@@ -13,19 +13,14 @@ Design principles:
 """
 
 import sys
-import threading
 
 from llvmlite import ir
 from ..logger import logger
 from ..source import SourceLocation
-from typing import List, Tuple, Optional, Any, Dict
+from typing import List, Tuple, Optional, Any
 from .composite_base import CompositeType
 from .base import BuiltinEntityMeta
 from ..valueref import extract_constant_index
-
-
-# Protect lazy field-map initialization independently of backend materialization.
-_llvm_type_lock = threading.RLock()
 
 
 class StructTypeMeta(BuiltinEntityMeta):
@@ -95,7 +90,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     # to name the identified type.
     _pc_record = True
     _force_identified: bool = False
-    _llvm_field_map: Optional[Dict[int, int]] = None  # PC field idx -> LLVM field idx
     
     @classmethod
     def map_type_components(cls, mapper):
@@ -139,13 +133,16 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         cls._ensure_field_types_resolved()
 
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            from .bitfield_access import get_bit_storage_ctypes
+        from ..target_layout import align_ctypes_record, uses_bit_storage, validate_ctypes_layout
+        from .bitfield_access import get_bit_storage_ctypes
+
+        layout = cls.get_layout()
+        node = cls._layout_diagnostic_node(sys._getframe(1))
+        if uses_bit_storage(cls):
             storage = get_bit_storage_ctypes(
-                cls.get_layout(),
+                layout,
                 f"CStruct_{cls.get_name()}",
+                node,
             )
             cache[cls] = storage
             return storage
@@ -177,12 +174,19 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         
         # Create ctypes.Structure class dynamically
         class_name = f"CStruct_{cls.get_name()}"
-        struct_class = type(class_name, (ctypes.Structure,), {
-            '_fields_': fields
-        })
-
-        from ..target_layout import validate_ctypes_layout
-        validate_ctypes_layout(cls, struct_class, field_indices)
+        attributes = {'_fields_': fields}
+        if cls._layout_config.member_alignments:
+            attributes['_fields_'] = _explicit_ctypes_fields(fields, field_indices, layout)
+            attributes['_layout_'] = 'ms'
+            attributes['_pack_'] = 1
+        elif cls._layout_config.alignment is not None:
+            attributes['_layout_'] = 'ms'
+            attributes['_pack_'] = cls._layout_config.alignment // 8
+        if cls._layout_config.abi_alignment is not None:
+            attributes['_align_'] = layout.alignment
+        struct_class = type(class_name, (ctypes.Structure,), attributes)
+        struct_class = align_ctypes_record(struct_class, layout.alignment, node)
+        validate_ctypes_layout(cls, struct_class, node, field_indices)
         
         cache[cls] = struct_class
         return struct_class
@@ -191,69 +195,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
     def _is_compile_class(cls) -> bool:
         """Check if this struct is from @compile decorated class"""
         return cls._python_class is not None
-    
-    @classmethod
-    def _build_llvm_field_map(cls, module_context=None) -> Dict[int, int]:
-        """Build mapping from PC field index to LLVM field index.
-        
-        Zero-sized types still have LLVM field indices when lowered as
-        empty structs.
-        
-        Args:
-            module_context: Optional module context for types that need it
-                           (e.g., @compile class types)
-        
-        Returns:
-            Dict[int, int]: PC field index -> LLVM field index
-                            -1 means the field has no LLVM representation
-        """
-        cls._ensure_field_types_resolved()
-        
-        field_map = {}
-        llvm_idx = 0
-        
-        for pc_idx, field_type in enumerate(cls._field_types):
-            # Check if field has LLVM representation
-            # Currently all types return non-None from get_llvm_type()
-            has_llvm_repr = True
-            
-            if hasattr(field_type, 'get_llvm_type'):
-                # For types that need module_context (like @compile class),
-                # we assume they have LLVM representation if module_context is not provided
-                # This is safe because all current types have LLVM representation
-                if module_context is not None:
-                    llvm_type = field_type.get_llvm_type(module_context)
-                    if llvm_type is None:
-                        has_llvm_repr = False
-                # else: assume has LLVM representation (safe default)
-            
-            if has_llvm_repr:
-                field_map[pc_idx] = llvm_idx
-                llvm_idx += 1
-            else:
-                field_map[pc_idx] = -1
-        
-        return field_map
-    
-    @classmethod
-    def _get_llvm_field_index(cls, pc_field_index: int, module_context=None) -> int:
-        """Get LLVM field index from PC field index.
-
-        The field map is materialized once and then frozen.
-
-        Args:
-            pc_field_index: PC field index (0-based)
-            module_context: Optional module context for building field map
-
-        Returns:
-            LLVM field index, or -1 for fields without an LLVM representation
-        """
-        if cls._llvm_field_map is None:
-            with _llvm_type_lock:
-                if cls._llvm_field_map is None:
-                    cls._llvm_field_map = cls._build_llvm_field_map(module_context)
-
-        return cls._llvm_field_map.get(pc_field_index, -1)
     
     @classmethod
     def get_llvm_type(cls, module_context=None, node=None) -> ir.Type:
@@ -271,69 +212,33 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
         Returns:
             LiteralStructType or IdentifiedStructType
         """
+        node = node or cls._layout_diagnostic_node(sys._getframe(1))
         if cls._field_types is None:
             logger.error("struct type requires field types", node=node, exc_type=TypeError)
 
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
+        from ..target_layout import uses_bit_storage
+        if uses_bit_storage(cls):
             from .bitfield_access import get_bit_storage_type
-            return get_bit_storage_type(cls.get_layout())
-        
+            return get_bit_storage_type(cls.get_layout(), node)
+
+        from ..builder.record_types import materialize_record, record_storage
+        from ..type_graph import prepare_type, record_definition, validate_type_graph
+
         if cls._is_compile_class() or cls._force_identified:
-            from ..type_graph import record_definition
             definition = record_definition(cls)
             if module_context is None:
-                logger.error(
-                    f"@compile class '{cls._canonical_name}' requires module_context",
-                    node=node, exc_type=TypeError)
-            from ..builder.record_types import materialize_record
-            return materialize_record(definition, module_context)
+                logger.error(f"struct '{cls.get_name()}' requires module_context",
+                             node=node, exc_type=TypeError)
+            return materialize_record(definition, module_context, node)
 
-        # Rule: Anonymous struct[...] always uses LiteralStructType
-        # Note: Field names affect PC type caching (via canonical_name) but not LLVM structure
-        
-        from ..type_graph import prepare_type, validate_type_graph
         prepare_type(cls)
         validate_type_graph(cls)
+        fields = tuple(field.get_llvm_type(module_context) for field in cls._field_types)
+        storage = record_storage(fields, cls, node)
+        record = ir.LiteralStructType(storage.elements, packed=storage.packed)
+        record._pythoc_field_paths = storage.field_paths
+        return record
 
-        # For LiteralStructType, need all fields resolved
-        cls._ensure_field_types_resolved()
-        
-        if any(isinstance(ft, str) for ft in cls._field_types):
-            logger.error(f"Cannot create LiteralStructType with unresolved field types: {cls._field_types}",
-                        node=node, exc_type=TypeError)
-        
-        # Keep zero-sized fields in the record so they have ordinary field indices.
-        llvm_field_types = []
-        for field_type in cls._field_types:
-            if hasattr(field_type, 'get_llvm_type'):
-                # Try to call with module_context, fallback to no args
-                import inspect
-                try:
-                    sig = inspect.signature(field_type.get_llvm_type)
-                    if len(sig.parameters) > 0:
-                        llvm_type = field_type.get_llvm_type(module_context)
-                    else:
-                        llvm_type = field_type.get_llvm_type()
-                    if llvm_type is not None:
-                        llvm_field_types.append(llvm_type)
-                except (ValueError, TypeError):
-                    llvm_type = field_type.get_llvm_type()
-                    if llvm_type is not None:
-                        llvm_field_types.append(llvm_type)
-            elif isinstance(field_type, ir.Type):
-                # ANTI-PATTERN: field_type should be BuiltinEntity, not ir.Type
-                logger.error(
-                    f"struct field type is raw LLVM type {field_type}. "
-                    f"This is a bug - use BuiltinEntity (i32, f64, etc.) instead.",
-                    node=node, exc_type=TypeError)
-            else:
-                logger.error(f"Unknown struct field type {field_type}", node=node, exc_type=TypeError)
-        
-        # Return LiteralStructType
-        return ir.LiteralStructType(llvm_field_types)
-    
     @classmethod
     def get_layout(cls):
         if cls._field_types is not None:
@@ -345,16 +250,11 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             from ..target_layout import TypeLayout
             return TypeLayout.empty()
 
-        from ..target_layout import get_target_layout, get_type_layout
-        from ..target_layout import NATURAL_LAYOUT, bit_aggregate_layout
-        layout_config = getattr(cls, '_layout_config', NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            return bit_aggregate_layout(
-                cls._field_names, cls._field_types, layout_config,
-                is_union=False,
-            )
-        fields = (get_type_layout(field) for field in cls._field_types)
-        return get_target_layout().struct(fields)
+        from ..target_layout import aggregate_layout
+        return aggregate_layout(
+            cls._field_names, cls._field_types, cls._layout_config,
+            cls._layout_diagnostic_node(sys._getframe(1)),
+        )
 
     @classmethod
     def get_size_bytes(cls) -> int:
@@ -406,10 +306,6 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             attr_name: Attribute name (string)
             node: Original ast.Attribute node
         """
-        import ast
-        from ..valueref import wrap_value, ensure_ir, get_type
-        from ..ir_helpers import propagate_qualifiers
-        
         # Ensure field types are resolved
         cls._ensure_field_types_resolved()
 
@@ -445,171 +341,51 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             logger.error(f"struct '{cls.get_name()}' has no field named '{attr_name}'",
                         node=node, exc_type=AttributeError)
 
-        field_index = cls._get_field_index(attr_name, node)
-        field_type = cls._field_types[field_index]
+        return cls._project_field(visitor, base, cls._get_field_index(attr_name, node), node)
 
-        # Propagate qualifiers from struct type to field type
-        # If we have const[struct], accessing field should give const[field_type]
-        if base.type_hint:
-            field_type = propagate_qualifiers(base.type_hint, field_type)
-        
-        from ..literal_protocol import project_tracking_metadata
-        result_var_name, result_linear_path = project_tracking_metadata(base, field_index)
-
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            from .bitfield_access import access_bit_field
-            return access_bit_field(
-                visitor,
-                base,
-                cls,
-                field_index,
-                field_type,
-                var_name=result_var_name,
-                linear_path=result_linear_path,
-            )
-        
-        module_context = visitor.module.context if visitor.module else None
-        llvm_field_index = cls._get_llvm_field_index(field_index, module_context)
-        if llvm_field_index == -1:
-            logger.error(f"Field '{attr_name}' has no LLVM representation",
-                        node=node, exc_type=TypeError)
-        
-        # Priority 1: Check if base has an address (for lvalue support)
-        if base.has_place():
-            # base is a loaded value with address (common case for variables)
-            struct_ptr = base.require_place()
-        else:
-            # Priority 2: base is a pure struct value without address
-            # Use extract_value (no lvalue support)
-            if base.is_struct_value():
-                struct_value = ensure_ir(base)
-                field_value = visitor.builder.extract_value(
-                    struct_value, llvm_field_index)
-                # For struct values without address, we can't provide lvalue
-                return wrap_value(
-                    field_value, kind="value", type_hint=field_type,
-                    var_name=result_var_name, linear_path=result_linear_path,
-                    linear_owner_id=base.linear_owner_id)
-            else:
-                logger.error(f"Cannot access field '{attr_name}' on non-struct type {base.type_hint}",
-                            node=node, exc_type=ValueError)
-        
-        # Use GEP to get field address
-        zero = ir.Constant(ir.IntType(32), 0)
-        idx = ir.Constant(ir.IntType(32), llvm_field_index)
-        field_ptr = visitor.builder.gep(struct_ptr, [zero, idx])
-        field_ptr = visitor.builder.bitcast(
-            field_ptr, ir.PointerType(field_type.get_llvm_type(module_context)))
-        
-        # Load value and return with address for lvalue support
-        
-        return wrap_value(
-            field_ptr,
-            kind="address",
-            type_hint=field_type,
-            address=field_ptr,
-            var_name=result_var_name,
-            linear_path=result_linear_path,
-            linear_owner_id=base.linear_owner_id,
-        )
-    
     @classmethod
     def handle_subscript(cls, visitor, base, index, node):
-        """Handle value subscript access on struct instances: s[0]
-        
-        Note: Type subscripts (struct[i32, f64]) are now handled by PythonType.handle_subscript
-        which extracts items and calls struct.handle_type_subscript directly.
-        This method only handles value subscripts.
-        
-        Args:
-            visitor: AST visitor
-            base: Pre-evaluated base object (ValueRef)
-            index: Pre-evaluated index (ValueRef)
-            node: Original ast.Subscript node
-        """
-        import ast
-        from ..valueref import wrap_value, ensure_ir, get_type
-
-        # VALUE SUBSCRIPT: s[0] - field access by index
-        # Ensure field types are resolved
+        """Project a field by its declaration index."""
         cls._ensure_field_types_resolved()
-        
-        # Extract constant index from pre-evaluated index ValueRef
-        index_val = extract_constant_index(index, node, "struct subscript")
-        
-        if index_val < 0 or index_val >= len(cls._field_types):
-            logger.error(f"struct index {index_val} out of range (0-{len(cls._field_types)-1})",
-                        node=node, exc_type=IndexError)
-        
-        field_type = cls._field_types[index_val]
+        index = extract_constant_index(index, node, 'struct subscript')
+        if not 0 <= index < len(cls._field_types):
+            logger.error(f'struct index {index} out of range (0-{len(cls._field_types)-1})',
+                         node=node, exc_type=IndexError)
+        return cls._project_field(visitor, base, index, node)
+
+    @classmethod
+    def _project_field(cls, visitor, base, index, node):
         from ..ir_helpers import propagate_qualifiers
-        field_type = propagate_qualifiers(base.type_hint, field_type)
-        
-        from ..target_layout import NATURAL_LAYOUT
-        layout_config = getattr(cls, "_layout_config", NATURAL_LAYOUT)
-        if not layout_config.is_natural:
-            from .bitfield_access import access_bit_field
-            from ..literal_protocol import project_tracking_metadata
-
-            result_var_name, result_linear_path = project_tracking_metadata(
-                base,
-                index_val,
-            )
-            return access_bit_field(
-                visitor,
-                base,
-                cls,
-                index_val,
-                field_type,
-                var_name=result_var_name,
-                linear_path=result_linear_path,
-            )
-        
-        # Get LLVM field index
-        module_context = visitor.module.context if visitor.module else None
-        llvm_index_val = cls._get_llvm_field_index(index_val, module_context)
-        if llvm_index_val == -1:
-            logger.error(f"Field [{index_val}] has no LLVM representation",
-                        node=node, exc_type=TypeError)
-        
-        # Priority: if base has address, use GEP for lvalue support.
-        # Otherwise, if base is a struct value, use extract_value.
-
         from ..literal_protocol import project_tracking_metadata
+        from ..target_layout import uses_bit_storage
+        from ..valueref import ensure_ir, wrap_value
 
-        result_var_name, result_linear_path = project_tracking_metadata(base, index_val)
+        field_type = propagate_qualifiers(base.type_hint, cls._field_types[index])
+        name, linear_path = project_tracking_metadata(base, index)
+        if uses_bit_storage(cls):
+            from .bitfield_access import access_bit_field
+            return access_bit_field(visitor, base, cls, index, field_type,
+                                    var_name=name, linear_path=linear_path)
 
-        if base.is_pointer_typed():
-            struct_ptr = ensure_ir(base)
-        elif base.has_place():
-            # Base is a loaded struct value with address - use GEP on address
-            struct_ptr = base.require_place()
-        elif base.is_struct_value():
-            # Base is a struct value without address (e.g., function return value)
-            # Use extract_value - this cannot be used as lvalue
-            struct_value = ensure_ir(base)
-            field_value = visitor.builder.extract_value(
-                struct_value, llvm_index_val)
-            return wrap_value(field_value, kind="value", type_hint=field_type,
-                              var_name=result_var_name, linear_path=result_linear_path,
-                              linear_owner_id=base.linear_owner_id)
-        else:
-            logger.error(f"Cannot access field [{index_val}] on non-struct type",
-                        node=node, exc_type=ValueError)
-        
-        # Use GEP to get field address
-        zero = ir.Constant(ir.IntType(32), 0)
-        idx = ir.Constant(ir.IntType(32), llvm_index_val)
-        field_ptr = visitor.builder.gep(struct_ptr, [zero, idx])
-        field_ptr = visitor.builder.bitcast(
-            field_ptr, ir.PointerType(field_type.get_llvm_type(module_context)))
-        
-        # Load value and return with address for lvalue support
-        return wrap_value(field_ptr, kind="address", type_hint=field_type, address=field_ptr,
-                        var_name=result_var_name, linear_path=result_linear_path,
+        address = ensure_ir(base) if base.is_pointer_typed() else base.get_place()
+        if address is None and not base.is_struct_value():
+            logger.error(f'Cannot access field [{index}] on non-struct type',
+                         node=node, exc_type=ValueError)
+        record = address.type.pointee if address is not None else ensure_ir(base).type
+        path = record._pythoc_field_paths[index]
+        if path is None:
+            logger.error(f'Field [{index}] has no LLVM representation',
+                         node=node, exc_type=TypeError)
+
+        metadata = dict(type_hint=field_type, var_name=name, linear_path=linear_path,
                         linear_owner_id=base.linear_owner_id)
+        if address is None:
+            value = visitor.builder.extract_value(ensure_ir(base), path)
+            return wrap_value(value, kind='value', **metadata)
+
+        indices = [ir.Constant(ir.IntType(32), i) for i in (0, *path)]
+        pointer = visitor.builder.gep(address, indices)
+        return wrap_value(pointer, kind='address', address=pointer, **metadata)
 
     @classmethod
     def get_all_fields(cls, visitor, base, node) -> list:
@@ -640,6 +416,28 @@ class StructType(CompositeType, metaclass=StructTypeMeta):
             fields.append(visitor.value_dispatcher.read_rvalue(field_vref))
         
         return fields
+
+
+def _explicit_ctypes_fields(fields, field_indices, layout):
+    """Represent the already planned field offsets using packed ctypes storage."""
+    import ctypes
+
+    names = {name for name, _ in fields}
+    output = []
+    cursor = 0
+    padding_index = 0
+    for (name, ctype), (index, _) in zip(fields, field_indices):
+        offset = layout.field_offsets[index]
+        if offset > cursor:
+            padding = f'_pc_padding_{padding_index}'
+            while padding in names:
+                padding_index += 1
+                padding = f'_pc_padding_{padding_index}'
+            output.append((padding, ctypes.c_ubyte * (offset - cursor)))
+            padding_index += 1
+        output.append((name, ctype))
+        cursor = offset + ctypes.sizeof(ctype)
+    return output
 
 
 def create_struct_type(field_types: List[Any], field_names: Optional[List[str]] = None,
@@ -728,23 +526,12 @@ class struct(StructType):
     - @struct(anonymous=True) - decorator with anonymous naming
     """
     
-    def __init__(self, target=None, suffix=None, anonymous=False):
-        """Initialize struct decorator with optional parameters"""
-        self.target = target
-        self.suffix = suffix
-        self.anonymous = anonymous
-    
-    def __call__(self, cls):
-        """Decorator application"""
-        return self._apply_decorator(cls, self.suffix, self.anonymous)
-    
     def __new__(cls, target=None, suffix=None, **kwargs):
         """Support @struct decorator syntax with parameters
         
         Uses the common decorator pattern from CompositeType base class.
         """
-        # Delegate to base class factory method
-        return cls.create_decorator_instance(target, suffix, **kwargs)
+        return cls.create_decorator_instance(target, suffix, kwargs)
     
     @classmethod
     def get_name(cls) -> str:

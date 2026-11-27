@@ -3,7 +3,7 @@
 import unittest
 
 from pythoc import (
-    array, compile, f64, i32, nullptr, ptr, static, union,
+    array, compile, f64, i16, i32, nullptr, ptr, static, union,
 )
 
 
@@ -17,6 +17,25 @@ class ZeroInner:
 class ZeroOuter:
     tag: i32
     inner: ZeroInner
+
+
+@union
+class StaticAlternative:
+    storage: array[i32, 2]
+    number: i32
+
+
+@compile
+class StaticSeeds:
+    selected: static[StaticAlternative] = {'number': 17}
+
+
+@compile
+def named_union_constants() -> i32:
+    selected: static[array[StaticAlternative, 2]] = (
+        {'number': 3}, {'storage': (5, 7)},
+    )
+    return StaticSeeds.selected.number + selected[0].number + selected[1].storage[1]
 
 
 @compile
@@ -50,6 +69,15 @@ def bool_integer_constants() -> i32:
     return values[0] * 10 + values[1]
 
 
+@compile
+def cast_and_negate_constants() -> i32:
+    values: static[array[array[i16, 2], 2]] = (
+        (i16((1.402 * (1 << 6)) + 0.5), -i32(i16((0.3441 * (1 << 6)) + 0.5))),
+        (i16(6) * i16(7), i16(4) + i16(1)),
+    )
+    return i32(values[0][0]) + i32(values[0][1]) + i32(values[1][0]) + i32(values[1][1])
+
+
 class TestConstantInitialization(unittest.TestCase):
     def test_nested_struct_zero(self):
         self.assertEqual(nested_struct_zero(), 10)
@@ -60,8 +88,14 @@ class TestConstantInitialization(unittest.TestCase):
     def test_zero_union(self):
         self.assertEqual(zero_union(), 0)
 
+    def test_named_union_constants_in_static_storage(self):
+        self.assertEqual(named_union_constants(), 27)
+
     def test_bool_integer_constants(self):
         self.assertEqual(bool_integer_constants(), 10)
+
+    def test_native_integer_operations_remain_static_constants(self):
+        self.assertEqual(cast_and_negate_constants(), 115)
 
 
 if __name__ == "__main__":

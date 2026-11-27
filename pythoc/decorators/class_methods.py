@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..logger import logger
 from ..context import INHERIT_EFFECT_SUFFIX as _INHERIT_EFFECT_SUFFIX
+from ..source import SourceLocation
 
 
 def _is_class_callable(member) -> bool:
@@ -159,6 +160,7 @@ def attach_class_methods(
 
         wrapper = _compile_impl(
             member,
+            SourceLocation(member.__code__.co_filename, member.__code__.co_firstlineno),
             compile_suffix=implicit_method_suffix,
             effect_suffix=effect_suffix,
             captured_symbols=method_symbols,

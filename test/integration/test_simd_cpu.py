@@ -24,6 +24,7 @@ from pythoc import (
     simd_reduce_add,
     simd_reduce_max,
     simd_store,
+    static,
     u16,
     u32,
 )
@@ -51,6 +52,14 @@ def test_simd_fma_reduce() -> i32:
 def test_simd_int_reduce_and_extract() -> i32:
     v: simd[i32, 4] = simd[i32, 4](3)
     return simd_reduce_add(v) + v[2]
+
+
+@compile
+def simd_sequence_values(runtime_lane: i32) -> i32:
+    seed: static[simd[i32, 4]] = simd[i32, 4]((7, 11, 13, 17))
+    zeros: static[simd[i32, 4]] = simd[i32, 4](0)
+    value = simd[i32, 4]((seed[1], runtime_lane, zeros[3], seed[3]))
+    return simd_reduce_add(value)
 
 
 @compile
@@ -94,6 +103,9 @@ class TestCpuSimd(unittest.TestCase):
 
     def test_int_reduce_and_extract(self):
         self.assertEqual(test_simd_int_reduce_and_extract(), 15)
+
+    def test_sequences_build_static_and_runtime_vectors(self):
+        self.assertEqual(simd_sequence_values(3), 31)
 
     def test_load_max_and_unsigned_div(self):
         values = (ctypes.c_uint32 * 4)(2, 8, 0xFFFFFFFE, 4)

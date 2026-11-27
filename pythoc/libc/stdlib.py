@@ -29,12 +29,12 @@ def realloc(ptr: ptr[void], size: size_t) -> ptr[void]:
     pass
 
 # Program control
-@extern(lib='c')
+@extern(lib='c', attrs={'noreturn'})
 def exit(status: i32) -> None:
     """Exit program"""
     pass
 
-@extern(lib='c')
+@extern(lib='c', attrs={'noreturn'})
 def abort() -> None:
     """Abort program"""
     pass

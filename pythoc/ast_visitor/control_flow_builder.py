@@ -40,12 +40,16 @@ if TYPE_CHECKING:
     from ..builder import LLVMBuilder
 
 
+class _TerminatedExpression(Exception):
+    """An expression has no continuation in the CFG."""
+
+
 @dataclass
 class PendingGoto:
     """A forward goto reference waiting to be resolved.
 
     Attributes:
-        block: The IR block where the goto was issued
+        block: The continuation of the goto, or None if a defer terminates it.
         label_name: Target label name
         goto_scope_depth: Scope depth when goto was issued
         defer_snapshot: List of (depth, callable_obj, func_ref, args, node) tuples
@@ -187,15 +191,6 @@ class ControlFlowBuilder:
             },
         )
 
-    def bitcast(self, value, typ, name=''):
-        """Fold static addresses before assigning a runtime PCIR register."""
-        from ..builder.llvm_simple_builder import LLVMBuilder
-
-        constant = LLVMBuilder._constant_pointer_bitcast(value, typ)
-        if constant is not None:
-            return constant
-        return self.__getattr__('bitcast')(value, typ, name=name)
-
     def __getattr__(self, name):
         """Record PCIR instruction instead of delegating to real builder.
 
@@ -209,7 +204,7 @@ class ControlFlowBuilder:
         # During build phase: return a PCIR recorder
         def _record(*args, **kwargs):
             from ..llvm_extensions import fold_instruction
-            folded = fold_instruction(name, args)
+            folded = fold_instruction(name, args, inbounds=kwargs.get('inbounds', False))
             if folded is not None:
                 return folded
             infer_kwargs = dict(kwargs)
@@ -227,6 +222,24 @@ class ControlFlowBuilder:
             return vreg
 
         return _record
+
+    def alloca_in_entry(self, typ, name):
+        block = self.block
+        self.position_at_start(self.entry_block)
+        place = self.alloca(typ, name=name)
+        self.position_at_end(block)
+        return place
+
+    def aggregate_value(self, pc_type, values, node, context):
+        return self._real_builder.aggregate_value(pc_type, values, node, context, emitter=self)
+
+    def union_value(self, pc_type, member, name, node, context, constant_only):
+        return self._real_builder.union_value(
+            pc_type, member, name, node, context, constant_only, emitter=self,
+        )
+
+    def vector_value(self, pc_type, lanes, context):
+        return self._real_builder.vector_value(pc_type, lanes, context, emitter=self)
 
     def _append_pcir(self, inst: PCIRInst):
         """Append a PCIR instruction to the current block.
@@ -290,6 +303,15 @@ class ControlFlowBuilder:
             ir_terminated = self._real_builder.block.is_terminated
             return cfg_terminated or ir_terminated
         return self._terminated.get(self._current_block_id, False)
+
+    def lower_expression(self, lower, *args):
+        """Lower an expression and unwind if it closes its continuation."""
+        # Compile-time label discovery can start with a closed block.
+        entered_open = not self.is_terminated()
+        result = lower(*args)
+        if entered_open and self.is_terminated():
+            raise _TerminatedExpression
+        return result
 
     def create_block(self, name: str):
         """Create a new basic block.
@@ -401,11 +423,18 @@ class ControlFlowBuilder:
 
     def unreachable(self):
         """Record an unreachable instruction."""
-        if not self._finalized:
-            self._terminated[self._current_block_id] = True
-            logger.debug(f"CFG: unreachable at CFGBlock({self._current_block_id})")
+        self._record_terminal('unreachable')
 
-        self._append_pcir(PCIRInst(op='unreachable', args=(), kwargs={}))
+    def trap(self):
+        """Record a runtime trap with no successor."""
+        self._record_terminal('trap')
+
+    def _record_terminal(self, op):
+        if not self._finalized:
+            self.mark_terminated()
+            logger.debug(f"CFG: {op} at CFGBlock({self._current_block_id})")
+
+        self._append_pcir(PCIRInst(op=op, args=(), kwargs={}))
 
     def require_unreachable(self, message: str, node: ast.AST):
         """Reject a reachable path here after all forward edges are resolved."""
@@ -667,6 +696,8 @@ class ControlFlowBuilder:
             return
 
         for pending in self._pending_gotos:
+            if pending.block is None:
+                continue
             if pending.goto_scope_depth < scope_depth:
                 continue
             if pending.emitted_to_depth <= scope_depth:
@@ -695,7 +726,7 @@ class ControlFlowBuilder:
                 defer_executor(callable_obj, func_ref, args, defer_node)
 
             # Update pending.block (defers may create new blocks via inlining)
-            pending.block = self._block_map.get(self._current_block_id)
+            pending.block = None if self.is_terminated() else self.block
 
             # Restore recording position
             self.restore_recording(saved)
@@ -722,6 +753,10 @@ class ControlFlowBuilder:
                             node=pending.node)
                 continue
 
+            if pending.block is None:
+                resolved.append(pending)
+                continue
+
             # Switch recording to pending block
             saved = self.resume_recording_at(pending.block)
 
@@ -741,7 +776,8 @@ class ControlFlowBuilder:
                 defer_executor(callable_obj, func_ref, args, defer_node)
 
             # Emit branch to target
-            self._record_branch(target_block, 'goto', pending.node)
+            if not self.is_terminated():
+                self._record_branch(target_block, 'goto', pending.node)
 
             # Restore recording position
             self.restore_recording(saved)

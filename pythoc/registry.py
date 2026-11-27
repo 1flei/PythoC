@@ -132,6 +132,7 @@ class FunctionInfo:
     # None keeps the default external linkage; validated values are
     # 'internal', 'weak_odr', 'linkonce_odr' (see validate_func_linkage).
     linkage: Optional[str] = None
+    visibility: Optional[str] = None
     binding_state: Optional[Any] = None
     # Parametric polymorphism metadata (populated when parameters are annotated with ``param``).
     parametric_indices: Optional[List[int]] = None

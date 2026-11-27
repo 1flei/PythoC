@@ -49,7 +49,7 @@ class TestExternDefinition(unittest.TestCase):
     def test_matching_local_definition_is_reused(self):
         module = ir.Module()
         local = LLVMBuilder().declare_function(
-            module, "native_function", [ir.IntType(32)], ir.IntType(32),
+            module, "native_function", [i32], i32,
         ).ir_function
         ir.IRBuilder(local.append_basic_block("entry")).ret(local.args[0])
         self.assertIs(ensure_ir(lower_extern_wrapper(declared, module)), local)

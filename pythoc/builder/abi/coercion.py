@@ -40,20 +40,23 @@ def pack_struct_for_return(builder: ir.IRBuilder, struct_value: ir.Value,
     original_type = coercion.original_type
     coerced_type = coercion.coerced_type
     
-    # Strategy: alloca original struct, store value, bitcast pointer, load as coerced
-    # This works because memory layout matches
-    
-    # Allocate space for the struct
-    alloca = alloca_in_entry(builder, original_type, name="struct.coerce")
-    builder.store(struct_value, alloca)
-    
-    # Load as the coerced type
-    # For opaque pointers, we can load any type from any pointer
-    # Cast pointer to coerced type pointer first
-    coerced_ptr = builder.bitcast(alloca, ir.PointerType(coerced_type), name="coerce.ptr")
-    coerced_value = builder.load(coerced_ptr, name="coerced")
-    
-    return coerced_value
+    return _coerce_storage(builder, struct_value, original_type, coerced_type)
+
+
+def _coerce_storage(builder, value, source, target):
+    from ...target_layout import get_target_layout
+    layout = get_target_layout()
+    # A register carrier can widen a partial eightbyte, or omit tail padding.
+    source_size = layout.primitive(source).allocation_size
+    target_size = layout.primitive(target).allocation_size
+    wider = target_size > source_size
+    slot = alloca_in_entry(builder, target if wider else source, name="abi.slot")
+    if wider:
+        builder.store(ir.Constant(target, None), slot)
+    src = builder.bitcast(slot, ir.PointerType(source))
+    dst = builder.bitcast(slot, ir.PointerType(target))
+    builder.store(value, src, align=1)
+    return builder.load(dst, align=1, name="abi.value")
 
 
 def unpack_struct_from_return(builder: ir.IRBuilder, coerced_value: ir.Value,
@@ -80,19 +83,7 @@ def unpack_struct_from_return(builder: ir.IRBuilder, coerced_value: ir.Value,
     original_type = coercion.original_type
     coerced_type = coercion.coerced_type
     
-    # Strategy: alloca coerced type, store value, load as original struct
-    # This works because memory layout matches
-    
-    # Allocate space for the coerced value
-    alloca = alloca_in_entry(builder, coerced_type, name="coerce.unpack")
-    builder.store(coerced_value, alloca)
-    
-    # Load as the original struct type
-    # Cast pointer to struct type pointer first
-    struct_ptr = builder.bitcast(alloca, ir.PointerType(original_type), name="struct.ptr")
-    struct_value = builder.load(struct_ptr, name="struct.unpacked")
-    
-    return struct_value
+    return _coerce_storage(builder, coerced_value, coerced_type, original_type)
 
 
 def create_sret_alloca(builder: ir.IRBuilder, struct_type: ir.Type) -> ir.AllocaInstr:
@@ -149,14 +140,7 @@ def pack_struct_for_argument(builder: ir.IRBuilder, struct_value: ir.Value,
     
     coerced_type = coercion.coerced_type
     
-    # Strategy: alloca original struct, store value, bitcast pointer, load as coerced
-    alloca = alloca_in_entry(builder, original_type, name="arg.coerce")
-    builder.store(struct_value, alloca)
-    
-    coerced_ptr = builder.bitcast(alloca, ir.PointerType(coerced_type), name="arg.coerce.ptr")
-    coerced_value = builder.load(coerced_ptr, name="arg.coerced")
-    
-    return coerced_value
+    return _coerce_storage(builder, struct_value, original_type, coerced_type)
 
 
 def unpack_coerced_parameter(builder, coerced_value: ir.Value,
@@ -186,11 +170,4 @@ def unpack_coerced_parameter(builder, coerced_value: ir.Value,
         # byval: coerced_value is a pointer to the struct, just load it
         return builder.load(coerced_value, name="param.byval.load")
     
-    # Coerced: alloca coerced type, store value, bitcast, load as struct
-    alloca = alloca_in_entry(builder, coerced_type, name="param.coerce.unpack")
-    builder.store(coerced_value, alloca)
-    
-    struct_ptr = builder.bitcast(alloca, ir.PointerType(original_type), name="param.struct.ptr")
-    struct_value = builder.load(struct_ptr, name="param.struct")
-    
-    return struct_value
+    return _coerce_storage(builder, coerced_value, coerced_type, original_type)

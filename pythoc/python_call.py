@@ -240,7 +240,7 @@ def try_bind_installed_adapter(wrapper) -> bool:
     module = _load_manifest_extension(manifest)
     install_module(module, [wrapper])
     address = module.adapter_address(export_id)
-    wrapper.bind_adapter(address)
+    wrapper.bind_adapter((address, 0))
     wrapper._pythoc_extension = module
     return True
 

@@ -61,6 +61,14 @@ def test_fn_asm_no_sideeffect() -> i32:
     return i32(1)
 
 
+if sys.platform.startswith('linux'):
+    @compile
+    def asm_quoted_directive() -> i32:
+        llvm_asm('.pushsection .rodata\n.ascii "a\\"b"\n.byte ${0:c}\n.popsection',
+                 'n', inputs=[-8])
+        return 7
+
+
 # ============================================================
 # Test functions: multiple asm calls
 # ============================================================
@@ -219,6 +227,10 @@ class TestLlvmAsm(DeferredTestCase):
     def test_asm_no_sideeffect(self):
         """Non-side-effect asm compiles (optimizer may elide)."""
         self.assertEqual(test_fn_asm_no_sideeffect(), 1)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'requires ELF assembler directives')
+    def test_asm_preserves_assembler_quotes_and_escapes(self):
+        self.assertEqual(asm_quoted_directive(), 7)
 
     # --- Multiple / control flow ---
 

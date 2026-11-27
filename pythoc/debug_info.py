@@ -14,6 +14,41 @@ from typing import Any, Dict, List, Optional
 from llvmlite import ir
 
 
+class MetadataModule(ir.Module):
+    """Deduplicate metadata using already interned operand references."""
+
+    @staticmethod
+    def _metadata_key(value):
+        if isinstance(value, (ir.MDValue, ir.DIValue)):
+            # Metadata is a DAG. Hashing whole child nodes repeats work for
+            # every path that reaches a shared child.
+            return (type(value), id(value))
+        if isinstance(value, ir.DIToken):
+            return (ir.DIToken, value.value)
+        return value
+
+    def add_metadata(self, operands):
+        if not isinstance(operands, (list, tuple)):
+            raise TypeError(f'expected a list or tuple of metadata values, got {operands!r}')
+        operands = self._fix_metadata_operands(operands)
+        key = tuple(self._metadata_key(value) for value in operands)
+        value = self._metadatacache.get(key)
+        if value is None:
+            value = ir.MDValue(self, operands, name=str(len(self.metadata)))
+            self._metadatacache[key] = value
+        return value
+
+    def add_debug_info(self, kind, operands, is_distinct=False):
+        operands = tuple(sorted(self._fix_di_operands(operands.items())))
+        key = (kind, tuple((name, self._metadata_key(value)) for name, value in operands),
+               is_distinct)
+        value = self._metadatacache.get(key)
+        if value is None:
+            value = ir.DIValue(self, is_distinct, kind, operands, name=str(len(self.metadata)))
+            self._metadatacache[key] = value
+        return value
+
+
 # DWARF language constants used by LLVM.
 _DW_LANG_C99 = 0xC
 
@@ -143,9 +178,8 @@ class DebugInfoBuilder:
 
     def _build_debug_type(self, pc_type: Any) -> Optional[ir.DIValue]:
         """Inner helper without caching; returns None for unsupported types."""
-        from .target_layout import NATURAL_LAYOUT
-        layout_config = getattr(pc_type, '_layout_config', NATURAL_LAYOUT)
-        if not layout_config.is_natural:
+        from .target_layout import uses_bit_storage
+        if uses_bit_storage(pc_type):
             from .builtin_entities import array, u8
             size = pc_type.get_layout().allocation_size
             storage = self._build_member_type('_storage', array[u8, size], 0)
@@ -281,15 +315,14 @@ class DebugInfoBuilder:
     ) -> ir.DIValue:
         """Build a DWARF member descriptor for a struct/union field."""
         size_bits = self._get_type_size_bits(pc_type)
-        field_di = self.get_debug_type(pc_type)
+        field_di = self._debug_type_or_unspecified(pc_type)
         fields: Dict[str, Any] = {
             'tag': ir.DIToken('DW_TAG_member'),
             'name': name,
             'size': size_bits,
             'offset': offset_bits,
+            'baseType': field_di,
         }
-        if field_di is not None:
-            fields['baseType'] = field_di
         return self.module.add_debug_info('DIDerivedType', fields)
 
     def _build_struct_debug_type(self, pc_type: Any) -> Optional[ir.DIValue]:
@@ -300,13 +333,10 @@ class DebugInfoBuilder:
         field_names = self._get_field_names(pc_type)
 
         members: List[ir.DIValue] = []
-        offset_bits = 0
-        for i, ft in enumerate(field_types):
-            align_bits = self._get_type_alignment_bits(ft)
-            offset_bits = ((offset_bits + align_bits - 1) // align_bits) * align_bits
+        offsets = pc_type.get_layout().field_offsets_bits
+        for i, (ft, offset_bits) in enumerate(zip(field_types, offsets)):
             name = field_names[i] if field_names[i] is not None else f'field_{i}'
             members.append(self._build_member_type(name, ft, offset_bits))
-            offset_bits += self._get_type_size_bits(ft)
 
         # Total size comes from the type itself rather than recomputing.
         total_size = self._get_type_size_bits(pc_type)
@@ -406,6 +436,17 @@ class DebugInfoBuilder:
         self._unspecified_type = cached
         return cached
 
+    def _debug_type_or_unspecified(self, pc_type: Any) -> ir.DIValue:
+        debug_type = self.get_debug_type(pc_type)
+        if debug_type is not None:
+            return debug_type
+        pc_type = _resolve_type(pc_type)
+        name = pc_type.get_name() if hasattr(pc_type, 'get_name') else '<unknown>'
+        return self.module.add_debug_info('DIBasicType', {
+            'tag': ir.DIToken('DW_TAG_unspecified_type'),
+            'name': name,
+        })
+
     def _build_array_debug_type(self, pc_type: Any) -> Optional[ir.DIValue]:
         """Build a DWARF array type for pythoc array[T, dims...]."""
         element_type = getattr(pc_type, 'element_type', None)
@@ -413,7 +454,7 @@ class DebugInfoBuilder:
         if element_type is None or not dimensions:
             return None
 
-        element_di = self.get_debug_type(element_type)
+        element_di = self._debug_type_or_unspecified(element_type)
 
         # Compute element size in bits as the starting size using existing APIs.
         current_size_bits = self._get_type_size_bits(element_type)
@@ -428,9 +469,8 @@ class DebugInfoBuilder:
                 'tag': ir.DIToken('DW_TAG_array_type'),
                 'size': current_size_bits,
                 'elements': elements_md,
+                'baseType': current_di,
             }
-            if current_di is not None:
-                fields['baseType'] = current_di
             current_di = self.module.add_debug_info('DICompositeType', fields)
 
         return current_di
@@ -536,7 +576,7 @@ class DebugInfoBuilder:
         arg_index: Optional[int] = None,
     ) -> 'ir.DIValue':
         """Create a DILocalVariable for a parameter or local variable."""
-        debug_type = self.get_debug_type(pc_type)
+        debug_type = self._debug_type_or_unspecified(pc_type)
 
         # DILocalVariable only accepts a line number, not a column.
         fields: Dict[str, Any] = {
@@ -544,9 +584,8 @@ class DebugInfoBuilder:
             'scope': subprogram,
             'file': self._file,
             'line': line,
+            'type': debug_type,
         }
-        if debug_type is not None:
-            fields['type'] = debug_type
         if is_parameter and arg_index is not None:
             fields['arg'] = arg_index
 

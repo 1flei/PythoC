@@ -60,7 +60,7 @@ def call_table(index: i32, value: i32) -> i32:
 def table_data_aliases() -> bool:
     table = get_table()
     first = ptr[i32](table.entries[0].data)
-    second = ptr[i32](table.entries[1].data)
+    second = table.entries[1].data
     return first == second and first == ptr(Data.counter)
 
 
@@ -75,7 +75,8 @@ def write_table_data(delta: i32) -> i32:
 @compile
 def table_null_entry() -> bool:
     entry = get_table().entries[2]
-    return entry.callback == nullptr and entry.data == nullptr
+    data = ptr[i32](entry.data)
+    return entry.callback == nullptr and data == nullptr and nullptr == data
 
 
 @compile
@@ -90,6 +91,12 @@ def use_data(delta: i32) -> i32:
 def use_external(value: i32) -> i32:
     callback: static[ptr[void]] = ptr[void](abs)
     return func[i32, i32](callback)(value)
+
+
+@compile
+def call_constant_casts(value: i32) -> i32:
+    absolute = func[i32, i32](ptr[void](abs))(value)
+    return func[i32, i32](ptr[void](plus))(absolute)
 
 
 @compile
@@ -126,6 +133,10 @@ class ConstantPointerCastsTest(unittest.TestCase):
         for value, expected in ((-9, 9), (0, 0), (9, 9)):
             with self.subTest(value=value):
                 self.assertEqual(use_external(value), expected)
+
+    def test_direct_calls_through_constant_function_pointer_casts(self):
+        self.assertEqual(call_constant_casts(-9), 12)
+        self.assertEqual(call_constant_casts(7), 10)
 
     def test_runtime_conversion_writes_the_original_variable(self):
         for value in (-7, 0, 23):

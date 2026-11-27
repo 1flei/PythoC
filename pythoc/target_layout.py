@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from types import MappingProxyType
@@ -10,6 +11,7 @@ from typing import Iterable, Mapping, Optional, Tuple
 
 from llvmlite import binding, ir
 from .config import config
+from .logger import logger
 
 
 try:
@@ -35,6 +37,7 @@ class TypeLayout:
     field_offsets_bits: Tuple[int, ...] = ()
     field_widths_bits: Tuple[int, ...] = ()
     field_storage_units_bits: Tuple[int, ...] = ()
+    member_alignment_bits: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.storage_bits < 0 or self.allocation_bits < 0:
@@ -83,6 +86,11 @@ class TypeLayout:
         return self._bytes(self.alignment_bits, "ABI alignment")
 
     @property
+    def member_alignment(self) -> int:
+        return self._bytes(self.member_alignment_bits or self.alignment_bits,
+                           "member alignment")
+
+    @property
     def stride(self) -> int:
         return self._bytes(self.stride_bits, "stride")
 
@@ -122,7 +130,12 @@ def _normalize_named_bits(
 
 @dataclass(frozen=True)
 class AggregateLayoutConfig:
-    """Orthogonal bit-placement and ABI configuration for an aggregate."""
+    """Member placement and ABI alignment in bits.
+
+    An ordinary member keeps its allocated size and takes the lesser of
+    its natural alignment and the requested alignment. Bit storage options
+    describe placement within integer allocation units.
+    """
 
     alignment: Optional[int] = None
     storage_unit: Optional[int] = None
@@ -131,7 +144,7 @@ class AggregateLayoutConfig:
     abi_alignment: Optional[int] = None
     storage_unit_overrides: Tuple[Tuple[str, int], ...] = ()
     unit_break_before: Tuple[Tuple[str, int], ...] = ()
-    explicit: bool = False
+    member_alignments: Tuple[Tuple[str, int], ...] = ()
 
     def __post_init__(self) -> None:
         _validate_power_of_two(self.alignment, "alignment")
@@ -142,7 +155,7 @@ class AggregateLayoutConfig:
         if self.bit_order not in ("lsb0", "msb0"):
             raise ValueError("bit_order must be 'lsb0' or 'msb0'")
         for name, bits in (
-            self.storage_unit_overrides + self.unit_break_before
+            self.storage_unit_overrides + self.unit_break_before + self.member_alignments
         ):
             if not isinstance(name, str) or not isinstance(bits, int):
                 raise TypeError("field layout overrides must contain name/bit pairs")
@@ -153,18 +166,23 @@ class AggregateLayoutConfig:
         ):
             if value is not None and value % 8:
                 raise ValueError(f"{name} must be byte-addressable")
+        if any(bits % 8 for _, bits in self.member_alignments):
+            raise ValueError("member alignments must be byte-addressable")
+        if self.member_alignments and self.has_bit_placement:
+            raise ValueError("member_alignments requires byte-addressable fields")
 
     @property
     def is_natural(self) -> bool:
-        return not self.explicit and (
-            self.alignment is None
-            and self.storage_unit is None
-            and self.abi_alignment is None
-            and not self.storage_unit_overrides
-            and not self.unit_break_before
-            and not self.cross_unit
-            and self.bit_order == "lsb0"
-        )
+        return (self.alignment is None and self.abi_alignment is None
+                and not self.member_alignments
+                and not self.has_bit_placement)
+
+    @property
+    def has_bit_placement(self) -> bool:
+        return bool((self.alignment is not None and self.alignment < 8)
+                    or self.storage_unit is not None or self.cross_unit
+                    or self.bit_order != "lsb0" or self.storage_unit_overrides
+                    or self.unit_break_before)
 
     @property
     def override_map(self):
@@ -183,7 +201,8 @@ class AggregateLayoutConfig:
             self.abi_alignment,
             self.storage_unit_overrides,
             self.unit_break_before,
-            self.explicit,
+            self.member_alignments,
+            not self.is_natural,
         ))
 
 
@@ -199,6 +218,7 @@ def make_aggregate_layout_config(**kwargs) -> AggregateLayoutConfig:
         "abi_alignment",
         "storage_unit_overrides",
         "unit_break_before",
+        "member_alignments",
     }
     unknown = set(kwargs) - allowed
     if unknown:
@@ -213,8 +233,19 @@ def make_aggregate_layout_config(**kwargs) -> AggregateLayoutConfig:
         normalized.get("unit_break_before"),
         "unit_break_before",
     )
-    normalized["explicit"] = bool(kwargs)
+    normalized["member_alignments"] = _normalize_named_bits(
+        normalized.get("member_alignments"), "member_alignments",
+    )
     return AggregateLayoutConfig(**normalized)
+
+
+@contextmanager
+def report_layout_errors(node):
+    """Report layout failures at the declaration or the use requesting it."""
+    try:
+        yield
+    except (TypeError, ValueError) as error:
+        logger.error(error, node=node)
 
 
 def _integer_bit_width(pc_type) -> int:
@@ -484,16 +515,26 @@ class TargetLayout:
             )
         return result
 
-    def struct(self, fields: Iterable[TypeLayout]) -> TypeLayout:
+    def struct(
+        self, fields: Iterable[TypeLayout], config: AggregateLayoutConfig = NATURAL_LAYOUT,
+        *, member_minima=(),
+    ) -> TypeLayout:
         offsets = []
         end = 0
         alignment = 8
-        for field in fields:
-            end = align_up(end, field.alignment_bits)
+        for index, field in enumerate(fields):
+            member_alignment = field.alignment_bits
+            if config.alignment is not None:
+                member_alignment = min(member_alignment, config.alignment)
+            if member_minima:
+                member_alignment = max(member_alignment, member_minima[index])
+            end = align_up(end, member_alignment)
             offsets.append(end)
             end += field.allocation_bits
-            alignment = max(alignment, field.alignment_bits)
+            alignment = max(alignment, member_alignment)
 
+        member_alignment = alignment
+        alignment = self._record_alignment(member_alignment, config)
         allocation_size = align_up(end, alignment)
         return TypeLayout(
             storage_bits=end,
@@ -501,15 +542,28 @@ class TargetLayout:
             alignment_bits=alignment,
             stride_bits=allocation_size,
             field_offsets_bits=tuple(offsets),
+            member_alignment_bits=member_alignment,
         )
 
-    def union(self, fields: Iterable[TypeLayout]) -> TypeLayout:
+    def union(
+        self, fields: Iterable[TypeLayout], config: AggregateLayoutConfig = NATURAL_LAYOUT,
+        *, member_minima=(),
+    ) -> TypeLayout:
         field_layouts = tuple(fields)
         if not field_layouts:
-            return TypeLayout.empty()
+            if config.abi_alignment is None:
+                return TypeLayout.empty()
+            alignment = config.abi_alignment
+            return TypeLayout(0, alignment, alignment, alignment)
 
         storage_size = max(field.allocation_bits for field in field_layouts)
         alignment = max(field.alignment_bits for field in field_layouts)
+        if config.alignment is not None:
+            alignment = min(alignment, config.alignment)
+        if member_minima:
+            alignment = max(alignment, *member_minima)
+        member_alignment = alignment
+        alignment = self._record_alignment(member_alignment, config)
         allocation_size = align_up(storage_size, alignment)
         return TypeLayout(
             storage_bits=storage_size,
@@ -517,11 +571,27 @@ class TargetLayout:
             alignment_bits=alignment,
             stride_bits=allocation_size,
             field_offsets_bits=(0,) * len(field_layouts),
+            member_alignment_bits=member_alignment,
         )
 
-    @lru_cache(maxsize=32)
-    def alignment_carrier(self, alignment: int) -> ir.Type:
+    @staticmethod
+    def _record_alignment(member_alignment, config):
+        if config.abi_alignment is None:
+            return member_alignment
+        if config.abi_alignment < member_alignment:
+            raise ValueError("record ABI alignment cannot be below member alignment")
+        return config.abi_alignment
+
+    def alignment_carrier(self, alignment: int, node) -> ir.Type:
         """Return storage with exactly the requested allocation and alignment."""
+        carrier = self._find_alignment_carrier(alignment)
+        if carrier is None:
+            logger.error(f'target {self.triple} has no storage carrier for alignment {alignment}',
+                         node=node, exc_type=ValueError)
+        return carrier
+
+    @lru_cache(maxsize=32)
+    def _find_alignment_carrier(self, alignment):
         candidates = [ir.IntType(width) for width in (8, 16, 32, 64, 128)]
         candidates.append(ir.VectorType(ir.IntType(8), alignment))
         for candidate in candidates:
@@ -531,10 +601,7 @@ class TargetLayout:
                 and layout.alignment == alignment
             ):
                 return candidate
-        raise ValueError(
-            f"target {self.triple} has no storage carrier for alignment "
-            f"{alignment}"
-        )
+        return None
 
 
 @lru_cache(maxsize=None)
@@ -555,7 +622,65 @@ def get_type_layout(pc_type) -> TypeLayout:
     return layout
 
 
-def validate_ctypes_layout(pc_type, ctype, fields=()):
+def aggregate_layout(field_names, field_types, config, node, *, is_union=False):
+    """Compute semantic layout before choosing a storage representation."""
+    with report_layout_errors(node):
+        if config.has_bit_placement:
+            return bit_aggregate_layout(field_names, field_types, config, is_union=is_union)
+        fields = (get_type_layout(field) for field in field_types)
+        return byte_aggregate_layout(field_names, fields, config, is_union=is_union)
+
+
+def byte_aggregate_layout(field_names, field_layouts, config, *, is_union=False):
+    """Lay out ordinary aggregate members from their semantic storage facts."""
+    target = get_target_layout()
+    ordinary = target.union if is_union else target.struct
+    minima = ()
+    if config.member_alignments:
+        overrides = dict(config.member_alignments)
+        names = tuple(field_names or ())
+        unknown = set(overrides).difference(names)
+        if unknown:
+            raise ValueError(f"member alignment names are not fields: {', '.join(sorted(unknown))}")
+        minima = tuple(overrides.get(field, 0) for field in names)
+    return ordinary(field_layouts, config, member_minima=minima)
+
+
+def uses_bit_storage(pc_type) -> bool:
+    return getattr(pc_type, '_layout_config', NATURAL_LAYOUT).has_bit_placement
+
+
+def ctypes_alignment_carrier(alignment, node):
+    import ctypes
+
+    for ctype in (ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint32,
+                  ctypes.c_uint64, ctypes.c_longdouble):
+        if ctypes.sizeof(ctype) == ctypes.alignment(ctype) == alignment:
+            return ctype
+    logger.error(f'ctypes has no carrier for {alignment}-byte alignment',
+                 node=node, exc_type=ValueError)
+
+
+def align_ctypes_record(ctype, alignment, node):
+    """Preserve named field projections when ctypes needs an alignment carrier."""
+    import ctypes
+
+    if ctypes.alignment(ctype) >= alignment:
+        return ctype
+    carrier = ctypes_alignment_carrier(alignment, node)
+    names = {name for name, _ in ctype._fields_}
+    payload, pad = '_pc_record', '_pc_alignment'
+    while payload in names:
+        payload += '_'
+    while pad in names:
+        pad += '_'
+    return type(ctype.__name__, (ctypes.Union,), {
+        '_anonymous_': (payload,),
+        '_fields_': [(payload, ctype), (pad, carrier * 0)],
+    })
+
+
+def validate_ctypes_layout(pc_type, ctype, node, fields=()):
     """Reject host ctypes representations that cannot model native storage."""
     import ctypes
 
@@ -563,13 +688,14 @@ def validate_ctypes_layout(pc_type, ctype, fields=()):
     actual = ctypes.sizeof(ctype), ctypes.alignment(ctype)
     expected = layout.allocation_size, layout.alignment
     if actual != expected:
-        raise ValueError(
+        logger.error(
             f"ctypes cannot represent {pc_type.get_name()} layout: "
-            f"size/alignment {actual} != {expected}"
+            f"size/alignment {actual} != {expected}", node=node, exc_type=ValueError,
         )
     for index, name in fields:
         if getattr(ctype, name).offset != layout.field_offsets[index]:
-            raise ValueError(
-                f"ctypes cannot represent {pc_type.get_name()} field {name!r}"
+            logger.error(
+                f"ctypes cannot represent {pc_type.get_name()} field {name!r}",
+                node=node, exc_type=ValueError,
             )
     return ctype

@@ -283,9 +283,11 @@ def _compile_parametric_specialization(
         param_types=param_types,
         return_type=return_type,
         name=factory_wrapper._original_name,
+        _native_name=factory_wrapper._native_name,
         suffix=suffix,
         attrs=factory_wrapper._original_fn_attrs,
         linkage=getattr(factory_wrapper, '_original_linkage', None),
+        visibility=factory_wrapper._original_visibility,
         source_file=factory_wrapper._source_file,
         source_code=source_code,
         start_line=factory_wrapper._start_line,
@@ -316,6 +318,8 @@ def _create_parametric_factory_wrapper(
     compile_suffix,
     effect_suffix,
     linkage=None,
+    visibility=None,
+    native_name=None,
 ):
     """Create a factory wrapper for a function with parametric parameters.
 
@@ -367,6 +371,8 @@ def _create_parametric_factory_wrapper(
     wrapper._raw_annotations = raw_annotations
     wrapper._original_fn_attrs = set(fn_attrs) if fn_attrs else set()
     wrapper._original_linkage = linkage
+    wrapper._original_visibility = visibility
+    wrapper._native_name = native_name
     wrapper._original_compile_suffix = compile_suffix
     wrapper._original_effect_suffix = effect_suffix
     wrapper._source_file = source_file
@@ -782,7 +788,8 @@ def get_compiler(source_file, user_globals, has_suffix=False):
 
 
 def compile(func_or_class=None, suffix=None, attrs=None,
-            linkage=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED):
+            linkage=None, _effect_suffix=None, _effect_scope=_SCOPE_NOT_PROVIDED,
+            *, visibility=None, name=None, static_member_symbol_prefix=None):
     """
     Compile a Python function or class to native code.
     
@@ -801,6 +808,14 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                static; module-private), 'weak_odr' or 'linkonce_odr' (like
                C++ inline/ODR definitions, allowing multiple modules to
                define the same symbol; default for class statics).
+        visibility: Export visibility of a function definition on supporting
+               targets. Accepts 'default', 'hidden', or 'protected'.
+        name: Native base name for a function. Compilation and effect suffixes
+               are appended as usual. Defaults to the Python function name.
+        static_member_symbol_prefix: Class-only prefix for native static member
+               symbols. None uses the class name; an empty string uses bare
+               member names. An explicit prefix defines storage in the class's
+               source module.
         _effect_suffix: Internal parameter for effect override (from with effect(suffix=X)).
                 This IS contagious - propagates to transitive calls that use effects.
         _effect_scope: Internal parameter for transitive effect compilation.
@@ -828,18 +843,26 @@ def compile(func_or_class=None, suffix=None, attrs=None,
     # Normalize compile_suffix early
     compile_suffix = normalize_suffix(suffix)
     fn_attrs = set(attrs) if attrs else set()
+    invalid_name = name is not None and (not isinstance(name, str) or not name or '\0' in name)
+    invalid_prefix = static_member_symbol_prefix is not None and (
+            not isinstance(static_member_symbol_prefix, str)
+            or '\0' in static_member_symbol_prefix)
+    option_node = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
+    if invalid_name or invalid_prefix:
+        message = ('native function name must be a nonempty string without NUL' if invalid_name
+                   else 'static_member_symbol_prefix must be a string without NUL')
+        logger.error(message, node=option_node, exc_type=TypeError)
 
-    from ..ir_helpers import validate_func_linkage
+    from ..ir_helpers import validate_func_linkage, validate_symbol_visibility
     func_name = getattr(func_or_class, '__name__', None)
     # Class statics default to weak_odr (one program-wide entity, like a C++
     # inline static member); 'internal' gives module-private storage instead.
     # Keep the requested value before validate_func_linkage collapses
     # 'external' to None for functions.
     static_linkage = linkage if linkage else 'weak_odr'
-    if linkage is not None:
-        call_site = logger.current_location() or SourceLocation.from_frame(sys._getframe(1))
-        with logger.at_node(call_site):
-            linkage = validate_func_linkage(linkage, None, func_name)
+    if linkage is not None or visibility is not None:
+        linkage = validate_func_linkage(linkage, option_node, func_name)
+        visibility = validate_symbol_visibility(visibility, option_node)
     
     # Get effect_suffix from context if not explicitly provided
     effect_suffix = resolve_effect_suffix(
@@ -847,7 +870,7 @@ def compile(func_or_class=None, suffix=None, attrs=None,
     
     if func_or_class is None:
         def decorator(f):
-            return _compile_impl(f, 
+            return _compile_impl(f, option_node,
                                 compile_suffix=compile_suffix,
                                 effect_suffix=effect_suffix,
                                 captured_symbols=capture_caller_symbols(
@@ -855,20 +878,26 @@ def compile(func_or_class=None, suffix=None, attrs=None,
                                 effect_scope=_effect_scope,
                                 fn_attrs=fn_attrs,
                                 linkage=linkage,
-                                static_linkage=static_linkage)
+                                visibility=visibility,
+                                static_linkage=static_linkage,
+                                static_member_symbol_prefix=static_member_symbol_prefix,
+                                native_name=name)
         return decorator
 
-    return _compile_impl(func_or_class, 
+    return _compile_impl(func_or_class, option_node,
                         compile_suffix=compile_suffix,
                         effect_suffix=effect_suffix,
                         captured_symbols=captured_symbols,
                         effect_scope=_effect_scope,
                         fn_attrs=fn_attrs,
                         linkage=linkage,
-                        static_linkage=static_linkage)
+                        visibility=visibility,
+                        static_linkage=static_linkage,
+                        static_member_symbol_prefix=static_member_symbol_prefix,
+                        native_name=name)
 
 
-def _compile_impl(func_or_class, 
+def _compile_impl(func_or_class, option_node,
                   compile_suffix: Optional[str] = None, 
                   effect_suffix: Optional[str] = None,
                   captured_symbols=None,
@@ -876,7 +905,10 @@ def _compile_impl(func_or_class,
                   effect_override_names=None,
                   fn_attrs=None,
                   linkage=None,
-                  static_linkage='weak_odr'):
+                  visibility=None,
+                  static_linkage='weak_odr',
+                  static_member_symbol_prefix=None,
+                  native_name=None):
     """Internal implementation of compile decorator.
     
     Uses 4-tuple group_key: (source_file, scope, compile_suffix, effect_suffix)
@@ -899,14 +931,29 @@ def _compile_impl(func_or_class,
                  every static member.
     """
     if inspect.isclass(func_or_class):
-        return _compile_dynamic_class(
+        if visibility is not None:
+            logger.error('function visibility applies only to functions',
+                         node=option_node, exc_type=TypeError)
+        if native_name is not None:
+            logger.error('native function name applies only to functions',
+                         node=option_node, exc_type=TypeError)
+        cls = _compile_dynamic_class(
             func_or_class,
             suffix=compile_suffix,
             captured_symbols=captured_symbols,
             static_linkage=static_linkage,
+            static_member_symbol_prefix=static_member_symbol_prefix,
             effect_suffix=effect_suffix,
         )
+        # C frontends use this decorator option to request source-owned storage.
+        if static_member_symbol_prefix is not None:
+            from .class_statics import register_static_definitions
+            register_static_definitions(cls, option_node)
+        return cls
 
+    if static_member_symbol_prefix is not None:
+        logger.error('static_member_symbol_prefix applies only to classes',
+                     node=option_node, exc_type=TypeError)
     func = func_or_class
 
     from ..python_call import create_compiled_callable, try_bind_installed_adapter
@@ -937,7 +984,13 @@ def _compile_impl(func_or_class,
         with logger.at_node(func_ast, source=diagnostic_source):
             logger.error(f"Expected FunctionDef, got {type(func_ast).__name__}", node=func_ast)
 
+    from ..ast_visitor.yield_transform import analyze_yield_function
     from ..call_normalization import native_positional_parameters
+
+    yield_analyzer = analyze_yield_function(func_ast)
+    if yield_analyzer and (native_name is not None or visibility is not None):
+        logger.error('Native naming and visibility require a standalone function',
+                     node=option_node, exc_type=TypeError)
 
     registry = _get_registry()
     from .visible import definition_names, get_all_accessible_symbols
@@ -958,7 +1011,7 @@ def _compile_impl(func_or_class,
 
     registry.register_function_source(source_file, func.__name__, func_source)
 
-    actual_func_name = func.__name__
+    actual_func_name = native_name if native_name is not None else func.__name__
 
     # Pre-identify parameters annotated directly with ``param`` so that their
     # names can be made available during annotation resolution without shadowing
@@ -1035,11 +1088,9 @@ def _compile_impl(func_or_class,
                 compile_suffix=compile_suffix,
                 effect_suffix=effect_suffix,
                 linkage=linkage,
+                visibility=visibility,
+                native_name=native_name,
             )
-
-    # Check if this is a yield-based generator function
-    from ..ast_visitor.yield_transform import analyze_yield_function
-    yield_analyzer = analyze_yield_function(func_ast)
 
     if yield_analyzer:
         set_ast_source(func_ast, diagnostic_source)
@@ -1131,22 +1182,15 @@ def _compile_impl(func_or_class,
 
     # Build mangled name: name_{compile_suffix}_{effect_suffix}
     # compile_suffix comes first, then effect_suffix
-    mangled_name = None
-    suffix_parts = []
-    if compile_suffix:
-        suffix_parts.append(compile_suffix)
-    if effect_suffix:
-        suffix_parts.append(effect_suffix)
-    
+    suffix_parts = [part for part in (compile_suffix, effect_suffix) if part]
     if suffix_parts:
-        combined_suffix = '_'.join(suffix_parts)
-        mangled_name = func.__name__ + '_' + combined_suffix
+        actual_func_name = '_'.join([actual_func_name, *suffix_parts])
 
-    if mangled_name:
+    mangled_name = actual_func_name if actual_func_name != func.__name__ else None
+    if mangled_name is not None:
         import copy
         func_ast = copy.deepcopy(func_ast)
         func_ast.name = mangled_name
-        actual_func_name = mangled_name
 
     # Determine grouping key and output paths
     # Design: group_key = (source_file, scope, compile_suffix, effect_suffix)
@@ -1225,6 +1269,7 @@ def _compile_impl(func_or_class,
         overload_enabled=False,
         fn_attrs=fn_attrs or set(),
         linkage=linkage,
+        visibility=visibility,
         has_llvm_varargs=resolved_varargs.has_llvm_varargs,
         has_varargs=resolved_varargs.is_typed,
         has_kwargs=resolved_kwargs.is_typed,
@@ -1242,7 +1287,8 @@ def _compile_impl(func_or_class,
     with logger.at_node(func_ast, source=diagnostic_source):
         existing_wrapper = _try_reuse_cached_wrapper(
             output_manager, group_key, func, wrapper,
-            compile_suffix, effect_suffix, registration_identity, node=func_ast,
+            compile_suffix, effect_suffix, registration_identity,
+            native_symbol=actual_func_name, node=func_ast,
         )
     if existing_wrapper is not None:
         try_bind_installed_adapter(existing_wrapper)
@@ -1298,10 +1344,11 @@ def _compile_impl(func_or_class,
     def specialize(effect_key, scope, override_names):
         st = wrapper._binding
         return _compile_impl(
-            func, compile_suffix=st.compile_suffix, effect_suffix=effect_key,
+            func, option_node, compile_suffix=st.compile_suffix, effect_suffix=effect_key,
             captured_symbols=st.captured_symbols, effect_scope=scope,
             effect_override_names=override_names, fn_attrs=func_info.fn_attrs,
-            linkage=func_info.linkage)
+            linkage=func_info.linkage, visibility=func_info.visibility,
+            native_name=native_name)
 
     binding_state.specialize = specialize
     
@@ -1426,7 +1473,7 @@ def _clone_binding_to_wrapper(binding, existing, wrapper):
 
 def _try_reuse_cached_wrapper(
     output_manager, group_key, func, wrapper,
-    compile_suffix, effect_suffix, registration_identity, node,
+    compile_suffix, effect_suffix, registration_identity, node, *, native_symbol,
 ):
     """Try to reuse an existing wrapper from a previously-registered group.
 
@@ -1460,6 +1507,7 @@ def _try_reuse_cached_wrapper(
                 continue
             if (
                 binding.original_name == func.__name__
+                and binding.actual_func_name == native_symbol
                 and binding.compile_suffix == compile_suffix
                 and binding.effect_suffix == effect_suffix
             ):

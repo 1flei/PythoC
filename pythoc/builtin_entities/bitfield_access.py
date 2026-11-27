@@ -9,26 +9,20 @@ from ..target_layout import field_segments, get_target_layout
 from ..valueref import ValueRef, ensure_ir
 
 
-def get_bit_storage_type(layout):
+def get_bit_storage_type(layout, node):
     target = get_target_layout()
-    carrier = target.alignment_carrier(layout.alignment)
+    carrier = target.alignment_carrier(layout.alignment, node)
     size = target.primitive(carrier).allocation_size
     if layout.allocation_size % size:
         raise ValueError('bit storage is not divisible by its alignment carrier')
     return ir.ArrayType(carrier, layout.allocation_size // size)
 
 
-def get_bit_storage_ctypes(layout, name):
+def get_bit_storage_ctypes(layout, name, node):
     import ctypes
+    from ..target_layout import ctypes_alignment_carrier
 
-    carriers = (ctypes.c_uint8, ctypes.c_uint16, ctypes.c_uint32,
-                ctypes.c_uint64, ctypes.c_longdouble)
-    carrier = next((candidate for candidate in carriers
-                    if ctypes.sizeof(candidate) == layout.alignment
-                    and ctypes.alignment(candidate) == layout.alignment), None)
-    if carrier is None:
-        raise ValueError(
-            f'ctypes has no carrier for {layout.alignment}-byte alignment')
+    carrier = ctypes_alignment_carrier(layout.alignment, node)
     return type(name, (ctypes.Structure,), {
         '_fields_': [('_storage', carrier * (
             layout.allocation_size // ctypes.sizeof(carrier)))],
@@ -45,20 +39,26 @@ def _resize(builder, value, target):
 
 def assemble_bit_fields(visitor, aggregate_type, values):
     """Pack constant and runtime initializers into the same field mapping."""
-    from ..type_converter import strip_qualifiers
     from .union import UnionType
 
     if issubclass(getattr(aggregate_type, '_union_type', aggregate_type), UnionType):
         raise TypeError(
             'Initialize a bit-layout union by assigning its selected field')
+    return assemble_bit_field_items(visitor, aggregate_type, tuple(enumerate(values)), None)
+
+
+def assemble_bit_field_items(visitor, aggregate_type, fields, node):
+    """Initialize the selected fields using the same layout as field access."""
+    from ..type_converter import strip_qualifiers
+
     layout = aggregate_type.get_layout()
     llvm_type = aggregate_type.get_llvm_type(visitor.module.context)
     bit_order = aggregate_type._layout_config.bit_order
-    if all(isinstance(value, ir.Constant) for value in values):
+    if all(isinstance(value, ir.Constant) for _, value in fields):
         data = bytearray(layout.allocation_size)
         byte_order = ('little' if str(get_target_layout().target_data)
                       .startswith('e') else 'big')
-        for index, value in enumerate(values):
+        for index, value in fields:
             unit = layout.field_storage_units_bits[index]
             segments = field_segments(
                 layout.field_offsets_bits[index],
@@ -67,7 +67,7 @@ def assemble_bit_fields(visitor, aggregate_type, values):
                 offset, size = start // 8, unit // 8
                 word = int.from_bytes(data[offset:offset + size], byte_order)
                 mask = (1 << width) - 1
-                word |= ((int(value.constant) >> value_bit) & mask) << bit
+                word |= ((int(value.constant or 0) >> value_bit) & mask) << bit
                 data[offset:offset + size] = word.to_bytes(size, byte_order)
         carrier = llvm_type.element
         size = get_target_layout().primitive(carrier).allocation_size
@@ -83,10 +83,10 @@ def assemble_bit_fields(visitor, aggregate_type, values):
     visitor.builder.store(ir.Constant(llvm_type, None), pointer)
     base = ValueRef(kind='address', value=pointer,
                     type_hint=aggregate_type, address=pointer)
-    for index, value in enumerate(values):
+    for index, value in fields:
         field_type = strip_qualifiers(aggregate_type._field_types[index])
         field = access_bit_field(visitor, base, aggregate_type, index, field_type)
-        field.store(visitor.builder, value)
+        field.store(visitor.builder, value, node=node)
     return visitor.builder.load(pointer)
 
 

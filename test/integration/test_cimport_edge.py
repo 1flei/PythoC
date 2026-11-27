@@ -275,6 +275,19 @@ enum Flags {
         self.assertEqual(mod.FLAG_B, 0x100)
         self.assertIn(mod.FLAG_C, (0xFFFFFFFF, -1))
 
+    def test_enum_with_reserved_c_identifiers(self):
+        from pythoc.cimport import cimport
+
+        header = self._write(
+            'reserved_enum.h',
+            'enum __codecvt_tag { _codecvt_first = 7, __codecvt_last = 19 };',
+        )
+        mod = cimport(header, lib='c')
+        enum_type = getattr(mod, '__codecvt_tag')
+        for name, tag in (('_codecvt_first', 7), ('__codecvt_last', 19)):
+            self.assertEqual(getattr(enum_type, name), tag)
+            self.assertEqual(getattr(mod, name), tag)
+
 
 class TestCimportNestedStruct(unittest.TestCase):
     """Test cimport with structs containing pointers to other structs."""

@@ -1014,7 +1014,7 @@ def _annotation_ast_to_type(node, type_resolver) -> Optional[type]:
     """Resolve a PythoC annotation using the shared type resolver."""
     if node is None:
         return None
-    return type_resolver.parse_annotation(node)
+    return type_resolver.resolve_annotation(node, node)
 
 
 def _typed_zero(ty: type) -> ast.expr:
