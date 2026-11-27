@@ -2,7 +2,7 @@
 
 import unittest
 
-from pythoc import compile, consume, i32, linear, param, ptr, struct
+from pythoc import compile, consume, i32, inline, linear, nullptr, param, ptr, struct
 from pythoc.build.output_manager import flush_all_pending_outputs
 from pythoc.session import CompileSession
 from test.utils.test_utils import DeferredTestCase
@@ -17,6 +17,39 @@ def step(count: ptr[i32]) -> i32:
 @compile
 def digits(a: i32, b: i32 = 8) -> i32:
     yield a * 10 + b
+
+
+@inline
+def optional_value(value: ptr[i32] = nullptr) -> i32:
+    if value == nullptr:
+        return 4
+    return value[0]
+
+
+@compile
+def optional_values(value: ptr[i32] = nullptr) -> i32:
+    yield optional_value(value)
+
+
+@compile
+def optional_generic(offset: param, value: ptr[i32] = nullptr) -> i32:
+    yield optional_value(value) + offset
+
+
+optional_specialization = optional_generic(1)
+
+
+@compile
+def typed_default_arguments() -> i32:
+    supplied: i32 = 9
+    result = optional_value()
+    for item in optional_values():
+        result = result * 10 + item
+    for item in optional_values(value=ptr(supplied)):
+        result = result * 10 + item
+    for item in optional_specialization():
+        result = result * 10 + item
+    return result
 
 
 @compile
@@ -144,6 +177,9 @@ class YieldCallArgumentsTest(DeferredTestCase):
 
     def test_default_argument_is_bound_without_extra_evaluation(self):
         self.assertEqual(default_argument(), 181)
+
+    def test_null_pointer_defaults_keep_their_native_type(self):
+        self.assertEqual(typed_default_arguments(), 4495)
 
     def test_starred_expression_is_evaluated_once(self):
         self.assertEqual(starred_arguments(), 122)

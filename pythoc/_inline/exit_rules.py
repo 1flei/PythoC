@@ -118,6 +118,12 @@ def _empty_label_block(label_name):
         pass
 
 
+def _yield_label_operand(name, *, definition):
+    operand = ast.Constant(value=name)
+    operand._pc_yield_label_definition = definition
+    return operand
+
+
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
@@ -311,6 +317,17 @@ class YieldExitRule(ExitPointRule):
                     rebindings.update(dict.fromkeys(iter_rebinding_names(target)))
         return tuple(rebindings)
 
+    def _copy_consumer(self):
+        """Give each copy fresh local yield labels and keep enclosing targets."""
+        body = copy.deepcopy(self.loop_body)
+        operands = [node for stmt in body for node in ast.walk(stmt)
+                    if hasattr(node, '_pc_yield_label_definition')]
+        renamed = {node.value: self.names.fresh(node.value) for node in operands
+                   if node._pc_yield_label_definition}
+        for node in operands:
+            node.value = renamed.get(node.value, node.value)
+        return body
+
     def get_exit_node_types(self) -> Tuple[type, ...]:
         # Yield expressions, plus Return: a return in the generator body ends
         # iteration.  Expr nodes containing Yield are handled specially in
@@ -377,14 +394,12 @@ class YieldExitRule(ExitPointRule):
         target = copy.deepcopy(self.loop_var) if has_value else "_unused"
 
         # Prepare loop body (transform break/continue if needed)
+        loop_body = self._copy_consumer()
         if self._body_has_break_or_continue and self.after_else_label:
             loop_body = [
-                _transform_break_continue_scoped(
-                    copy.deepcopy(stmt), self.after_else_label, yield_label)
-                for stmt in self.loop_body
+                _transform_break_continue_scoped(stmt, self.after_else_label, yield_label)
+                for stmt in loop_body
             ]
-        else:
-            loop_body = [copy.deepcopy(s) for s in self.loop_body]
 
         if has_value:
             annotation = self.return_type_annotation
@@ -396,7 +411,7 @@ class YieldExitRule(ExitPointRule):
         result = _yield_exit_template(
             meta_const(has_label), meta_const(not has_label),
             meta_const(has_value),
-            ast.Constant(value=yield_label or "_unused"),
+            _yield_label_operand(yield_label or "_unused", definition=True),
             target, value, loop_body,
         ).stmts
 
@@ -561,4 +576,4 @@ class _BreakContinueTransformer(ast.NodeTransformer):
         """
         if self.loop_depth > 0:
             return node
-        return _goto_end(ast.Constant(value=self.yield_label)).stmt
+        return _goto_end(_yield_label_operand(self.yield_label, definition=False)).stmt

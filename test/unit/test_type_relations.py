@@ -303,6 +303,26 @@ class TypeRelationsTest(unittest.TestCase):
         self.assertTrue(same_type(array_decay_type(volatile[array[i32, 2, 3]]),
                                   ptr[volatile[array[i32, 3]]]))
 
+    def test_qualified_array_alias_decays_to_a_qualified_pointee(self):
+        from pythoc.type_resolver import TypeReference
+
+        with CompileSession():
+            row = TypeReference('Row', {'Row': array[i32, 3]})
+            self.assertTrue(can_convert(row, ptr[i32]))
+            source = const[row]
+            self.assertTrue(can_convert(source, ptr[const[i32]]))
+            self.assertFalse(can_convert(source, ptr[i32]))
+
+    def test_qualifier_resolution_rejects_an_alias_to_itself(self):
+        from pythoc.type_resolver import TypeReference
+
+        with CompileSession():
+            namespace = {}
+            alias = const[TypeReference('Cycle', namespace)]
+            namespace['Cycle'] = alias
+            with self.assertRaisesRegex(TypeError, 'Cyclic type qualifier'):
+                can_convert(alias, i32)
+
     def test_atomic_admission_preserves_storage_and_refinement_rules(self):
         from pythoc import i24, f64
         from pythoc.type_descriptor import atomic_value_is_supported
@@ -563,6 +583,36 @@ class TypeRelationsTest(unittest.TestCase):
             prepare_type(root)
             self.assertIn(root, session.type_graph.prepared_types)
             self.assertTrue(same_type(pending, ptr[i64]))
+
+    def test_qualified_opaque_pointee_can_be_completed_later(self):
+        from pythoc.type_graph import prepare_type
+        from pythoc.type_resolver import TypeReference
+
+        with CompileSession() as session:
+            namespace = {}
+            qualified = const[volatile[TypeReference('QualifiedOpaque', namespace)]]
+            pointer = ptr[qualified]
+            self.assertEqual(pointer.get_llvm_type(), ir.IntType(8).as_pointer())
+            self.assertNotIn(pointer, session.type_graph.prepared_types)
+            with self.assertRaisesRegex(NameError, 'QualifiedOpaque'):
+                prepare_type(qualified)
+            namespace['QualifiedOpaque'] = i32
+            self.assertEqual(pointer.get_llvm_type(), ir.IntType(32).as_pointer())
+            self.assertIn(pointer, session.type_graph.prepared_types)
+            self.assertTrue(same_type(pointer, ptr[const[volatile[i32]]]))
+
+    def test_pointer_visit_does_not_relax_a_later_by_value_layout_use(self):
+        from pythoc import struct
+        from pythoc.type_graph import IncompleteRecordError, prepare_type, validate_type_graph
+        from pythoc.type_resolver import TypeReference
+
+        with CompileSession():
+            qualified = const[TypeReference('RequiredField', {})]
+            record = struct['value': qualified, 'address': ptr[qualified]]
+            with self.assertRaisesRegex(IncompleteRecordError, 'RequiredField'):
+                validate_type_graph(record)
+            with self.assertRaisesRegex(NameError, 'RequiredField'):
+                prepare_type(record)
 
     def test_standard_predicate_type_edges_close_recursive_records(self):
         from pythoc.std.refinement import nonnull

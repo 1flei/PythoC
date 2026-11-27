@@ -188,22 +188,21 @@ class ptr(BuiltinType):
     @classmethod
     def get_llvm_type(cls, module_context=None) -> ir.Type:
         """Get LLVM pointer type"""
+        from ..type_converter import strip_qualifiers
         from ..type_graph import prepare_type
+        from ..type_resolver import TypeResolver
+
         prepare_type(cls)
         if cls.pointee_type is not None:
-            pointee = cls._resolve_pointee()
-            from ..type_resolver import TypeResolver
-            TypeResolver.resolve_type(cls.pointee_type, required=False, freeze=True)
+            pointee = strip_qualifiers(cls._resolve_pointee())
 
             # An unresolved pointee has no layout. Its pointer representation
             # is an address; the PythoC name remains in the semantic type.
-            from ..type_resolver import TypeReference
-            if isinstance(pointee, (str, TypeReference)):
+            if TypeResolver.is_reference(pointee):
                 return ir.PointerType(ir.IntType(8))
 
             # ptr[void] -> i8* (same as unspecialized ptr)
-            from ..type_converter import strip_qualifiers
-            if strip_qualifiers(pointee) is void:
+            if pointee is void:
                 return ir.PointerType(ir.IntType(8))
 
             # Determine pointee LLVM type from either PC type or direct LLVM type
@@ -298,17 +297,17 @@ class ptr(BuiltinType):
     @classmethod
     def handle_add(cls, visitor, left, right, node: ast.BinOp):
         """Handle pointer addition: ptr + offset """
-        from ..valueref import wrap_value, ensure_ir, get_type
+        from ..valueref import wrap_value, ensure_ir
 
         # cast to pc type for python value
         right = visitor.type_converter.integer_operand(right, node)
         
         # Pointer arithmetic operates on runtime pcvalues plus their type hints.
-        from ..type_converter import get_base_type
+        from ..type_converter import get_base_type, strip_qualifiers
+        from ..type_resolver import TypeResolver
         pointer_type = get_base_type(left.type_hint)
-        pointee = pointer_type._resolve_pointee(getattr(visitor, 'ctx', None))
-        from ..type_resolver import TypeReference
-        if isinstance(pointee, (str, TypeReference)):
+        pointee = strip_qualifiers(pointer_type._resolve_pointee(getattr(visitor, 'ctx', None)))
+        if TypeResolver.is_reference(pointee):
             logger.error(
                 f"Pointer arithmetic requires a complete pointee type: {pointee}",
                 node=node, exc_type=TypeError)
@@ -327,7 +326,8 @@ class ptr(BuiltinType):
     @classmethod
     def handle_sub(cls, visitor, left, right, node: ast.BinOp):
         """Handle pointer subtraction: ptr - offset or ptr - ptr or ptr - array"""
-        from ..type_converter import get_base_type
+        from ..type_converter import get_base_type, strip_qualifiers
+        from ..type_resolver import TypeResolver
         from ..valueref import wrap_value, ensure_ir
         
         right_type = get_base_type(right.type_hint)
@@ -354,9 +354,8 @@ class ptr(BuiltinType):
             byte_diff = visitor.builder.sub(left_int, right_int)
             
             # Get element size
-            pointee_type = cls._resolve_pointee(getattr(visitor, 'ctx', None))
-            from ..type_resolver import TypeReference
-            if isinstance(pointee_type, (str, TypeReference)):
+            pointee_type = strip_qualifiers(cls._resolve_pointee(getattr(visitor, 'ctx', None)))
+            if TypeResolver.is_reference(pointee_type):
                 logger.error(
                     f"Pointer subtraction requires a complete pointee type: {pointee_type}",
                     node=node, exc_type=TypeError)

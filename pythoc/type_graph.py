@@ -138,6 +138,13 @@ def _shape(pc_type):
     return ('leaf', leaf_key(pc_type)), ()
 
 
+def _layout_requirements(shape, children, required):
+    """Qualifiers pass on the layout requirement of their enclosing use."""
+    for child, stored in children:
+        if stored is not None:
+            yield child, required if shape[0] == 'qualified' else stored
+
+
 def _equivalent(first, second, resolver=None):
     """Compare directly while the visited graphs admit a one-to-one mapping.
 
@@ -253,6 +260,7 @@ class TypeGraph:
 
     def _collect(self, root):
         pending, nodes, records = [(root, True)], {}, []
+        required = set()
         while pending:
             original, stored = pending.pop()
             pc_type = _resolve(original)
@@ -261,16 +269,17 @@ class TypeGraph:
                     raise IncompleteRecordError(f'Incomplete PythoC value type: {original}')
                 continue
             key = id(pc_type)
-            if key in nodes:
+            if key in nodes and (not stored or key in required):
                 continue
-            _, children = _shape(pc_type)
-            nodes[key] = (pc_type, children)
-            if named_record(pc_type) is not None:
+            if stored:
+                required.add(key)
+            shape, children = _shape(pc_type)
+            if key not in nodes and named_record(pc_type) is not None:
                 records.append(pc_type)
+            nodes[key] = (pc_type, children)
             # Identity-only enum variant edges are compared and projected,
             # but the union payload already owns their storage validation.
-            pending.extend((child, stored) for child, stored in children
-                           if stored is not None)
+            pending.extend(_layout_requirements(shape, children, stored))
         return nodes, records
 
     def _check_storage(self, nodes):
@@ -467,7 +476,7 @@ class TypeGraph:
         with self._lock, self.binding_transaction():
             prepared = self.prepared_types
             pending, seen, active = [(pc_type, True, 0, None, False)], {}, {}
-            parents, incomplete = {}, set()
+            parents, incomplete, required = {}, set(), set()
             while pending:
                 current, stored, depth, parent, finish = pending.pop()
                 if finish:
@@ -495,20 +504,22 @@ class TypeGraph:
                     if depth <= active[key]:
                         raise TypeError('Recursive type constructors require a named record')
                     continue
-                if key in seen:
+                if key in seen and (not stored or key in required):
                     continue
+                if stored:
+                    required.add(key)
                 seen[key] = current
                 active[key] = depth
                 pending.append((current, stored, depth, parent, True))
-                _, children = _shape(current)
+                shape, children = _shape(current)
                 owner = getattr(current, '_python_class', None)
                 declaration = getattr(owner, '_type_declaration', None)
                 if declaration is not None:
                     # Static fields are absent from the instance graph, but their
                     # bindings also determine this declaration's storage projection.
                     children = tuple((pc_type, True) for _, _, pc_type, _ in declaration)
-                pending.extend((child, bool(stored), depth, key, False) for child, stored in children
-                               if stored is not None)
+                pending.extend((child, need, depth, key, False)
+                               for child, need in _layout_requirements(shape, children, stored))
             if seen:
                 self.validate(pc_type)
             # An opaque pointee may resolve on a later use. Keep preparing

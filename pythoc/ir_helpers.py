@@ -2,6 +2,7 @@
 from llvmlite import ir
 from typing import Any, Optional
 from .logger import logger
+from .type_descriptor import strip_qualifiers
 
 
 def alloca_in_entry(builder, llvm_type, name=""):
@@ -9,21 +10,6 @@ def alloca_in_entry(builder, llvm_type, name=""):
     llvm_builder = builder if isinstance(builder, ir.IRBuilder) else builder.ir_builder
     with llvm_builder.goto_entry_block():
         return llvm_builder.alloca(llvm_type, name=name)
-
-
-def strip_qualifiers(pc_type: Any) -> Any:
-    """Strip qualifier wrappers (const, volatile, static) from a type.
-
-    Delegates to the canonical implementation in type_converter which
-    correctly preserves refined types.
-
-    Example:
-        const[volatile[i32]] -> i32
-        static[const[array[i32, 5]]] -> array[i32, 5]
-        refined[i32, pred] -> refined[i32, pred]  (NOT stripped)
-    """
-    from .type_converter import strip_qualifiers as _canonical_strip
-    return _canonical_strip(pc_type)
 
 
 def propagate_qualifiers(from_type: Any, to_type: Any) -> Any:
@@ -50,7 +36,7 @@ def propagate_qualifiers(from_type: Any, to_type: Any) -> Any:
     from .builtin_entities.qualifiers import const, volatile
     from .type_descriptor import _flags
     flags = _flags(from_type)
-    from .type_converter import get_base_type, strip_qualifiers
+    from .type_converter import get_base_type
     source = strip_qualifiers(from_type)
     base = get_base_type(source)
     if (getattr(source, '_is_refined', False)

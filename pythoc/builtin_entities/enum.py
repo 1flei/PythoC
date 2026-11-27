@@ -65,10 +65,10 @@ def _create_enum_type(variants, tag_type, node, class_name=None):
 
     Also stores valid tag values for discriminant type semantics.
     """
-    from ..type_descriptor import validate_member_names, validate_type_argument, _unqualified
+    from ..type_descriptor import validate_member_names, validate_type_argument, strip_qualifiers
     from ..type_converter import get_base_type
     validate_type_argument(tag_type, 'enum tag', node=node)
-    plain_tag = _unqualified(tag_type)
+    plain_tag = strip_qualifiers(tag_type)
     if (getattr(plain_tag, '_is_refined', False)
             or not getattr(plain_tag, '_is_integer', False)):
         logger.error('enum tag type must be an integer without refinement',

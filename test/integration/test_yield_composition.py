@@ -33,6 +33,19 @@ def consume_pairs() -> i32:
 
 
 @compile
+def choose_pair_value(minimum: i32) -> i32:
+    result: i32 = 0
+    for value in pairs(1, 10):
+        if value < minimum:
+            continue
+        result = value
+        break
+    else:
+        result = -1
+    return result
+
+
+@compile
 def maybe(value: i32) -> i32:
     if value >= 0:
         yield value
@@ -92,6 +105,11 @@ class TestYieldComposition(DeferredTestCase):
 
     def test_nested_effect_sources_preserve_all_yields_in_order(self):
         self.assertEqual(consume_pairs(), 11121213)
+
+    def test_break_and_continue_target_their_own_composed_scope(self):
+        self.assertEqual(choose_pair_value(11), 11)
+        self.assertEqual(choose_pair_value(13), 13)
+        self.assertEqual(choose_pair_value(14), -1)
 
     def test_arguments_are_evaluated_once_in_order(self):
         self.assertEqual(consume_trace(3), 712)

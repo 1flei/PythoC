@@ -491,6 +491,20 @@ def _build_sig_from_ast(arguments, defaults=None, *, has_llvm_varargs=False):
     )
 
 
+def inline_parameter_defaults(func):
+    """Capture definition-time defaults, retaining already typed values."""
+    from .builtin_entities.python_type import PythonType
+
+    defaults = {}
+    for name, parameter in inspect.signature(func).parameters.items():
+        value = parameter.default
+        if value is inspect.Parameter.empty:
+            continue
+        defaults[name] = value if isinstance(value, ValueRef) else wrap_value(
+            value, kind='python', type_hint=PythonType.wrap(value))
+    return defaults
+
+
 def lower_inline_signature(func_ast, defaults):
     """Retain source binding rules while lowering inline ABI parameters."""
     signature = _build_sig_from_ast(func_ast.args, defaults)

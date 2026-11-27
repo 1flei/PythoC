@@ -8,7 +8,7 @@ class TypeQualifierMeta(BuiltinEntityMeta):
     
     # Methods that should NOT be forwarded (qualifier-specific logic)
     _LOCAL_METHODS = frozenset({
-        'qualified_type', '_qualifier_flags', 'get_qualifier_name',
+        'qualified_type', '_qualifier_flags', 'get_qualifier_name', 'can_be_type',
         'get_qualifier_flags', 'handle_type_subscript', '__class_getitem__',
         'is_const', 'is_static', 'is_thread_local', 'is_volatile', 'get_name',
         '_normalize_qualifiers', '__init__', '__new__', '__init_subclass__',
@@ -220,12 +220,6 @@ class TypeQualifier(BuiltinType, metaclass=TypeQualifierMeta):
             methods
         )
     
-    def __class_getitem__(cls, item):
-        """Runtime path: delegate to BuiltinType normalization and handle_type_subscript"""
-        normalized = cls.normalize_subscript_items(item, node=None)
-        return cls.handle_type_subscript(normalized, node=None)
-
-
 class const(TypeQualifier):
     _qualifier_flags = {
         'const': True,

@@ -56,17 +56,9 @@ def analyze_yield_function(func_ast: ast.FunctionDef) -> Optional[YieldAnalyzer]
 
 def _make_yield_placeholder(func, func_ast, callee_globals, effect_suffix=None):
     """Create a yield placeholder with explicit callee globals."""
-    from ..builtin_entities.python_type import PythonType
-    from ..valueref import wrap_value
-    from ..call_normalization import lower_inline_signature
-    import inspect
+    from ..call_normalization import inline_parameter_defaults, lower_inline_signature
 
-    defaults = {
-        name: wrap_value(parameter.default, kind='python',
-                         type_hint=PythonType.wrap(parameter.default))
-        for name, parameter in inspect.signature(func).parameters.items()
-        if parameter.default is not inspect.Parameter.empty
-    }
+    defaults = inline_parameter_defaults(func)
     source_ast = func_ast
     func_ast, signature = lower_inline_signature(source_ast, defaults)
     func_ast._pc_diagnose_expansion_at_call = getattr(

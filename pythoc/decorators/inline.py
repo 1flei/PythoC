@@ -60,17 +60,11 @@ def inline(func=None, *, cls_method=False, method=False):
             logger.error(f'Expected function definition, got {type(func_ast).__name__}',
                          node=func_ast, exc_type=ValueError)
 
-        from ..builtin_entities.python_type import PythonType
-        from ..valueref import wrap_value
+        from ..call_normalization import inline_parameter_defaults
         from .visible import definition_names, get_all_accessible_symbols
         from ..type_resolver import TypeResolver
 
-        defaults = {
-            name: wrap_value(parameter.default, kind='python',
-                             type_hint=PythonType.wrap(parameter.default))
-            for name, parameter in inspect.signature(f).parameters.items()
-            if parameter.default is not inspect.Parameter.empty
-        }
+        defaults = inline_parameter_defaults(f)
         names = definition_names(f, func_ast)
         captured_symbols = TypeResolver.capture_type_namespace(names, definition=f)
         merged_func_globals = get_all_accessible_symbols(

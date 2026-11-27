@@ -391,10 +391,24 @@ def same_type(source, target, *, resolver=None):
     return _equivalent(source, target, resolver=resolver)
 
 
-def _unqualified(pc_type):
-    while getattr(pc_type, 'qualified_type', None) is not None:
-        pc_type = pc_type.qualified_type
-    return pc_type
+def strip_qualifiers(pc_type):
+    """Strip storage qualifiers through resolved aliases, preserving refinements."""
+    from .logger import logger
+    from .type_resolver import TypeResolver
+
+    seen = set()
+    while True:
+        resolved = TypeResolver.resolve_type(pc_type, required=False)
+        if resolved is not None:
+            pc_type = resolved
+        inner = getattr(pc_type, 'qualified_type', None)
+        if inner is None or getattr(pc_type, '_is_refined', False):
+            return pc_type
+        if pc_type in seen:
+            logger.error(f'Cyclic type qualifier: {pc_type.__name__}',
+                         node=None, exc_type=TypeError)
+        seen.add(pc_type)
+        pc_type = inner
 
 
 def _refinement_chain(pc_type):
@@ -637,7 +651,7 @@ def validate_static_storage(pc_type, node, *, zero_initialized=False):
     """Apply the same storage admission to local and class static members."""
     from .builtin_entities.types import void
     from .logger import logger
-    if _unqualified(pc_type) is void:
+    if strip_qualifiers(pc_type) is void:
         logger.error('Static storage requires a value type', node=node, exc_type=TypeError)
     if contains_linear_storage(pc_type):
         logger.error('Static storage of linear values is unsupported',
@@ -653,7 +667,7 @@ def can_zero_initialize(target, _active=None):
     from .builtin_entities.python_type import PythonType
     from .schema_protocol import get_schema_field_types, is_schema_type
     from .type_graph import _resolve
-    target = _resolve(_unqualified(target))
+    target = _resolve(strip_qualifiers(target))
     if target is None:
         return False
     if getattr(target, '_is_refined', False) or getattr(target, '_is_linear', False):
@@ -761,7 +775,7 @@ def _literal_relation(literal, target, mode, context):
     if type(literal) is str:
         if getattr(target, '_is_pointer', False):
             from .builtin_entities.types import i8, u8, void
-            pointee = _unqualified(getattr(target, 'pointee_type', None))
+            pointee = strip_qualifiers(getattr(target, 'pointee_type', None))
             return (mode == 'explicit' or pointee is None or pointee is void
                     or any(same_type(pointee, byte, resolver=context)
                            for byte in (i8, u8)))
@@ -864,7 +878,7 @@ def format_type(pc_type, parents=()):
 def _record_conversion_detail(source, target, mode, context, seen):
     """Find the first aggregate field rejected by the normal relation."""
     from .schema_protocol import get_schema_field_types, is_schema_type, iter_schema_fields
-    source, target = _unqualified(source), _unqualified(target)
+    source, target = strip_qualifiers(source), strip_qualifiers(target)
     if not all(is_schema_type(t) and not getattr(t, '_is_enum', False)
                and not getattr(t, '_is_union', False) for t in (source, target)):
         return None
@@ -900,10 +914,10 @@ def conversion_message(source, target, value, *, mode, context=None):
     detail = _record_conversion_detail(source, target, mode, context, set())
     if detail is not None:
         message += f': incompatible fields, {detail}'
-    elif (getattr(_unqualified(source), 'pointee_type', None) is not None
-          and getattr(_unqualified(target), 'pointee_type', None) is not None):
-        detail = _record_conversion_detail(_unqualified(source).pointee_type,
-                                           _unqualified(target).pointee_type,
+    elif (getattr(strip_qualifiers(source), 'pointee_type', None) is not None
+          and getattr(strip_qualifiers(target), 'pointee_type', None) is not None):
+        detail = _record_conversion_detail(strip_qualifiers(source).pointee_type,
+                                           strip_qualifiers(target).pointee_type,
                                            'identity', context, set())
         if detail is not None:
             message += f': pointed-to record {detail}'
@@ -918,10 +932,10 @@ def conversion_message(source, target, value, *, mode, context=None):
 
 
 def _implicit_pointer_qualifier_loss(source, target):
-    target = _unqualified(target)
+    target = strip_qualifiers(target)
     if not getattr(target, '_is_pointer', False) or getattr(target, '_is_function_type', False):
         return ()
-    source_base = _refinement_chain(_unqualified(source))[1]
+    source_base = _refinement_chain(strip_qualifiers(source))[1]
     if getattr(source_base, 'dimensions', None) is not None:
         source_base = array_decay_type(source)
     if not getattr(source_base, '_is_pointer', False) or getattr(source_base, '_is_function_type', False):
@@ -958,7 +972,7 @@ def conversion_failure(source, target, value, mode, context):
             name = getattr(literal, '__name__', getattr(literal, 'func_name', repr(literal)))
             return (f"Function '{name}' has signature {format_type(actual)}, "
                     f"but is being used as {format_type(target)}")
-    target = _unqualified(target)
+    target = strip_qualifiers(target)
     if is_mapping_carrier(literal) and getattr(target, '_is_union', False):
         selected = select_union_member(literal, target)
         if selected is None:
@@ -1040,15 +1054,14 @@ def can_convert(source, target, *, mode='implicit', value=None, context=None, _s
         return True
     _seen.add(pair)
 
-    original_source = source
-    source_flags, target_flags = _flags(source), _flags(target)
-    if source_flags or target_flags:
-        # At the value level qualifiers describe storage. Pointer pointee
-        # qualifiers are checked below before recursive conversion.
-        source = _unqualified(source)
-        target = _unqualified(target)
-        if same_type(source, target, resolver=context):
-            return True
+    original_source, original_target = source, target
+    # At the value level qualifiers describe storage. Pointer pointee
+    # qualifiers are checked below before recursive conversion.
+    source = strip_qualifiers(source)
+    target = strip_qualifiers(target)
+    if ((source is not original_source or target is not original_target)
+            and same_type(source, target, resolver=context)):
+        return True
 
     if any(getattr(item, '_is_function_type', False)
            and getattr(item, 'param_types', None) is None for item in (source, target)):
@@ -1112,7 +1125,7 @@ def can_convert(source, target, *, mode='implicit', value=None, context=None, _s
                          or getattr(source, '_is_bool', False))) or (
                     source_func is not None and target_func is None
                     and getattr(target, '_is_pointer', False)
-                    and _unqualified(getattr(target, 'pointee_type', None)) in (None, void))
+                    and strip_qualifiers(getattr(target, 'pointee_type', None)) in (None, void))
         if len(source_func) != len(target_func):
             return False
         flags = ('has_varargs', 'has_llvm_varargs', 'has_kwargs')
@@ -1138,8 +1151,8 @@ def can_convert(source, target, *, mode='implicit', value=None, context=None, _s
         target_pointee = getattr(target, 'pointee_type', None)
         if _dropped_pointee_qualifiers(source_pointee, target_pointee):
             return False
-        first = _unqualified(source_pointee)
-        second = _unqualified(target_pointee)
+        first = strip_qualifiers(source_pointee)
+        second = strip_qualifiers(target_pointee)
         return (first in (None, void) or second in (None, void)
                 or same_type(first, second, resolver=context))
     if source_ptr or target_ptr:
@@ -1247,7 +1260,7 @@ def common_value_type(left, right):
     from .builtin_entities.qualifiers import const, volatile
     if left is None or right is None:
         return None
-    left, right = _unqualified(left), _unqualified(right)
+    left, right = strip_qualifiers(left), strip_qualifiers(right)
     if same_type(left, right):
         return left
     if getattr(left, '_is_refined', False) and getattr(right, '_is_refined', False):
@@ -1271,7 +1284,7 @@ def common_value_type(left, right):
             and getattr(right, 'param_types', None) is None):
         first = getattr(left, 'pointee_type', None)
         second = getattr(right, 'pointee_type', None)
-        base_first, base_second = _unqualified(first), _unqualified(second)
+        base_first, base_second = strip_qualifiers(first), strip_qualifiers(second)
         if base_first in (None, void):
             pointee = base_second
         elif base_second in (None, void) or same_type(base_first, base_second):
@@ -1307,8 +1320,8 @@ def can_subtract_pointers(left, right, context=None):
     if not all(getattr(item, '_is_pointer', False)
                and getattr(item, 'param_types', None) is None for item in (left, right)):
         return False
-    first = _unqualified(getattr(left, 'pointee_type', None)) or void
-    second = _unqualified(getattr(right, 'pointee_type', None)) or void
+    first = strip_qualifiers(getattr(left, 'pointee_type', None)) or void
+    second = strip_qualifiers(getattr(right, 'pointee_type', None)) or void
     return same_type(first, second, resolver=context)
 
 
@@ -1326,7 +1339,7 @@ def can_compare_pointers(left, right, *, left_value=None, right_value=None,
     first = getattr(left, 'pointee_type', None)
     second = getattr(right, 'pointee_type', None)
     return (first is not None and second is not None
-            and same_type(_unqualified(first), _unqualified(second), resolver=context))
+            and same_type(strip_qualifiers(first), strip_qualifiers(second), resolver=context))
 
 
 def is_integer_operand(source, *, value=None):
@@ -1358,7 +1371,7 @@ def atomic_value_is_supported(pointee, operation):
     if operation != 'load' and _flags(pointee).get('const'):
         return False
     arithmetic = operation in ('add', 'sub', 'and', 'or')
-    if arithmetic and _refinement_chain(_unqualified(pointee))[0]:
+    if arithmetic and _refinement_chain(strip_qualifiers(pointee))[0]:
         return False
     base = get_base_type(pointee)
     if getattr(base, '_is_integer', False):
@@ -1424,6 +1437,6 @@ def validate_type_argument(value, context, node, *, allow_void=True, allow_incom
     if not _is_type_like(value):
         logger.error(f'{context}: expected a PythoC type or quoted forward reference',
                      node=node, exc_type=TypeError)
-    if not allow_void and _unqualified(value) is void:
+    if not allow_void and strip_qualifiers(value) is void:
         logger.error(f'{context}: void is not a value element or parameter type',
                      node=node, exc_type=TypeError)

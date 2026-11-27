@@ -15,6 +15,7 @@ from .type_check import is_struct_type, is_enum_type
 from .logger import logger
 from .builtin_entities.base import BuiltinType
 from .schema_protocol import get_schema_field_types, is_schema_type
+from .type_descriptor import strip_qualifiers
 from . import llvm_extensions as floating
 import ast
 
@@ -36,38 +37,6 @@ def _reject_compile_level_callable(python_val, node):
     message = _compile_level_callable_error(python_val)
     if message is not None:
         logger.error(message, node=node, exc_type=TypeError)
-
-
-def strip_qualifiers(pc_type):
-    """Strip type qualifiers (const, volatile, static) but NOT refined types
-    
-    Returns the underlying type by stripping qualifiers ONLY.
-    Refined types are NOT stripped because they have semantic meaning
-    (runtime constraints) and are not mere compile-time qualifiers.
-    
-    Example:
-        const[i32] -> i32
-        volatile[ptr[i32]] -> ptr[i32]
-        static[const[i32]] -> i32 (strips nested qualifiers)
-        refined[is_positive] -> refined[is_positive] (NOT stripped!)
-    """
-    if pc_type is None:
-        return None
-    from .type_resolver import TypeResolver
-    resolved = TypeResolver.resolve_type(pc_type, required=False)
-    pc_type = pc_type if resolved is None else resolved
-    
-    # Refined types are NOT qualifiers - they carry semantic constraints
-    # Do NOT strip them!
-    if hasattr(pc_type, '_is_refined') and pc_type._is_refined:
-        return pc_type
-    
-    # Check if this is a qualifier type
-    if hasattr(pc_type, 'qualified_type') and pc_type.qualified_type is not None:
-        # Recursively strip nested qualifiers
-        return strip_qualifiers(pc_type.qualified_type)
-    
-    return pc_type
 
 
 def get_base_type(pc_type):

@@ -8,7 +8,7 @@ import unittest
 
 import pythoc
 
-from pythoc import array, compile, const, func, i32, i64, ptr, refined, static, void
+from pythoc import array, compile, const, func, i32, i64, nullptr, ptr, refined, static, void
 from pythoc.builtin_entities.enum import _create_enum_type
 from pythoc.builtin_entities.python_type import PythonType
 from pythoc.builtin_entities.struct import create_struct_type
@@ -299,6 +299,44 @@ class TypeRelationsTest(unittest.TestCase):
 
         flush_all_pending_outputs()
         self.assertEqual(read_second(), 2)
+
+    def test_qualified_array_alias_decays_at_a_native_call(self):
+        Row = const['RelationArrayRow']
+
+        @compile(suffix='relation_array_alias_read')
+        def read(address: ptr[const[i32]]) -> i32:
+            return address[1]
+
+        @compile(suffix='relation_array_alias_decay')
+        def caller() -> i32:
+            values: Row = [11, 23, 31]
+            return read(values)
+
+        RelationArrayRow = array[i32, 3]
+        self.assertEqual(caller(), 23)
+
+        @compile(suffix='relation_array_alias_drop_const')
+        def invalid() -> i32:
+            values: Row = [11, 23, 31]
+            address: ptr[i32] = values
+            return address[0]
+
+        self._reject(invalid, 'would drop pointee const')
+
+    def test_qualified_opaque_pointee_supports_addresses_without_a_layout(self):
+        address_type = ptr[const[pythoc.volatile['RelationOpaquePointee']]]
+
+        @compile(suffix='relation_qualified_opaque_address')
+        def is_null(address: address_type) -> pythoc.bool:
+            return address == nullptr
+
+        self.assertTrue(is_null(None))
+
+        @compile(suffix='relation_qualified_opaque_offset')
+        def invalid(address: address_type) -> address_type:
+            return address + 1
+
+        self._reject(invalid, 'Pointer arithmetic requires a complete pointee type')
 
     def test_literal_array_rejects_bad_element(self):
         @compile(suffix='relation_array_bad_element')
